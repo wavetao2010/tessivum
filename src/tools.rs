@@ -492,6 +492,86 @@ impl ToolRuntime {
         })
     }
 
+    /// Atomically replaces only the registrations named by `prior`.
+    ///
+    /// Every replacement definition is validated before the registry lock is acquired. While
+    /// holding that lock, only registrations whose name and id still exactly match `prior` are
+    /// removed, and the complete replacement set is inserted. Observers therefore see either
+    /// the old complete set or the new complete set, never an intermediate subset.
+    pub fn replace(
+        &self,
+        prior: &[ToolRegistration],
+        mut definitions: Vec<ToolDefinition>,
+    ) -> Result<Vec<ToolRegistration>, TessivumError> {
+        let mut names = BTreeSet::new();
+        for definition in &definitions {
+            validate_definition(definition)?;
+            if !names.insert(definition.name.clone()) {
+                return Err(tool_error(
+                    "DUPLICATE_TOOL_NAME",
+                    "replacement contains duplicate tool names",
+                    json!({"name": definition.name}),
+                ));
+            }
+        }
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let (registrations, changes) = {
+            let mut state = lock(&self.inner.state);
+            let removed: BTreeSet<String> = prior
+                .iter()
+                .filter(|registration| {
+                    state
+                        .tools
+                        .get(&registration.name)
+                        .is_some_and(|tool| tool.id == registration.id)
+                })
+                .map(|registration| registration.name.clone())
+                .collect();
+            if let Some(name) = definitions
+                .iter()
+                .map(|definition| &definition.name)
+                .find(|name| state.tools.contains_key(*name) && !removed.contains(*name))
+            {
+                return Err(tool_error(
+                    "DUPLICATE_TOOL_NAME",
+                    "a replacement tool name is already registered outside the replaced set",
+                    json!({"name": name}),
+                ));
+            }
+            for name in &removed {
+                state.tools.remove(name);
+            }
+            let mut registrations = Vec::with_capacity(definitions.len());
+            let mut changes: Vec<ToolChange> = removed
+                .iter()
+                .cloned()
+                .map(|name| ToolChange::Removed { name })
+                .collect();
+            for definition in definitions {
+                let schema = definition.schema();
+                let name = definition.name.clone();
+                let id = state.next_id;
+                state.next_id = state.next_id.checked_add(1).unwrap_or(1);
+                state
+                    .tools
+                    .insert(name.clone(), RegisteredTool { id, definition });
+                changes.push(ToolChange::Registered { schema });
+                registrations.push(ToolRegistration {
+                    inner: Arc::downgrade(&self.inner),
+                    name,
+                    id,
+                    closed: AtomicBool::new(false),
+                });
+            }
+            (registrations, changes)
+        };
+        for change in changes {
+            self.notify_change(change);
+        }
+        Ok(registrations)
+    }
+
     /// Returns only model-visible tool schemas in deterministic name order.
     pub fn schemas(&self) -> Vec<ToolSchema> {
         let state = lock(&self.inner.state);

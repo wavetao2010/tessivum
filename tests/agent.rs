@@ -289,6 +289,27 @@ async fn stale_dispose_cannot_remove_a_later_generation() {
 }
 
 #[tokio::test]
+async fn authority_rejects_a_replaced_agent_generation() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory).unwrap();
+    let first = registry
+        .create_or_resume(header("authority"), options(), cancellation())
+        .await
+        .unwrap();
+    let stale = first.authority();
+    assert!(stale.is_live());
+
+    first.dispose().await.unwrap();
+    let second = registry
+        .create_or_resume(header("authority"), options(), cancellation())
+        .await
+        .unwrap();
+    assert!(!stale.is_live());
+    assert!(second.authority().is_live());
+    second.dispose().await.unwrap();
+}
+
+#[tokio::test]
 async fn registry_shutdown_waits_for_each_runtime_disposal() {
     let (registry, factory) = registry();
     let _factory = registry.register_factory(factory.clone()).unwrap();

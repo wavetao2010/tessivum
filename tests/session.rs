@@ -251,12 +251,76 @@ async fn surface_replacement_preserves_source_event_sequences() {
         SurfaceOp::Replace { start: 0, end: 1 },
     );
     replacement.source_event_seqs = Some(vec![0]);
-    session.append(replacement, cancellation()).await.unwrap();
+    session
+        .append_if_surface(replacement, &[0], cancellation())
+        .await
+        .unwrap();
 
     let surface = session.surface();
     assert_eq!(surface.len(), 1);
     assert_eq!(surface[0].message.id.as_str(), "message-b");
     assert_eq!(surface[0].source_event_seqs, Some(vec![0]));
+}
+
+#[tokio::test]
+async fn conditional_surface_append_rejects_a_stale_vector_without_writing() {
+    let persistence = Arc::new(MemorySessionPersistence::new());
+    let store = SessionStore::new(persistence.clone());
+    let session = store
+        .create(header("conditional-surface", None), cancellation())
+        .await
+        .unwrap();
+    session
+        .append(
+            user_event(0, "message-a", "old", SurfaceOp::Append),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let expected = vec![0];
+    session
+        .append(
+            user_event(1, "message-b", "newer", SurfaceOp::Append),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let mut replacement = user_event(
+        2,
+        "message-c",
+        "must not be admitted",
+        SurfaceOp::Replace { start: 0, end: 1 },
+    );
+    replacement.source_event_seqs = Some(vec![0]);
+
+    assert_eq!(
+        session
+            .append_if_surface(replacement, &expected, cancellation())
+            .await
+            .unwrap_err(),
+        SessionError::StaleSurface {
+            expected,
+            actual: vec![0, 1],
+        }
+    );
+    assert_eq!(
+        session
+            .surface()
+            .iter()
+            .map(|entry| entry.event_seq)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(session.events().len(), 2);
+    assert_eq!(
+        persistence
+            .inspect(&SessionId::from("conditional-surface"), cancellation())
+            .await
+            .unwrap()
+            .unwrap()
+            .event_count,
+        2
+    );
 }
 
 #[tokio::test]

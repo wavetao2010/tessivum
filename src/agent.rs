@@ -806,6 +806,57 @@ impl AgentInner {
     }
 }
 
+/// Opaque authority for one exact live agent generation.
+#[derive(Clone)]
+pub struct AgentAuthority {
+    inner: Weak<AgentInner>,
+    id: SessionId,
+    generation: u64,
+}
+impl fmt::Debug for AgentAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentAuthority")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AgentAuthority {
+    /// Returns the attached agent's session identity for routing diagnostics.
+    pub fn id(&self) -> SessionId {
+        self.id.clone()
+    }
+
+    /// Returns whether this exact agent generation is still live and undisposed.
+    pub fn is_live(&self) -> bool {
+        let Some(inner) = self.inner.upgrade() else {
+            return false;
+        };
+        if inner.id != self.id || inner.generation.load(Ordering::Acquire) != self.generation {
+            return false;
+        }
+        let Some(registry) = inner.registry.upgrade() else {
+            return false;
+        };
+        let state = lock(&registry.state);
+        state.live.get(&self.id).is_some_and(|live| {
+            live.generation == self.generation
+                && Arc::ptr_eq(&live.inner, &inner)
+                && !lock(&inner.state).disposed
+        })
+    }
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.generation == other.generation
+            && Weak::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+pub(crate) fn same_authority(left: &AgentAuthority, right: &AgentAuthority) -> bool {
+    left.same_authority(right)
+}
+
 /// A handle to one registry-owned agent. Creation handles cancel on Drop; query handles do not.
 pub struct AgentHandle {
     inner: Arc<AgentInner>,
@@ -835,6 +886,14 @@ impl AgentHandle {
         Self {
             inner,
             drop_cancels: false,
+        }
+    }
+    /// Derives an opaque capability for this exact live agent generation.
+    pub fn authority(&self) -> AgentAuthority {
+        AgentAuthority {
+            inner: Arc::downgrade(&self.inner),
+            id: self.id(),
+            generation: self.inner.generation.load(Ordering::Acquire),
         }
     }
 

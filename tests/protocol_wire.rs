@@ -167,6 +167,25 @@ fn empty_assistant_source_sequences_and_ignorable_unknown_events_round_trip() {
 }
 
 #[test]
+fn validation_rejects_misspelled_required_event() {
+    let misspelled: SessionEvent = serde_json::from_value(json!({
+        "type": "approval/askd",
+        "seq": 0,
+        "time": 0,
+        "data": {}
+    }))
+    .expect("event envelope deserializes");
+
+    assert_eq!(
+        misspelled
+            .validate()
+            .expect_err("misspelled event rejects")
+            .code,
+        "UNKNOWN_REQUIRED_EVENT"
+    );
+}
+
+#[test]
 fn validation_rejects_nonzero_format_negative_sequences_and_misplaced_surface_metadata() {
     let fixture = expected_fixture();
 

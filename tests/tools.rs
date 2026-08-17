@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use parking_lot::Mutex as ParkingMutex;
 use serde_json::{json, Value};
 use tessivum::{
     tools::{
@@ -401,4 +402,73 @@ fn context_handle_publishes_the_thread_safe_tools_service() {
     assert!(resolved
         .with(|tools| tools.schemas().is_empty())
         .expect("current runtime is callable"));
+}
+
+#[test]
+fn atomic_replacement_never_exposes_partial_tools_and_rolls_back_validation_failures() {
+    let runtime = ToolRuntime::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let old = vec![
+        runtime
+            .register(definition("old_a", Arc::clone(&calls)))
+            .unwrap(),
+        runtime
+            .register(definition("old_b", Arc::clone(&calls)))
+            .unwrap(),
+    ];
+    let snapshots = Arc::new(ParkingMutex::new(Vec::<Vec<String>>::new()));
+    let observed_runtime = runtime.clone();
+    let observed_snapshots = Arc::clone(&snapshots);
+    let _observer = runtime.on_change(move |_: &ToolChange| {
+        observed_snapshots.lock().push(
+            observed_runtime
+                .schemas()
+                .into_iter()
+                .map(|schema| schema.name)
+                .collect(),
+        );
+    });
+    snapshots.lock().clear();
+
+    let replacement = runtime
+        .replace(
+            &old,
+            vec![
+                definition("new_a", Arc::clone(&calls)),
+                definition("new_b", Arc::clone(&calls)),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<Vec<_>>(),
+        vec!["new_a", "new_b"]
+    );
+    assert!(snapshots
+        .lock()
+        .iter()
+        .all(|snapshot| snapshot == &vec![String::from("new_a"), String::from("new_b")]));
+
+    let error = runtime.replace(
+        &replacement,
+        vec![ToolDefinition::new(
+            "invalid",
+            "invalid schema",
+            json!({"type": "object"}),
+            Echo { calls },
+        )],
+    );
+    assert_eq!(error.unwrap_err().code, "INVALID_TOOL_SCHEMA");
+    assert_eq!(
+        runtime
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<Vec<_>>(),
+        vec!["new_a", "new_b"],
+        "a failed replacement leaves the complete prior set intact"
+    );
 }

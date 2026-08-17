@@ -81,6 +81,11 @@ pub enum SessionError {
     InvalidSeedBoundary,
     #[error("session has more than one seed boundary")]
     DuplicateSeedBoundary,
+    #[error("surface changed before conditional append")]
+    StaleSurface {
+        expected: Vec<u64>,
+        actual: Vec<u64>,
+    },
     #[error("surface replacement range [{start}, {end}) is outside a surface of length {len}")]
     SurfaceRange { start: u64, end: u64, len: u64 },
     #[error("surface source event sequence {source_seq} is not committed")]
@@ -115,6 +120,7 @@ impl SessionError {
             Self::InvalidSeedLength { .. } => "INVALID_SEED_LENGTH",
             Self::InvalidSeedBoundary => "INVALID_SEED_BOUNDARY",
             Self::DuplicateSeedBoundary => "DUPLICATE_SEED_BOUNDARY",
+            Self::StaleSurface { .. } => "STALE_SESSION_SURFACE",
             Self::SurfaceRange { .. } => "INVALID_SURFACE_RANGE",
             Self::MissingSourceEvent { .. } => "MISSING_SOURCE_EVENT",
             Self::InvalidSurfaceMessage => "INVALID_SURFACE_MESSAGE",
@@ -416,13 +422,47 @@ impl Session {
         event: SessionEvent,
         cancellation: CancellationToken,
     ) -> Result<(), SessionError> {
+        self.append_inner(event, None, cancellation).await
+    }
+
+    /// Persists and atomically admits one new event only if the complete
+    /// current surface still has exactly these event sequence numbers.
+    pub async fn append_if_surface(
+        &self,
+        event: SessionEvent,
+        expected_surface_event_seqs: &[u64],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.append_inner(event, Some(expected_surface_event_seqs), cancellation)
+            .await
+    }
+
+    async fn append_inner(
+        &self,
+        event: SessionEvent,
+        expected_surface_event_seqs: Option<&[u64]>,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
         check_cancellation(&cancellation)?;
         let _gate = self.write_gate.lock().await;
         check_cancellation(&cancellation)?;
-        event.validate()?;
 
         let projection = {
             let state = read_lock(&self.state);
+            if let Some(expected) = expected_surface_event_seqs {
+                if !state
+                    .surface
+                    .iter()
+                    .map(|entry| entry.event_seq)
+                    .eq(expected.iter().copied())
+                {
+                    return Err(SessionError::StaleSurface {
+                        expected: expected.to_vec(),
+                        actual: state.surface.iter().map(|entry| entry.event_seq).collect(),
+                    });
+                }
+            }
+            event.validate()?;
             let expected = next_seq(&state.events)?;
             if event.seq != expected {
                 return Err(SessionError::SequenceGap {
