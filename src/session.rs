@@ -738,14 +738,17 @@ fn decode_surface_event(event: &SessionEvent) -> Result<Option<SurfaceMessage>, 
         "tool/result" => MessageRole::User,
         _ => return Ok(None),
     };
-    let message: Message = event
-        .data
-        .get("message")
-        .cloned()
-        .ok_or(SessionError::InvalidSurfaceMessage)
-        .and_then(|value| {
-            serde_json::from_value(value).map_err(|_| SessionError::InvalidSurfaceMessage)
-        })?;
+    let data = if event.event_type == "user/message" {
+        event.data.clone()
+    } else {
+        event
+            .data
+            .get("message")
+            .cloned()
+            .ok_or(SessionError::InvalidSurfaceMessage)?
+    };
+    let message: Message =
+        serde_json::from_value(data).map_err(|_| SessionError::InvalidSurfaceMessage)?;
     message
         .validate()
         .map_err(|_| SessionError::InvalidSurfaceMessage)?;

@@ -51,16 +51,72 @@ fn user_event(seq: u64, id: &str, text: &str, surface_op: SurfaceOp) -> SessionE
         "user/message",
         seq,
         json!({
-            "message": {
-                "id": id,
-                "role": "user",
-                "content": [{"type": "text", "text": text}],
-                "source": {"kind": "user"},
-            },
+            "id": id,
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+            "source": {"kind": "user"},
         }),
         None,
         Some(surface_op),
     )
+}
+
+#[tokio::test]
+async fn user_messages_require_direct_payloads() {
+    let store = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let session = store
+        .create(header("direct", None), cancellation())
+        .await
+        .unwrap();
+    let direct = json!({
+        "id": "message-1",
+        "role": "user",
+        "content": [{"type": "text", "text": "hello"}],
+        "source": {"kind": "user"},
+    });
+    session
+        .append(
+            event(
+                "user/message",
+                0,
+                direct.clone(),
+                None,
+                Some(SurfaceOp::Append),
+            ),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.events()[0].data, direct);
+    assert_eq!(session.derive_messages()[0].id.as_str(), "message-1");
+
+    let wrapped = event(
+        "user/message",
+        1,
+        json!({"message": direct}),
+        None,
+        Some(SurfaceOp::Append),
+    );
+    assert!(matches!(
+        session.append(wrapped, cancellation()).await,
+        Err(SessionError::InvalidSurfaceMessage)
+    ));
+    let wrong_role = event(
+        "user/message",
+        1,
+        json!({
+            "id": "message-2",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "wrong"}],
+            "source": {"kind": "user"},
+        }),
+        None,
+        Some(SurfaceOp::Append),
+    );
+    assert!(matches!(
+        session.append(wrong_role, cancellation()).await,
+        Err(SessionError::InvalidSurfaceRole)
+    ));
 }
 
 #[tokio::test]

@@ -11,12 +11,12 @@ use tessivum::{
     agent_loop::AgentLoopFactory,
     llm::{LlmAdapter, LlmRuntime, LlmStream},
     session::{MemorySessionPersistence, SessionStore},
-    system_prompt::SystemPrompt,
+    system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext, ToolRuntime,
     },
-    ContentBlock, FinishReason, GenerateRequest, Message, MessageRole, MessageSource,
-    SessionHeader, SessionId, StreamChunk, ToolCallId,
+    ContentBlock, FinishReason, GenerateRequest, Message, MessageRole, MessageSource, SessionEvent,
+    SessionHeader, SessionId, StreamChunk, SurfaceOp, ToolCallId,
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 
@@ -76,6 +76,28 @@ struct Echo;
 #[async_trait]
 impl ToolHandler for Echo {
     async fn run(&self, _context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
+        Ok(ToolOutput::new(
+            vec![ContentBlock::Text {
+                text: arguments["value"].as_str().unwrap().into(),
+            }],
+            false,
+            Value::Null,
+        ))
+    }
+}
+
+struct PromptChangingEcho {
+    prompt: SystemPrompt,
+    registration: Arc<Mutex<Option<PromptRegistration>>>,
+}
+
+#[async_trait]
+impl ToolHandler for PromptChangingEcho {
+    async fn run(&self, _context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
+        let registration = self
+            .prompt
+            .register(PromptSection::new("changed", 0, "changed"))?;
+        *self.registration.lock().unwrap() = Some(registration);
         Ok(ToolOutput::new(
             vec![ContentBlock::Text {
                 text: arguments["value"].as_str().unwrap().into(),
@@ -193,7 +215,6 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
             "tool/result",
             "step/end",
             "step/start",
-            "request/header",
             "assistant/chunk",
             "assistant/chunk",
             "assistant/chunk",
@@ -202,6 +223,35 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
             "step/end",
             "turn/end",
         ],
+    );
+    let user_message = events
+        .iter()
+        .find(|event| event.event_type == "user/message")
+        .unwrap();
+    assert_eq!(
+        user_message.data,
+        serde_json::to_value(user("question")).unwrap()
+    );
+    assert_eq!(user_message.surface_op, Some(SurfaceOp::Append));
+    assert_eq!(user_message.source_event_seqs, None);
+    let request_headers = events
+        .iter()
+        .filter(|event| event.event_type == "request/header")
+        .collect::<Vec<_>>();
+    assert_eq!(request_headers.len(), 1);
+    assert_eq!(
+        request_headers[0].data,
+        json!({
+            "header": {
+                "config": {"provider": "test", "model": "deterministic"},
+                "tools": [{
+                    "name": "echo",
+                    "description": "echoes",
+                    "parameters": {"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}
+                }]
+            },
+            "reason": "initial"
+        })
     );
     let assistant = events
         .iter()
@@ -217,5 +267,147 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
     assert!(events.iter().all(
         |event| event.event_type != "turn/end" || event.data["reason"]["kind"] != "interrupted"
     ));
+    agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn changed_effective_header_emits_change_event() {
+    let llm = LlmRuntime::new();
+    let adapter = DeterministicAdapter {
+        streams: Arc::new(Mutex::new(VecDeque::from([tool_turn(), text_turn("done")]))),
+    };
+    let _provider = llm.register("test", Arc::new(adapter)).unwrap();
+    let tools = ToolRuntime::new();
+    let prompt = SystemPrompt::new();
+    let registrations = Arc::new(Mutex::new(None));
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "echo",
+            "echoes",
+            json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
+            PromptChangingEcho {
+                prompt: prompt.clone(),
+                registration: Arc::clone(&registrations),
+            },
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(AgentLoopFactory::new(llm, prompt, tools)))
+        .unwrap();
+    let agent = registry
+        .create(
+            header("changed-header"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "deterministic".into(),
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+
+    agent.followup(user("question")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    let headers = agent
+        .session()
+        .events()
+        .into_iter()
+        .filter(|event| event.event_type == "request/header")
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 2);
+    assert_eq!(headers[0].data["reason"], "initial");
+    assert_eq!(headers[1].data["reason"], "change");
+    assert_eq!(
+        headers[0]
+            .data
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["header", "reason"]
+    );
+    assert_eq!(
+        headers[1]
+            .data
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["header", "reason"]
+    );
+    assert_ne!(headers[0].data["header"], headers[1].data["header"]);
+    assert_eq!(headers[1].data["header"]["system"], "changed");
+    agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn preloaded_request_header_makes_first_runtime_header_resume() {
+    let store = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let session = store
+        .create(header("resumed"), cancellation())
+        .await
+        .unwrap();
+    session
+        .append(
+            SessionEvent {
+                event_type: "request/header".into(),
+                seq: 0,
+                time: 0,
+                data: json!({
+                    "header": {"config": {"provider": "previous", "model": "previous"}},
+                    "reason": "initial"
+                }),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let llm = LlmRuntime::new();
+    let adapter = DeterministicAdapter {
+        streams: Arc::new(Mutex::new(VecDeque::from([text_turn("resumed")]))),
+    };
+    let _provider = llm.register("test", Arc::new(adapter)).unwrap();
+    let registry = AgentRegistry::new(store);
+    let _factory = registry
+        .register_factory(Arc::new(AgentLoopFactory::new(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
+        .unwrap();
+    let agent = registry
+        .resume(
+            SessionId::from("resumed"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "deterministic".into(),
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+
+    agent.followup(user("question")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    let headers = agent
+        .session()
+        .events()
+        .into_iter()
+        .filter(|event| event.event_type == "request/header")
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 2);
+    assert_eq!(
+        headers[1].data,
+        json!({
+            "header": {"config": {"provider": "test", "model": "deterministic"}},
+            "reason": "resume"
+        })
+    );
     agent.dispose().await.unwrap();
 }

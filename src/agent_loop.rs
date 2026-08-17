@@ -131,6 +131,8 @@ struct State {
     settled_revision: u64,
     worker: Option<JoinHandle<()>>,
     last_error: Option<AgentError>,
+    last_request_header: Option<Value>,
+    next_request_header_reason: Option<&'static str>,
 }
 
 impl AgentLoop {
@@ -146,6 +148,10 @@ impl AgentLoop {
         max_parallel_tool_calls: usize,
         max_steps: u64,
     ) -> Arc<Self> {
+        let has_prior_request_header = session
+            .events()
+            .iter()
+            .any(|event| event.event_type == "request/header");
         let inner = Arc::new(Inner {
             session,
             options,
@@ -166,6 +172,12 @@ impl AgentLoop {
                 settled_revision: 0,
                 worker: None,
                 last_error: None,
+                last_request_header: None,
+                next_request_header_reason: Some(if has_prior_request_header {
+                    "resume"
+                } else {
+                    "initial"
+                }),
             }),
         });
         let worker = tokio::spawn(drive(Arc::clone(&inner)));
@@ -341,30 +353,31 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             session_id: Some(inner.session.id()),
             purpose: None,
         };
-        append(
-            inner,
-            "request/header",
-            json!({
-                "turn": turn,
-                "step": step,
-                "header": EpochHeader {
-                    config: LlmCallConfig {
-                        provider: request.provider.clone(),
-                        model: request.model.clone(),
-                        reasoning_effort: request.reasoning_effort.clone(),
-                        temperature: request.temperature,
-                        max_tokens: request.max_tokens,
-                        stop: request.stop.clone(),
-                    },
-                    adapter_defaults: None,
-                    system: request.system.clone(),
-                    tools: request.tools.clone(),
-                },
-            }),
-            None,
-            None,
-        )
-        .await?;
+        let effective_header = serde_json::to_value(EpochHeader {
+            config: LlmCallConfig {
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+                reasoning_effort: request.reasoning_effort.clone(),
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                stop: request.stop.clone(),
+            },
+            adapter_defaults: None,
+            system: request.system.clone(),
+            tools: request.tools.clone(),
+        })
+        .map_err(|error| AgentError::Runtime(error.to_string()))?;
+        if let Some(reason) = request_header_reason(inner, &effective_header) {
+            append(
+                inner,
+                "request/header",
+                json!({"header": effective_header, "reason": reason}),
+                None,
+                None,
+            )
+            .await?;
+            record_request_header(inner, effective_header);
+        }
 
         let generation = match inner
             .llm
@@ -581,15 +594,33 @@ async fn append_message(
     message: Message,
     source_event_seqs: Option<Vec<u64>>,
 ) -> Result<(), AgentError> {
+    let data = if event_type == "user/message" {
+        serde_json::to_value(message).map_err(|error| AgentError::Runtime(error.to_string()))?
+    } else {
+        json!({"turn": turn, "step": step, "message": message})
+    };
     append(
         inner,
         event_type,
-        json!({"turn": turn, "step": step, "message": message}),
+        data,
         source_event_seqs,
         Some(SurfaceOp::Append),
     )
     .await?;
     Ok(())
+}
+
+fn request_header_reason(inner: &Inner, header: &Value) -> Option<&'static str> {
+    let state = lock(&inner.state);
+    state
+        .next_request_header_reason
+        .or_else(|| (state.last_request_header.as_ref() != Some(header)).then_some("change"))
+}
+
+fn record_request_header(inner: &Inner, header: Value) {
+    let mut state = lock(&inner.state);
+    state.last_request_header = Some(header);
+    state.next_request_header_reason = None;
 }
 
 async fn close_step(inner: &Inner, turn: u64, step: u64) -> Result<(), AgentError> {

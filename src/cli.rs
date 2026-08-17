@@ -28,6 +28,7 @@ pub struct HeadlessCommand {
     pub provider: String,
     pub model: String,
     pub max_tokens: Option<NonZeroU64>,
+    pub trusted_bash: bool,
     pub task: String,
 }
 
@@ -92,6 +93,8 @@ struct RawHeadlessCommand {
     model: Option<String>,
     #[arg(long, value_name = "TOKENS")]
     max_tokens: Option<NonZeroU64>,
+    #[arg(long)]
+    trusted_bash: bool,
     #[arg(value_name = "TASK", num_args = 0..)]
     task: Vec<String>,
 }
@@ -150,6 +153,7 @@ impl RawHeadlessCommand {
             || self.provider.is_some()
             || self.model.is_some()
             || self.max_tokens.is_some()
+            || self.trusted_bash
             || !self.task.is_empty()
     }
 }
@@ -157,6 +161,9 @@ impl RawHeadlessCommand {
 fn headless_command(raw: RawHeadlessCommand) -> Result<HeadlessCommand, Error> {
     if raw.resume && raw.session.is_none() {
         return Err(usage_error("--resume requires --session"));
+    }
+    if raw.provider.as_deref().unwrap_or("recorded") == "recorded" && raw.replay.is_none() {
+        return Err(usage_error("--provider recorded requires --replay <FILE>"));
     }
 
     let task = raw.task.join(" ");
@@ -175,6 +182,7 @@ fn headless_command(raw: RawHeadlessCommand) -> Result<HeadlessCommand, Error> {
         provider: raw.provider.unwrap_or_else(|| "recorded".into()),
         model: raw.model.unwrap_or_else(|| "recorded".into()),
         max_tokens: raw.max_tokens,
+        trusted_bash: raw.trusted_bash,
         task,
     })
 }
@@ -212,7 +220,9 @@ fn reject_launcher_options_after_task(args: &[OsString]) -> Result<(), Error> {
 }
 
 fn is_launcher_option(argument: &str) -> bool {
-    argument == "--resume" || launcher_option_with_value(argument).is_some()
+    argument == "--resume"
+        || argument == "--trusted-bash"
+        || launcher_option_with_value(argument).is_some()
 }
 
 fn launcher_option_with_value(argument: &str) -> Option<&str> {

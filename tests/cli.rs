@@ -27,6 +27,7 @@ fn upstream_headless_example_keeps_launcher_data_separate_from_task() {
         "--session",
         "session-7",
         "--resume",
+        "--trusted-bash",
         "--replay",
         "recording.jsonl",
         "--provider",
@@ -45,6 +46,7 @@ fn upstream_headless_example_keeps_launcher_data_separate_from_task() {
     assert_eq!(command.data_dir, Some(PathBuf::from("state")));
     assert_eq!(command.session.as_deref(), Some("session-7"));
     assert!(command.resume);
+    assert!(command.trusted_bash);
     assert_eq!(command.replay, Some(PathBuf::from("recording.jsonl")));
     assert_eq!(command.provider, "recorded");
     assert_eq!(command.model, "fixture-model");
@@ -59,6 +61,8 @@ fn repeated_patches_keep_order_and_defaults_select_recorded() {
         "--patch",
         "base.toml",
         "--patch=local.toml",
+        "--replay",
+        "recording.jsonl",
         "ship",
         "this",
     ]);
@@ -99,7 +103,7 @@ fn help_and_version_remain_clap_display_outcomes() {
 
 #[test]
 fn launcher_flags_after_task_are_not_absorbed_as_task_text() {
-    let error = parse_cli(["tessivum", "describe", "this", "--model", "other"])
+    let error = parse_cli(["tessivum", "describe", "this", "--trusted-bash"])
         .expect_err("launcher flag after the task must fail");
 
     assert_eq!(error.kind(), ErrorKind::InvalidValue);
@@ -113,6 +117,7 @@ fn invalid_headless_combinations_are_usage_errors() {
         ["tessivum", "   "].as_slice(),
         ["tessivum", "--resume", "task"].as_slice(),
         ["tessivum", "--max-tokens", "0", "task"].as_slice(),
+        ["tessivum", "--provider", "recorded", "task"].as_slice(),
     ] {
         assert_eq!(parse_cli(args.iter().copied()).unwrap_err().exit_code(), 2);
     }
@@ -124,7 +129,14 @@ fn invalid_headless_combinations_are_usage_errors() {
 
 #[test]
 fn default_rust_entrypoint_selects_headless_and_exit_codes_are_stable() {
-    let command = headless(&["tessivum", "preserve", "word", "boundaries"]);
+    let command = headless(&[
+        "tessivum",
+        "--replay",
+        "recording.jsonl",
+        "preserve",
+        "word",
+        "boundaries",
+    ]);
     assert_eq!(command.task, "preserve word boundaries");
     assert_eq!(ExitClass::Usage.code(), 2);
     assert_eq!(ExitClass::Runtime.code(), 1);
