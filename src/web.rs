@@ -10,6 +10,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
+use tokio::time;
 use url::Url;
 
 use crate::TessivumError;
@@ -476,14 +477,15 @@ impl WebFetchProvider for HttpFetchProvider {
         cancellation: CancellationToken,
     ) -> Result<WebFetchResult, TessivumError> {
         let initial = validate_fetch_url(&request.url)?;
+        let deadline = time::Instant::now() + self.config.timeout;
         let mut current = initial.clone();
         for redirects in 0..=self.config.max_redirects {
             let response = tokio::select! {
                 _ = cancellation.cancelled() => return Err(aborted_error()),
-                response = tokio::time::timeout(self.config.timeout, self.client.get(current.clone()).send()) => match response {
+                response = time::timeout_at(deadline, self.client.get(current.clone()).send()) => match response {
                     Ok(Ok(response)) => response,
                     Ok(Err(error)) => return Err(web_error("WEB_PROVIDER_ERROR", "HTTP request failed", json!({"error": error.to_string()}))),
-                    Err(_) => return Err(web_error("WEB_FETCH_TIMEOUT", "HTTP request timed out", json!({"url": current.as_str()}))),
+                    Err(_) => return Err(fetch_timeout_error(&current)),
                 },
             };
             if response.status().is_redirection() {
@@ -529,7 +531,8 @@ impl WebFetchProvider for HttpFetchProvider {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
-            let (text, truncated) = read_body(response, &self.config, cancellation).await?;
+            let (text, truncated) =
+                read_body(response, &self.config, deadline, cancellation).await?;
             return Ok(WebFetchResult {
                 final_url: current.into(),
                 status_code,
@@ -596,6 +599,7 @@ fn select_provider<T: ?Sized, R>(
 async fn read_body(
     response: reqwest::Response,
     config: &HttpFetchConfig,
+    deadline: time::Instant,
     cancellation: CancellationToken,
 ) -> Result<(String, bool), TessivumError> {
     let mut stream = response.bytes_stream();
@@ -603,7 +607,10 @@ async fn read_body(
     let mut truncated = false;
     while let Some(chunk) = tokio::select! {
         _ = cancellation.cancelled() => return Err(aborted_error()),
-        chunk = stream.next() => chunk,
+        chunk = time::timeout_at(deadline, stream.next()) => match chunk {
+            Ok(chunk) => chunk,
+            Err(_) => return Err(web_error("WEB_FETCH_TIMEOUT", "HTTP response body timed out", Value::Null)),
+        },
     } {
         let chunk = chunk.map_err(|error| {
             web_error(
@@ -697,6 +704,14 @@ fn duplicate_provider(id: &str) -> TessivumError {
         "WEB_DUPLICATE_PROVIDER",
         "a web provider is already registered under this identifier",
         json!({"provider": id}),
+    )
+}
+
+fn fetch_timeout_error(url: &Url) -> TessivumError {
+    web_error(
+        "WEB_FETCH_TIMEOUT",
+        "HTTP request timed out",
+        json!({"url": url.as_str()}),
     )
 }
 

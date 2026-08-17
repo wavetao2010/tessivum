@@ -1,0 +1,839 @@
+use std::{
+    io::Cursor,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use serde_json::json;
+
+use tessivum::{
+    agent::{
+        AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry, AgentRuntime,
+        AgentStatus, Inbox,
+    },
+    bridge::{
+        BridgeLimits, BridgeServices, DomainBridge, DomainEventSink, DomainLogger, DomainRequest,
+        LogLevel, AGENTS_SERVICE, CREDENTIALS_SERVICE, LLM_SERVICE, LOGGER_SERVICE,
+        SESSIONS_SERVICE, SETTINGS_SERVICE, SYSTEM_PROMPT_SERVICE, TIMERS_SERVICE, TOOLS_SERVICE,
+    },
+    credentials::{Credentials, YamlCredentialFile},
+    llm::LlmRuntime,
+    protocol::{SessionHeader, SessionId, SESSION_FORMAT_VERSION},
+    session::{MemorySessionPersistence, Session, SessionStore},
+    settings::{MemorySettingsProvider, Settings},
+    system_prompt::{PromptSection, SystemPrompt},
+    tools::{
+        ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext, ToolRuntime,
+    },
+    TessivumError,
+};
+use tessivum_core::{CancellationToken, ContextHandle};
+use tessivum_node_bridge::{
+    BridgeClient, BridgeError, BridgeHandler, ClientConfig, Frame, FrameKind,
+};
+
+fn bridge_services() -> (BridgeServices, ToolRuntime, SystemPrompt, SessionStore) {
+    let tools = ToolRuntime::new();
+    let prompt = SystemPrompt::new();
+    let llm = LlmRuntime::new();
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let agents = AgentRegistry::new(sessions.clone());
+    (
+        BridgeServices::new(tools.clone(), prompt.clone(), llm, sessions.clone(), agents),
+        tools,
+        prompt,
+        sessions,
+    )
+}
+
+fn disconnected_client(generation: u64) -> BridgeClient {
+    BridgeClient::from_io(
+        Cursor::new(Vec::<u8>::new()),
+        Vec::<u8>::new(),
+        generation,
+        ClientConfig::default(),
+    )
+    .unwrap()
+}
+
+fn remote_code(error: BridgeError) -> String {
+    match error {
+        BridgeError::Remote(error) => error.code,
+        other => panic!("expected remote error, got {other:?}"),
+    }
+}
+
+fn cancellation() -> CancellationToken {
+    ContextHandle::root().scope().cancellation()
+}
+
+fn session_header(id: &str) -> SessionHeader {
+    SessionHeader {
+        version: SESSION_FORMAT_VERSION,
+        id: SessionId::from(id),
+        created_at: 0,
+        cwd: None,
+        parent_session: None,
+        seed_length: None,
+        origin: None,
+        delegation_depth: None,
+        agent_preset: None,
+    }
+}
+
+fn agent_options() -> AgentOptions {
+    AgentOptions {
+        provider: "test".into(),
+        model: "test".into(),
+        max_tokens: Some(1),
+    }
+}
+
+struct IdleAgent;
+
+#[async_trait]
+impl AgentRuntime for IdleAgent {
+    fn status(&self) -> AgentStatus {
+        AgentStatus::Idle
+    }
+
+    async fn wake(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn when_idle(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn dispose(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+}
+
+struct IdleAgentFactory;
+
+#[async_trait]
+impl AgentFactory for IdleAgentFactory {
+    async fn create(
+        &self,
+        _: Arc<Session>,
+        _: AgentOptions,
+        _: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        Ok(Arc::new(IdleAgent))
+    }
+}
+
+struct CountingTool(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ToolHandler for CountingTool {
+    async fn run(&self, _: ToolRunContext, _: serde_json::Value) -> ToolHandlerResult {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Ok(ToolOutput::new(Vec::new(), false, serde_json::Value::Null))
+    }
+}
+
+async fn owned_bridge() -> (DomainBridge, ToolRuntime, AgentHandle, AgentHandle) {
+    let tools = ToolRuntime::new();
+    let prompt = SystemPrompt::new();
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let agents = AgentRegistry::new(sessions.clone());
+    let registration = agents.register_factory(Arc::new(IdleAgentFactory)).unwrap();
+    let owner = agents
+        .create(session_header("owner"), agent_options(), cancellation())
+        .await
+        .unwrap();
+    let foreign = agents
+        .create(session_header("foreign"), agent_options(), cancellation())
+        .await
+        .unwrap();
+    drop(registration);
+    let bridge = DomainBridge::new(
+        BridgeServices::new(tools.clone(), prompt, LlmRuntime::new(), sessions, agents)
+            .with_owner(owner.authority()),
+    )
+    .unwrap();
+    (bridge, tools, owner, foreign)
+}
+
+#[derive(Default)]
+struct RecordingLogger(Mutex<Vec<(LogLevel, String)>>);
+impl DomainLogger for RecordingLogger {
+    fn log(&self, level: LogLevel, message: &str, _: &serde_json::Value) {
+        self.0.lock().push((level, message.into()));
+    }
+}
+
+struct EchoEvents;
+impl DomainEventSink for EchoEvents {
+    fn emit(
+        &self,
+        event: &str,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, TessivumError> {
+        Ok(json!({"event": event, "payload": payload}))
+    }
+}
+
+#[test]
+fn construction_outside_tokio_is_rejected() {
+    let (services, _, _, _) = bridge_services();
+    assert!(matches!(
+        DomainBridge::new(services),
+        Err(BridgeError::InvalidFrame(message)) if message.contains("Tokio runtime")
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_drop_is_async_context_safe() {
+    let (services, _, _, _) = bridge_services();
+    drop(DomainBridge::new(services).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_allowlists_and_bounded_envelopes() {
+    let (services, _, _, _) = bridge_services();
+    let logger = Arc::new(RecordingLogger::default());
+    let bridge = DomainBridge::with_limits(
+        services
+            .with_logger(logger.clone())
+            .with_event_sink(Arc::new(EchoEvents), ["notice"]),
+        BridgeLimits {
+            max_json_bytes: 128,
+            max_callback_bytes: 64,
+            max_callback_concurrency: 1,
+            max_timers_per_generation: 1,
+            request_timeout: std::time::Duration::from_millis(10),
+            callback_timeout: std::time::Duration::from_millis(10),
+        },
+    )
+    .unwrap();
+    bridge.attach_client(disconnected_client(1), 1).unwrap();
+
+    assert_eq!(
+        bridge
+            .dispatch_native(DomainRequest {
+                service: TOOLS_SERVICE.into(),
+                method: "schemas".into(),
+                params: json!({}),
+            })
+            .unwrap(),
+        json!({"tools": []})
+    );
+    bridge
+        .dispatch_native(DomainRequest {
+            service: LOGGER_SERVICE.into(),
+            method: "log".into(),
+            params: json!({"level": "info", "message": "hello"}),
+        })
+        .unwrap();
+    assert_eq!(
+        logger.0.lock().as_slice(),
+        &[(LogLevel::Info, "hello".into())]
+    );
+
+    assert_eq!(
+        BridgeHandler::handle(
+            &bridge,
+            Frame::request(
+                1,
+                1,
+                FrameKind::EventEmit,
+                json!({"event": "notice", "payload": {"ok": true}}),
+            )
+        )
+        .unwrap(),
+        json!({"event": "notice", "payload": {"ok": true}})
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: LOGGER_SERVICE.into(),
+                    method: "setLevel".into(),
+                    params: json!({}),
+                })
+                .unwrap_err()
+        ),
+        "UNKNOWN_METHOD"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: "context@1".into(),
+                    method: "get".into(),
+                    params: json!({}),
+                })
+                .unwrap_err()
+        ),
+        "UNKNOWN_SERVICE"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: TOOLS_SERVICE.into(),
+                    method: "schemas".into(),
+                    params: json!({"unexpected": true}),
+                })
+                .unwrap_err()
+        ),
+        "INVALID_SCHEMA"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: TOOLS_SERVICE.into(),
+                    method: "schemas".into(),
+                    params: json!({"oversized": "x".repeat(128)}),
+                })
+                .unwrap_err()
+        ),
+        "PAYLOAD_TOO_LARGE"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_contributions_are_typed_and_generation_owned() {
+    let (services, tools, prompt, _) = bridge_services();
+    let bridge = DomainBridge::new(services).unwrap();
+    bridge.attach_client(disconnected_client(7), 7).unwrap();
+
+    bridge.dispatch(7, DomainRequest {
+        service: SYSTEM_PROMPT_SERVICE.into(),
+        method: "register".into(),
+        params: json!({"registrationId": "prompt", "id": "legacy", "order": 0, "text": "from Node"}),
+    }).unwrap();
+    bridge
+        .dispatch(
+            7,
+            DomainRequest {
+                service: TOOLS_SERVICE.into(),
+                method: "register".into(),
+                params: json!({
+                    "registrationId": "tool",
+                    "callbackId": "run-tool",
+                    "name": "legacy-tool",
+                    "description": "legacy callback",
+                    "parameters": {"type": "object", "properties": {}}
+                }),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(tools.schemas()[0].name, "legacy-tool");
+    assert_eq!(
+        prompt
+            .assemble(Vec::<PromptSection>::new(), Vec::new())
+            .unwrap()
+            .text,
+        "from Node"
+    );
+
+    let removed = BridgeHandler::handle(
+        &bridge,
+        Frame::request(
+            7,
+            1,
+            FrameKind::RegistrationDispose,
+            json!({"registrationId": "tool"}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(removed, json!({"removed": true}));
+    assert!(tools.schemas().is_empty());
+
+    bridge.cleanup_generation(7);
+    assert!(prompt
+        .assemble(Vec::<PromptSection>::new(), Vec::new())
+        .unwrap()
+        .text
+        .is_empty());
+    assert_eq!(
+        remote_code(bridge.attach_client(disconnected_client(7), 7).unwrap_err()),
+        "DUPLICATE_GENERATION"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch(
+                    7,
+                    DomainRequest {
+                        service: TOOLS_SERVICE.into(),
+                        method: "schemas".into(),
+                        params: json!({}),
+                    }
+                )
+                .unwrap_err()
+        ),
+        "STALE_GENERATION"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_read_only_proxies_and_timer_lifetime() {
+    let (services, _, _, _) = bridge_services();
+    let settings = Arc::new(Settings::new(Arc::new(MemorySettingsProvider::new())));
+    let credentials = Arc::new(Credentials::new(Arc::new(YamlCredentialFile::read_only(
+        "/tmp/tessivum-bridge-test-credentials.yaml",
+    ))));
+    let services = services
+        .with_settings(settings)
+        .with_credentials(credentials);
+    let bridge = DomainBridge::with_limits(
+        services,
+        BridgeLimits {
+            max_timers_per_generation: 1,
+            ..BridgeLimits::default()
+        },
+    )
+    .unwrap();
+    bridge.attach_client(disconnected_client(9), 9).unwrap();
+
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SETTINGS_SERVICE.into(),
+                    method: "update".into(),
+                    params: json!({"namespace": "plugin"}),
+                })
+                .unwrap_err()
+        ),
+        "UNKNOWN_METHOD"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: CREDENTIALS_SERVICE.into(),
+                    method: "resolve".into(),
+                    params: json!({"reference": "TOKEN"}),
+                })
+                .unwrap_err()
+        ),
+        "UNKNOWN_METHOD"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SETTINGS_SERVICE.into(),
+                    method: "get".into(),
+                    params: json!({"namespace": "plugin"}),
+                })
+                .unwrap_err()
+        ),
+        "SETTINGS_NOT_REGISTERED"
+    );
+    assert_eq!(
+        bridge
+            .dispatch_native(DomainRequest {
+                service: CREDENTIALS_SERVICE.into(),
+                method: "describe".into(),
+                params: json!({"reference": "TESSIVUM_BRIDGE_TEST_MISSING"}),
+            })
+            .unwrap(),
+        json!({
+            "reference": "TESSIVUM_BRIDGE_TEST_MISSING",
+            "configured": false,
+            "writable": false,
+        })
+    );
+
+    assert_eq!(
+        bridge.dispatch(9, DomainRequest {
+            service: TIMERS_SERVICE.into(),
+            method: "schedule".into(),
+            params: json!({"registrationId": "timer", "callbackId": "tick", "delayMs": 60_000}),
+        }).unwrap(),
+        json!({"timerId": "timer"})
+    );
+    assert_eq!(
+        remote_code(bridge.dispatch(9, DomainRequest {
+            service: TIMERS_SERVICE.into(),
+            method: "schedule".into(),
+            params: json!({"registrationId": "second", "callbackId": "tick", "delayMs": 60_000}),
+        }).unwrap_err()),
+        "CONCURRENCY_LIMIT"
+    );
+    assert_eq!(
+        bridge
+            .dispatch(
+                9,
+                DomainRequest {
+                    service: TIMERS_SERVICE.into(),
+                    method: "cancel".into(),
+                    params: json!({"registrationId": "timer"}),
+                }
+            )
+            .unwrap(),
+        json!({"removed": true})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_bound_services_reject_cross_session_access() {
+    let (bridge, tools, owner, foreign) = owned_bridge().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "count",
+            "counts executions",
+            json!({"type": "object", "properties": {}}),
+            CountingTool(Arc::clone(&calls)),
+        ))
+        .unwrap();
+    let foreign_id = foreign.id();
+
+    assert_eq!(
+        remote_code(bridge.dispatch_native(DomainRequest {
+            service: TOOLS_SERVICE.into(),
+            method: "execute".into(),
+            params: json!({"session": foreign_id, "call": "foreign-call", "name": "count", "arguments": {}}),
+        }).unwrap_err()),
+        "OWNER_DENIED"
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "read".into(),
+                    params: json!({"session": foreign_id}),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_DENIED"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "append".into(),
+                    params: json!({
+                        "session": foreign_id,
+                        "event": {"type": "turn/start", "seq": 0, "time": 0, "data": null},
+                    }),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_DENIED"
+    );
+    assert_eq!(foreign.session().events(), Vec::new());
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: AGENTS_SERVICE.into(),
+                    method: "get".into(),
+                    params: json!({"session": foreign_id}),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_DENIED"
+    );
+
+    assert!(bridge.dispatch_native(DomainRequest {
+        service: TOOLS_SERVICE.into(),
+        method: "execute".into(),
+        params: json!({"session": owner.id(), "call": "owner-call", "name": "count", "arguments": {}}),
+    }).is_ok());
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        bridge
+            .dispatch_native(DomainRequest {
+                service: SESSIONS_SERVICE.into(),
+                method: "append".into(),
+                params: json!({
+                    "session": owner.id(),
+                    "event": {"type": "turn/start", "seq": 0, "time": 0, "data": null},
+                }),
+            })
+            .unwrap(),
+        json!({"appended": true})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_authority_rejects_a_replacement_agent_generation() {
+    let tools = ToolRuntime::new();
+    let prompt = SystemPrompt::new();
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let agents = AgentRegistry::new(sessions.clone());
+    let _factory = agents.register_factory(Arc::new(IdleAgentFactory)).unwrap();
+    let first = agents
+        .create(
+            session_header("same-session"),
+            agent_options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let stale = first.authority();
+    first.dispose().await.unwrap();
+    let replacement = agents
+        .create_or_resume(
+            session_header("same-session"),
+            agent_options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert!(replacement.authority().is_live());
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "count",
+            "counts executions",
+            json!({"type": "object", "properties": {}}),
+            CountingTool(Arc::clone(&calls)),
+        ))
+        .unwrap();
+    let bridge = DomainBridge::new(
+        BridgeServices::new(tools, prompt, LlmRuntime::new(), sessions, agents).with_owner(stale),
+    )
+    .unwrap();
+
+    assert_eq!(
+        remote_code(bridge.dispatch_native(DomainRequest {
+            service: TOOLS_SERVICE.into(),
+            method: "execute".into(),
+            params: json!({"session": "same-session", "call": "stale-call", "name": "count", "arguments": {}}),
+        }).unwrap_err()),
+        "OWNER_STALE"
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "read".into(),
+                    params: json!({"session": "same-session"}),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_STALE"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "append".into(),
+                    params: json!({
+                        "session": "same-session",
+                        "event": {"type": "turn/start", "seq": 0, "time": 0, "data": null},
+                    }),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_STALE"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: AGENTS_SERVICE.into(),
+                    method: "get".into(),
+                    params: json!({"session": "same-session"}),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_STALE"
+    );
+}
+
+async fn schedule_timer_until_admitted(
+    bridge: &DomainBridge,
+    generation: u64,
+    registration_id: &str,
+    delay_ms: u64,
+) {
+    for _ in 0..100 {
+        match bridge.dispatch(
+            generation,
+            DomainRequest {
+                service: TIMERS_SERVICE.into(),
+                method: "schedule".into(),
+                params: json!({
+                    "registrationId": registration_id,
+                    "callbackId": "tick",
+                    "delayMs": delay_ms,
+                }),
+            },
+        ) {
+            Ok(value) => {
+                assert_eq!(value, json!({"timerId": registration_id}));
+                return;
+            }
+            Err(error) => {
+                let code = remote_code(error);
+                assert!(matches!(
+                    code.as_str(),
+                    "CONCURRENCY_LIMIT" | "DUPLICATE_REGISTRATION"
+                ));
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+    panic!("timer never released its registration or capacity");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_hundred_zero_delay_timers_release_registration_and_capacity() {
+    let (services, _, _, _) = bridge_services();
+    let bridge = DomainBridge::with_limits(
+        services,
+        BridgeLimits {
+            max_callback_concurrency: 1,
+            max_timers_per_generation: 1,
+            callback_timeout: Duration::from_millis(1),
+            ..BridgeLimits::default()
+        },
+    )
+    .unwrap();
+    bridge.attach_client(disconnected_client(10), 10).unwrap();
+
+    for _ in 0..100 {
+        schedule_timer_until_admitted(&bridge, 10, "zero", 0).await;
+    }
+    schedule_timer_until_admitted(&bridge, 10, "drain", 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timer_registration_reuse_and_cleanup_race_are_safe() {
+    let (services, _, _, _) = bridge_services();
+    let bridge = DomainBridge::with_limits(
+        services,
+        BridgeLimits {
+            max_timers_per_generation: 1,
+            callback_timeout: Duration::from_millis(1),
+            ..BridgeLimits::default()
+        },
+    )
+    .unwrap();
+    bridge.attach_client(disconnected_client(11), 11).unwrap();
+
+    schedule_timer_until_admitted(&bridge, 11, "reused", 0).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        bridge.dispatch(11, DomainRequest {
+            service: TIMERS_SERVICE.into(),
+            method: "schedule".into(),
+            params: json!({"registrationId": "reused", "callbackId": "tick", "delayMs": 60_000}),
+        }).unwrap(),
+        json!({"timerId": "reused"})
+    );
+    assert_eq!(
+        bridge
+            .dispatch(
+                11,
+                DomainRequest {
+                    service: TIMERS_SERVICE.into(),
+                    method: "cancel".into(),
+                    params: json!({"registrationId": "reused"}),
+                }
+            )
+            .unwrap(),
+        json!({"removed": true})
+    );
+
+    assert!(bridge.dispatch(11, DomainRequest {
+        service: TIMERS_SERVICE.into(),
+        method: "schedule".into(),
+        params: json!({"registrationId": "cleanup-race", "callbackId": "tick", "delayMs": 0}),
+    }).is_ok());
+    bridge.cleanup_generation(11);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch(
+                    11,
+                    DomainRequest {
+                        service: TIMERS_SERVICE.into(),
+                        method: "cancel".into(),
+                        params: json!({"registrationId": "cleanup-race"}),
+                    }
+                )
+                .unwrap_err()
+        ),
+        "STALE_GENERATION"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remaining_service_proxies_reject_invalid_ownership_or_routes() {
+    let (services, _, _, _) = bridge_services();
+    let bridge = DomainBridge::new(services).unwrap();
+
+    assert_eq!(
+        remote_code(bridge.dispatch_native(DomainRequest {
+            service: LLM_SERVICE.into(),
+            method: "generate".into(),
+            params: json!({"request": {"provider": "missing", "model": "m", "messages": []}}),
+        }).unwrap_err()),
+        "LLM_PROVIDER_NOT_FOUND"
+    );
+    assert_eq!(
+        remote_code(bridge.dispatch_native(DomainRequest {
+            service: TOOLS_SERVICE.into(),
+            method: "execute".into(),
+            params: json!({"session": "missing", "call": "missing", "name": "missing", "arguments": {}}),
+        }).unwrap_err()),
+        "OWNER_REQUIRED"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "read".into(),
+                    params: json!({"session": "missing"}),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_REQUIRED"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "append".into(),
+                    params: json!({
+                        "session": "missing",
+                        "event": {"type": "turn/start", "seq": 0, "time": 0, "data": null},
+                    }),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_REQUIRED"
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: AGENTS_SERVICE.into(),
+                    method: "get".into(),
+                    params: json!({"session": "missing"}),
+                })
+                .unwrap_err()
+        ),
+        "OWNER_REQUIRED"
+    );
+}

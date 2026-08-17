@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    io::{self, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
@@ -34,6 +35,16 @@ pub struct McpClientConfig {
     pub server_name: String,
     pub timeout: Duration,
     pub reconnect: McpReconnectPolicy,
+    pub max_decoded_json_bytes: usize,
+    pub max_pages: usize,
+    pub max_tools_per_page: usize,
+    pub max_total_tools: usize,
+    pub max_cursor_bytes: usize,
+    pub max_name_bytes: usize,
+    pub max_description_bytes: usize,
+    pub max_schema_bytes: usize,
+    pub max_args_bytes: usize,
+    pub max_result_bytes: usize,
 }
 
 impl McpClientConfig {
@@ -42,6 +53,16 @@ impl McpClientConfig {
             server_name: server_name.into(),
             timeout: Duration::from_secs(60),
             reconnect: McpReconnectPolicy::default(),
+            max_decoded_json_bytes: 1_048_576,
+            max_pages: 1_024,
+            max_tools_per_page: 128,
+            max_total_tools: 1_024,
+            max_cursor_bytes: 1_024,
+            max_name_bytes: 256,
+            max_description_bytes: 16_384,
+            max_schema_bytes: 65_536,
+            max_args_bytes: 1_048_576,
+            max_result_bytes: 1_048_576,
         };
         config.validate()?;
         Ok(config)
@@ -65,6 +86,24 @@ impl McpClientConfig {
             return Err(mcp_error(
                 "INVALID_MCP_TIMEOUT",
                 "MCP timeout must be positive",
+                Value::Null,
+            ));
+        }
+        if self.max_decoded_json_bytes == 0
+            || self.max_pages == 0
+            || self.max_tools_per_page == 0
+            || self.max_total_tools == 0
+            || self.max_tools_per_page > self.max_total_tools
+            || self.max_cursor_bytes == 0
+            || self.max_name_bytes == 0
+            || self.max_description_bytes == 0
+            || self.max_schema_bytes == 0
+            || self.max_args_bytes == 0
+            || self.max_result_bytes == 0
+        {
+            return Err(mcp_error(
+                "INVALID_MCP_CONFIG",
+                "MCP limits must be positive and tools per page cannot exceed total tools",
                 Value::Null,
             ));
         }
@@ -194,6 +233,8 @@ struct McpInner {
     connector: Arc<dyn McpConnector>,
     state: Mutex<McpState>,
     lifecycle: AsyncMutex<()>,
+    registration_gate: Mutex<()>,
+    cancellation: CancellationToken,
     disposed: AtomicBool,
 }
 
@@ -239,6 +280,8 @@ impl McpConnection {
                     last_error: None,
                 }),
                 lifecycle: AsyncMutex::new(()),
+                registration_gate: Mutex::new(()),
+                cancellation: ContextHandle::root().scope().cancellation(),
                 disposed: AtomicBool::new(false),
             }),
         };
@@ -313,12 +356,17 @@ impl McpConnection {
 
     /// Cancels future work, removes every owned tool, and bounds transport close to five seconds.
     pub async fn dispose(&self) -> Result<(), TessivumError> {
-        let _lifecycle = self.inner.lifecycle.lock().await;
         if self.inner.disposed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        self.inner.cancellation.cancel();
         self.remove_current_tools();
-        let transport = lock(&self.inner.state).transport.take();
+        let transport = {
+            let mut state = lock(&self.inner.state);
+            state.generation = next_generation(state.generation);
+            state.connected_at = None;
+            state.transport.take()
+        };
         if let Some(transport) = transport {
             match time::timeout(Duration::from_secs(5), transport.close()).await {
                 Ok(result) => result?,
@@ -349,27 +397,48 @@ impl McpConnection {
 
         for attempt in start_attempt..end_attempt {
             if after_close {
-                time::sleep(backoff(policy, attempt)).await;
+                tokio::select! {
+                    _ = self.inner.cancellation.cancelled() => return Err(disposed_error()),
+                    _ = time::sleep(backoff(policy, attempt)) => {}
+                }
             }
             if self.inner.disposed.load(Ordering::Acquire) {
                 return Err(disposed_error());
             }
-            let transport = match self.inner.connector.connect(&self.inner.config).await {
+            let deadline = time::Instant::now() + self.inner.config.timeout;
+            let transport = match tokio::select! {
+                _ = self.inner.cancellation.cancelled() => return Err(disposed_error()),
+                result = time::timeout_at(deadline, self.inner.connector.connect(&self.inner.config)) => match result {
+                    Ok(result) => result,
+                    Err(_) => Err(mcp_error("MCP_CONNECT_TIMEOUT", "MCP connector timed out", Value::Null)),
+                },
+            } {
                 Ok(transport) => transport,
                 Err(error) => {
                     last_error = Some(error);
                     continue;
                 }
             };
-            let generation = {
+            let installed = {
                 let mut state = lock(&self.inner.state);
-                state.generation = state.generation.wrapping_add(1).max(1);
-                state.transport = Some(Arc::clone(&transport));
-                state.connected_at = Some(Instant::now());
-                state.last_error = None;
-                state.reconnect_attempts = if after_close { attempt + 1 } else { 0 };
-                state.generation
+                if self.inner.disposed.load(Ordering::Acquire) {
+                    None
+                } else {
+                    state.generation = next_generation(state.generation);
+                    let previous = state.transport.replace(Arc::clone(&transport));
+                    state.connected_at = Some(Instant::now());
+                    state.last_error = None;
+                    state.reconnect_attempts = if after_close { attempt + 1 } else { 0 };
+                    Some((state.generation, previous))
+                }
             };
+            let Some((generation, previous)) = installed else {
+                let _ = time::timeout(Duration::from_secs(5), transport.close()).await;
+                return Err(disposed_error());
+            };
+            if let Some(previous) = previous {
+                let _ = time::timeout(Duration::from_secs(5), previous.close()).await;
+            }
             match self.sync_current().await {
                 Ok(()) => {
                     self.monitor_close(generation, transport);
@@ -377,8 +446,18 @@ impl McpConnection {
                 }
                 Err(error) => {
                     self.remove_current_tools();
-                    lock(&self.inner.state).transport = None;
-                    let _ = transport.close().await;
+                    {
+                        let mut state = lock(&self.inner.state);
+                        if state.generation == generation
+                            && state
+                                .transport
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &transport))
+                        {
+                            state.transport = None;
+                        }
+                    }
+                    let _ = time::timeout(Duration::from_secs(5), transport.close()).await;
                     last_error = Some(error);
                 }
             }
@@ -425,8 +504,12 @@ impl McpConnection {
                 })?,
             )
         };
-        let tools = list_all_tools(&transport).await?;
-        let definitions = definitions_for(&self.inner, &tools)?;
+        let tools =
+            list_all_tools(&transport, &self.inner.config, &self.inner.cancellation).await?;
+        if self.inner.disposed.load(Ordering::Acquire) {
+            return Err(disposed_error());
+        }
+        let definitions = definitions_for(&self.inner, generation, &transport, &tools)?;
         let raw_names: BTreeMap<_, _> = tools
             .iter()
             .map(|tool| {
@@ -437,14 +520,19 @@ impl McpConnection {
             })
             .collect();
 
+        let _registration_gate = lock(&self.inner.registration_gate);
         let prior = {
             let mut state = lock(&self.inner.state);
-            if state.generation != generation || state.transport.is_none() {
-                return Err(mcp_error(
-                    "MCP_GENERATION_REPLACED",
-                    "MCP transport generation changed while listing tools",
-                    Value::Null,
-                ));
+            if self.inner.disposed.load(Ordering::Acquire) {
+                return Err(disposed_error());
+            }
+            if state.generation != generation
+                || !state
+                    .transport
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &transport))
+            {
+                return Err(generation_replaced_error());
             }
             std::mem::take(&mut state.registrations)
         };
@@ -452,19 +540,49 @@ impl McpConnection {
             Ok(registrations) => registrations,
             Err(error) => {
                 let mut state = lock(&self.inner.state);
-                if state.generation == generation {
+                if !self.inner.disposed.load(Ordering::Acquire)
+                    && state.generation == generation
+                    && state
+                        .transport
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &transport))
+                {
                     state.registrations = prior;
                 }
                 return Err(error);
             }
         };
-        let mut state = lock(&self.inner.state);
-        state.registrations = registrations;
-        state.raw_names = raw_names;
-        Ok(())
+        let stale = {
+            let mut state = lock(&self.inner.state);
+            if !self.inner.disposed.load(Ordering::Acquire)
+                && state.generation == generation
+                && state
+                    .transport
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &transport))
+            {
+                state.registrations = registrations;
+                state.raw_names = raw_names;
+                None
+            } else {
+                Some(registrations)
+            }
+        };
+        match stale {
+            None => Ok(()),
+            Some(registrations) => {
+                let _ = self.inner.tools.replace(&registrations, Vec::new());
+                if self.inner.disposed.load(Ordering::Acquire) {
+                    Err(disposed_error())
+                } else {
+                    Err(generation_replaced_error())
+                }
+            }
+        }
     }
 
     fn remove_current_tools(&self) {
+        let _registration_gate = lock(&self.inner.registration_gate);
         let prior = {
             let mut state = lock(&self.inner.state);
             std::mem::take(&mut state.registrations)
@@ -496,6 +614,8 @@ impl McpConnection {
 
     async fn call_raw(
         &self,
+        generation: u64,
+        expected_transport: &Arc<dyn McpTransport>,
         raw_name: &str,
         arguments: Value,
         cancellation: CancellationToken,
@@ -511,27 +631,51 @@ impl McpConnection {
         if cancellation.is_cancelled() {
             return Err(cancelled_error());
         }
-        let transport = lock(&self.inner.state).transport.clone().ok_or_else(|| {
-            mcp_error(
-                "MCP_NOT_READY",
-                "MCP connection has no active transport",
-                Value::Null,
-            )
-        })?;
+        ensure_json_bound(
+            &arguments,
+            self.inner.config.max_args_bytes,
+            "MCP_ARGUMENTS_LIMIT",
+            "MCP tool arguments exceed the configured limit",
+        )?;
+        let transport = {
+            let state = lock(&self.inner.state);
+            if self.inner.disposed.load(Ordering::Acquire) {
+                return Err(disposed_error());
+            }
+            if state.generation != generation
+                || !state
+                    .transport
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, expected_transport))
+            {
+                return Err(generation_replaced_error());
+            }
+            Arc::clone(expected_transport)
+        };
+        let deadline = time::Instant::now() + self.inner.config.timeout;
         let call = transport.call_tool(raw_name, arguments, cancellation.clone());
         let response = tokio::select! {
+            _ = self.inner.cancellation.cancelled() => return Err(disposed_error()),
             _ = cancellation.cancelled() => return Err(cancelled_error()),
-            result = time::timeout(self.inner.config.timeout, call) => match result {
+            result = time::timeout_at(deadline, call) => match result {
                 Ok(result) => result?,
                 Err(_) => return Err(mcp_error("MCP_TOOL_TIMEOUT", "MCP tool call timed out", json!({"name": raw_name}))),
             },
         };
+        ensure_json_bound(
+            &response,
+            self.inner.config.max_result_bytes,
+            "MCP_RESULT_LIMIT",
+            "MCP tool result exceeds the configured limit",
+        )?;
         normalize_result(response)
     }
 }
 
 struct McpToolHandler {
     connection: Weak<McpInner>,
+    generation: u64,
+    transport: Arc<dyn McpTransport>,
     raw_name: String,
     task_support: McpTaskSupport,
 }
@@ -548,6 +692,8 @@ impl ToolHandler for McpToolHandler {
         };
         McpConnection { inner }
             .call_raw(
+                self.generation,
+                &self.transport,
                 &self.raw_name,
                 arguments,
                 context.cancellation,
@@ -559,6 +705,8 @@ impl ToolHandler for McpToolHandler {
 
 fn definitions_for(
     inner: &Arc<McpInner>,
+    generation: u64,
+    transport: &Arc<dyn McpTransport>,
     tools: &[McpTool],
 ) -> Result<Vec<ToolDefinition>, TessivumError> {
     let mut raw_names = BTreeSet::new();
@@ -598,6 +746,8 @@ fn definitions_for(
             input_schema,
             McpToolHandler {
                 connection: Arc::downgrade(inner),
+                generation,
+                transport: Arc::clone(transport),
                 raw_name: tool.name.clone(),
                 task_support: tool.task_support,
             },
@@ -617,15 +767,31 @@ fn normalize_input_schema(input_schema: &Value) -> Value {
     Value::Object(schema)
 }
 
-async fn list_all_tools(transport: &Arc<dyn McpTransport>) -> Result<Vec<McpTool>, TessivumError> {
-    let cancellation = ContextHandle::root().scope().cancellation();
+async fn list_all_tools(
+    transport: &Arc<dyn McpTransport>,
+    config: &McpClientConfig,
+    cancellation: &CancellationToken,
+) -> Result<Vec<McpTool>, TessivumError> {
+    let deadline = time::Instant::now() + config.timeout;
     let mut cursor = None;
     let mut cursors = BTreeSet::new();
     let mut tools = Vec::new();
-    for _ in 0..1024 {
-        let page = transport
-            .list_tools(cursor.clone(), cancellation.clone())
-            .await?;
+    for _ in 0..config.max_pages {
+        let page = tokio::select! {
+            _ = cancellation.cancelled() => return Err(disposed_error()),
+            result = time::timeout_at(deadline, transport.list_tools(cursor.clone(), cancellation.clone())) => match result {
+                Ok(result) => result?,
+                Err(_) => return Err(mcp_error("MCP_SYNC_TIMEOUT", "MCP tools synchronization timed out", Value::Null)),
+            },
+        };
+        validate_page(&page, config)?;
+        if page.tools.len() > config.max_total_tools.saturating_sub(tools.len()) {
+            return Err(mcp_error(
+                "MCP_TOTAL_TOOLS_LIMIT",
+                "MCP tools/list exceeded the configured total tool limit",
+                Value::Null,
+            ));
+        }
         tools.extend(page.tools);
         match page.next_cursor {
             None => return Ok(tools),
@@ -640,10 +806,101 @@ async fn list_all_tools(transport: &Arc<dyn McpTransport>) -> Result<Vec<McpTool
         }
     }
     Err(mcp_error(
-        "INVALID_MCP_PAGINATION",
-        "MCP tools/list exceeded the 1024 page safety limit",
+        "MCP_PAGE_LIMIT",
+        "MCP tools/list exceeded the configured page limit",
         Value::Null,
     ))
+}
+
+fn validate_page(page: &McpToolPage, config: &McpClientConfig) -> Result<(), TessivumError> {
+    if page.tools.len() > config.max_tools_per_page {
+        return Err(mcp_error(
+            "MCP_TOOLS_PER_PAGE_LIMIT",
+            "MCP tools/list page exceeds the configured tool limit",
+            Value::Null,
+        ));
+    }
+    ensure_json_bound(
+        page,
+        config.max_decoded_json_bytes,
+        "MCP_JSON_LIMIT",
+        "decoded MCP JSON exceeds the configured limit",
+    )?;
+    if page
+        .next_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > config.max_cursor_bytes)
+    {
+        return Err(mcp_error(
+            "MCP_CURSOR_LIMIT",
+            "MCP pagination cursor exceeds the configured limit",
+            Value::Null,
+        ));
+    }
+    for tool in &page.tools {
+        if tool.name.len() > config.max_name_bytes {
+            return Err(mcp_error(
+                "MCP_NAME_LIMIT",
+                "MCP tool name exceeds the configured limit",
+                Value::Null,
+            ));
+        }
+        if tool.description.len() > config.max_description_bytes {
+            return Err(mcp_error(
+                "MCP_DESCRIPTION_LIMIT",
+                "MCP tool description exceeds the configured limit",
+                Value::Null,
+            ));
+        }
+        ensure_json_bound(
+            &tool.input_schema,
+            config.max_schema_bytes,
+            "MCP_SCHEMA_LIMIT",
+            "MCP tool schema exceeds the configured limit",
+        )?;
+    }
+    Ok(())
+}
+
+struct ByteLimitWriter {
+    remaining: usize,
+    exceeded: bool,
+}
+
+impl Write for ByteLimitWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            self.exceeded = true;
+            return Err(io::Error::other("JSON byte limit exceeded"));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn ensure_json_bound<T: Serialize>(
+    value: &T,
+    maximum: usize,
+    code: &str,
+    message: &str,
+) -> Result<(), TessivumError> {
+    let mut writer = ByteLimitWriter {
+        remaining: maximum,
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(()),
+        Err(_) if writer.exceeded => Err(mcp_error(code, message, Value::Null)),
+        Err(error) => Err(mcp_error(
+            "MCP_JSON_SERIALIZATION",
+            "MCP JSON could not be measured",
+            json!({"error": error.to_string()}),
+        )),
+    }
 }
 
 /// Produces a stable, model-safe public tool name. Callers must retain the raw mapping instead of
@@ -699,6 +956,10 @@ fn backoff(policy: &McpReconnectPolicy, attempt: u32) -> Duration {
         .checked_mul(factor)
         .unwrap_or(policy.max_delay)
         .min(policy.max_delay)
+}
+
+fn next_generation(generation: u64) -> u64 {
+    generation.wrapping_add(1).max(1)
 }
 
 fn normalize_result(value: Value) -> ToolHandlerResult {
@@ -759,6 +1020,14 @@ fn cancelled_error() -> TessivumError {
 
 fn disposed_error() -> TessivumError {
     mcp_error("MCP_DISPOSED", "MCP connection was disposed", Value::Null)
+}
+
+fn generation_replaced_error() -> TessivumError {
+    mcp_error(
+        "MCP_GENERATION_REPLACED",
+        "MCP transport generation was replaced",
+        Value::Null,
+    )
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
