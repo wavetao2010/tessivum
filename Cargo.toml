@@ -20,3 +20,4 @@ regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
+parking_lot = "0.12"
