@@ -1,0 +1,132 @@
+#[path = "../src/cli.rs"]
+mod cli;
+
+use std::{num::NonZeroU64, path::PathBuf};
+
+use clap::error::ErrorKind;
+use cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand};
+
+fn headless(args: &[&str]) -> HeadlessCommand {
+    let cli = parse_cli(args.iter().copied()).expect("headless invocation should parse");
+    match cli.command {
+        CliCommand::Headless(command) => command,
+        command => panic!("expected Headless, got {command:?}"),
+    }
+}
+
+#[test]
+fn upstream_headless_example_keeps_launcher_data_separate_from_task() {
+    let command = headless(&[
+        "tessivum",
+        "--profile",
+        "headless",
+        "--patch",
+        "base.toml",
+        "--data-dir",
+        "state",
+        "--session",
+        "session-7",
+        "--resume",
+        "--replay",
+        "recording.jsonl",
+        "--provider",
+        "recorded",
+        "--model",
+        "fixture-model",
+        "--max-tokens",
+        "64",
+        "prove",
+        "the",
+        "round",
+        "trip",
+    ]);
+
+    assert_eq!(command.patches, vec![PathBuf::from("base.toml")]);
+    assert_eq!(command.data_dir, Some(PathBuf::from("state")));
+    assert_eq!(command.session.as_deref(), Some("session-7"));
+    assert!(command.resume);
+    assert_eq!(command.replay, Some(PathBuf::from("recording.jsonl")));
+    assert_eq!(command.provider, "recorded");
+    assert_eq!(command.model, "fixture-model");
+    assert_eq!(command.max_tokens, Some(NonZeroU64::new(64).unwrap()));
+    assert_eq!(command.task, "prove the round trip");
+}
+
+#[test]
+fn repeated_patches_keep_order_and_defaults_select_recorded() {
+    let command = headless(&[
+        "tessivum",
+        "--patch",
+        "base.toml",
+        "--patch=local.toml",
+        "ship",
+        "this",
+    ]);
+
+    assert_eq!(
+        command.patches,
+        vec![PathBuf::from("base.toml"), PathBuf::from("local.toml")]
+    );
+    assert_eq!(command.provider, "recorded");
+    assert_eq!(command.model, "recorded");
+    assert_eq!(command.task, "ship this");
+}
+
+#[test]
+fn direct_web_and_profile_web_are_the_same_future_command() {
+    for args in [
+        ["tessivum", "web"].as_slice(),
+        ["tessivum", "--profile", "web"].as_slice(),
+    ] {
+        assert_eq!(
+            parse_cli(args.iter().copied()).unwrap().command,
+            CliCommand::Web
+        );
+    }
+}
+
+#[test]
+fn help_and_version_remain_clap_display_outcomes() {
+    assert_eq!(
+        parse_cli(["tessivum", "--help"]).unwrap_err().kind(),
+        ErrorKind::DisplayHelp
+    );
+    assert_eq!(
+        parse_cli(["tessivum", "--version"]).unwrap_err().kind(),
+        ErrorKind::DisplayVersion
+    );
+}
+
+#[test]
+fn launcher_flags_after_task_are_not_absorbed_as_task_text() {
+    let error = parse_cli(["tessivum", "describe", "this", "--model", "other"])
+        .expect_err("launcher flag after the task must fail");
+
+    assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    assert!(error.to_string().contains("before the task"));
+}
+
+#[test]
+fn invalid_headless_combinations_are_usage_errors() {
+    for args in [
+        ["tessivum"].as_slice(),
+        ["tessivum", "   "].as_slice(),
+        ["tessivum", "--resume", "task"].as_slice(),
+        ["tessivum", "--max-tokens", "0", "task"].as_slice(),
+    ] {
+        assert_eq!(parse_cli(args.iter().copied()).unwrap_err().exit_code(), 2);
+    }
+
+    let error = parse_cli(["tessivum", "sdk", "--patch", "base.toml"])
+        .expect_err("future commands own no headless launcher arguments");
+    assert_eq!(error.exit_code(), 2);
+}
+
+#[test]
+fn default_rust_entrypoint_selects_headless_and_exit_codes_are_stable() {
+    let command = headless(&["tessivum", "preserve", "word", "boundaries"]);
+    assert_eq!(command.task, "preserve word boundaries");
+    assert_eq!(ExitClass::Usage.code(), 2);
+    assert_eq!(ExitClass::Runtime.code(), 1);
+    assert_eq!(ExitClass::Cancelled.code(), 130);
+}

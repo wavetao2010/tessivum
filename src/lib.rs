@@ -1,6 +1,7 @@
 //! Wire-stable Tessivum product protocol DTOs.
 
 pub mod agent;
+pub mod cli;
 pub mod error;
 pub mod llm;
 pub mod persistence_jsonl;
