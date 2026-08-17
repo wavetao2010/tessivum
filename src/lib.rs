@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod agent_loop;
+pub mod api;
 pub mod approval;
 pub mod attachments;
 pub mod bridge;
@@ -12,8 +13,10 @@ pub mod compaction;
 pub mod credentials;
 pub mod error;
 pub mod filesystem;
+pub mod frontend;
 pub mod goal;
 pub mod headless;
+pub mod host;
 pub mod invariants;
 pub mod jobs;
 pub mod legacy;
@@ -28,6 +31,7 @@ pub mod plugins;
 pub mod projection;
 pub mod protocol;
 pub mod sandbox;
+pub mod sdk;
 pub mod session;
 pub mod session_query;
 pub mod settings;

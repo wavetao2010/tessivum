@@ -1,9 +1,10 @@
-use std::{env, process::ExitCode};
+use std::{env, net::SocketAddr, process::ExitCode, sync::Arc};
 
 use clap::error::ErrorKind;
 use tessivum::{
     cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand},
     headless::{run_headless, HeadlessConfig},
+    host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
     SessionId,
 };
 
@@ -35,19 +36,19 @@ async fn run() -> Result<(), Diagnostic> {
         Err(error) => return Err(Diagnostic::usage(error.to_string())),
     };
 
-    let CliCommand::Headless(command) = command else {
-        let name = match command {
-            CliCommand::Sdk => "sdk",
-            CliCommand::Web => "web",
-            CliCommand::PluginReport => "plugin-report",
-            CliCommand::Headless(_) => unreachable!("headless was matched above"),
-        };
-        return Err(Diagnostic::runtime(
-            "NOT_YET_ACTIVE",
-            format!("{name} is not yet active"),
-        ));
-    };
+    match command {
+        CliCommand::Headless(command) => run_headless_command(command).await,
+        CliCommand::Web => run_web().await,
+        CliCommand::Sdk => run_sdk().await,
+        // Keep plugin inspection isolated in the existing dedicated binary.
+        CliCommand::PluginReport => Err(Diagnostic::runtime(
+            "PLUGIN_REPORT_BINARY",
+            "run the existing tessivum-plugin-report binary for package inspection",
+        )),
+    }
+}
 
+async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic> {
     let (config, task) = config(command).await?;
     let result = tokio::select! {
         result = run_headless(config, task) => result.map_err(|error| {
@@ -66,6 +67,89 @@ async fn run() -> Result<(), Diagnostic> {
     }?;
     println!("{}", result.final_text);
     Ok(())
+}
+
+async fn run_web() -> Result<(), Diagnostic> {
+    let runtime = boot_host().await?;
+    let host: Arc<dyn HostApi> = Arc::new(runtime.handle());
+    let address = env::var("TESSIVUM_WEB_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:3000".into())
+        .parse::<SocketAddr>()
+        .map_err(|error| Diagnostic::usage(format!("invalid TESSIVUM_WEB_ADDR: {error}")))?;
+    let mut server = tessivum::api::ApiServer::bind_at(host, address)
+        .await
+        .map_err(|error| Diagnostic::runtime("WEB_BIND_FAILED", error))?;
+    let signal = shutdown_signal()
+        .await
+        .map_err(|error| Diagnostic::runtime("SIGNAL_FAILED", error))?;
+    let server_result = server
+        .shutdown()
+        .await
+        .map_err(|error| Diagnostic::runtime("WEB_SHUTDOWN_FAILED", error));
+    let host_result = runtime
+        .shutdown()
+        .await
+        .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error));
+    server_result?;
+    host_result?;
+    if signal == 130 {
+        Err(Diagnostic::cancelled("interrupted"))
+    } else {
+        Ok(())
+    }
+}
+
+enum SdkOutcome {
+    Eof,
+    Signal(i32),
+}
+
+async fn run_sdk() -> Result<(), Diagnostic> {
+    let runtime = boot_host().await?;
+    let server = tessivum::sdk::JsonRpcServer::new(Arc::new(runtime.handle()));
+    let reader = tokio::fs::File::open("/dev/stdin")
+        .await
+        .map_err(|error| Diagnostic::runtime("SDK_STDIN_FAILED", error))?;
+    let writer = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/stdout")
+        .await
+        .map_err(|error| Diagnostic::runtime("SDK_STDOUT_FAILED", error))?;
+    let outcome = tokio::select! {
+        result = server.serve(reader, writer) => result
+            .map(|()| SdkOutcome::Eof)
+            .map_err(|error| Diagnostic::runtime("SDK_RUNTIME_FAILED", error)),
+        signal = shutdown_signal() => signal
+            .map(SdkOutcome::Signal)
+            .map_err(|error| Diagnostic::runtime("SIGNAL_FAILED", error)),
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            return Err(error);
+        }
+    };
+    runtime
+        .shutdown()
+        .await
+        .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))?;
+    match outcome {
+        SdkOutcome::Eof | SdkOutcome::Signal(0) => Ok(()),
+        SdkOutcome::Signal(130) => Err(Diagnostic::cancelled("interrupted")),
+        SdkOutcome::Signal(_) => Err(Diagnostic::runtime(
+            "SIGNAL_FAILED",
+            "unknown signal result",
+        )),
+    }
+}
+
+async fn boot_host() -> Result<HostRuntime, Diagnostic> {
+    let cwd =
+        env::current_dir().map_err(|error| Diagnostic::runtime("CWD_RESOLUTION_FAILED", error))?;
+    HostRuntime::boot(HostConfig::new(cwd.clone(), cwd.join(".tessivum")))
+        .await
+        .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))
 }
 
 async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Diagnostic> {
