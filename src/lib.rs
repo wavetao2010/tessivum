@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod agent_loop;
+pub mod builtin_tools;
 pub mod cli;
 pub mod error;
 pub mod llm;

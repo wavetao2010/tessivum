@@ -87,6 +87,227 @@ fn text_stream(text: &str) -> Vec<StreamChunk> {
     ]
 }
 
+async fn replay(adapter: &RecordedLlmAdapter, request: GenerateRequest) -> Vec<StreamChunk> {
+    adapter
+        .generate(request, cancellation())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap()
+}
+
+async fn replay_text(adapter: &RecordedLlmAdapter, request: GenerateRequest) -> String {
+    replay(adapter, request)
+        .await
+        .into_iter()
+        .find_map(|chunk| match chunk {
+            StreamChunk::TextDelta { text, .. } => Some(text),
+            _ => None,
+        })
+        .expect("replay attempt contains a text delta")
+}
+
+fn replay_line(session_id: &str, request_id: &str, text: &str) -> String {
+    json!({
+        "sessionId": session_id,
+        "provider": "recorded",
+        "model": "model-a",
+        "requestId": request_id,
+        "chunks": text_stream(text),
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn recorded_replay_consumes_request_id_attempts_from_protocol_fixture() {
+    let adapter = RecordedLlmAdapter::from_jsonl_with_route(
+        include_str!("../fixtures/headless/recorded-replay.jsonl"),
+        Some(SessionId::from("s-1")),
+        "recorded",
+        "model-a",
+    )
+    .unwrap();
+    let request = request(Some("s-1"));
+
+    let tool_attempt = replay(&adapter, request.clone()).await;
+    assert_eq!(tool_attempt.len(), 5);
+    assert!(matches!(
+        tool_attempt.last(),
+        Some(StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+            ..
+        })
+    ));
+
+    let text_attempt = replay(&adapter, request).await;
+    assert_eq!(text_attempt.len(), 5);
+    assert!(matches!(
+        text_attempt.last(),
+        Some(StreamChunk::Finish {
+            reason: FinishReason::Stop,
+            ..
+        })
+    ));
+    assert!(text_attempt.iter().any(|chunk| matches!(
+        chunk,
+        StreamChunk::TextDelta { text, .. } if text == "CLI tool round trip complete: CLI_TOOL_ROUND_TRIP"
+    )));
+}
+
+#[tokio::test]
+async fn recorded_replay_preserves_legacy_lines_and_exhausts_routes() {
+    let adapter = RecordedLlmAdapter::from_jsonl(
+        r#"{"sessionId":"s-1","provider":"recorded","model":"model-a","chunk":{"type":"block-start","index":0,"blockType":"text"}}
+{"sessionId":"s-1","provider":"recorded","model":"model-a","chunk":{"type":"text-delta","index":0,"text":"replayed"}}
+{"sessionId":"s-1","provider":"recorded","model":"model-a","chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"replayed"}}}
+{"sessionId":"s-1","provider":"recorded","model":"model-a","chunk":{"type":"finish","reason":{"kind":"stop"}}}"#,
+    )
+    .unwrap();
+    let matching_request = request(Some("s-1"));
+    let cancelled = cancellation();
+    assert!(cancelled.cancel());
+    let cancellation_error = match adapter.generate(matching_request.clone(), cancelled).await {
+        Ok(_) => panic!("cancelled replay must not return a stream"),
+        Err(error) => error,
+    };
+    assert_eq!(cancellation_error.code, "LLM_CANCELLED");
+    assert_eq!(
+        replay(&adapter, matching_request.clone()).await,
+        text_stream("replayed")
+    );
+
+    let exhausted = match adapter.generate(matching_request, cancellation()).await {
+        Ok(_) => panic!("exhausted replay must not return a stream"),
+        Err(error) => error,
+    };
+    assert_eq!(exhausted.code, "RECORDED_LLM_EXHAUSTED");
+    let missing_route = match adapter
+        .generate(request(Some("wrong-session")), cancellation())
+        .await
+    {
+        Ok(_) => panic!("unrecorded route must not return a stream"),
+        Err(error) => error,
+    };
+    assert_eq!(missing_route.code, "RECORDED_LLM_ROUTE_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn recorded_replay_keeps_session_cursors_independent() {
+    let adapter = RecordedLlmAdapter::from_jsonl(
+        &[
+            replay_line("s-1", "s-1-first", "session one first"),
+            replay_line("s-2", "s-2-first", "session two first"),
+            replay_line("s-1", "s-1-second", "session one second"),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        replay_text(&adapter, request(Some("s-1"))).await,
+        "session one first"
+    );
+    assert_eq!(
+        replay_text(&adapter, request(Some("s-2"))).await,
+        "session two first"
+    );
+    assert_eq!(
+        replay_text(&adapter, request(Some("s-1"))).await,
+        "session one second"
+    );
+}
+
+#[tokio::test]
+async fn recorded_replay_reset_and_fresh_adapters_start_at_the_first_attempt() {
+    let recording = [
+        replay_line("s-1", "first", "first attempt"),
+        replay_line("s-1", "second", "second attempt"),
+    ]
+    .join("\n");
+    let adapter = RecordedLlmAdapter::from_jsonl(&recording).unwrap();
+
+    assert_eq!(
+        replay_text(&adapter, request(Some("s-1"))).await,
+        "first attempt"
+    );
+    assert_eq!(
+        replay_text(&adapter, request(Some("s-1"))).await,
+        "second attempt"
+    );
+    adapter.reset();
+    assert_eq!(
+        replay_text(&adapter, request(Some("s-1"))).await,
+        "first attempt"
+    );
+
+    let fresh = RecordedLlmAdapter::from_jsonl(&recording).unwrap();
+    assert_eq!(
+        replay_text(&fresh, request(Some("s-1"))).await,
+        "first attempt"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_replay_calls_receive_distinct_complete_attempts() {
+    let adapter = Arc::new(
+        RecordedLlmAdapter::from_jsonl(
+            &[
+                replay_line("s-1", "first", "first attempt"),
+                replay_line("s-1", "second", "second attempt"),
+            ]
+            .join("\n"),
+        )
+        .unwrap(),
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let first = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            replay(&adapter, request(Some("s-1"))).await
+        }
+    });
+    let second = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        async move {
+            barrier.wait().await;
+            replay(&adapter, request(Some("s-1"))).await
+        }
+    });
+    let mut attempts = vec![first.await.unwrap(), second.await.unwrap()];
+    for attempt in &attempts {
+        assert!(matches!(attempt.last(), Some(StreamChunk::Finish { .. })));
+    }
+    attempts.sort_by_key(|attempt| match &attempt[1] {
+        StreamChunk::TextDelta { text, .. } => text.clone(),
+        _ => panic!("text attempt has a text delta"),
+    });
+    assert_eq!(attempts[0], text_stream("first attempt"));
+    assert_eq!(attempts[1], text_stream("second attempt"));
+}
+
+#[test]
+fn recorded_replay_requires_routes_without_defaults_and_rejects_chunks_after_finish() {
+    let missing_route = match RecordedLlmAdapter::from_jsonl(
+        r#"{"requestId":"one","chunk":{"type":"finish","reason":{"kind":"stop"}}}"#,
+    ) {
+        Ok(_) => panic!("replay without a route must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(missing_route.code, "INVALID_LLM_REPLAY");
+
+    let after_finish = match RecordedLlmAdapter::from_jsonl(
+        r#"{"provider":"recorded","model":"model-a","chunk":{"type":"finish","reason":{"kind":"stop"}}}
+{"provider":"recorded","model":"model-a","chunk":{"type":"text-delta","index":0,"text":"late"}}"#,
+    ) {
+        Ok(_) => panic!("replay cannot contain chunks after finish"),
+        Err(error) => error,
+    };
+    assert_eq!(after_finish.code, "INVALID_LLM_REPLAY");
+}
+
 #[test]
 fn assembler_mixes_sorted_blocks_and_keeps_raw_chunks() {
     let mut assembler = BlockAssembler::with_message_id("recorded", "model-a", "message-1".into());
@@ -346,7 +567,7 @@ async fn cancellation_interrupts_the_returned_stream() {
 }
 
 #[tokio::test]
-async fn recorded_replay_routes_deterministically_without_consuming_entries() {
+async fn recorded_replay_is_deterministic_after_reset() {
     let adapter = RecordedLlmAdapter::from_jsonl(
         r#"{"sessionId":"s-1","provider":"recorded","model":"model-a","chunk":{"type":"block-start","index":0,"blockType":"text"}}
 {"sessionId":"s-1","provider":"recorded","model":"model-a","chunk":{"type":"text-delta","index":0,"text":"replayed"}}
@@ -362,6 +583,7 @@ async fn recorded_replay_routes_deterministically_without_consuming_entries() {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
+    adapter.reset();
     let second = adapter
         .generate(matching_request, cancellation())
         .await

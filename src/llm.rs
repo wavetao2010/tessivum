@@ -531,9 +531,8 @@ fn close_block(
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ReplayRoute {
-    #[serde(rename = "sessionId")]
     session_id: Option<SessionId>,
     provider: String,
     model: String,
@@ -542,24 +541,75 @@ struct ReplayRoute {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReplayLine {
-    #[serde(flatten)]
-    route: ReplayRoute,
+    #[serde(default)]
+    session_id: Option<SessionId>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(default)]
     chunk: Option<StreamChunk>,
     #[serde(default)]
     chunks: Vec<StreamChunk>,
 }
 
+#[derive(Debug)]
+struct ReplayAttempt {
+    request_id: Option<String>,
+    chunks: Vec<StreamChunk>,
+}
+
 /// An in-memory, timing-free adapter created from newline-delimited recorded chunks.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct RecordedLlmAdapter {
-    routes: Arc<BTreeMap<ReplayRoute, Vec<StreamChunk>>>,
+    routes: Arc<BTreeMap<ReplayRoute, Vec<Arc<[StreamChunk]>>>>,
+    cursors: Arc<Mutex<BTreeMap<ReplayRoute, usize>>>,
+}
+
+impl Clone for RecordedLlmAdapter {
+    fn clone(&self) -> Self {
+        Self {
+            routes: Arc::clone(&self.routes),
+            cursors: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
 }
 
 impl RecordedLlmAdapter {
-    /// Parses one JSON object per line. Each object names its session, provider, model, and chunk(s).
+    /// Parses one JSON object per line. Each object must name its provider and model.
     pub fn from_jsonl(recording: &str) -> Result<Self, TessivumError> {
-        let mut routes = BTreeMap::<ReplayRoute, Vec<StreamChunk>>::new();
+        Self::parse_jsonl(recording, None)
+    }
+
+    /// Parses recorded chunks, supplying route values omitted by protocol-level recordings.
+    pub fn from_jsonl_with_route(
+        recording: &str,
+        session_id: Option<SessionId>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, TessivumError> {
+        Self::parse_jsonl(
+            recording,
+            Some(ReplayRoute {
+                session_id,
+                provider: provider.into(),
+                model: model.into(),
+            }),
+        )
+    }
+
+    /// Returns every route to its first recorded attempt.
+    pub fn reset(&self) {
+        lock(&self.cursors).clear();
+    }
+
+    fn parse_jsonl(
+        recording: &str,
+        default_route: Option<ReplayRoute>,
+    ) -> Result<Self, TessivumError> {
+        let mut routes = BTreeMap::<ReplayRoute, Vec<ReplayAttempt>>::new();
         for (line_number, line) in recording.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -571,6 +621,33 @@ impl RecordedLlmAdapter {
                     json!({"line": line_number + 1, "error": error.to_string()}),
                 )
             })?;
+            let route = ReplayRoute {
+                session_id: line.session_id.or_else(|| {
+                    default_route
+                        .as_ref()
+                        .and_then(|route| route.session_id.clone())
+                }),
+                provider: line
+                    .provider
+                    .or_else(|| default_route.as_ref().map(|route| route.provider.clone()))
+                    .ok_or_else(|| {
+                        llm_error(
+                            "INVALID_LLM_REPLAY",
+                            "a replay line must name a provider",
+                            json!({"line": line_number + 1}),
+                        )
+                    })?,
+                model: line
+                    .model
+                    .or_else(|| default_route.as_ref().map(|route| route.model.clone()))
+                    .ok_or_else(|| {
+                        llm_error(
+                            "INVALID_LLM_REPLAY",
+                            "a replay line must name a model",
+                            json!({"line": line_number + 1}),
+                        )
+                    })?,
+            };
             let mut chunks = line.chunks;
             if let Some(chunk) = line.chunk {
                 if !chunks.is_empty() {
@@ -592,12 +669,80 @@ impl RecordedLlmAdapter {
             for chunk in &chunks {
                 chunk.validate()?;
             }
-            routes.entry(line.route).or_default().append(&mut chunks);
+
+            let attempts = routes.entry(route).or_default();
+            if attempts.is_empty()
+                || attempts
+                    .last()
+                    .and_then(|attempt| attempt.request_id.as_ref())
+                    != line.request_id.as_ref()
+            {
+                attempts.push(ReplayAttempt {
+                    request_id: line.request_id,
+                    chunks: Vec::new(),
+                });
+            }
+            attempts
+                .last_mut()
+                .expect("a replay attempt was inserted")
+                .chunks
+                .append(&mut chunks);
         }
+
+        let routes = routes
+            .into_iter()
+            .map(|(route, attempts)| {
+                let attempts = attempts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(attempt_index, attempt)| {
+                        validate_replay_attempt(&route, &attempt.chunks, attempt_index)?;
+                        Ok(Arc::from(attempt.chunks))
+                    })
+                    .collect::<Result<Vec<Arc<[StreamChunk]>>, TessivumError>>()?;
+                Ok((route, attempts))
+            })
+            .collect::<Result<BTreeMap<_, _>, TessivumError>>()?;
         Ok(Self {
             routes: Arc::new(routes),
+            cursors: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
+}
+
+fn validate_replay_attempt(
+    route: &ReplayRoute,
+    chunks: &[StreamChunk],
+    attempt_index: usize,
+) -> Result<(), TessivumError> {
+    let details = || {
+        json!({
+            "sessionId": route.session_id,
+            "provider": route.provider,
+            "model": route.model,
+            "attempt": attempt_index + 1,
+        })
+    };
+    if chunks
+        .iter()
+        .filter(|chunk| matches!(chunk, StreamChunk::Finish { .. }))
+        .count()
+        != 1
+    {
+        return Err(llm_error(
+            "INVALID_LLM_REPLAY",
+            "every replay attempt must contain exactly one finish chunk",
+            details(),
+        ));
+    }
+    if !matches!(chunks.last(), Some(StreamChunk::Finish { .. })) {
+        return Err(llm_error(
+            "INVALID_LLM_REPLAY",
+            "a replay attempt cannot contain chunks after its finish chunk",
+            details(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -615,7 +760,7 @@ impl LlmAdapter for RecordedLlmAdapter {
             provider: request.provider,
             model: request.model,
         };
-        let chunks = self.routes.get(&route).cloned().ok_or_else(|| {
+        let attempts = self.routes.get(&route).ok_or_else(|| {
             llm_error(
                 "RECORDED_LLM_ROUTE_NOT_FOUND",
                 "no recorded LLM replay matches this session, provider, and model",
@@ -626,7 +771,36 @@ impl LlmAdapter for RecordedLlmAdapter {
                 }),
             )
         })?;
-        Ok(Box::pin(stream::iter(chunks.into_iter().map(Ok))))
+        let attempt = {
+            let mut cursors = lock(&self.cursors);
+            if cancellation.is_cancelled() {
+                return Err(cancelled_error());
+            }
+            let attempt_index = cursors.get(&route).copied().unwrap_or_default();
+            let attempt = attempts.get(attempt_index).cloned().ok_or_else(|| {
+                llm_error(
+                    "RECORDED_LLM_EXHAUSTED",
+                    "all recorded LLM replay attempts for this route have been consumed",
+                    json!({
+                        "sessionId": route.session_id,
+                        "provider": route.provider,
+                        "model": route.model,
+                        "attempt": attempt_index + 1,
+                    }),
+                )
+            })?;
+            cursors.insert(route, attempt_index + 1);
+            attempt
+        };
+        Ok(Box::pin(stream::unfold(
+            (attempt, 0_usize),
+            |(attempt, index)| async move {
+                attempt
+                    .get(index)
+                    .cloned()
+                    .map(|chunk| (Ok(chunk), (attempt, index + 1)))
+            },
+        )))
     }
 }
 
