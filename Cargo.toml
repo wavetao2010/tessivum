@@ -21,3 +21,5 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
 parking_lot = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+url = "2"
