@@ -497,7 +497,7 @@ CordisError {
 | Native Rust | 可信 | 编译/发布审核、Harness policy |
 | Extism/WASM | 非可信或半可信 | 通用 Capability 与 manifest `servicePermissions` 双层授权；未知、缺失、过期或通配声明默认拒绝；WASI 禁用并限制 memory/fuel/timeout/I/O |
 | Legacy Node | 可信旧代码 | 独立进程、OS sandbox、Bridge 输入限制 |
-| Browser | 非可信客户端 | loopback-only、WebSocket 同源校验、RPC schema、服务端状态权威 |
+| Browser | 非可信客户端 | exact bound loopback Host/Origin authority、RPC schema、approval generation/rpcId、redacted settings、write-only credentials、服务端状态权威 |
 
 ## 18. 架构验收不变量
 
@@ -509,3 +509,5 @@ CordisError {
 6. 持久事实只由 Host 写入并可重放。
 7. 非可信 WASM Host service call 必须同时通过通用 Capability 和精确 `service@version`/method 策略；卸载后旧实例与 policy 均失效。
 8. 现有浏览器插件不因 Host Rust 化而被迫重写。
+9. Browser approval 必须先持久化 asked、first-wins 回答、再持久化 decided 并发送 resolved；刷新复用同一 rpcId。
+10. Browser 永不读取 credential value 或 settings secret；DNS rebinding 不能绕过 exact Host/Origin authority。

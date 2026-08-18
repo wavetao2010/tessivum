@@ -328,6 +328,8 @@ A 阶段完成定义：真实 WASM Guest 能完成一个被授权调用；同一
 
 # 里程碑 B：Browser 控制面
 
+> 状态：已完成，发布目标 `v0.1.0-alpha.3`。
+
 ## 11. B 阶段目标
 
 在不重写 published Browser Cordis/React UI 的前提下，接通三条真实 Host 控制链路：
