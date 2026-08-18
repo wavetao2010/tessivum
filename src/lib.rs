@@ -44,6 +44,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod web;
 pub mod workflow;
+pub mod workspace;
 
 pub use error::TessivumError;
 pub use protocol::*;
