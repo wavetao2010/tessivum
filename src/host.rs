@@ -32,7 +32,7 @@ use crate::{
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     code_runtime::{CodeRuntime, ProcessCodeRuntime},
-    credentials::{credentials_service_key, Credentials, YamlCredentialFile},
+    credentials::{credentials_service_key, CredentialEvent, Credentials, YamlCredentialFile},
     legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream, RecordedLlmAdapter},
     persistence_jsonl::JsonlSessionPersistence,
@@ -44,7 +44,7 @@ use crate::{
         SESSION_FORMAT_VERSION,
     },
     session::{session_service_key, SessionError, SessionPersistence, SessionStore},
-    settings::{settings_service_key, Settings, YamlSettingsProvider},
+    settings::{settings_service_key, Settings, SettingsEvent, YamlSettingsProvider},
     subprocess::SubprocessRuntime,
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     telemetry::TelemetryCoordinator,
@@ -286,6 +286,8 @@ pub enum HostNotification {
     SubagentFinished(SubagentFinishedNotification),
     ApprovalRequested(ApprovalRequested),
     ApprovalResolved(ApprovalResolved),
+    SettingsChanged(SettingsEvent),
+    CredentialsChanged(CredentialEvent),
 }
 
 /// Durable session metadata needed by reconnecting transports without replaying logs.
@@ -695,6 +697,7 @@ impl HostRuntime {
             relays_closed: AtomicBool::new(false),
             relays: Mutex::new(Vec::new()),
         });
+HostHandle::start_service_relays(&inner);
         let handle = HostHandle { inner };
         handle.start_approval_relay();
         Ok(Self { handle })
@@ -1126,6 +1129,44 @@ impl HostHandle {
         self.inner.registry.get(session_id).ok_or_else(|| {
             HostError::InvalidConfiguration("created agent was not published".into())
         })
+    }
+
+    fn start_service_relays(inner: &Arc<HostInner>) {
+        let mut settings_events = inner.settings.subscribe();
+        let settings_inner = Arc::clone(inner);
+        let settings_relay = tokio::spawn(async move {
+            loop {
+                if settings_inner.relays_closed.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::select! {
+                    event = settings_events.recv() => match event {
+                        Ok(event) => { let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event)); }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = settings_inner.relay_stop.notified() => break,
+                }
+            }
+        });
+        let mut credential_events = inner.credentials.subscribe();
+        let credentials_inner = Arc::clone(inner);
+        let credentials_relay = tokio::spawn(async move {
+            loop {
+                if credentials_inner.relays_closed.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::select! {
+                    event = credential_events.recv() => match event {
+                        Ok(event) => { let _ = credentials_inner.notices.send(HostNotification::CredentialsChanged(event)); }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = credentials_inner.relay_stop.notified() => break,
+                }
+            }
+        });
+        lock(&inner.relays).extend([settings_relay, credentials_relay]);
     }
 
     fn ensure_relay(&self, session: Arc<crate::session::Session>) {

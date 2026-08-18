@@ -45,12 +45,14 @@ use tokio::{
 
 use crate::{
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
+    credentials::{CredentialRef, CredentialSource},
     frontend::FrontendStatic,
     host::{HostApi, HostDescriptor, HostNotification},
     protocol::{
         AgentCancelCause, InitializeParams, SessionEventNotification, SessionId,
         SessionPromptParams, MAX_SAFE_INTEGER,
     },
+    settings::{SettingsDescriptor, SettingsError, SettingsPathOp},
     TessivumError,
 };
 use uuid::Uuid;
@@ -573,6 +575,52 @@ struct CompatCredentialsDescribe {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSettingsUpdate {
+    ns: String,
+    patch: Map<String, Value>,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSettingsReplace {
+    ns: String,
+    section: Map<String, Value>,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSettingsMutate {
+    ns: String,
+    ops: Vec<CompatSettingsPathOp>,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+enum CompatSettingsPathOp {
+    Set { path: Vec<String>, value: Value },
+    Unset { path: Vec<String> },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCredentialsSet {
+    #[serde(rename = "ref")]
+    reference: CredentialRef,
+    value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCredentialsUnset {
+    #[serde(rename = "ref")]
+    reference: CredentialRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatPrompt {
     session_id: SessionId,
     mode: CompatPromptMode,
@@ -749,8 +797,11 @@ async fn compat_dispatch(
         }
         "settings.describe" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
-            Ok(json!({"writable": false, "hasDocument": false, "namespaces": []}))
+            compat_settings_describe(state)
         }
+        "settings.update" => compat_settings_update(state, compat_decode(payload)?).await,
+        "settings.replace" => compat_settings_replace(state, compat_decode(payload)?).await,
+        "settings.mutate" => compat_settings_mutate(state, compat_decode(payload)?).await,
         "workspace.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
             compat_sync_sessions(state).await?;
@@ -818,23 +869,217 @@ async fn compat_dispatch(
             }
             Ok(compat_llm_models(&state.compat))
         }
-        "credentials.describe" => {
-            let args: CompatCredentialsDescribe = compat_decode(payload)?;
-            let credentials = args
-                .refs
-                .into_iter()
-                .map(|reference| {
-                    if reference.trim().is_empty() {
-                        Err(CompatError::invalid("credential refs must not be blank"))
-                    } else {
-                        Ok((reference, json!({"configured": false, "writable": false})))
-                    }
-                })
-                .collect::<Result<Map<String, Value>, CompatError>>()?;
-            Ok(json!({"credentials": credentials}))
-        }
+        "credentials.describe" => compat_credentials_describe(state, compat_decode(payload)?).await,
+        "credentials.set" => compat_credentials_set(state, compat_decode(payload)?).await,
+        "credentials.unset" => compat_credentials_unset(state, compat_decode(payload)?).await,
         _ => Err(CompatError::not_found()),
     }
+}
+
+fn compat_settings_describe(state: &ApiState) -> Result<Value, CompatError> {
+    let Some(settings) = state.host.settings() else {
+        return Ok(json!({"writable": false, "hasDocument": false, "namespaces": []}));
+    };
+    let namespaces = settings
+        .describe_all()
+        .map_err(|_| CompatError::internal("settings are unavailable"))?
+        .into_iter()
+        .map(compat_settings_view)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "writable": settings.writable(),
+        "hasDocument": false,
+        "namespaces": namespaces,
+    }))
+}
+
+fn compat_settings_view(descriptor: SettingsDescriptor) -> Value {
+    let mut view = Map::from_iter([
+        ("ns".into(), Value::String(descriptor.namespace)),
+        ("schema".into(), descriptor.schema),
+        ("value".into(), descriptor.resolved),
+        ("applies".into(), Value::String("live".into())),
+        (
+            "secrets".into(),
+            Value::Array(
+                descriptor
+                    .secret_paths
+                    .iter()
+                    .zip(descriptor.secret_set)
+                    .map(|(path, set)| json!({"path": path, "set": set}))
+                    .collect(),
+            ),
+        ),
+        ("revision".into(), Value::from(descriptor.revision)),
+    ]);
+    if !descriptor.base.as_object().is_some_and(Map::is_empty) {
+        view.insert("base".into(), descriptor.base);
+    }
+    if descriptor.user_present {
+        view.insert("user".into(), descriptor.user);
+    }
+    Value::Object(view)
+}
+fn compat_require_ns(ns: &str) -> Result<(), CompatError> {
+    if ns.is_empty() {
+        Err(CompatError::invalid("ns must not be empty"))
+    } else {
+        Ok(())
+    }
+}
+
+fn compat_settings_error(ns: &str, error: SettingsError) -> CompatError {
+    match error {
+        SettingsError::Conflict { expected, actual } => CompatError {
+            code: "settings-conflict".into(),
+            message: "settings revision conflict".into(),
+            details: json!({"ns": ns, "expected": expected, "actual": actual}),
+        },
+        _ => CompatError {
+            code: "settings-rejected".into(),
+            message: "settings change was rejected".into(),
+            details: json!({"ns": ns}),
+        },
+    }
+}
+
+async fn compat_settings_update(
+    state: &ApiState,
+    args: CompatSettingsUpdate,
+) -> Result<Value, CompatError> {
+    compat_require_ns(&args.ns)?;
+    let ns = args.ns;
+    let Some(settings) = state.host.settings() else {
+        return Err(compat_settings_error(&ns, SettingsError::Closed));
+    };
+    settings
+        .update(&ns, Value::Object(args.patch), args.expected_revision)
+        .await
+        .map_err(|error| compat_settings_error(&ns, error))?;
+    settings
+        .describe(&ns)
+        .map(compat_settings_view)
+        .map_err(|error| compat_settings_error(&ns, error))
+}
+
+async fn compat_settings_replace(
+    state: &ApiState,
+    args: CompatSettingsReplace,
+) -> Result<Value, CompatError> {
+    compat_require_ns(&args.ns)?;
+    let ns = args.ns;
+    let Some(settings) = state.host.settings() else {
+        return Err(compat_settings_error(&ns, SettingsError::Closed));
+    };
+    settings
+        .replace(&ns, Value::Object(args.section), args.expected_revision)
+        .await
+        .map_err(|error| compat_settings_error(&ns, error))?;
+    settings
+        .describe(&ns)
+        .map(compat_settings_view)
+        .map_err(|error| compat_settings_error(&ns, error))
+}
+
+async fn compat_settings_mutate(
+    state: &ApiState,
+    args: CompatSettingsMutate,
+) -> Result<Value, CompatError> {
+    compat_require_ns(&args.ns)?;
+    let ns = args.ns;
+    let ops = args
+        .ops
+        .into_iter()
+        .map(|op| match op {
+            CompatSettingsPathOp::Set { path, value } => SettingsPathOp::Set { path, value },
+            CompatSettingsPathOp::Unset { path } => SettingsPathOp::Unset { path },
+        })
+        .collect();
+    let Some(settings) = state.host.settings() else {
+        return Err(compat_settings_error(&ns, SettingsError::Closed));
+    };
+    settings
+        .mutate(&ns, ops, args.expected_revision)
+        .await
+        .map_err(|error| compat_settings_error(&ns, error))?;
+    settings
+        .describe(&ns)
+        .map(compat_settings_view)
+        .map_err(|error| compat_settings_error(&ns, error))
+}
+
+fn compat_credential_error(reference: &CredentialRef) -> CompatError {
+    CompatError {
+        code: "credential-rejected".into(),
+        message: "credential change was rejected".into(),
+        details: json!({"ref": reference.as_str()}),
+    }
+}
+
+async fn compat_credentials_describe(
+    state: &ApiState,
+    args: CompatCredentialsDescribe,
+) -> Result<Value, CompatError> {
+    if args.refs.len() > 64 {
+        return Err(CompatError::invalid("refs must contain at most 64 entries"));
+    }
+    let references = args
+        .refs
+        .into_iter()
+        .map(CredentialRef::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CompatError::invalid(error.to_string()))?;
+    let Some(credentials) = state.host.credentials() else {
+        return Ok(json!({"credentials": {}}));
+    };
+    let mut described = Map::new();
+    for reference in references {
+        let descriptor = credentials
+            .describe(&reference)
+            .await
+            .map_err(|_| compat_credential_error(&reference))?;
+        let mut view = Map::from_iter([
+            ("configured".into(), Value::Bool(descriptor.configured)),
+            ("writable".into(), Value::Bool(descriptor.writable)),
+        ]);
+        if let Some(source) = descriptor.source {
+            let source = match source {
+                CredentialSource::Environment => "env",
+                CredentialSource::File => "file",
+            };
+            view.insert("source".into(), Value::String(source.into()));
+        }
+        described.insert(reference.as_str().to_owned(), Value::Object(view));
+    }
+    Ok(json!({"credentials": described}))
+}
+
+async fn compat_credentials_set(
+    state: &ApiState,
+    args: CompatCredentialsSet,
+) -> Result<Value, CompatError> {
+    let Some(credentials) = state.host.credentials() else {
+        return Err(compat_credential_error(&args.reference));
+    };
+    credentials
+        .set(args.reference.clone(), args.value)
+        .await
+        .map_err(|_| compat_credential_error(&args.reference))?;
+    Ok(json!({}))
+}
+
+async fn compat_credentials_unset(
+    state: &ApiState,
+    args: CompatCredentialsUnset,
+) -> Result<Value, CompatError> {
+    let Some(credentials) = state.host.credentials() else {
+        return Err(compat_credential_error(&args.reference));
+    };
+    credentials
+        .unset(&args.reference)
+        .await
+        .map_err(|_| compat_credential_error(&args.reference))?;
+    Ok(json!({}))
 }
 
 fn compat_decode<T: DeserializeOwned>(payload: Value) -> Result<T, CompatError> {
@@ -1345,6 +1590,14 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
                 "approvalId": resolved.approval_id,
                 "outcome": resolved.outcome,
             }),
+        }),
+        HostNotification::SettingsChanged(event) => Some(CompatFrame {
+            stream: CompatStream::Host,
+            payload: json!({"type": "host/settings-changed", "ns": event.namespace}),
+        }),
+        HostNotification::CredentialsChanged(event) => Some(CompatFrame {
+            stream: CompatStream::Host,
+            payload: json!({"type": "host/credentials-changed", "ref": event.reference}),
         }),
         HostNotification::SubagentStarted(_) | HostNotification::SubagentFinished(_) => None,
     }
@@ -2042,6 +2295,12 @@ fn ws_notification(notification: &HostNotification) -> Result<WsMessage, ApiErro
                 "approvalId": value.approval_id,
                 "outcome": value.outcome,
             }})
+        }
+        HostNotification::SettingsChanged(value) => {
+            json!({"kind": "settings-changed", "payload": value})
+        }
+        HostNotification::CredentialsChanged(value) => {
+            json!({"kind": "credentials-changed", "payload": value})
         }
     };
     ws_json(json!({"type": "notification", "notification": notification}))

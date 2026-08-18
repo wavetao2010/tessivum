@@ -23,6 +23,7 @@ use tessivum::{
         InitializeResult, MessageId, SdkServerInfo, SessionEvent, SessionEventNotification,
         SessionId, SessionPromptParams, SessionPromptResult, SessionStatus, StreamChunk,
     },
+    settings::SettingsRegistration,
     TessivumError,
 };
 use tokio::{
@@ -580,6 +581,178 @@ async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
     assert_eq!(resolved_frame["method"], "approval/resolved");
     assert_eq!(resolved_frame["payload"]["outcome"], "rejected");
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_settings_and_credentials_use_redacted_published_wire() {
+    let fixture = BrowserStopFixture::new();
+    let runtime = HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
+        .await
+        .expect("real Host boots");
+    let handle = runtime.handle();
+    let settings = handle.settings().expect("settings service");
+    let namespace = format!("browser-{}", Uuid::new_v4().simple());
+    settings
+        .register(
+            SettingsRegistration::new(
+                namespace.clone(),
+                json!({"type": "object"}),
+                json!({"visible": "default", "secret": "default-secret"}),
+                json!({"base": true}),
+            )
+            .with_secret_paths(vec![vec!["secret".into()]]),
+        )
+        .await
+        .expect("namespace registers");
+    let host: Arc<dyn HostApi> = Arc::new(handle.clone());
+    let mut server = ApiServer::bind(host).await.expect("real API binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    let mut downlink = RawWebSocket::connect_path(server.local_addr(), "/api/events.host").await;
+
+    let described = browser_call(&client, &base, "settings-describe", "settings.describe", json!({})).await;
+    let value = &described["result"]["value"];
+    assert_eq!(value["writable"], true);
+    assert_eq!(value["hasDocument"], false);
+    assert_eq!(value["namespaces"][0]["ns"].as_str(), Some(namespace.as_str()));
+    assert_eq!(value["namespaces"][0]["applies"], "live");
+    assert_eq!(value["namespaces"][0]["secrets"], json!([{"path": ["secret"], "set": true}]));
+    assert_eq!(value["namespaces"][0]["base"], json!({"base": true}));
+    assert!(value["namespaces"][0].get("user").is_none());
+    assert!(!described.to_string().contains("default-secret"));
+
+    let secret = "settings-wire-secret";
+    let updated = browser_call(
+        &client,
+        &base,
+        "settings-update",
+        "settings.update",
+        json!({"ns": namespace, "patch": {"visible": "saved", "secret": secret}, "expectedRevision": 0}),
+    )
+    .await;
+    assert_eq!(updated["result"]["value"]["revision"], 1);
+    assert!(!updated.to_string().contains(secret));
+    let mutated = browser_call(
+        &client,
+        &base,
+        "settings-mutate",
+        "settings.mutate",
+        json!({"ns": namespace, "ops": [{"op": "set", "path": ["added"], "value": true}, {"op": "unset", "path": ["visible"]}], "expectedRevision": 1}),
+    )
+    .await;
+    assert_eq!(mutated["result"]["value"]["revision"], 2);
+    let conflict = browser_call(
+        &client,
+        &base,
+        "settings-conflict",
+        "settings.replace",
+        json!({"ns": namespace, "section": {}, "expectedRevision": 1}),
+    )
+    .await;
+    assert_eq!(conflict["result"]["error"]["code"], "settings-conflict");
+    assert_eq!(conflict["result"]["error"]["details"], json!({"ns": namespace, "expected": 1, "actual": 2}));
+
+    let settings_frame = timeout(Duration::from_secs(1), async {
+        loop {
+            let frame: Value = serde_json::from_str(&downlink.read_text().await.expect("host frame"))
+                .expect("host frame JSON");
+            if frame["payload"]["type"] == "host/settings-changed" {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("settings invalidation arrives");
+    assert_eq!(settings_frame["payload"]["ns"].as_str(), Some(namespace.as_str()));
+    assert!(!settings_frame.to_string().contains(secret));
+
+    let reference = format!("TESSIVUM_BROWSER_{}", Uuid::new_v4().simple());
+    let credential_secret = "credential-wire-secret";
+    let set = browser_call(
+        &client,
+        &base,
+        "credentials-set",
+        "credentials.set",
+        json!({"ref": reference, "value": credential_secret}),
+    )
+    .await;
+    assert_eq!(set["result"]["value"], json!({}));
+    assert!(!set.to_string().contains(credential_secret));
+    let credentials = browser_call(
+        &client,
+        &base,
+        "credentials-describe",
+        "credentials.describe",
+        json!({"refs": [reference]}),
+    )
+    .await;
+    assert_eq!(
+        credentials["result"]["value"]["credentials"][reference.as_str()]["configured"],
+        true
+    );
+    assert_eq!(
+        credentials["result"]["value"]["credentials"][reference.as_str()]["source"],
+        "file"
+    );
+    assert!(!credentials.to_string().contains(credential_secret));
+    let credential_frame = timeout(Duration::from_secs(1), async {
+        loop {
+            let frame: Value = serde_json::from_str(&downlink.read_text().await.expect("host frame"))
+                .expect("host frame JSON");
+            if frame["payload"]["type"] == "host/credentials-changed" {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("credential invalidation arrives");
+    assert_eq!(credential_frame["payload"]["ref"].as_str(), Some(reference.as_str()));
+    assert!(!credential_frame.to_string().contains(credential_secret));
+
+    let shadow = format!("TESSIVUM_SHADOW_{}", Uuid::new_v4().simple());
+    std::env::set_var(&shadow, "environment-secret");
+    let shadowed = browser_call(
+        &client,
+        &base,
+        "credentials-shadowed",
+        "credentials.set",
+        json!({"ref": shadow, "value": "shadow-file-secret"}),
+    )
+    .await;
+    std::env::remove_var(&shadow);
+    assert_eq!(shadowed["result"]["error"]["code"], "credential-rejected");
+    assert!(!shadowed.to_string().contains("environment-secret"));
+    assert!(!shadowed.to_string().contains("shadow-file-secret"));
+    let unset = browser_call(
+        &client,
+        &base,
+        "credentials-unset",
+        "credentials.unset",
+        json!({"ref": reference}),
+    )
+    .await;
+    assert_eq!(unset["result"]["value"], json!({}));
+    let invalid_mutation = browser_call(
+        &client,
+        &base,
+        "settings-invalid-mutate",
+        "settings.mutate",
+        json!({"ns": namespace, "ops": [{"op": "remove", "path": ["added"]}]}),
+    )
+    .await;
+    assert_eq!(invalid_mutation["result"]["error"]["code"], "bad-request");
+    let too_many_refs = browser_call(
+        &client,
+        &base,
+        "credentials-too-many",
+        "credentials.describe",
+        json!({"refs": (0..65).map(|index| format!("REF_{index}")).collect::<Vec<_>>() }),
+    )
+    .await;
+    assert_eq!(too_many_refs["result"]["error"]["code"], "bad-request");
+
+    server.shutdown().await.expect("server shuts down");
+    runtime.shutdown().await.expect("host shuts down");
 }
 
 #[tokio::test(flavor = "multi_thread")]

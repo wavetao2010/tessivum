@@ -105,6 +105,10 @@ pub struct SettingsDescriptor {
     pub user: Value,
     pub resolved: Value,
     pub secret_paths: Vec<SettingPath>,
+    #[serde(skip)]
+    pub secret_set: Vec<bool>,
+    #[serde(skip)]
+    pub user_present: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -118,8 +122,17 @@ pub struct SettingsEvent {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SettingsEventKind {
+    Registered,
     Updated,
     Reloaded,
+    Unregistered,
+}
+
+/// One path-addressed update applied atomically to a user settings section.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingsPathOp {
+    Set { path: SettingPath, value: Value },
+    Unset { path: SettingPath },
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -186,6 +199,7 @@ struct NamespaceState {
 }
 struct NamespaceData {
     user: Value,
+    user_present: bool,
     resolved: Value,
     revision: u64,
 }
@@ -228,11 +242,9 @@ impl Settings {
         if lock(&self.namespaces).contains_key(&registration.namespace) {
             return Err(SettingsError::DuplicateNamespace(registration.namespace));
         }
-        let user = self
-            .provider
-            .load(&registration.namespace)
-            .await?
-            .unwrap_or_else(empty_document);
+        let loaded_user = self.provider.load(&registration.namespace).await?;
+        let user_present = loaded_user.is_some();
+        let user = loaded_user.unwrap_or_else(empty_document);
         validate_document(&user)?;
         let resolved = resolve(&registration.defaults, &registration.base, &user);
         validate_resolved(&registration, &resolved)?;
@@ -240,6 +252,7 @@ impl Settings {
             registration,
             data: Mutex::new(NamespaceData {
                 user,
+                user_present,
                 resolved,
                 revision: 0,
             }),
@@ -254,7 +267,13 @@ impl Settings {
                 state.registration.namespace.clone(),
             ));
         }
-        namespaces.insert(state.registration.namespace.clone(), state);
+        let namespace = state.registration.namespace.clone();
+        namespaces.insert(namespace.clone(), state);
+        let _ = self.updates.send(SettingsEvent {
+            namespace,
+            revision: 0,
+            kind: SettingsEventKind::Registered,
+        });
         Ok(())
     }
 
@@ -267,22 +286,37 @@ impl Settings {
             value: data.resolved.clone(),
         })
     }
+    pub fn writable(&self) -> bool {
+        !self.closed.load(Ordering::Acquire) && self.provider.writable()
+    }
+    pub fn describe_all(&self) -> Result<Vec<SettingsDescriptor>, SettingsError> {
+        let namespaces = lock(&self.namespaces).keys().cloned().collect::<Vec<_>>();
+        namespaces
+            .into_iter()
+            .map(|namespace| self.describe(&namespace))
+            .collect()
+    }
     pub fn user(&self, namespace: &str) -> Result<Value, SettingsError> {
         Ok(lock(&self.state(namespace)?.data).user.clone())
     }
     pub fn describe(&self, namespace: &str) -> Result<SettingsDescriptor, SettingsError> {
         let state = self.state(namespace)?;
         let data = lock(&state.data);
-        let secrets = &state.registration.secret_paths;
+        let secret_paths = state.registration.secret_paths.clone();
         Ok(SettingsDescriptor {
             namespace: namespace.to_owned(),
             revision: data.revision,
             schema: state.registration.schema.clone(),
-            defaults: redact(&state.registration.defaults, secrets),
-            base: redact(&state.registration.base, secrets),
-            user: redact(&data.user, secrets),
-            resolved: redact(&data.resolved, secrets),
-            secret_paths: secrets.clone(),
+            defaults: redact(&state.registration.defaults, &secret_paths),
+            base: redact(&state.registration.base, &secret_paths),
+            user: redact(&data.user, &secret_paths),
+            resolved: redact(&data.resolved, &secret_paths),
+            secret_set: secret_paths
+                .iter()
+                .map(|path| has_path(&data.resolved, path))
+                .collect(),
+            secret_paths,
+            user_present: data.user_present,
         })
     }
     pub fn subscribe(&self) -> broadcast::Receiver<SettingsEvent> {
@@ -357,6 +391,71 @@ impl Settings {
         )
         .await
     }
+    pub async fn mutate(
+        &self,
+        namespace: &str,
+        ops: Vec<SettingsPathOp>,
+        expected_revision: Option<u64>,
+    ) -> Result<SettingsSnapshot, SettingsError> {
+        let mut root_is_document = true;
+        for op in &ops {
+            let path = match op {
+                SettingsPathOp::Set { path, value } => {
+                    validate_path_or_root(path)?;
+                    validate_json(value)?;
+                    path
+                }
+                SettingsPathOp::Unset { path } => {
+                    validate_path_or_root(path)?;
+                    path
+                }
+            };
+            if path.is_empty() {
+                root_is_document = match op {
+                    SettingsPathOp::Set { value, .. } => value.is_object(),
+                    SettingsPathOp::Unset { .. } => true,
+                };
+            } else if !root_is_document {
+                return Err(SettingsError::InvalidDocument);
+            }
+        }
+        self.commit(
+            namespace,
+            expected_revision,
+            SettingsEventKind::Updated,
+            move |mut user| {
+                for op in ops {
+                    match op {
+                        SettingsPathOp::Set { path, value } if path.is_empty() => user = value,
+                        SettingsPathOp::Set { path, value } => set_at_path(&mut user, &path, value),
+                        SettingsPathOp::Unset { path } if path.is_empty() => user = empty_document(),
+                        SettingsPathOp::Unset { path } => remove_at_path(&mut user, &path),
+                    }
+                }
+                user
+            },
+        )
+        .await
+    }
+
+    /// Detaches one owner while preserving its durable user section for a later owner.
+    pub async fn unregister(&self, namespace: &str) -> Result<(), SettingsError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SettingsError::Closed);
+        }
+        let state = self.state(namespace)?;
+        let _gate = state.gate.lock().await;
+        let revision = lock(&state.data).revision;
+        if lock(&self.namespaces).remove(namespace).is_none() {
+            return Err(SettingsError::NotRegistered(namespace.to_owned()));
+        }
+        let _ = self.updates.send(SettingsEvent {
+            namespace: namespace.to_owned(),
+            revision,
+            kind: SettingsEventKind::Unregistered,
+        });
+        Ok(())
+    }
 
     pub async fn reload(&self, namespace: &str) -> Result<SettingsSnapshot, SettingsError> {
         if self.closed.load(Ordering::Acquire) {
@@ -367,11 +466,9 @@ impl Settings {
         if self.closed.load(Ordering::Acquire) {
             return Err(SettingsError::Closed);
         }
-        let user = self
-            .provider
-            .load(namespace)
-            .await?
-            .unwrap_or_else(empty_document);
+        let loaded_user = self.provider.load(namespace).await?;
+        let user_present = loaded_user.is_some();
+        let user = loaded_user.unwrap_or_else(empty_document);
         validate_document(&user)?;
         let resolved = resolve(
             &state.registration.defaults,
@@ -381,7 +478,7 @@ impl Settings {
         validate_resolved(&state.registration, &resolved)?;
         let (snapshot, event) = {
             let mut data = lock(&state.data);
-            if data.user == user {
+            if data.user == user && data.user_present == user_present {
                 return Ok(SettingsSnapshot {
                     namespace: namespace.to_owned(),
                     revision: data.revision,
@@ -393,6 +490,7 @@ impl Settings {
                 .checked_add(1)
                 .ok_or(SettingsError::RevisionExhausted)?;
             data.user = user;
+            data.user_present = user_present;
             data.resolved = resolved;
             (
                 SettingsSnapshot {
@@ -476,6 +574,7 @@ impl Settings {
             data.user = candidate;
             data.resolved = resolved;
             data.revision = next_revision;
+            data.user_present = true;
             SettingsSnapshot {
                 namespace: namespace.to_owned(),
                 revision: data.revision,
@@ -496,7 +595,6 @@ impl Settings {
             .ok_or_else(|| SettingsError::NotRegistered(namespace.to_owned()))
     }
 }
-
 pub struct MemorySettingsProvider {
     sections: Mutex<BTreeMap<String, Value>>,
     writable: AtomicBool,
@@ -716,6 +814,24 @@ fn validate_path(path: &[String]) -> Result<(), SettingsError> {
     } else {
         Ok(())
     }
+}
+fn validate_path_or_root(path: &[String]) -> Result<(), SettingsError> {
+    if path.is_empty() {
+        Ok(())
+    } else {
+        validate_path(path)
+    }
+}
+
+fn has_path(value: &Value, path: &[String]) -> bool {
+    let mut current = value;
+    for member in path {
+        let Some(next) = current.as_object().and_then(|object| object.get(member)) else {
+            return false;
+        };
+        current = next;
+    }
+    true
 }
 fn validate_document(value: &Value) -> Result<(), SettingsError> {
     if !value.is_object() {

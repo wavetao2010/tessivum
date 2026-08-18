@@ -11,7 +11,8 @@ use tessivum::{
         CredentialEnvironment, CredentialError, CredentialRef, Credentials, YamlCredentialFile,
     },
     settings::{
-        MemorySettingsProvider, Settings, SettingsError, SettingsRegistration, YamlSettingsProvider,
+        MemorySettingsProvider, Settings, SettingsError, SettingsPathOp, SettingsRegistration,
+        YamlSettingsProvider,
     },
     storage::{MemoryStorageBackend, StorageError, StorageRegistry},
 };
@@ -89,6 +90,48 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
         Err(SettingsError::ReadOnly)
     ));
     assert!(settings.get("demo").unwrap().value.get("nope").is_none());
+    let mut lifecycle = settings.subscribe();
+    settings.unregister("demo").await.unwrap();
+    assert!(matches!(settings.get("demo"), Err(SettingsError::NotRegistered(_))));
+    assert!(matches!(
+        lifecycle.recv().await.unwrap().kind,
+        tessivum::settings::SettingsEventKind::Unregistered
+    ));
+    settings
+        .register(
+            SettingsRegistration::new(
+                "demo",
+                json!({"type": "object"}),
+                json!({"replacement": true}),
+                json!({}),
+            )
+            .with_secret_paths(vec![vec!["secret".into()]]),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        lifecycle.recv().await.unwrap().kind,
+        tessivum::settings::SettingsEventKind::Registered
+    ));
+    let reloaded = settings.get("demo").unwrap();
+    assert_eq!(reloaded.value["array"], json!([3]));
+    let atomically_mutated = settings
+        .mutate(
+            "demo",
+            vec![
+                SettingsPathOp::Set {
+                    path: vec!["nested".into(), "after".into()],
+                    value: json!(true),
+                },
+                SettingsPathOp::Unset {
+                    path: vec!["nested".into(), "more".into()],
+                },
+            ],
+            Some(reloaded.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(atomically_mutated.revision, reloaded.revision + 1);
 
     let path = root("settings").join("settings.yaml");
     let yaml_provider = Arc::new(YamlSettingsProvider::new(&path));
