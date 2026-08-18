@@ -48,7 +48,7 @@ use crate::{
     subprocess::SubprocessRuntime,
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     telemetry::TelemetryCoordinator,
-    tools::ToolRuntime,
+    tools::{ToolRestrictions, ToolRuntime},
     TessivumError,
 };
 
@@ -94,6 +94,8 @@ pub struct HostConfig {
     pub telemetry_patch: Value,
     pub system_prompt: Option<String>,
     pub enable_trusted_bash: bool,
+    /// Host-selected tools requiring one Browser/local approval per call.
+    pub approval_required_tools: BTreeSet<String>,
     pub notification_capacity: usize,
     pub max_live_sessions: usize,
     /// Entries use the Core Loader with the product WASM runtime and optional Legacy Node runtime.
@@ -149,6 +151,7 @@ impl HostConfig {
             telemetry_patch: json!({}),
             system_prompt: None,
             enable_trusted_bash: false,
+            approval_required_tools: BTreeSet::new(),
             notification_capacity: 128,
             max_live_sessions: 128,
             entries: None,
@@ -177,6 +180,11 @@ impl HostConfig {
 
     pub fn with_adapter_factory(mut self, factory: Arc<dyn HostLlmAdapterFactory>) -> Self {
         self.adapter_factory = Some(factory);
+        self
+    }
+
+    pub fn with_approval_required_tool(mut self, tool: impl Into<String>) -> Self {
+        self.approval_required_tools.insert(tool.into());
         self
     }
 
@@ -556,12 +564,22 @@ impl HostRuntime {
                 ..BuiltinToolsConfig::default()
             },
         )?;
+        let agent_tools = if config.approval_required_tools.is_empty() {
+            tools.clone()
+        } else {
+            let restrictions = config
+                .approval_required_tools
+                .iter()
+                .cloned()
+                .fold(ToolRestrictions::new(), ToolRestrictions::ask);
+            tools.scoped(restrictions)?
+        };
         let tools_service = tools.publish(&root)?;
         let registry = AgentRegistry::new(sessions.clone());
         let factory = registry.register_factory(Arc::new(AgentLoopFactory::new(
             llm.clone(),
             prompt.clone(),
-            tools.clone(),
+            agent_tools,
         )))?;
         let agents_service = registry.clone().publish(&root)?;
         let subprocesses = SubprocessRuntime::new();
