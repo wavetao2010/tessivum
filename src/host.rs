@@ -980,6 +980,8 @@ impl HostHandle {
             self.wait_drained().await;
             return Ok(());
         }
+        self.inner.settings.shutdown().await;
+        self.inner.credentials.shutdown().await;
         self.inner.approvals.cancel_all();
         self.inner.registry.cancel_all(
             AgentCancelCause::Hook {
@@ -988,8 +990,6 @@ impl HostHandle {
             false,
         );
         self.wait_drained().await;
-        self.inner.settings.shutdown().await;
-        self.inner.credentials.shutdown().await;
         let mut failures = Vec::new();
         if let Err(error) = self.inner.registry.dispose_all().await {
             failures.push(format!("agents: {error}"));
