@@ -39,7 +39,7 @@ use crate::{
         ToolDefinition, ToolHandler, ToolOutput, ToolRegistration, ToolRunContext, ToolRuntime,
     },
     TessivumError,
-}
+};
 
 /// Stable domain service identifiers. Versioning is part of the wire contract.
 pub const TOOLS_SERVICE: &str = "tools@1";
@@ -105,6 +105,15 @@ pub struct DomainRequest {
     pub method: String,
     #[serde(default)]
     pub params: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WasmServiceRequest {
+    service: String,
+    method: String,
+    #[serde(default)]
+    payload: Value,
 }
 
 /// Product authorization installed for one running WASM plugin.
@@ -198,10 +207,9 @@ impl WasmPolicyRegistry {
         method: &str,
     ) -> WasmResult<WasmPolicyLease> {
         let policies = lock(&self.inner.policies);
-        let entry = policies
-            .get(plugin_id)
-            .cloned()
-            .ok_or_else(|| policy_error("PLUGIN_POLICY_NOT_FOUND", "plugin policy is not installed"))?;
+        let entry = policies.get(plugin_id).cloned().ok_or_else(|| {
+            policy_error("PLUGIN_POLICY_NOT_FOUND", "plugin policy is not installed")
+        })?;
         let mut state = lock(&entry.state);
         if state.revoked {
             return Err(policy_error(
@@ -218,9 +226,10 @@ impl WasmPolicyRegistry {
                 "service method is not permitted",
             ));
         }
-        state.active = state.active.checked_add(1).ok_or_else(|| {
-            policy_error("RESOURCE_LIMIT", "too many active service calls")
-        })?;
+        state.active = state
+            .active
+            .checked_add(1)
+            .ok_or_else(|| policy_error("RESOURCE_LIMIT", "too many active service calls"))?;
         drop(state);
         drop(policies);
         Ok(WasmPolicyLease { entry })
@@ -253,15 +262,24 @@ impl WasmPolicyRegistration {
 
     /// Waits no longer than `timeout` for calls admitted before revocation to finish.
     pub fn drain(&self, timeout: Duration) -> WasmResult<()> {
-        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
         let mut state = lock(&self.entry.state);
         while state.active != 0 {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() || self.entry.drained.wait_for(&mut state, remaining).timed_out()
+            if (remaining.is_zero()
+                || self
+                    .entry
+                    .drained
+                    .wait_for(&mut state, remaining)
+                    .timed_out())
+                && state.active != 0
             {
-                if state.active != 0 {
-                    return Err(policy_error("RESOURCE_LIMIT", "service calls did not drain in time"));
-                }
+                return Err(policy_error(
+                    "RESOURCE_LIMIT",
+                    "service calls did not drain in time",
+                ));
             }
         }
         Ok(())
@@ -1183,14 +1201,19 @@ impl CapabilityHandler for DomainBridge {
         }
         bounded_json(&request.payload, self.inner.limits.max_json_bytes)
             .map_err(bridge_to_plugin_error)?;
-        let domain: DomainRequest = decode(request.payload).map_err(bridge_to_plugin_error)?;
+        let plugin_id = request.plugin_id;
+        let wire: WasmServiceRequest = decode(request.payload).map_err(bridge_to_plugin_error)?;
+        let domain = DomainRequest {
+            service: wire.service,
+            method: wire.method,
+            params: wire.payload,
+        };
         self.validate_request(&domain, self.inner.limits.max_json_bytes)
             .map_err(bridge_to_plugin_error)?;
-        let _lease = self.inner.policy_registry.authorize(
-            &request.plugin_id,
-            &domain.service,
-            &domain.method,
-        )?;
+        let _lease =
+            self.inner
+                .policy_registry
+                .authorize(&plugin_id, &domain.service, &domain.method)?;
         self.dispatch_native(domain).map_err(bridge_to_plugin_error)
     }
 }

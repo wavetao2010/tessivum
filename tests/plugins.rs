@@ -542,7 +542,10 @@ fn wasm_product_declaration_projects_exact_permissions_from_every_location() {
         assert_eq!(product.manifest.id, id);
         assert_eq!(product.manifest.entry, "plugin.wasm");
         assert_eq!(product.service_permissions, expected);
-        assert_eq!(product.entry, fs::canonicalize(fixture.path().join("plugin.wasm")).unwrap());
+        assert_eq!(
+            product.entry,
+            fs::canonicalize(fixture.path().join("plugin.wasm")).unwrap()
+        );
         assert_eq!(product.root, fs::canonicalize(fixture.path()).unwrap());
 
         let report = PluginRouter::new().inspect(fixture.path(), None).unwrap();
@@ -575,16 +578,56 @@ fn empty_service_permissions_need_no_service_call_capability() {
 #[test]
 fn service_permission_validation_rejects_every_invalid_edge_in_every_location() {
     let cases = [
-        ("blank-service", r#"["cordis.service.call"]"#, r#"[{"service":"","methods":["log"]}]"#),
-        ("blank-method", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":[""]}]"#),
-        ("empty-methods", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":[]}]"#),
-        ("duplicate-method", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":["log","log"]}]"#),
-        ("duplicate-service", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":["log"]},{"service":"logger@1","methods":["log"]}]"#),
-        ("wildcard-service", r#"["cordis.service.call"]"#, r#"[{"service":"logger@*","methods":["log"]}]"#),
-        ("pattern-method", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":["log*"]}]"#),
-        ("unknown-service", r#"["cordis.service.call"]"#, r#"[{"service":"llm@1","methods":["generate"]}]"#),
-        ("unknown-method", r#"["cordis.service.call"]"#, r#"[{"service":"tools@1","methods":["execute"]}]"#),
-        ("missing-capability", r#"["cordis.log"]"#, r#"[{"service":"logger@1","methods":["log"]}]"#),
+        (
+            "blank-service",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"","methods":["log"]}]"#,
+        ),
+        (
+            "blank-method",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"logger@1","methods":[""]}]"#,
+        ),
+        (
+            "empty-methods",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"logger@1","methods":[]}]"#,
+        ),
+        (
+            "duplicate-method",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"logger@1","methods":["log","log"]}]"#,
+        ),
+        (
+            "duplicate-service",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"logger@1","methods":["log"]},{"service":"logger@1","methods":["log"]}]"#,
+        ),
+        (
+            "wildcard-service",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"logger@*","methods":["log"]}]"#,
+        ),
+        (
+            "pattern-method",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"logger@1","methods":["log*"]}]"#,
+        ),
+        (
+            "unknown-service",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"llm@1","methods":["generate"]}]"#,
+        ),
+        (
+            "unknown-method",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"tools@1","methods":["execute"]}]"#,
+        ),
+        (
+            "missing-capability",
+            r#"["cordis.log"]"#,
+            r#"[{"service":"logger@1","methods":["log"]}]"#,
+        ),
     ];
     for (case_name, permissions, service_permissions) in cases {
         for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
@@ -634,12 +677,7 @@ fn wasm_product_declaration_requires_complete_confined_core_manifest() {
             &traversal,
             location,
             &id,
-            &wasm_product(
-                &id,
-                "../plugin.wasm",
-                r#"["cordis.log"]"#,
-                "[]",
-            ),
+            &wasm_product(&id, "../plugin.wasm", r#"["cordis.log"]"#, "[]"),
         );
         assert_eq!(
             PluginPackage::inspect(traversal.path())
@@ -666,13 +704,9 @@ fn wasm_product_declaration_requires_every_core_projection_field() {
         "exports",
     ] {
         let id = format!("com.example.missing-{field}");
-        let mut declaration: serde_json::Value = serde_json::from_str(&wasm_product(
-            &id,
-            "plugin.wasm",
-            r#"["cordis.log"]"#,
-            "[]",
-        ))
-        .unwrap();
+        let mut declaration: serde_json::Value =
+            serde_json::from_str(&wasm_product(&id, "plugin.wasm", r#"["cordis.log"]"#, "[]"))
+                .unwrap();
         declaration.as_object_mut().unwrap().remove(field);
         let declaration = serde_json::to_string(&declaration).unwrap();
         for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
@@ -741,9 +775,7 @@ fn wasm_product_declaration_rejects_duplicate_or_conflicting_declarations() {
         "package.json",
         &package_json(
             "conflicting",
-            &format!(
-                r#", "cordis":{{"plugin":{first}}}, "tessivum":{{"plugin":{second}}}"#
-            ),
+            &format!(r#", "cordis":{{"plugin":{first}}}, "tessivum":{{"plugin":{second}}}"#),
         ),
     );
     conflicting.write("first.wasm", "not executed");

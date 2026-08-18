@@ -58,7 +58,6 @@ impl WasmProductDeclaration {
     }
 }
 
-
 /// Default bound for each package or external manifest before parsing.
 pub const DEFAULT_MAX_MANIFEST_BYTES: usize = 256 * 1024;
 /// Default bound for each scanned JavaScript or TypeScript source file.
@@ -326,7 +325,6 @@ struct RuntimeDeclaration {
     service_permissions: Vec<ServicePermissionDeclaration>,
 }
 
-
 /// Package facts retained by the inspector. It intentionally retains no plugin configuration or
 /// source text, so reports cannot disclose runtime secrets.
 #[derive(Clone)]
@@ -456,7 +454,6 @@ impl PluginPackage {
 
     fn resolve_legacy_entry(&self) -> Result<PathBuf, PluginError> {
         let mut declared_entries = self
-
             .declarations
             .iter()
             .filter(|declaration| declaration.runtime == PluginRuntime::LegacyNode)
@@ -532,10 +529,9 @@ impl PluginPackage {
             ));
         }
         let entry = self.canonical_entry(
-            declaration
-                .entry
-                .as_ref()
-                .ok_or_else(|| PluginError::malformed(&declaration.declaration_path, "entry is required"))?,
+            declaration.entry.as_ref().ok_or_else(|| {
+                PluginError::malformed(&declaration.declaration_path, "entry is required")
+            })?,
             PluginRuntime::Wasm,
         )?;
         if !self
@@ -546,17 +542,23 @@ impl PluginPackage {
         {
             return Err(PluginError::InvalidRoute {
                 runtime: PluginRuntime::Wasm,
-                reason: format!("declared wasm entry {} is not a package artifact", entry.display()),
+                reason: format!(
+                    "declared wasm entry {} is not a package artifact",
+                    entry.display()
+                ),
             });
         }
         let service_permissions = declaration
             .service_permissions
             .iter()
             .flat_map(|declaration| {
-                declaration.methods.iter().map(|method| ServiceMethodPermission {
-                    service: declaration.service.clone(),
-                    method: method.clone(),
-                })
+                declaration
+                    .methods
+                    .iter()
+                    .map(|method| ServiceMethodPermission {
+                        service: declaration.service.clone(),
+                        method: method.clone(),
+                    })
             })
             .collect();
         Ok(WasmProductDeclaration {
@@ -1543,7 +1545,10 @@ fn parse_service_permissions(
         if declaration.service.is_empty() || contains_permission_pattern(&declaration.service) {
             return Err(PluginError::permission_invalid(
                 path,
-                format!("service {:?} must be an exact catalog name", declaration.service),
+                format!(
+                    "service {:?} must be an exact catalog name",
+                    declaration.service
+                ),
             ));
         }
         let Some((_, allowed_methods)) = SERVICE_CATALOG
@@ -1558,13 +1563,19 @@ fn parse_service_permissions(
         if !services.insert(declaration.service.clone()) {
             return Err(PluginError::permission_invalid(
                 path,
-                format!("service {:?} is declared more than once", declaration.service),
+                format!(
+                    "service {:?} is declared more than once",
+                    declaration.service
+                ),
             ));
         }
         if declaration.methods.is_empty() {
             return Err(PluginError::permission_invalid(
                 path,
-                format!("service {:?} must declare at least one method", declaration.service),
+                format!(
+                    "service {:?} must declare at least one method",
+                    declaration.service
+                ),
             ));
         }
         let mut methods = BTreeSet::new();
@@ -1575,19 +1586,22 @@ fn parse_service_permissions(
                     format!("method {method:?} must be an exact catalog name"),
                 ));
             }
-            if !allowed_methods
-                .iter()
-                .any(|allowed| *allowed == method.as_str())
-            {
+            if !allowed_methods.contains(&method.as_str()) {
                 return Err(PluginError::permission_invalid(
                     path,
-                    format!("method {method:?} is not allowed for {}", declaration.service),
+                    format!(
+                        "method {method:?} is not allowed for {}",
+                        declaration.service
+                    ),
                 ));
             }
             if !methods.insert(method) {
                 return Err(PluginError::permission_invalid(
                     path,
-                    format!("service method {} is declared more than once", declaration.service),
+                    format!(
+                        "service method {} is declared more than once",
+                        declaration.service
+                    ),
                 ));
             }
         }
@@ -1600,9 +1614,9 @@ fn parse_service_permissions(
             .get("permissions")
             .and_then(Value::as_array)
             .is_some_and(|permissions| {
-                permissions.iter().any(|permission| {
-                    permission.as_str() == Some(Capability::ServiceCall.as_str())
-                })
+                permissions
+                    .iter()
+                    .any(|permission| permission.as_str() == Some(Capability::ServiceCall.as_str()))
             })
     {
         return Err(PluginError::permission_invalid(
@@ -1669,7 +1683,10 @@ fn project_wasm_manifest(
         }
     }
     if object.get("runtime").and_then(Value::as_str) != Some("wasm") {
-        return Err(PluginError::malformed(path, "loadable product runtime must be wasm"));
+        return Err(PluginError::malformed(
+            path,
+            "loadable product runtime must be wasm",
+        ));
     }
     if object.get("abi").and_then(Value::as_str) != Some(WASM_ABI) {
         return Err(PluginError::malformed(
@@ -1687,8 +1704,9 @@ fn project_wasm_manifest(
                 .clone(),
         );
     }
-    let manifest = serde_json::from_value::<tessivum_extism::PluginManifest>(Value::Object(projected))
-        .map_err(|error| PluginError::malformed(path, error))?;
+    let manifest =
+        serde_json::from_value::<tessivum_extism::PluginManifest>(Value::Object(projected))
+            .map_err(|error| PluginError::malformed(path, error))?;
     manifest
         .validate()
         .map_err(|error| PluginError::malformed(path, error))?;

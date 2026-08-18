@@ -24,10 +24,10 @@ use tessivum::{
     },
     credentials::{Credentials, YamlCredentialFile},
     llm::LlmRuntime,
+    plugins::ServiceMethodPermission,
     protocol::{SessionHeader, SessionId, SESSION_FORMAT_VERSION},
     session::{MemorySessionPersistence, Session, SessionStore},
     settings::{MemorySettingsProvider, Settings},
-    plugins::ServiceMethodPermission,
     system_prompt::{PromptSection, SystemPrompt},
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext, ToolRuntime,
@@ -35,10 +35,10 @@ use tessivum::{
     TessivumError,
 };
 use tessivum_core::{CancellationToken, ContextHandle};
+use tessivum_extism::{Capability, CapabilityHandler, CapabilityRequest, PluginError};
 use tessivum_node_bridge::{
     BridgeClient, BridgeError, BridgeHandler, ClientConfig, Frame, FrameKind,
 };
-use tessivum_extism::{Capability, CapabilityHandler, CapabilityRequest, PluginError};
 
 fn bridge_services() -> (BridgeServices, ToolRuntime, SystemPrompt, SessionStore) {
     let tools = ToolRuntime::new();
@@ -74,10 +74,12 @@ fn remote_code(error: BridgeError) -> String {
 fn wasm_policy(plugin_id: &str, permissions: &[(&str, &str)]) -> WasmEffectivePolicy {
     WasmEffectivePolicy::new(
         plugin_id,
-        permissions.iter().map(|(service, method)| ServiceMethodPermission {
-            service: (*service).into(),
-            method: (*method).into(),
-        }),
+        permissions
+            .iter()
+            .map(|(service, method)| ServiceMethodPermission {
+                service: (*service).into(),
+                method: (*method).into(),
+            }),
     )
 }
 
@@ -889,11 +891,19 @@ fn wasm_policy_registry_revokes_and_drains_admitted_calls() {
         .authorize("plugin-a", LOGGER_SERVICE, "log")
         .unwrap();
     assert_eq!(
-        plugin_code(rejected(registry.authorize("plugin-a", LOGGER_SERVICE, "other"))),
+        plugin_code(rejected(registry.authorize(
+            "plugin-a",
+            LOGGER_SERVICE,
+            "other"
+        ))),
         "SERVICE_PERMISSION_DENIED"
     );
     assert_eq!(
-        plugin_code(rejected(registry.authorize("plugin-a", TOOLS_SERVICE, "schemas"))),
+        plugin_code(rejected(registry.authorize(
+            "plugin-a",
+            TOOLS_SERVICE,
+            "schemas"
+        ))),
         "SERVICE_PERMISSION_DENIED"
     );
     assert_eq!(
@@ -909,7 +919,11 @@ fn wasm_policy_registry_revokes_and_drains_admitted_calls() {
     });
     observed.recv().unwrap();
     assert_eq!(
-        plugin_code(rejected(registry_for_check.authorize("plugin-a", LOGGER_SERVICE, "log"))),
+        plugin_code(rejected(registry_for_check.authorize(
+            "plugin-a",
+            LOGGER_SERVICE,
+            "log"
+        ))),
         "PLUGIN_POLICY_NOT_FOUND"
     );
     drop(lease);
@@ -927,8 +941,10 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
     let _other = registry
         .install(wasm_policy("plugin-b", &[(TOOLS_SERVICE, "schemas")]))
         .unwrap();
-    let mut limits = BridgeLimits::default();
-    limits.max_json_bytes = 128;
+    let limits = BridgeLimits {
+        max_json_bytes: 128,
+        ..BridgeLimits::default()
+    };
     let bridge = DomainBridge::with_limits_and_policy_registry(
         services.with_logger(logger.clone()),
         limits,
@@ -944,7 +960,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
                 json!({
                     "service": LOGGER_SERVICE,
                     "method": "log",
-                    "params": {"level": "info", "message": "allowed"},
+                    "payload": {"level": "info", "message": "allowed"},
                 }),
             ),
         )
@@ -958,7 +974,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
             &bridge,
             wasm_service_call(
                 "plugin-a",
-                json!({"service": LOGGER_SERVICE, "method": "other", "params": {}}),
+                json!({"service": LOGGER_SERVICE, "method": "other", "payload": {}}),
             ),
         ))),
         "SERVICE_PERMISSION_DENIED"
@@ -968,7 +984,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
             &bridge,
             wasm_service_call(
                 "plugin-b",
-                json!({"service": LOGGER_SERVICE, "method": "log", "params": {}}),
+                json!({"service": LOGGER_SERVICE, "method": "log", "payload": {}}),
             ),
         ))),
         "SERVICE_PERMISSION_DENIED"
@@ -978,7 +994,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
             &bridge,
             wasm_service_call(
                 "missing",
-                json!({"service": LOGGER_SERVICE, "method": "log", "params": {}}),
+                json!({"service": LOGGER_SERVICE, "method": "log", "payload": {}}),
             ),
         ))),
         "PLUGIN_POLICY_NOT_FOUND"
@@ -991,7 +1007,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
             json!({
                 "service": LOGGER_SERVICE,
                 "method": "log",
-                "params": {"level": "info", "message": "payload-secret"},
+                "payload": {"level": "info", "message": "payload-secret"},
                 "pluginId": "plugin-b",
             }),
         ),
@@ -1007,7 +1023,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
             json!({
                 "service": LOGGER_SERVICE,
                 "method": "log",
-                "params": {"level": "info", "message": "payload-secret".repeat(32)},
+                "payload": {"level": "info", "message": "payload-secret".repeat(32)},
             }),
         ),
     ));
@@ -1022,7 +1038,7 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
             &bridge,
             wasm_service_call(
                 "plugin-a",
-                json!({"service": LOGGER_SERVICE, "method": "log", "params": {}}),
+                json!({"service": LOGGER_SERVICE, "method": "log", "payload": {}}),
             ),
         ))),
         "PLUGIN_POLICY_NOT_FOUND"
