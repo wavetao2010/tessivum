@@ -495,7 +495,7 @@ CordisError {
 | 平面 | 默认信任 | 能力控制 |
 |---|---|---|
 | Native Rust | 可信 | 编译/发布审核、Harness policy |
-| Extism/WASM | 非可信或半可信 | 未配置 per-plugin permissions 时 Host service call 默认拒绝；接线后再按 manifest、WASI/HTTP 和资源额度逐项授予 |
+| Extism/WASM | 非可信或半可信 | 通用 Capability 与 manifest `servicePermissions` 双层授权；未知、缺失、过期或通配声明默认拒绝；WASI 禁用并限制 memory/fuel/timeout/I/O |
 | Legacy Node | 可信旧代码 | 独立进程、OS sandbox、Bridge 输入限制 |
 | Browser | 非可信客户端 | loopback-only、WebSocket 同源校验、RPC schema、服务端状态权威 |
 
@@ -507,5 +507,5 @@ CordisError {
 4. Node/WASM 崩溃不会污染 Native Registry。
 5. 配置失败保留最后可运行树。
 6. 持久事实只由 Host 写入并可重放。
-7. 未接入 manifest permissions 的非可信 WASM Host service call 必须 fail closed；接入后只能使用声明授予的 Host Functions。
+7. 非可信 WASM Host service call 必须同时通过通用 Capability 和精确 `service@version`/method 策略；卸载后旧实例与 policy 均失效。
 8. 现有浏览器插件不因 Host Rust 化而被迫重写。

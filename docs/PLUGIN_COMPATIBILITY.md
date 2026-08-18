@@ -89,7 +89,7 @@ Loader 不能通过扫描源码猜 runtime。选择优先级：
 
 ## 5. 目标插件 Manifest
 
-新插件使用版本化 manifest；字段名在实现前通过夹具冻结。概念形状：
+新 WASM 插件使用已冻结的 `cordis.plugin/v1` manifest：
 
 ```yaml
 schemaVersion: cordis.plugin/v1
@@ -98,26 +98,32 @@ version: 1.2.0
 runtime: wasm
 entry: plugin.wasm
 abi: cordis.plugin/v1
-inject:
-  - service: tools
-    version: 1
+inject: []
 permissions:
-  - log
-  - http:
-      hosts: [api.example.com]
-configSchema: schema.json
+  - cordis.service.call
+servicePermissions:
+  - service: tools@1
+    methods: [schemas]
+configSchema:
+  type: object
+  additionalProperties: false
 exports:
-  - run
+  - cordis_init
+  - cordis_call
+  - cordis_event
+  - cordis_update
+  - cordis_stop
 ```
 
 规则：
 
-- `id` 在 profile 内唯一；
-- `abi` 不匹配时装载前失败；
+- `id` 在同一运行时生命周期内唯一；
+- `abi` 不匹配、entry 越界或缺少五个生命周期 export 时在装载前失败；
 - `inject` 是激活门控，不是权限授予；
-- `permissions` 是能力上限；
-- config 先由 Host 验证，再传给 Guest；
-- 未声明能力默认不可用；
+- `permissions` 是通用 Host capability 上限；
+- `servicePermissions` 只接受已发布的精确 `service@version` 与 method，不接受通配符、前缀或正则；
+- 非空 `servicePermissions` 必须同时声明 `cordis.service.call`；
+- config 先由 Host 验证，再传给 Guest；未声明能力默认不可用；
 - manifest 不能通过 Guest 运行时返回值自我扩大权限。
 
 现有 npm 包无需补此 manifest 才能通过 Legacy Node Host 运行。

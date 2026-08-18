@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by the architectu
 
 ## Alpha status
 
-`v0.1.0-alpha.1` is a source release and reproducible baseline, not a production-stable API promise.
+`v0.1.0-alpha.2` is a source release and reproducible baseline, not a production-stable API promise.
 
 Implemented and verified:
 
@@ -18,7 +18,8 @@ Implemented and verified:
 - HTTP API, durable SSE, published full-form RPC, and Browser WebSocket downlinks;
 - published Browser Cordis/React shell with workspace/session recovery and tool cards;
 - Legacy Node compatibility host with generation cleanup and real Cordis community samples;
-- Native/WASM/Legacy/Browser plugin routing and actionable compatibility reports.
+- Native/WASM/Legacy/Browser plugin routing and actionable compatibility reports;
+- exact per-plugin WASM service permissions plus a pinned real Rust/Extism Guest.
 
 ## Architecture
 
@@ -95,13 +96,13 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-The Alpha cutover baseline passes 224 Rust tests across 36 suites, the Browser typecheck/build, real Headless and SDK process journeys, published Browser interaction, community plugin loading, rollback drills, and graceful shutdown checks.
+The Alpha cutover baseline passes 235 Rust tests across 37 suites, the Browser typecheck/build, real Headless and SDK process journeys, published Browser interaction, community plugin loading, real Extism allow/deny/trap/unload flows, rollback drills, and graceful shutdown checks.
 
 ## Known Alpha limits
 
 - one Host profile owns one canonical workspace directory;
 - Browser settings are read-only; approval UI and long-running-turn stop controls are not yet wired to the Rust Host;
-- untrusted WASM Host service calls fail closed until per-plugin manifest permissions are connected;
+- WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, and `credentials@1.describe`;
 - several unpublished upstream Browser packages require explicit compatibility overrides;
 - API listeners are loopback-only and this release does not ship prebuilt binaries.
 
