@@ -507,6 +507,8 @@ B 阶段完成定义：真实 Chromium 可停止 turn、处理并恢复审批、
 
 # 里程碑 C：多工作区
 
+> 状态：已完成，发布目标 `v0.1.0-alpha.4`。
+
 ## 17. C 阶段目标
 
 把当前 Host 级单一 cwd 改造成“一个 HostRuntime 管理多个持久 Workspace，每个 Session 绑定一个受控资源根”。不得为每个 workspace 启动独立 HostRuntime。

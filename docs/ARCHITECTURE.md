@@ -511,3 +511,5 @@ CordisError {
 8. 现有浏览器插件不因 Host Rust 化而被迫重写。
 9. Browser approval 必须先持久化 asked、first-wins 回答、再持久化 decided 并发送 resolved；刷新复用同一 rpcId。
 10. Browser 永不读取 credential value 或 settings secret；DNS rebinding 不能绕过 exact Host/Origin authority。
+11. Workspace ID 由 Host 签发；Session/Tool/Subagent 仅通过 generation-checked lease 使用 canonical root，Browser path 只允许 workspace.create。
+12. Registry 0600、bounded single-open、exclusive profile lock、atomic replace；删除 workspace 先撤销 live Agent，再失效 lease。

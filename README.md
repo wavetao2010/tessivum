@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by the architectu
 
 ## Alpha status
 
-`v0.1.0-alpha.3` is a source release and reproducible baseline, not a production-stable API promise.
+`v0.1.0-alpha.4` is a source release and reproducible baseline, not a production-stable API promise.
 
 Implemented and verified:
 
@@ -20,7 +20,8 @@ Implemented and verified:
 - Legacy Node compatibility host with generation cleanup and real Cordis community samples;
 - Native/WASM/Legacy/Browser plugin routing and actionable compatibility reports;
 - exact per-plugin WASM service permissions plus a pinned real Rust/Extism Guest;
-- Browser stop/resume, durable approval request/response/reconnect, and writable redacted settings/credentials.
+- Browser stop/resume, durable approval request/response/reconnect, and writable redacted settings/credentials;
+- one HostRuntime with durable opaque multi-workspace/session authority, restart migration, workspace-scoped Bash, and subagent inheritance.
 
 ## Architecture
 
@@ -97,11 +98,11 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-The Alpha cutover baseline passes 256 Rust tests across 37 suites, the Browser typecheck/build, real Headless and SDK process journeys, real Chromium stop/approval/settings/credential interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, and graceful shutdown checks.
+The Alpha cutover baseline passes 280 Rust tests across 38 suites, the Browser typecheck/build, real Headless and SDK process journeys, real Chromium stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, and graceful shutdown checks.
 
 ## Known Alpha limits
 
-- one Host profile owns one canonical workspace directory;
+- only production-wired cwd-sensitive capabilities are workspace-scoped; latent library-only Skills/LSP/Filesystem integrations remain unavailable from the Host;
 - Browser configuration exposes only the published settings namespace allowlist; arbitrary registered namespaces remain Host-internal;
 - WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, and `credentials@1.describe`;
 - several unpublished upstream Browser packages require explicit compatibility overrides;
