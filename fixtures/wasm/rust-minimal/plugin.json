@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "cordis.plugin/v1",
+  "id": "com.tessivum.fixture.rust-minimal",
+  "version": "0.1.0",
+  "runtime": "wasm",
+  "entry": "plugin.wasm",
+  "abi": "cordis.plugin/v1",
+  "inject": [],
+  "permissions": [
+    "cordis.log",
+    "cordis.service.call"
+  ],
+  "servicePermissions": [
+    {
+      "service": "logger@1",
+      "methods": [
+        "log"
+      ]
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "exports": [
+    "cordis_init",
+    "cordis_call",
+    "cordis_event",
+    "cordis_update",
+    "cordis_stop"
+  ]
+}

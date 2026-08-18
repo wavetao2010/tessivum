@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "tessivum-rust-minimal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = { version = "=1.4.1", default-features = false }
+serde_json = "1"
+tessivum-pdk = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "2d3fd3c418d8ce28c4ca7a8180f6794963271db7" }
