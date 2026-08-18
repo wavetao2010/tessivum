@@ -356,6 +356,7 @@ struct HostInner {
     services: Services,
     owned_agents: Mutex<BTreeMap<SessionId, AgentHandle>>,
     state: Mutex<State>,
+    // ponytail: one Host-wide generation gate; shard by session only if prompt churn contends.
     setup: AsyncMutex<()>,
     admission: Mutex<AdmissionState>,
     drained: Notify,
@@ -802,6 +803,7 @@ impl HostHandle {
         cause: AgentCancelCause,
     ) -> Result<bool, HostError> {
         let _admission = self.admit()?;
+        let _setup = self.inner.setup.lock().await;
         let agent = self.inner.registry.get(&session);
         let cancelled = match self.inner.registry.cancel(&session, cause, false) {
             Ok(value) => value,
@@ -970,9 +972,6 @@ impl HostHandle {
     }
 
     async fn ensure_agent(&self, session_id: &SessionId) -> Result<AgentHandle, HostError> {
-        if let Some(agent) = self.inner.registry.get(session_id) {
-            return Ok(agent);
-        }
         let _setup = self.inner.setup.lock().await;
         if let Some(agent) = self.inner.registry.get(session_id) {
             return Ok(agent);

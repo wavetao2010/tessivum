@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
-    io,
+    fs, io,
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -10,15 +11,16 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use tessivum::{
     api::{ApiServer, MAX_FRAME_BYTES},
-    host::{HostApi, HostNotification},
+    host::{HostApi, HostConfig, HostLlmAdapterFactory, HostNotification, HostRuntime},
+    llm::{LlmAdapter, LlmStream},
     protocol::{
-        AgentCancelCause, InitializeParams, InitializeResult, MessageId, SdkServerInfo,
-        SessionEvent, SessionEventNotification, SessionId, SessionPromptParams,
-        SessionPromptResult, SessionStatus,
+        AgentCancelCause, ContentBlock, FinishReason, GenerateRequest, InitializeParams,
+        InitializeResult, MessageId, SdkServerInfo, SessionEvent, SessionEventNotification,
+        SessionId, SessionPromptParams, SessionPromptResult, SessionStatus, StreamChunk,
     },
     TessivumError,
 };
@@ -28,6 +30,7 @@ use tokio::{
     sync::{broadcast, Notify},
     time::timeout,
 };
+use uuid::Uuid;
 
 struct FakeHost {
     events: Mutex<BTreeMap<SessionId, Vec<SessionEvent>>>,
@@ -189,6 +192,89 @@ async fn start() -> (ApiServer, Arc<FakeHost>, String) {
     (server, host, base)
 }
 
+struct BrowserStopFixture(PathBuf);
+
+impl BrowserStopFixture {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("tessivum-browser-stop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for BrowserStopFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct DelayedAdapter {
+    calls: AtomicUsize,
+    started: Notify,
+}
+
+impl DelayedAdapter {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            started: Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmAdapter for DelayedAdapter {
+    async fn generate(
+        &self,
+        _: GenerateRequest,
+        cancellation: tessivum_core::CancellationToken,
+    ) -> Result<LlmStream, TessivumError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.started.notify_one();
+            cancellation.cancelled().await;
+            return Err(TessivumError::new(
+                "LLM_CANCELLED",
+                "delayed Browser generation was cancelled",
+                "llm",
+                Value::Null,
+            ));
+        }
+        let marker = "fresh-generation-complete";
+        Ok(Box::pin(stream::iter(
+            vec![
+                StreamChunk::BlockStart {
+                    index: 0,
+                    block_type: "text".into(),
+                },
+                StreamChunk::TextDelta {
+                    index: 0,
+                    text: marker.into(),
+                },
+                StreamChunk::BlockEnd {
+                    index: 0,
+                    block: ContentBlock::Text {
+                        text: marker.into(),
+                    },
+                },
+                StreamChunk::Finish {
+                    reason: FinishReason::Stop,
+                    replay_state: None,
+                },
+            ]
+            .into_iter()
+            .map(Ok),
+        )))
+    }
+}
+
+struct DelayedFactory(Arc<DelayedAdapter>);
+
+impl HostLlmAdapterFactory for DelayedFactory {
+    fn create(&self, _: &str, _: &str) -> Result<Arc<dyn LlmAdapter>, TessivumError> {
+        Ok(self.0.clone())
+    }
+}
+
 #[tokio::test]
 async fn api_rejects_non_loopback_binds_without_authentication() {
     let host: Arc<dyn HostApi> = Arc::new(FakeHost::new());
@@ -244,6 +330,23 @@ async fn browser_call(
         .expect("browser RPC response");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     response.json().await.expect("browser RPC JSON")
+}
+
+async fn wait_host_running(socket: &mut RawWebSocket, session: &str, running: bool) -> Value {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let text = socket.read_text().await.expect("host downlink frame");
+            let frame: Value = serde_json::from_str(&text).expect("host frame JSON");
+            if frame["payload"]["type"] == "host/session-status"
+                && frame["payload"]["sessionId"] == session
+                && frame["payload"]["running"] == running
+            {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("host session status frame arrives")
 }
 
 #[tokio::test]
@@ -381,6 +484,128 @@ async fn browser_host_websocket_wraps_compatibility_frames_as_server_requests() 
     assert_eq!(frame["payload"]["sessionId"], "ws-session");
 
     server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_stop_quiesces_output_and_next_prompt_uses_fresh_generation() {
+    let fixture = BrowserStopFixture::new();
+    let adapter = Arc::new(DelayedAdapter::new());
+    let mut config = HostConfig::new(&fixture.0, fixture.0.join("data"))
+        .with_adapter_factory(Arc::new(DelayedFactory(Arc::clone(&adapter))));
+    config.provider = "delayed".into();
+    config.model = "delayed".into();
+    let runtime = HostRuntime::boot(config).await.expect("real Host boots");
+    let handle = runtime.handle();
+    let host: Arc<dyn HostApi> = Arc::new(handle.clone());
+    let mut server = ApiServer::bind(host).await.expect("real API binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    let mut downlink = RawWebSocket::connect_path(server.local_addr(), "/api/events.host").await;
+    let session = "browser-stop";
+
+    let created = browser_call(
+        &client,
+        &base,
+        "stop-create",
+        "session.create",
+        json!({"sessionId": session}),
+    )
+    .await;
+    assert_eq!(created["result"]["ok"], true);
+    let prompted = browser_call(
+        &client,
+        &base,
+        "stop-prompt",
+        "session.prompt",
+        json!({
+            "sessionId": session,
+            "mode": "queue",
+            "content": [{"type": "text", "text": "block until stopped"}],
+        }),
+    )
+    .await;
+    assert_eq!(prompted["result"]["value"]["accepted"], true);
+    timeout(Duration::from_secs(2), adapter.started.notified())
+        .await
+        .expect("delayed model starts");
+    let running = wait_host_running(&mut downlink, session, true).await;
+    assert_eq!(running["type"], "server-request");
+
+    let stopped = browser_call(
+        &client,
+        &base,
+        "stop-cancel",
+        "session.cancel",
+        json!({"sessionId": session}),
+    )
+    .await;
+    assert_eq!(stopped["rpcId"], "stop-cancel");
+    assert_eq!(stopped["result"]["value"]["accepted"], true);
+    wait_host_running(&mut downlink, session, false).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let cancelled_events = handle
+        .events(SessionId::from(session), 0)
+        .await
+        .expect("cancelled events remain durable");
+    assert!(cancelled_events
+        .iter()
+        .all(|event| event.event_type != "assistant/message"));
+
+    let duplicate = browser_call(
+        &client,
+        &base,
+        "stop-duplicate",
+        "session.cancel",
+        json!({"sessionId": session}),
+    )
+    .await;
+    assert_eq!(duplicate["result"]["value"]["accepted"], true);
+    assert!(
+        timeout(Duration::from_millis(100), downlink.read_text())
+            .await
+            .is_err(),
+        "duplicate cancel does not publish another terminal status"
+    );
+
+    let resumed = browser_call(
+        &client,
+        &base,
+        "stop-resume",
+        "session.prompt",
+        json!({
+            "sessionId": session,
+            "mode": "queue",
+            "content": [{"type": "text", "text": "resume"}],
+        }),
+    )
+    .await;
+    assert_eq!(resumed["result"]["value"]["accepted"], true);
+    wait_host_running(&mut downlink, session, true).await;
+    wait_host_running(&mut downlink, session, false).await;
+    let events = timeout(Duration::from_secs(2), async {
+        loop {
+            let events = handle.events(SessionId::from(session), 0).await.unwrap();
+            if events.iter().any(|event| {
+                event.event_type == "assistant/message"
+                    && event.data.to_string().contains("fresh-generation-complete")
+            }) {
+                return events;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fresh generation completes");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "assistant/message")
+            .count(),
+        1
+    );
+
+    server.shutdown().await.expect("API shuts down");
+    runtime.shutdown().await.expect("Host shuts down");
 }
 
 #[tokio::test]
