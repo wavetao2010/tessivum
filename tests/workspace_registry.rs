@@ -7,7 +7,9 @@ use std::{
 use tessivum::{
     protocol::{SessionHeader, SessionId, SESSION_FORMAT_VERSION},
     session::SessionInspection,
-    workspace::{WorkspaceDiagnostic, WorkspaceRegistry, WorkspaceSnapshot},
+    workspace::{
+        SessionResourceResolver, WorkspaceDiagnostic, WorkspaceRegistry, WorkspaceSnapshot,
+    },
 };
 use uuid::Uuid;
 
@@ -244,6 +246,56 @@ fn mutations_are_ordered_idempotent_and_preserve_global_archive() {
         registry.snapshot().archived_session_ids,
         vec![SessionId::from("a")]
     );
+    assert_eq!(
+        lease.validate_current().unwrap_err().code(),
+        "STALE_WORKSPACE_LEASE"
+    );
+}
+
+#[test]
+fn recognized_blank_session_resolves_only_while_its_directory_is_current() {
+    let root = TempDir::new("resolver");
+    let host = root.dir("host");
+    let workspace = root.dir("workspace");
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    let workspace_id = registry
+        .create(&workspace, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    registry.recognize_session("blank").unwrap();
+    registry
+        .attach_session(&workspace_id, "blank", None)
+        .unwrap();
+    let resolver = SessionResourceResolver::new(registry);
+    assert_eq!(
+        resolver.resolve_root("blank").unwrap(),
+        workspace.canonicalize().unwrap()
+    );
+    fs::remove_dir(&workspace).unwrap();
+    assert_eq!(
+        resolver.resolve_root("blank").unwrap_err().code(),
+        "STALE_WORKSPACE_LEASE"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lease_rejects_a_workspace_path_retargeted_to_a_symlink() {
+    let root = TempDir::new("symlink-retarget");
+    let host = root.dir("host");
+    let workspace = root.dir("workspace");
+    let replacement = root.dir("replacement");
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    let workspace_id = registry
+        .create(&workspace, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let lease = registry.resolve(&workspace_id).unwrap();
+    let original = root.path().join("original-workspace");
+    fs::rename(&workspace, &original).unwrap();
+    std::os::unix::fs::symlink(&replacement, &workspace).unwrap();
     assert_eq!(
         lease.validate_current().unwrap_err().code(),
         "STALE_WORKSPACE_LEASE"

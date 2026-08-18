@@ -49,6 +49,7 @@ use crate::{
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     telemetry::TelemetryCoordinator,
     tools::{ToolRestrictions, ToolRuntime},
+    workspace::{SessionResourceResolver, WorkspaceError, WorkspaceId, WorkspaceRegistry},
     TessivumError,
 };
 
@@ -249,6 +250,17 @@ pub enum HostError {
     Approval(#[from] ApprovalError),
     #[error(transparent)]
     ApprovalRegistry(#[from] HostApprovalError),
+    #[error("session {session_id} is durable but ungrouped")]
+    SessionUngrouped { session_id: SessionId },
+    #[error("failed to attach session {session_id} to workspace {workspace_id}: {source}")]
+    WorkspaceAttach {
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+        #[source]
+        source: WorkspaceError,
+    },
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
 }
 
 impl HostError {
@@ -265,6 +277,9 @@ impl HostError {
             Self::InitializationConflict => "HOST_INITIALIZATION_CONFLICT",
             Self::SessionCapacity => "HOST_SESSION_CAPACITY",
             Self::Shutdown(_) => "HOST_SHUTDOWN_FAILED",
+            Self::SessionUngrouped { .. } => "SESSION_UNGROUPED",
+            Self::WorkspaceAttach { .. } => "WORKSPACE_ATTACH_FAILED",
+            Self::Workspace(error) => error.code(),
             Self::Runtime(error) => &error.code,
             Self::Session(error) => error.code(),
             Self::Agent(AgentError::Cancelled) => "CANCELLED",
@@ -277,6 +292,28 @@ impl HostError {
     fn wire(self) -> TessivumError {
         match self {
             Self::Runtime(error) => error,
+            Self::SessionUngrouped { session_id } => TessivumError::new(
+                "SESSION_UNGROUPED",
+                format!("session {session_id} is durable but ungrouped"),
+                "host",
+                json!({"sessionId": session_id}),
+            ),
+            Self::WorkspaceAttach {
+                session_id,
+                workspace_id,
+                source,
+            } => TessivumError::new(
+                "WORKSPACE_ATTACH_FAILED",
+                format!(
+                    "failed to attach session {session_id} to workspace {workspace_id}: {source}"
+                ),
+                "host",
+                json!({
+                    "sessionId": session_id,
+                    "workspaceId": workspace_id,
+                    "cause": source.code(),
+                }),
+            ),
             error => {
                 let code = error.code().to_owned();
                 TessivumError::new(code, error.to_string(), "host", Value::Null)
@@ -302,6 +339,7 @@ pub enum HostNotification {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostSessionInfo {
     pub session_id: SessionId,
+    pub workspace_id: Option<WorkspaceId>,
     pub created_at: u64,
     pub cwd: Option<String>,
     pub event_count: u64,
@@ -348,10 +386,18 @@ pub trait HostApi: Send + Sync {
     ) -> Result<HostSessionInfo, TessivumError> {
         Ok(HostSessionInfo {
             session_id,
+            workspace_id: None,
             created_at: 0,
             cwd: None,
             event_count: 0,
         })
+    }
+    async fn create_session_in(
+        &self,
+        session_id: SessionId,
+        _workspace_id: WorkspaceId,
+    ) -> Result<HostSessionInfo, TessivumError> {
+        self.create_session(session_id).await
     }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         Ok(Vec::new())
@@ -377,6 +423,9 @@ pub trait HostApi: Send + Sync {
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         None
     }
+    fn workspace_registry(&self) -> Option<WorkspaceRegistry> {
+        None
+    }
     async fn shutdown(&self) -> Result<(), TessivumError>;
 }
 
@@ -400,6 +449,8 @@ struct HostInner {
     cancellation: tessivum_core::CancellationToken,
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
+    workspace_registry: WorkspaceRegistry,
+    resources: Arc<SessionResourceResolver>,
     registry: AgentRegistry,
     approvals: HostApprovalRegistry,
     telemetry: Option<TelemetryCoordinator>,
@@ -540,6 +591,9 @@ impl HostRuntime {
             root.provide(credentials_service_key(), Arc::clone(&credentials))?;
         let persistence: Arc<dyn SessionPersistence> =
             Arc::new(JsonlSessionPersistence::new(&data_dir));
+        let persisted_sessions = persistence.list(cancellation.clone()).await?;
+        let workspace_registry = WorkspaceRegistry::open(&data_dir, &cwd, persisted_sessions)?;
+        let resources = Arc::new(SessionResourceResolver::new(workspace_registry.clone()));
         let sessions = SessionStore::new(Arc::clone(&persistence));
         let session_service = root.provide(session_service_key(), sessions.clone())?;
 
@@ -561,6 +615,7 @@ impl HostRuntime {
             BuiltinToolsConfig {
                 enable_bash: config.enable_trusted_bash,
                 cwd: cwd.clone(),
+                resolver: Some(Arc::clone(&resources)),
                 ..BuiltinToolsConfig::default()
             },
         )?;
@@ -680,6 +735,8 @@ impl HostRuntime {
             cancellation,
             sessions,
             persistence,
+            workspace_registry,
+            resources,
             registry,
             approvals,
             telemetry: config.telemetry.clone(),
@@ -798,30 +855,72 @@ impl HostHandle {
         session_id: SessionId,
     ) -> Result<HostSessionInfo, HostError> {
         let _admission = self.admit()?;
+        self.create_session_in_unadmitted(session_id, self.default_workspace_id()?)
+            .await
+    }
+
+    async fn create_session_in_inner(
+        &self,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    ) -> Result<HostSessionInfo, HostError> {
+        let _admission = self.admit()?;
+        self.create_session_in_unadmitted(session_id, workspace_id)
+            .await
+    }
+
+    async fn create_session_in_unadmitted(
+        &self,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    ) -> Result<HostSessionInfo, HostError> {
         validate_session(&session_id)?;
-        if let Some(session) = self.inner.sessions.get(&session_id) {
-            let header = session.header();
+        let lease = self.inner.workspace_registry.resolve(&workspace_id)?;
+        let root = lease.validate_current()?;
+        let existing = match self.inner.sessions.get(&session_id) {
+            Some(session) => Some((session.header(), session.events().len() as u64)),
+            None => self
+                .inner
+                .persistence
+                .inspect(&session_id, self.inner.cancellation.clone())
+                .await?
+                .map(|session| (session.header, session.event_count)),
+        };
+        if let Some((header, event_count)) = existing {
+            self.require_session_root(&header, &root)?;
+            if self
+                .inner
+                .workspace_registry
+                .workspace_for_session(&session_id)
+                .is_some_and(|workspace| workspace.workspace_id != workspace_id)
+            {
+                return Err(HostError::invalid(
+                    "SESSION_CONFLICT",
+                    "session is already attached to another workspace",
+                ));
+            }
+            self.inner
+                .workspace_registry
+                .recognize_session(&session_id)?;
+            self.inner
+                .workspace_registry
+                .attach_session(&workspace_id, &session_id, None)
+                .map_err(|source| HostError::WorkspaceAttach {
+                    session_id: session_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    source,
+                })?;
             return Ok(HostSessionInfo {
                 session_id,
+                workspace_id: Some(workspace_id),
                 created_at: header.created_at,
                 cwd: header.cwd,
-                event_count: session.events().len() as u64,
+                event_count,
             });
         }
-        if let Some(session) = self
-            .inner
-            .persistence
-            .inspect(&session_id, self.inner.cancellation.clone())
-            .await?
-        {
-            return Ok(HostSessionInfo {
-                session_id: session.header.id,
-                created_at: session.header.created_at,
-                cwd: session.header.cwd,
-                event_count: session.event_count,
-            });
-        }
+
         let created_at = now();
+        let cwd = root.to_string_lossy().into_owned();
         self.inner
             .sessions
             .create(
@@ -829,7 +928,7 @@ impl HostHandle {
                     version: SESSION_FORMAT_VERSION,
                     id: session_id.clone(),
                     created_at,
-                    cwd: Some(self.inner.identity.cwd.to_string_lossy().into_owned()),
+                    cwd: Some(cwd.clone()),
                     parent_session: None,
                     seed_length: None,
                     origin: None,
@@ -839,12 +938,50 @@ impl HostHandle {
                 self.inner.cancellation.clone(),
             )
             .await?;
+        self.inner
+            .workspace_registry
+            .recognize_session(&session_id)?;
+        self.inner
+            .workspace_registry
+            .attach_session(&workspace_id, &session_id, None)
+            .map_err(|source| HostError::WorkspaceAttach {
+                session_id: session_id.clone(),
+                workspace_id: workspace_id.clone(),
+                source,
+            })?;
         Ok(HostSessionInfo {
             session_id,
+            workspace_id: Some(workspace_id),
             created_at,
-            cwd: Some(self.inner.identity.cwd.to_string_lossy().into_owned()),
+            cwd: Some(cwd),
             event_count: 0,
         })
+    }
+
+    fn default_workspace_id(&self) -> Result<WorkspaceId, HostError> {
+        self.inner
+            .workspace_registry
+            .list()
+            .into_iter()
+            .find(|workspace| workspace.path == self.inner.identity.cwd.to_string_lossy())
+            .map(|workspace| workspace.workspace_id)
+            .ok_or_else(|| HostError::InvalidConfiguration("default workspace is missing".into()))
+    }
+
+    fn require_session_root(&self, header: &SessionHeader, root: &Path) -> Result<(), HostError> {
+        let valid = header
+            .cwd
+            .as_deref()
+            .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+            .is_some_and(|cwd| cwd == root);
+        if valid {
+            Ok(())
+        } else {
+            Err(HostError::invalid(
+                "SESSION_CONFLICT",
+                "session cwd does not match the requested workspace",
+            ))
+        }
     }
 
     async fn prompt_inner(
@@ -1087,6 +1224,40 @@ impl HostHandle {
         if lock(&self.inner.owned_agents).len() >= self.inner.config.max_live_sessions {
             return Err(HostError::SessionCapacity);
         }
+        let header = match self.inner.sessions.get(session_id) {
+            Some(session) => session.header(),
+            None => match self
+                .inner
+                .persistence
+                .inspect(session_id, self.inner.cancellation.clone())
+                .await?
+            {
+                Some(session) => session.header,
+                None => {
+                    self.create_session_inner(session_id.clone()).await?;
+                    self.inner
+                        .sessions
+                        .get(session_id)
+                        .ok_or_else(|| {
+                            HostError::InvalidConfiguration("new session was not published".into())
+                        })?
+                        .header()
+                }
+            },
+        };
+        if self
+            .inner
+            .workspace_registry
+            .workspace_for_session(session_id)
+            .is_none()
+        {
+            return Err(HostError::SessionUngrouped {
+                session_id: session_id.clone(),
+            });
+        }
+        let lease = self.inner.resources.resolve(session_id)?;
+        let root = lease.validate_current()?;
+        self.require_session_root(&header, &root)?;
         let owned = self
             .inner
             .registry
@@ -1094,8 +1265,8 @@ impl HostHandle {
                 SessionHeader {
                     version: SESSION_FORMAT_VERSION,
                     id: session_id.clone(),
-                    created_at: now(),
-                    cwd: Some(self.inner.identity.cwd.to_string_lossy().into_owned()),
+                    created_at: header.created_at,
+                    cwd: Some(root.to_string_lossy().into_owned()),
                     parent_session: None,
                     seed_length: None,
                     origin: None,
@@ -1357,6 +1528,15 @@ impl HostApi for HostHandle {
             .await
             .map_err(HostError::wire)
     }
+    async fn create_session_in(
+        &self,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    ) -> Result<HostSessionInfo, TessivumError> {
+        self.create_session_in_inner(session_id, workspace_id)
+            .await
+            .map_err(HostError::wire)
+    }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         self.inner
             .persistence
@@ -1366,6 +1546,11 @@ impl HostApi for HostHandle {
                 sessions
                     .into_iter()
                     .map(|session| HostSessionInfo {
+                        workspace_id: self
+                            .inner
+                            .workspace_registry
+                            .workspace_for_session(&session.header.id)
+                            .map(|workspace| workspace.workspace_id),
                         session_id: session.header.id,
                         created_at: session.header.created_at,
                         cwd: session.header.cwd,
@@ -1386,6 +1571,9 @@ impl HostApi for HostHandle {
     }
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         Some(self.inner.approvals.clone())
+    }
+    fn workspace_registry(&self) -> Option<WorkspaceRegistry> {
+        Some(self.inner.workspace_registry.clone())
     }
     fn settings(&self) -> Option<Arc<Settings>> {
         Some(Arc::clone(&self.inner.settings))
@@ -1444,6 +1632,15 @@ impl HostApi for HostRuntime {
     ) -> Result<HostSessionInfo, TessivumError> {
         self.handle.create_session(session_id).await
     }
+    async fn create_session_in(
+        &self,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    ) -> Result<HostSessionInfo, TessivumError> {
+        self.handle
+            .create_session_in(session_id, workspace_id)
+            .await
+    }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         self.handle.list_sessions().await
     }
@@ -1452,6 +1649,9 @@ impl HostApi for HostRuntime {
     }
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         self.handle.approval_registry()
+    }
+    fn workspace_registry(&self) -> Option<WorkspaceRegistry> {
+        self.handle.workspace_registry()
     }
     fn settings(&self) -> Option<Arc<Settings>> {
         self.handle.settings()

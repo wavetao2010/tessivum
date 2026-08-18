@@ -8,10 +8,16 @@ use serde_json::json;
 use tessivum::{
     credentials::{CredentialError, CredentialRef},
     host::{HostApi, HostConfig, HostNotification, HostRuntime},
-    protocol::{AgentCancelCause, ContentBlock, SessionPromptParams, SessionStatus},
+    persistence_jsonl::JsonlSessionPersistence,
+    protocol::{
+        AgentCancelCause, ContentBlock, SessionHeader, SessionPromptParams, SessionStatus,
+        SESSION_FORMAT_VERSION,
+    },
+    session::SessionPersistence,
     settings::{SettingsError, SettingsEventKind, SettingsRegistration},
     SessionId,
 };
+use tessivum_core::ContextHandle;
 use uuid::Uuid;
 
 const REPLAY: &str = include_str!("../fixtures/headless/recorded-replay.jsonl");
@@ -559,4 +565,155 @@ async fn host_uses_selected_storage_files_and_rejects_directories() {
         .err()
         .unwrap();
     assert_eq!(rejected.code(), "INVALID_HOST_CONFIG");
+}
+
+#[tokio::test]
+async fn host_persists_workspace_session_attachment_and_retries_ungrouped_blanks() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let registry = runtime.workspace_registry().unwrap();
+    let default_workspace = registry.list().into_iter().next().unwrap().workspace_id;
+    let direct = runtime
+        .create_session(SessionId::from("workspace-direct"))
+        .await
+        .unwrap();
+    assert_eq!(direct.workspace_id, Some(default_workspace.clone()));
+
+    let other_dir = root.path().join("other-workspace");
+    fs::create_dir(&other_dir).unwrap();
+    let other_workspace = registry
+        .create(&other_dir, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let attached = runtime
+        .create_session_in(SessionId::from("workspace-other"), other_workspace.clone())
+        .await
+        .unwrap();
+    assert_eq!(attached.workspace_id, Some(other_workspace));
+    assert_eq!(
+        runtime
+            .create_session_in(
+                SessionId::from("workspace-other"),
+                default_workspace.clone()
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "SESSION_CONFLICT"
+    );
+
+    let registry_path = root.path().join("data/workspaces.json");
+    fs::remove_file(&registry_path).unwrap();
+    fs::create_dir(&registry_path).unwrap();
+    let failed = runtime
+        .create_session_in(
+            SessionId::from("workspace-retry"),
+            default_workspace.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code, "WORKSPACE_ATTACH_FAILED");
+    let ungrouped = runtime
+        .list_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.session_id == SessionId::from("workspace-retry"))
+        .unwrap();
+    assert_eq!(ungrouped.workspace_id, None);
+    assert_eq!(
+        runtime
+            .prompt(prompt("workspace-retry"))
+            .await
+            .unwrap_err()
+            .code,
+        "SESSION_UNGROUPED"
+    );
+    fs::remove_dir(&registry_path).unwrap();
+    let retried = runtime
+        .create_session_in(
+            SessionId::from("workspace-retry"),
+            default_workspace.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.workspace_id, Some(default_workspace.clone()));
+    runtime.shutdown().await.unwrap();
+
+    let restarted = HostRuntime::boot(config(&root)).await.unwrap();
+    let reopened = restarted.workspace_registry().unwrap();
+    assert!(reopened
+        .list()
+        .into_iter()
+        .any(|workspace| workspace.workspace_id == default_workspace));
+    assert_eq!(
+        restarted
+            .list_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.session_id == SessionId::from("workspace-retry"))
+            .unwrap()
+            .workspace_id,
+        Some(default_workspace)
+    );
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_boot_migrates_durable_session_cwds_once() {
+    let root = TempDir::new();
+    let legacy_workspace = root.path().join("legacy-workspace");
+    fs::create_dir(&legacy_workspace).unwrap();
+    let persistence = JsonlSessionPersistence::new(root.path().join("data"));
+    let context = ContextHandle::root();
+    persistence
+        .create(
+            &SessionHeader {
+                version: SESSION_FORMAT_VERSION,
+                id: SessionId::from("legacy-workspace-session"),
+                created_at: 1,
+                cwd: Some(
+                    legacy_workspace
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                parent_session: None,
+                seed_length: None,
+                origin: None,
+                delegation_depth: Some(0),
+                agent_preset: None,
+            },
+            context.scope().cancellation(),
+        )
+        .await
+        .unwrap();
+
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let first = runtime
+        .workspace_registry()
+        .unwrap()
+        .workspace_for_session("legacy-workspace-session")
+        .unwrap();
+    assert_eq!(
+        first.path,
+        legacy_workspace.canonicalize().unwrap().to_string_lossy()
+    );
+    let workspace_id = first.workspace_id;
+    runtime.shutdown().await.unwrap();
+
+    let restarted = HostRuntime::boot(config(&root)).await.unwrap();
+    assert_eq!(
+        restarted
+            .workspace_registry()
+            .unwrap()
+            .workspace_for_session("legacy-workspace-session")
+            .unwrap()
+            .workspace_id,
+        workspace_id
+    );
+    restarted.shutdown().await.unwrap();
 }

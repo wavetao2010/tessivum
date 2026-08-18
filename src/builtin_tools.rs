@@ -4,7 +4,10 @@
 //! configured working directory's host permissions; callers must still apply
 //! their normal approval and sandbox policy before allowing a model to invoke it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -14,6 +17,7 @@ use crate::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
     },
+    workspace::{SessionResourceResolver, WorkspaceError, WorkspaceLease},
     ContentBlock, TessivumError,
 };
 
@@ -27,8 +31,10 @@ pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub struct BuiltinToolsConfig {
     /// Enables the trusted native `bash` capability. It is disabled by default.
     pub enable_bash: bool,
-    /// Working directory for `bash`; canonicalized when the tools are registered.
+    /// Fixed working directory for headless composition; ignored with a resolver.
     pub cwd: PathBuf,
+    /// Resolves each trusted `bash` call from its durable session membership.
+    pub resolver: Option<Arc<SessionResourceResolver>>,
     /// Maximum combined stdout and stderr bytes retained for one `bash` call.
     pub max_output_bytes: usize,
 }
@@ -38,6 +44,7 @@ impl Default for BuiltinToolsConfig {
         Self {
             enable_bash: false,
             cwd: PathBuf::from("."),
+            resolver: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
     }
@@ -78,6 +85,7 @@ impl BuiltinTools {
                 bash_schema(),
                 Bash {
                     cwd: config.cwd.clone(),
+                    resolver: config.resolver.clone(),
                     max_output_bytes: config.max_output_bytes,
                 },
             ))?);
@@ -106,19 +114,21 @@ fn canonical_config(mut config: BuiltinToolsConfig) -> Result<BuiltinToolsConfig
             json!({"maxOutputBytes": config.max_output_bytes, "max": MAX_OUTPUT_BYTES}),
         ));
     }
-    config.cwd = config.cwd.canonicalize().map_err(|error| {
-        config_error(
-            "INVALID_BUILTIN_TOOLS_CONFIG",
-            "cwd must exist and be canonicalizable",
-            json!({"cwd": config.cwd, "error": error.to_string()}),
-        )
-    })?;
-    if !config.cwd.is_dir() {
-        return Err(config_error(
-            "INVALID_BUILTIN_TOOLS_CONFIG",
-            "cwd must be a directory",
-            json!({"cwd": config.cwd}),
-        ));
+    if config.resolver.is_none() {
+        config.cwd = config.cwd.canonicalize().map_err(|error| {
+            config_error(
+                "INVALID_BUILTIN_TOOLS_CONFIG",
+                "cwd must exist and be canonicalizable",
+                json!({"cwd": config.cwd, "error": error.to_string()}),
+            )
+        })?;
+        if !config.cwd.is_dir() {
+            return Err(config_error(
+                "INVALID_BUILTIN_TOOLS_CONFIG",
+                "cwd must be a directory",
+                json!({"cwd": config.cwd}),
+            ));
+        }
     }
     Ok(config)
 }
@@ -174,6 +184,7 @@ impl ToolHandler for Echo {
 #[cfg(unix)]
 struct Bash {
     cwd: PathBuf,
+    resolver: Option<Arc<SessionResourceResolver>>,
     max_output_bytes: usize,
 }
 
@@ -193,13 +204,27 @@ impl ToolHandler for Bash {
                 json!({"path": "$.command"}),
             ));
         }
-        run_bash(&self.cwd, self.max_output_bytes, &context, command).await
+        let lease = self
+            .resolver
+            .as_ref()
+            .map(|resolver| resolver.resolve(&context.session))
+            .transpose()
+            .map_err(|error| workspace_error(&context, error))?;
+        run_bash(
+            &self.cwd,
+            lease.as_ref(),
+            self.max_output_bytes,
+            &context,
+            command,
+        )
+        .await
     }
 }
 
 #[cfg(unix)]
 async fn run_bash(
     cwd: &Path,
+    lease: Option<&WorkspaceLease>,
     max_output_bytes: usize,
     context: &ToolRunContext,
     command: &str,
@@ -211,9 +236,15 @@ async fn run_bash(
 
     use tokio::process::Command;
 
+    let cwd = match lease {
+        Some(lease) => lease
+            .validate_current()
+            .map_err(|error| workspace_error(context, error))?,
+        None => cwd.to_path_buf(),
+    };
     let mut child = Command::new("/bin/sh")
         .args(["-lc", "--", command])
-        .current_dir(cwd)
+        .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -279,6 +310,16 @@ fn bash_error(message: &str, error: std::io::Error) -> TessivumError {
         message,
         "tools",
         json!({"error": error.to_string()}),
+    )
+}
+
+#[cfg(unix)]
+fn workspace_error(context: &ToolRunContext, error: WorkspaceError) -> TessivumError {
+    TessivumError::new(
+        error.code(),
+        error.to_string(),
+        "tools",
+        json!({"sessionId": context.session}),
     )
 }
 

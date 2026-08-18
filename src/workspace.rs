@@ -250,8 +250,7 @@ impl WorkspaceLease {
         &self.canonical_root
     }
 
-    /// Verifies both registration and generation.  The returned path is a
-    /// clone so callers cannot retain a lock or mutate registry state.
+    /// Verifies registration, generation, and the filesystem root immediately before use.
     pub fn validate_current(&self) -> Result<PathBuf, WorkspaceError> {
         let Some(registry) = self.registry.upgrade() else {
             return Err(WorkspaceError::StaleLease);
@@ -274,7 +273,44 @@ impl WorkspaceLease {
         if *generation != self.generation || workspace.path != path_string(&self.canonical_root) {
             return Err(WorkspaceError::StaleLease);
         }
-        Ok(self.canonical_root.clone())
+        let current =
+            canonical_directory(&self.canonical_root).map_err(|_| WorkspaceError::StaleLease)?;
+        if current != self.canonical_root {
+            return Err(WorkspaceError::StaleLease);
+        }
+        Ok(current)
+    }
+}
+
+/// Resolves a durable session membership into a generation-checked resource root.
+#[derive(Clone, Debug)]
+pub struct SessionResourceResolver {
+    registry: WorkspaceRegistry,
+}
+
+impl SessionResourceResolver {
+    pub fn new(registry: WorkspaceRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub fn registry(&self) -> &WorkspaceRegistry {
+        &self.registry
+    }
+
+    /// Returns a lease after checking the current canonical directory.
+    pub fn resolve(&self, session_id: impl AsRef<str>) -> Result<WorkspaceLease, WorkspaceError> {
+        let session_id = SessionId::from(session_id.as_ref());
+        let workspace = self
+            .registry
+            .workspace_for_session(&session_id)
+            .ok_or_else(|| WorkspaceError::UnaccountedSession(session_id.clone()))?;
+        let lease = self.registry.resolve(&workspace.workspace_id)?;
+        lease.validate_current()?;
+        Ok(lease)
+    }
+
+    pub fn resolve_root(&self, session_id: impl AsRef<str>) -> Result<PathBuf, WorkspaceError> {
+        self.resolve(session_id)?.validate_current()
     }
 }
 
@@ -364,6 +400,18 @@ impl WorkspaceRegistry {
 
     pub fn list(&self) -> Vec<Workspace> {
         self.snapshot().items
+    }
+    /// Adds a freshly persisted session to the in-memory known-session set.
+    /// Membership remains ungrouped until `attach_session` commits it.
+    pub fn recognize_session(&self, session_id: impl AsRef<str>) -> Result<(), WorkspaceError> {
+        let session_id = SessionId::from(session_id.as_ref());
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::StaleLease)?;
+        state.known_sessions.insert(session_id);
+        Ok(())
     }
 
     pub fn revision(&self) -> u64 {

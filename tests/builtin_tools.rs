@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::Duration,
 };
 
@@ -9,6 +10,7 @@ use serde_json::{json, Value};
 use tessivum::{
     builtin_tools::{BuiltinTools, BuiltinToolsConfig, DEFAULT_MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES},
     tools::{ToolRunContext, ToolRuntime},
+    workspace::{SessionResourceResolver, WorkspaceRegistry},
     ContentBlock, SessionId, ToolCallId,
 };
 use tessivum_core::ContextHandle;
@@ -59,6 +61,7 @@ fn bash_config(cwd: &Path) -> BuiltinToolsConfig {
     BuiltinToolsConfig {
         enable_bash: true,
         cwd: cwd.to_path_buf(),
+        resolver: None,
         max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
     }
 }
@@ -161,6 +164,7 @@ async fn bash_bounds_combined_output_and_marks_truncation() {
         BuiltinToolsConfig {
             enable_bash: true,
             cwd: directory.path().to_path_buf(),
+            resolver: None,
             max_output_bytes: 8,
         },
     )
@@ -229,16 +233,19 @@ async fn invalid_configuration_and_arguments_fail_explicitly() {
         BuiltinToolsConfig {
             enable_bash: false,
             cwd: directory.path().to_path_buf(),
+            resolver: None,
             max_output_bytes: 0,
         },
         BuiltinToolsConfig {
             enable_bash: false,
             cwd: directory.path().to_path_buf(),
+            resolver: None,
             max_output_bytes: MAX_OUTPUT_BYTES + 1,
         },
         BuiltinToolsConfig {
             enable_bash: false,
             cwd: directory.path().join("missing"),
+            resolver: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         },
     ] {
@@ -260,9 +267,96 @@ async fn invalid_configuration_and_arguments_fail_explicitly() {
         let output = runtime
             .execute(context(&root, "invalid"), name, arguments)
             .await;
+
         assert!(output.is_error);
         assert_eq!(code(&output), "INVALID_TOOL_ARGUMENTS");
     }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_uses_only_the_workspace_bound_to_its_session() {
+    let root = TempDir::new();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &first, Vec::new()).unwrap();
+    let first_workspace = registry.list().into_iter().next().unwrap().workspace_id;
+    let second_workspace = registry
+        .create(&second, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    for (session, workspace) in [
+        (SessionId::from("workspace-first"), first_workspace.clone()),
+        (
+            SessionId::from("workspace-second"),
+            second_workspace.clone(),
+        ),
+    ] {
+        registry.recognize_session(&session).unwrap();
+        registry.attach_session(&workspace, &session, None).unwrap();
+    }
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: root.path().to_path_buf(),
+            resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .unwrap();
+    let context_root = ContextHandle::root();
+    let run = |session: &str, call: &str| ToolRunContext {
+        session: SessionId::from(session),
+        call: ToolCallId::from(call),
+        cancellation: context_root.scope().cancellation(),
+    };
+
+    let first_output = runtime
+        .execute(
+            run("workspace-first", "first"),
+            "bash",
+            json!({"command": "pwd"}),
+        )
+        .await;
+    assert_eq!(
+        text(&first_output).trim(),
+        first.canonicalize().unwrap().to_string_lossy()
+    );
+    let second_output = runtime
+        .execute(
+            run("workspace-second", "second"),
+            "bash",
+            json!({"command": "pwd"}),
+        )
+        .await;
+    assert_eq!(
+        text(&second_output).trim(),
+        second.canonicalize().unwrap().to_string_lossy()
+    );
+    let traversal = runtime
+        .execute(
+            run("workspace-first", "traversal"),
+            "bash",
+            json!({"command": "pwd", "cwd": "/"}),
+        )
+        .await;
+    assert!(traversal.is_error);
+    assert_eq!(code(&traversal), "INVALID_TOOL_ARGUMENTS");
+
+    fs::remove_dir(&second).unwrap();
+    let deleted = runtime
+        .execute(
+            run("workspace-second", "deleted"),
+            "bash",
+            json!({"command": "pwd"}),
+        )
+        .await;
+    assert!(deleted.is_error);
+    assert_eq!(code(&deleted), "STALE_WORKSPACE_LEASE");
 }
 
 #[cfg(not(unix))]
