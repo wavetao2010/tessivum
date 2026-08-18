@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -14,7 +16,7 @@ use tessivum::{
         AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry, AgentRuntime,
         AgentStatus, Inbox,
     },
-    protocol::{Message, SessionEvent, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
+    protocol::{Message, SessionEvent, SessionHeader, SessionId, SessionOrigin, SESSION_FORMAT_VERSION},
     session::{
         MemorySessionPersistence, SessionError, SessionInspection, SessionPersistence, SessionStore,
     },
@@ -26,10 +28,12 @@ use tessivum::{
         WorkflowContext, WorkflowEngine, WorkflowError, WorkflowRequest, WorkflowRun,
         WorkflowRunStatus, WorkflowRuntime,
     },
+    workspace::{WorkspaceError, WorkspaceRegistry},
     TessivumError,
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::{oneshot, Notify};
+use uuid::Uuid;
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -138,11 +142,20 @@ struct Harness {
     parent: Arc<AgentHandle>,
     agents: AgentRegistry,
     sessions: SessionStore,
+    persistence: Arc<dyn SessionPersistence>,
 }
 
 async fn setup_with(
     persistence: Arc<dyn SessionPersistence>,
     factory: Arc<dyn AgentFactory>,
+) -> Harness {
+    setup_with_parent_header(persistence, factory, header("parent", None)).await
+}
+
+async fn setup_with_parent_header(
+    persistence: Arc<dyn SessionPersistence>,
+    factory: Arc<dyn AgentFactory>,
+    parent_header: SessionHeader,
 ) -> Harness {
     let sessions = SessionStore::new(Arc::clone(&persistence));
     let agents = AgentRegistry::new(sessions.clone());
@@ -151,11 +164,11 @@ async fn setup_with(
         native: NativeSubagentProvider::new(agents.clone(), ["scout".into()]),
         calls: AtomicUsize::new(0),
     });
-    let service = SubagentService::new(agents.clone(), sessions.clone(), persistence);
+    let service = SubagentService::new(agents.clone(), sessions.clone(), Arc::clone(&persistence));
     std::mem::forget(service.register("native", provider.clone()).unwrap());
     let parent = Arc::new(
         agents
-            .create(header("parent", None), options(), cancellation())
+            .create(parent_header, options(), cancellation())
             .await
             .unwrap(),
     );
@@ -165,11 +178,102 @@ async fn setup_with(
         parent,
         agents,
         sessions,
+        persistence,
     }
 }
 
 async fn setup() -> Harness {
     setup_with(Arc::new(MemorySessionPersistence::new()), Arc::new(Factory)).await
+}
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("tessivum-subagent-{label}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn dir(&self, name: &str) -> PathBuf {
+        let path = self.0.join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct WorkspaceHarness {
+    service: SubagentService,
+    provider: Arc<CountingProvider>,
+    parent: Arc<AgentHandle>,
+    agents: AgentRegistry,
+    sessions: SessionStore,
+    persistence: Arc<dyn SessionPersistence>,
+    registry: WorkspaceRegistry,
+    workspace_id: String,
+    workspace: PathBuf,
+    root: TempDir,
+}
+
+async fn setup_workspace() -> WorkspaceHarness {
+    let root = TempDir::new("workspace");
+    let workspace = root.dir("workspace");
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());
+    let sessions = SessionStore::new(Arc::clone(&persistence));
+    let agents = AgentRegistry::new(sessions.clone());
+    std::mem::forget(agents.register_factory(Arc::new(Factory)).unwrap());
+    let mut parent_header = header("parent", None);
+    parent_header.cwd = Some(workspace.canonicalize().unwrap().to_string_lossy().into_owned());
+    let parent = Arc::new(
+        agents
+            .create(parent_header, options(), cancellation())
+            .await
+            .unwrap(),
+    );
+    let registry = WorkspaceRegistry::open(
+        root.path().join("data"),
+        &workspace,
+        persistence.list(cancellation()).await.unwrap(),
+    )
+    .unwrap();
+    let workspace_id = registry
+        .workspace_for_session(parent.id())
+        .unwrap()
+        .workspace_id
+        .to_string();
+    let provider = Arc::new(CountingProvider {
+        native: NativeSubagentProvider::new(agents.clone(), ["scout".into()]),
+        calls: AtomicUsize::new(0),
+    });
+    let service = SubagentService::new_with_workspace_registry(
+        agents.clone(),
+        sessions.clone(),
+        Arc::clone(&persistence),
+        registry.clone(),
+    );
+    std::mem::forget(service.register("native", provider.clone()).unwrap());
+    WorkspaceHarness {
+        service,
+        provider,
+        parent,
+        agents,
+        sessions,
+        persistence,
+        registry,
+        workspace_id,
+        workspace,
+        root,
+    }
 }
 
 #[tokio::test]
@@ -264,6 +368,297 @@ async fn cold_resume_uses_durable_child_header() {
     assert_eq!(
         resumed_child.run().await.unwrap().status,
         SubagentRunStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn nonworkspace_service_inherits_parent_header_and_rejects_cwd_override() {
+    let mut parent_header = header("parent", None);
+    parent_header.cwd = Some("/parent-root".into());
+    let harness = setup_with_parent_header(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(Factory),
+        parent_header,
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let (_, child) = parent
+        .start(request("inherited-child"), cancellation())
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .persistence
+            .load(&SessionId::from("inherited-child"), cancellation())
+            .await
+            .unwrap()
+            .unwrap()
+            .cwd,
+        Some("/parent-root".into())
+    );
+    child.dispose().await.unwrap();
+
+    let calls = harness.provider.calls.load(Ordering::Acquire);
+    let mut override_request = request("override-child");
+    override_request.cwd = Some("/other-root".into());
+    assert!(matches!(
+        parent.start(override_request, cancellation()).await,
+        Err(SubagentError::CwdOverrideUnsupported)
+    ));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), calls);
+}
+
+#[tokio::test]
+async fn workspace_children_inherit_and_resume_after_restart() {
+    let harness = setup_workspace().await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let (_, child) = parent
+        .start(request("workspace-child"), cancellation())
+        .await
+        .unwrap();
+    let expected_cwd = Some(harness.workspace.canonicalize().unwrap().to_string_lossy().into_owned());
+    assert_eq!(
+        harness
+            .persistence
+            .load(&SessionId::from("workspace-child"), cancellation())
+            .await
+            .unwrap()
+            .unwrap()
+            .cwd,
+        expected_cwd.clone()
+    );
+    assert_eq!(
+        harness
+            .registry
+            .workspace_for_session("workspace-child")
+            .unwrap()
+            .workspace_id
+            .to_string(),
+        harness.workspace_id
+    );
+    child.dispose().await.unwrap();
+    harness.parent.dispose().await.unwrap();
+
+    let registry = WorkspaceRegistry::open(
+        harness.root.path().join("data"),
+        &harness.workspace,
+        harness.persistence.list(cancellation()).await.unwrap(),
+    )
+    .unwrap();
+    let sessions = SessionStore::new(harness.persistence.clone());
+    let agents = AgentRegistry::new(sessions.clone());
+    std::mem::forget(agents.register_factory(Arc::new(Factory)).unwrap());
+    let provider = Arc::new(CountingProvider {
+        native: NativeSubagentProvider::new(agents.clone(), ["scout".into()]),
+        calls: AtomicUsize::new(0),
+    });
+    let service = SubagentService::new_with_workspace_registry(
+        agents.clone(),
+        sessions,
+        harness.persistence.clone(),
+        registry.clone(),
+    );
+    std::mem::forget(service.register("native", provider).unwrap());
+    let resumed_parent = Arc::new(
+        agents
+            .resume(SessionId::from("parent"), options(), cancellation())
+            .await
+            .unwrap(),
+    );
+    let parent = service.attach(resumed_parent).unwrap();
+    let mut resumed = request("workspace-child");
+    resumed.resume = true;
+    let (_, resumed_child) = parent.start(resumed, cancellation()).await.unwrap();
+    assert_eq!(
+        harness
+            .persistence
+            .load(&SessionId::from("workspace-child"), cancellation())
+            .await
+            .unwrap()
+            .unwrap()
+            .cwd,
+        expected_cwd
+    );
+    resumed_child.dispose().await.unwrap();
+    assert_eq!(
+        registry
+            .workspace_for_session("workspace-child")
+            .unwrap()
+            .workspace_id
+            .to_string(),
+        harness.workspace_id
+    );
+}
+
+#[tokio::test]
+async fn workspace_resume_rejects_foreign_and_removed_parent_workspaces() {
+    let harness = setup_workspace().await;
+    let wrong_cwd_child = harness
+        .agents
+        .create(
+            SessionHeader {
+                version: SESSION_FORMAT_VERSION,
+                id: SessionId::from("wrong-cwd-child"),
+                created_at: 0,
+                cwd: Some("/wrong-root".into()),
+                parent_session: Some(SessionId::from("parent")),
+                seed_length: None,
+                origin: Some(SessionOrigin::Subagent),
+                delegation_depth: None,
+                agent_preset: Some("scout".into()),
+            },
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    harness.registry.recognize_session("wrong-cwd-child").unwrap();
+    harness
+        .registry
+        .attach_session(&harness.workspace_id, "wrong-cwd-child", None)
+        .unwrap();
+    wrong_cwd_child.dispose().await.unwrap();
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let mut resume = request("wrong-cwd-child");
+    resume.resume = true;
+    assert!(matches!(
+        parent.start(resume, cancellation()).await,
+        Err(SubagentError::ResumeWorkspaceMismatch)
+    ));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), 0);
+
+    let foreign = harness.root.dir("foreign");
+    let foreign_id = harness
+        .registry
+        .create(&foreign, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let child_header = SessionHeader {
+        version: SESSION_FORMAT_VERSION,
+        id: SessionId::from("foreign-child"),
+        created_at: 0,
+        cwd: Some(harness.workspace.canonicalize().unwrap().to_string_lossy().into_owned()),
+        parent_session: Some(SessionId::from("parent")),
+        seed_length: None,
+        origin: Some(SessionOrigin::Subagent),
+        delegation_depth: None,
+        agent_preset: Some("scout".into()),
+    };
+    let foreign_child = harness
+        .agents
+        .create(child_header, options(), cancellation())
+        .await
+        .unwrap();
+    harness.registry.recognize_session("foreign-child").unwrap();
+    harness
+        .registry
+        .attach_session(&foreign_id, "foreign-child", None)
+        .unwrap();
+    foreign_child.dispose().await.unwrap();
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let mut resume = request("foreign-child");
+    resume.resume = true;
+    assert!(matches!(
+        parent.start(resume, cancellation()).await,
+        Err(SubagentError::ResumeWorkspaceMismatch)
+    ));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), 0);
+
+    let removed = setup_workspace().await;
+    let parent = removed.service.attach(removed.parent.clone()).unwrap();
+    removed
+        .registry
+        .delete(&removed.workspace_id, None)
+        .unwrap();
+    assert!(matches!(
+        parent.start(request("removed-child"), cancellation()).await,
+        Err(SubagentError::Workspace(_))
+    ));
+    assert_eq!(removed.provider.calls.load(Ordering::Acquire), 0);
+}
+
+struct DeleteWorkspaceProvider {
+    native: NativeSubagentProvider,
+    registry: WorkspaceRegistry,
+    workspace_id: String,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl SubagentProvider for DeleteWorkspaceProvider {
+    fn capabilities(&self) -> BTreeSet<String> {
+        self.native.capabilities()
+    }
+
+    async fn start(
+        &self,
+        request: tessivum::subagent::ProviderStart,
+        cancellation: CancellationToken,
+    ) -> Result<AgentHandle, SubagentError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let agent = self.native.start(request, cancellation).await?;
+        self.registry.delete(&self.workspace_id, None).unwrap();
+        Ok(agent)
+    }
+}
+
+#[tokio::test]
+async fn workspace_attach_failure_disposes_and_leaves_child_for_repair() {
+    let harness = setup_workspace().await;
+    let provider = Arc::new(DeleteWorkspaceProvider {
+        native: NativeSubagentProvider::new(harness.agents.clone(), ["scout".into()]),
+        registry: harness.registry.clone(),
+        workspace_id: harness.workspace_id.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let service = SubagentService::new_with_workspace_registry(
+        harness.agents.clone(),
+        harness.sessions.clone(),
+        harness.persistence.clone(),
+        harness.registry.clone(),
+    );
+    std::mem::forget(service.register("deleting", provider.clone()).unwrap());
+    let parent = service.attach(harness.parent.clone()).unwrap();
+    let mut request = request("repair-child");
+    request.provider = "deleting".into();
+    assert!(matches!(
+        parent.start(request, cancellation()).await,
+        Err(SubagentError::Workspace(WorkspaceError::StaleLease))
+    ));
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    assert!(harness.agents.get(&SessionId::from("repair-child")).is_none());
+    assert_eq!(
+        harness
+            .persistence
+            .load(&SessionId::from("repair-child"), cancellation())
+            .await
+            .unwrap()
+            .unwrap()
+            .cwd,
+        Some(harness.workspace.canonicalize().unwrap().to_string_lossy().into_owned())
+    );
+    assert!(harness.registry.workspace_for_session("repair-child").is_none());
+    assert!(harness.parent.session().events().is_empty());
+
+    let replacement = harness
+        .registry
+        .create(&harness.workspace, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    harness.registry.recognize_session("repair-child").unwrap();
+    harness
+        .registry
+        .attach_session(&replacement, "repair-child", None)
+        .unwrap();
+    assert_eq!(
+        harness
+            .registry
+            .workspace_for_session("repair-child")
+            .unwrap()
+            .workspace_id,
+        replacement
     );
 }
 

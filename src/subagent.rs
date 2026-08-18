@@ -24,6 +24,7 @@ use crate::{
         SessionId, SessionOrigin, SESSION_FORMAT_VERSION,
     },
     session::{Session, SessionError, SessionInspection, SessionPersistence, SessionStore},
+    workspace::{SessionResourceResolver, WorkspaceError, WorkspaceLease, WorkspaceRegistry},
     TessivumError,
 };
 
@@ -222,6 +223,8 @@ pub enum SubagentError {
     InvalidCapability,
     #[error("subagent options are invalid: {0}")]
     InvalidOptions(&'static str),
+    #[error("subagent cwd overrides are unsupported")]
+    CwdOverrideUnsupported,
     #[error("parent session is required and must be live")]
     ParentRequired,
     #[error("subagent parent attachment requires a Tokio runtime")]
@@ -239,6 +242,8 @@ pub enum SubagentError {
     CancelledBeforeAcceptance,
     #[error("resumed child does not name this direct parent")]
     ResumeParentMismatch,
+    #[error("resumed child does not share this parent's workspace or cwd")]
+    ResumeWorkspaceMismatch,
     #[error("a child activation can run only once")]
     AlreadyRun,
     #[error(transparent)]
@@ -247,6 +252,8 @@ pub enum SubagentError {
     Session(#[from] SessionError),
     #[error(transparent)]
     Protocol(#[from] TessivumError),
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
 }
 
 struct ParentAdmissions {
@@ -606,9 +613,21 @@ impl SubagentActivation {
     }
 }
 
+struct WorkspaceResources {
+    registry: WorkspaceRegistry,
+    resolver: SessionResourceResolver,
+}
+
+struct ParentWorkspace {
+    registry: WorkspaceRegistry,
+    lease: WorkspaceLease,
+    cwd: String,
+}
+
 struct SubagentInner {
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
+    workspace: Option<WorkspaceResources>,
     providers: Arc<Mutex<ProviderState>>,
     children: Mutex<BTreeMap<u64, Arc<ChildState>>>,
     next_acceptance: AtomicU64,
@@ -635,10 +654,49 @@ impl SubagentService {
         sessions: SessionStore,
         persistence: Arc<dyn SessionPersistence>,
     ) -> Self {
+        Self::compose(sessions, persistence, None)
+    }
+
+    /// Composes subagent orchestration with durable workspace authority.
+    pub fn new_with_workspace_registry(
+        _agents: AgentRegistry,
+        sessions: SessionStore,
+        persistence: Arc<dyn SessionPersistence>,
+        registry: WorkspaceRegistry,
+    ) -> Self {
+        Self::new_with_workspace_resolver(
+            _agents,
+            sessions,
+            persistence,
+            SessionResourceResolver::new(registry),
+        )
+    }
+
+    /// Composes subagent orchestration with an existing session resource resolver.
+    pub fn new_with_workspace_resolver(
+        _agents: AgentRegistry,
+        sessions: SessionStore,
+        persistence: Arc<dyn SessionPersistence>,
+        resolver: SessionResourceResolver,
+    ) -> Self {
+        let registry = resolver.registry().clone();
+        Self::compose(
+            sessions,
+            persistence,
+            Some(WorkspaceResources { registry, resolver }),
+        )
+    }
+
+    fn compose(
+        sessions: SessionStore,
+        persistence: Arc<dyn SessionPersistence>,
+        workspace: Option<WorkspaceResources>,
+    ) -> Self {
         Self {
             inner: Arc::new(SubagentInner {
                 sessions,
                 persistence,
+                workspace,
                 providers: Arc::new(Mutex::new(ProviderState::default())),
                 children: Mutex::new(BTreeMap::new()),
                 next_acceptance: AtomicU64::new(0),
@@ -732,18 +790,30 @@ impl SubagentInner {
         cancellation: CancellationToken,
     ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
         let parent = self.require_live_parent(parent_agent)?;
+        if request.cwd.is_some() {
+            return Err(SubagentError::CwdOverrideUnsupported);
+        }
         let descriptor = descriptor(&parent, &request)?;
+        let workspace = self.parent_workspace(&parent)?;
+        let cwd = workspace
+            .as_ref()
+            .map(|workspace| workspace.cwd.clone())
+            .or_else(|| parent.header().cwd);
         if cancellation.is_cancelled() {
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
         let provider = self.select_provider(&descriptor)?;
         if request.resume {
-            self.require_direct_parent(&descriptor).await?;
+            self.require_direct_parent(&descriptor, &cwd, workspace.as_ref())
+                .await?;
+        }
+        if let Some(workspace) = &workspace {
+            workspace.lease.validate_current()?;
         }
         if cancellation.is_cancelled() {
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
-        let header = child_header(&descriptor, &request)?;
+        let header = child_header(&descriptor, &request, cwd)?;
         let agent = provider
             .start(
                 ProviderStart {
@@ -754,6 +824,11 @@ impl SubagentInner {
                 cancellation.clone(),
             )
             .await?;
+        if let Err(error) = self.attach_child_workspace(workspace.as_ref(), &descriptor.child_session_id)
+        {
+            let _ = agent.dispose().await;
+            return Err(error.into());
+        }
         if cancellation.is_cancelled() {
             let _ = agent.dispose().await;
             return Err(SubagentError::CancelledBeforeAcceptance);
@@ -884,9 +959,44 @@ impl SubagentInner {
         Ok(provider)
     }
 
+    fn parent_workspace(&self, parent: &Session) -> Result<Option<ParentWorkspace>, SubagentError> {
+        let Some(resources) = &self.workspace else {
+            return Ok(None);
+        };
+        let lease = resources.resolver.resolve(parent.id())?;
+        let cwd = lease
+            .validate_current()?
+            .to_string_lossy()
+            .into_owned();
+        Ok(Some(ParentWorkspace {
+            registry: resources.registry.clone(),
+            lease,
+            cwd,
+        }))
+    }
+
+    fn attach_child_workspace(
+        &self,
+        workspace: Option<&ParentWorkspace>,
+        child_session_id: &SessionId,
+    ) -> Result<(), WorkspaceError> {
+        let Some(workspace) = workspace else {
+            return Ok(());
+        };
+        workspace.registry.recognize_session(child_session_id)?;
+        workspace.lease.validate_current()?;
+        workspace.registry.attach_session(
+            workspace.lease.workspace_id(),
+            child_session_id,
+            None,
+        )
+    }
+
     async fn require_direct_parent(
         &self,
         descriptor: &SubagentDescriptor,
+        expected_cwd: &Option<String>,
+        workspace: Option<&ParentWorkspace>,
     ) -> Result<(), SubagentError> {
         let header = self
             .persistence
@@ -900,6 +1010,16 @@ impl SubagentInner {
             || header.origin != Some(SessionOrigin::Subagent)
         {
             return Err(SubagentError::ResumeParentMismatch);
+        }
+        if header.cwd != *expected_cwd
+            || workspace.is_some_and(|workspace| {
+                workspace
+                    .registry
+                    .workspace_for_session(&descriptor.child_session_id)
+                    .is_none_or(|child| child.workspace_id != *workspace.lease.workspace_id())
+            })
+        {
+            return Err(SubagentError::ResumeWorkspaceMismatch);
         }
         Ok(())
     }
@@ -955,12 +1075,13 @@ fn descriptor(
 fn child_header(
     descriptor: &SubagentDescriptor,
     request: &SubagentStartRequest,
+    cwd: Option<String>,
 ) -> Result<SessionHeader, SubagentError> {
     let header = SessionHeader {
         version: SESSION_FORMAT_VERSION,
         id: descriptor.child_session_id.clone(),
         created_at: request.created_at,
-        cwd: request.cwd.clone(),
+        cwd,
         parent_session: Some(descriptor.parent_session_id.clone()),
         seed_length: None,
         origin: Some(SessionOrigin::Subagent),
