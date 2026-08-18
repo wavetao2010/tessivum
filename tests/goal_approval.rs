@@ -1154,32 +1154,40 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     assert!(requested.call_id.is_none());
     assert!(requested.reason.is_none());
     let notice = notices.recv().await.unwrap();
-    assert!(matches!(notice, tessivum::approval::ApprovalNotification::Requested(value) if value.rpc_id == requested.rpc_id));
+    assert!(
+        matches!(notice, tessivum::approval::ApprovalNotification::Requested(value) if value.rpc_id == requested.rpc_id)
+    );
 
-    assert!(!browser
-        .respond(
-            &requested.rpc_id,
-            &SessionId::from("wrong-session"),
-            &requested.approval_id,
-            ApprovalOutcome::AllowedOnce,
-        )
-        .accepted);
-    assert!(browser
-        .respond(
-            &requested.rpc_id,
-            &requested.session_id,
-            &requested.approval_id,
-            ApprovalOutcome::AllowedOnce,
-        )
-        .accepted);
-    assert!(!browser
-        .respond(
-            &requested.rpc_id,
-            &requested.session_id,
-            &requested.approval_id,
-            ApprovalOutcome::Rejected,
-        )
-        .accepted);
+    assert!(
+        !browser
+            .respond(
+                &requested.rpc_id,
+                &SessionId::from("wrong-session"),
+                &requested.approval_id,
+                ApprovalOutcome::AllowedOnce,
+            )
+            .accepted
+    );
+    assert!(
+        browser
+            .respond(
+                &requested.rpc_id,
+                &requested.session_id,
+                &requested.approval_id,
+                ApprovalOutcome::AllowedOnce,
+            )
+            .accepted
+    );
+    assert!(
+        !browser
+            .respond(
+                &requested.rpc_id,
+                &requested.session_id,
+                &requested.approval_id,
+                ApprovalOutcome::Rejected,
+            )
+            .accepted
+    );
     assert_eq!(first.await.unwrap(), ApprovalOutcome::AllowedOnce);
     let decision = session
         .events()
@@ -1193,7 +1201,9 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     assert_eq!(decision.approval_id, requested.approval_id);
     browser.observe_decided(&session_id, &decision);
     assert!(browser.snapshots().is_empty());
-    assert!(matches!(notices.recv().await.unwrap(), tessivum::approval::ApprovalNotification::Resolved(value) if value.approval_id == requested.approval_id && value.outcome == ApprovalOutcome::AllowedOnce));
+    assert!(
+        matches!(notices.recv().await.unwrap(), tessivum::approval::ApprovalNotification::Resolved(value) if value.approval_id == requested.approval_id && value.outcome == ApprovalOutcome::AllowedOnce)
+    );
 
     let second = tokio::spawn({
         let approvals = approvals.clone();
@@ -1222,14 +1232,16 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     browser.observe_asked(&rejected_asked);
     let rejected = browser.snapshots().pop().unwrap();
     assert_ne!(rejected.approval_id, requested.approval_id);
-    assert!(browser
-        .respond(
-            &rejected.rpc_id,
-            &rejected.session_id,
-            &rejected.approval_id,
-            ApprovalOutcome::Rejected,
-        )
-        .accepted);
+    assert!(
+        browser
+            .respond(
+                &rejected.rpc_id,
+                &rejected.session_id,
+                &rejected.approval_id,
+                ApprovalOutcome::Rejected,
+            )
+            .accepted
+    );
     assert_eq!(second.await.unwrap(), ApprovalOutcome::Rejected);
 }
 
@@ -1248,7 +1260,13 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
         let approvals = approvals.clone();
         async move {
             approvals
-                .approve(ApprovalRequest { action: "one".into(), details: json!({}) }, cancellation())
+                .approve(
+                    ApprovalRequest {
+                        action: "one".into(),
+                        details: json!({}),
+                    },
+                    cancellation(),
+                )
                 .await
         }
     });
@@ -1266,7 +1284,13 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
     assert_eq!(browser.snapshots().pop().unwrap().rpc_id, stable_rpc_id);
     assert_eq!(
         approvals
-            .approve(ApprovalRequest { action: "two".into(), details: json!({}) }, cancellation())
+            .approve(
+                ApprovalRequest {
+                    action: "two".into(),
+                    details: json!({})
+                },
+                cancellation()
+            )
             .await,
         ApprovalOutcome::Unavailable
     );
@@ -1291,7 +1315,13 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
         let approvals = approvals.clone();
         async move {
             approvals
-                .approve(ApprovalRequest { action: "three".into(), details: json!({}) }, cancellation())
+                .approve(
+                    ApprovalRequest {
+                        action: "three".into(),
+                        details: json!({}),
+                    },
+                    cancellation(),
+                )
                 .await
         }
     });
@@ -1308,13 +1338,15 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
     browser.observe_asked(&cancelled_asked);
     let pending = browser.snapshots().pop().unwrap();
     browser.cancel_session(&session_id);
-    assert!(!browser
-        .respond(
-            &pending.rpc_id,
-            &pending.session_id,
-            &pending.approval_id,
-            ApprovalOutcome::AllowedOnce,
-        )
-        .accepted);
+    assert!(
+        !browser
+            .respond(
+                &pending.rpc_id,
+                &pending.session_id,
+                &pending.approval_id,
+                ApprovalOutcome::AllowedOnce,
+            )
+            .accepted
+    );
     assert_eq!(cancelled.await.unwrap(), ApprovalOutcome::Cancelled);
 }

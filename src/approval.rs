@@ -187,6 +187,7 @@ pub enum ApprovalError {
     Session(#[from] SessionError),
 }
 
+#[derive(Default)]
 struct ApprovalState {
     policy: ApprovalPolicy,
     next_step: Option<ApprovalPolicy>,
@@ -841,7 +842,10 @@ impl HostApprovalRegistry {
         approval_id: &ApprovalId,
         outcome: ApprovalOutcome,
     ) -> RpcReceipt {
-        if !matches!(outcome, ApprovalOutcome::AllowedOnce | ApprovalOutcome::Rejected) {
+        if !matches!(
+            outcome,
+            ApprovalOutcome::AllowedOnce | ApprovalOutcome::Rejected
+        ) {
             return RpcReceipt::bad_response();
         }
         let sender = {
@@ -879,7 +883,10 @@ impl HostApprovalRegistry {
                 .map(|entry| entry.requested.clone())
         };
         if let Some(requested) = requested {
-            let _ = self.inner.notices.send(ApprovalNotification::Requested(requested));
+            let _ = self
+                .inner
+                .notices
+                .send(ApprovalNotification::Requested(requested));
         }
     }
 
@@ -902,7 +909,10 @@ impl HostApprovalRegistry {
                 outcome: decision.outcome,
             });
         if let Some(resolved) = resolved {
-            let _ = self.inner.notices.send(ApprovalNotification::Resolved(resolved));
+            let _ = self
+                .inner
+                .notices
+                .send(ApprovalNotification::Resolved(resolved));
         }
     }
 
@@ -922,7 +932,9 @@ impl HostApprovalRegistry {
         asked: ApprovalAsked,
         cancellation: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
-        let Some((receiver, deadline)) = self.register_pending(session, authority, &asked, cancellation.clone()) else {
+        let Some((receiver, deadline)) =
+            self.register_pending(session, authority, &asked, cancellation.clone())
+        else {
             return Ok(None);
         };
         tokio::select! {
@@ -1057,7 +1069,9 @@ impl HostApprovalRegistration {
             }
         };
         if removed {
-            cancel_pending(&inner, |entry| same_authority(&entry.authority, &self.authority));
+            cancel_pending(&inner, |entry| {
+                same_authority(&entry.authority, &self.authority)
+            });
         }
         removed
     }
@@ -1122,7 +1136,10 @@ fn remember_relayed_asked(state: &mut PendingState, key: PendingKey, limit: usiz
     }
 }
 
-fn cancel_pending(inner: &HostApprovalRegistryInner, matches: impl Fn(&PendingInteraction) -> bool) {
+fn cancel_pending(
+    inner: &HostApprovalRegistryInner,
+    matches: impl Fn(&PendingInteraction) -> bool,
+) {
     let mut pending = lock(&inner.pending);
     for entry in pending.entries.values_mut().filter(|entry| matches(entry)) {
         if !entry.claimed {

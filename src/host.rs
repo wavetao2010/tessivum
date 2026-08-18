@@ -697,7 +697,7 @@ impl HostRuntime {
             relays_closed: AtomicBool::new(false),
             relays: Mutex::new(Vec::new()),
         });
-HostHandle::start_service_relays(&inner);
+        HostHandle::start_service_relays(&inner);
         let handle = HostHandle { inner };
         handle.start_approval_relay();
         Ok(Self { handle })

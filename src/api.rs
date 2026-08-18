@@ -194,7 +194,10 @@ fn router_with_shutdown(
         .route("/ws", get(websocket_upgrade))
         .route("/api/events.mux", get(compat_events_mux))
         .route("/api/events.host", get(compat_events_host))
-        .route("/api/respond", post(compat_approval_response).fallback(method_not_allowed))
+        .route(
+            "/api/respond",
+            post(compat_approval_response).fallback(method_not_allowed),
+        )
         .route(
             "/api/{method}",
             post(compat_unary).fallback(method_not_allowed),
@@ -670,17 +673,17 @@ async fn compat_approval_response(State(state): State<ApiState>, request: Reques
     {
         return compat_receipt(RpcReceipt::bad_response());
     }
-    let receipt = state.host.approval_registry().map_or_else(
-        RpcReceipt::not_pending,
-        |registry| {
+    let receipt = state
+        .host
+        .approval_registry()
+        .map_or_else(RpcReceipt::not_pending, |registry| {
             registry.respond(
                 &response.rpc_id,
                 &response.result.value.session_id,
                 &response.result.value.approval_id,
                 response.result.value.outcome,
             )
-        },
-    );
+        });
     compat_receipt(receipt)
 }
 
@@ -1593,10 +1596,12 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
         }),
         HostNotification::SettingsChanged(event) => Some(CompatFrame {
             stream: CompatStream::Host,
+            rpc_id: None,
             payload: json!({"type": "host/settings-changed", "ns": event.namespace}),
         }),
         HostNotification::CredentialsChanged(event) => Some(CompatFrame {
             stream: CompatStream::Host,
+            rpc_id: None,
             payload: json!({"type": "host/credentials-changed", "ref": event.reference}),
         }),
         HostNotification::SubagentStarted(_) | HostNotification::SubagentFinished(_) => None,
@@ -1606,12 +1611,24 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
 fn approval_requested_payload(requested: &ApprovalRequested) -> Value {
     let mut payload = Map::from_iter([
         ("type".into(), Value::String("approval/requested".into())),
-        ("sessionId".into(), serde_json::to_value(&requested.session_id).expect("session id serializes")),
-        ("approvalId".into(), serde_json::to_value(&requested.approval_id).expect("approval id serializes")),
-        ("toolName".into(), Value::String(requested.tool_name.clone())),
+        (
+            "sessionId".into(),
+            serde_json::to_value(&requested.session_id).expect("session id serializes"),
+        ),
+        (
+            "approvalId".into(),
+            serde_json::to_value(&requested.approval_id).expect("approval id serializes"),
+        ),
+        (
+            "toolName".into(),
+            Value::String(requested.tool_name.clone()),
+        ),
     ]);
     if let Some(call_id) = &requested.call_id {
-        payload.insert("callId".into(), serde_json::to_value(call_id).expect("call id serializes"));
+        payload.insert(
+            "callId".into(),
+            serde_json::to_value(call_id).expect("call id serializes"),
+        );
     }
     if let Some(reason) = &requested.reason {
         payload.insert("reason".into(), Value::String(reason.clone()));

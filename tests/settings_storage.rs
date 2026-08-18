@@ -92,7 +92,10 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
     assert!(settings.get("demo").unwrap().value.get("nope").is_none());
     let mut lifecycle = settings.subscribe();
     settings.unregister("demo").await.unwrap();
-    assert!(matches!(settings.get("demo"), Err(SettingsError::NotRegistered(_))));
+    assert!(matches!(
+        settings.get("demo"),
+        Err(SettingsError::NotRegistered(_))
+    ));
     assert!(matches!(
         lifecycle.recv().await.unwrap().kind,
         tessivum::settings::SettingsEventKind::Unregistered
@@ -114,6 +117,7 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
         tessivum::settings::SettingsEventKind::Registered
     ));
     let reloaded = settings.get("demo").unwrap();
+    provider.set_writable(true);
     assert_eq!(reloaded.value["array"], json!([3]));
     let atomically_mutated = settings
         .mutate(

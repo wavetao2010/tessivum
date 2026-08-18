@@ -664,6 +664,26 @@ async fn send_notification(
             "method": "session.status",
             "params": payload,
         }),
+        HostNotification::ApprovalRequested(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "approval.requested",
+            "params": payload,
+        }),
+        HostNotification::ApprovalResolved(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "approval.resolved",
+            "params": payload,
+        }),
+        HostNotification::SettingsChanged(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "settings.changed",
+            "params": payload,
+        }),
+        HostNotification::CredentialsChanged(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "credentials.changed",
+            "params": payload,
+        }),
         HostNotification::SubagentStarted(payload) => json!({
             "jsonrpc": "2.0",
             "method": "subagent.started",

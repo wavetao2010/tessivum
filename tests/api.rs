@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use tessivum::{
-    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     api::{ApiServer, MAX_FRAME_BYTES},
+    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     host::{HostApi, HostConfig, HostLlmAdapterFactory, HostNotification, HostRuntime},
     llm::{LlmAdapter, LlmStream},
     protocol::{
@@ -477,7 +477,10 @@ async fn browser_approval_responses_are_raw_and_fail_closed() {
         .json()
         .await
         .unwrap();
-    assert_eq!(response, json!({"accepted": false, "reason": "not-pending"}));
+    assert_eq!(
+        response,
+        json!({"accepted": false, "reason": "not-pending"})
+    );
 
     let malformed: Value = client
         .post(format!("{base}/api/respond"))
@@ -488,7 +491,10 @@ async fn browser_approval_responses_are_raw_and_fail_closed() {
         .json()
         .await
         .unwrap();
-    assert_eq!(malformed, json!({"accepted": false, "reason": "bad-response"}));
+    assert_eq!(
+        malformed,
+        json!({"accepted": false, "reason": "bad-response"})
+    );
     server.shutdown().await.unwrap();
 }
 
@@ -537,8 +543,7 @@ async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
         call_id: Some("tool-call".into()),
         reason: Some("policy".into()),
     };
-    host
-        .notifications
+    host.notifications
         .send(HostNotification::ApprovalRequested(requested.clone()))
         .unwrap();
     let requested_frame: Value = serde_json::from_str(
@@ -562,8 +567,7 @@ async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
             "reason": "policy",
         })
     );
-    host
-        .notifications
+    host.notifications
         .send(HostNotification::ApprovalResolved(ApprovalResolved {
             rpc_id: requested.rpc_id,
             session_id: SessionId::from("approval-session"),
@@ -610,13 +614,26 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     let client = reqwest::Client::new();
     let mut downlink = RawWebSocket::connect_path(server.local_addr(), "/api/events.host").await;
 
-    let described = browser_call(&client, &base, "settings-describe", "settings.describe", json!({})).await;
+    let described = browser_call(
+        &client,
+        &base,
+        "settings-describe",
+        "settings.describe",
+        json!({}),
+    )
+    .await;
     let value = &described["result"]["value"];
     assert_eq!(value["writable"], true);
     assert_eq!(value["hasDocument"], false);
-    assert_eq!(value["namespaces"][0]["ns"].as_str(), Some(namespace.as_str()));
+    assert_eq!(
+        value["namespaces"][0]["ns"].as_str(),
+        Some(namespace.as_str())
+    );
     assert_eq!(value["namespaces"][0]["applies"], "live");
-    assert_eq!(value["namespaces"][0]["secrets"], json!([{"path": ["secret"], "set": true}]));
+    assert_eq!(
+        value["namespaces"][0]["secrets"],
+        json!([{"path": ["secret"], "set": true}])
+    );
     assert_eq!(value["namespaces"][0]["base"], json!({"base": true}));
     assert!(value["namespaces"][0].get("user").is_none());
     assert!(!described.to_string().contains("default-secret"));
@@ -650,12 +667,16 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     )
     .await;
     assert_eq!(conflict["result"]["error"]["code"], "settings-conflict");
-    assert_eq!(conflict["result"]["error"]["details"], json!({"ns": namespace, "expected": 1, "actual": 2}));
+    assert_eq!(
+        conflict["result"]["error"]["details"],
+        json!({"ns": namespace, "expected": 1, "actual": 2})
+    );
 
     let settings_frame = timeout(Duration::from_secs(1), async {
         loop {
-            let frame: Value = serde_json::from_str(&downlink.read_text().await.expect("host frame"))
-                .expect("host frame JSON");
+            let frame: Value =
+                serde_json::from_str(&downlink.read_text().await.expect("host frame"))
+                    .expect("host frame JSON");
             if frame["payload"]["type"] == "host/settings-changed" {
                 return frame;
             }
@@ -663,7 +684,10 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     })
     .await
     .expect("settings invalidation arrives");
-    assert_eq!(settings_frame["payload"]["ns"].as_str(), Some(namespace.as_str()));
+    assert_eq!(
+        settings_frame["payload"]["ns"].as_str(),
+        Some(namespace.as_str())
+    );
     assert!(!settings_frame.to_string().contains(secret));
 
     let reference = format!("TESSIVUM_BROWSER_{}", Uuid::new_v4().simple());
@@ -697,8 +721,9 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     assert!(!credentials.to_string().contains(credential_secret));
     let credential_frame = timeout(Duration::from_secs(1), async {
         loop {
-            let frame: Value = serde_json::from_str(&downlink.read_text().await.expect("host frame"))
-                .expect("host frame JSON");
+            let frame: Value =
+                serde_json::from_str(&downlink.read_text().await.expect("host frame"))
+                    .expect("host frame JSON");
             if frame["payload"]["type"] == "host/credentials-changed" {
                 return frame;
             }
@@ -706,7 +731,10 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     })
     .await
     .expect("credential invalidation arrives");
-    assert_eq!(credential_frame["payload"]["ref"].as_str(), Some(reference.as_str()));
+    assert_eq!(
+        credential_frame["payload"]["ref"].as_str(),
+        Some(reference.as_str())
+    );
     assert!(!credential_frame.to_string().contains(credential_secret));
 
     let shadow = format!("TESSIVUM_SHADOW_{}", Uuid::new_v4().simple());

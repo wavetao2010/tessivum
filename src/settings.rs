@@ -428,7 +428,9 @@ impl Settings {
                     match op {
                         SettingsPathOp::Set { path, value } if path.is_empty() => user = value,
                         SettingsPathOp::Set { path, value } => set_at_path(&mut user, &path, value),
-                        SettingsPathOp::Unset { path } if path.is_empty() => user = empty_document(),
+                        SettingsPathOp::Unset { path } if path.is_empty() => {
+                            user = empty_document()
+                        }
                         SettingsPathOp::Unset { path } => remove_at_path(&mut user, &path),
                     }
                 }
