@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use tessivum::{
     agent::{
@@ -18,14 +18,16 @@ use tessivum::{
     },
     bridge::{
         BridgeLimits, BridgeServices, DomainBridge, DomainEventSink, DomainLogger, DomainRequest,
-        LogLevel, AGENTS_SERVICE, CREDENTIALS_SERVICE, LLM_SERVICE, LOGGER_SERVICE,
-        SESSIONS_SERVICE, SETTINGS_SERVICE, SYSTEM_PROMPT_SERVICE, TIMERS_SERVICE, TOOLS_SERVICE,
+        LogLevel, WasmEffectivePolicy, WasmPolicyRegistry, AGENTS_SERVICE, CREDENTIALS_SERVICE,
+        LLM_SERVICE, LOGGER_SERVICE, SESSIONS_SERVICE, SETTINGS_SERVICE, SYSTEM_PROMPT_SERVICE,
+        TIMERS_SERVICE, TOOLS_SERVICE,
     },
     credentials::{Credentials, YamlCredentialFile},
     llm::LlmRuntime,
     protocol::{SessionHeader, SessionId, SESSION_FORMAT_VERSION},
     session::{MemorySessionPersistence, Session, SessionStore},
     settings::{MemorySettingsProvider, Settings},
+    plugins::ServiceMethodPermission,
     system_prompt::{PromptSection, SystemPrompt},
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext, ToolRuntime,
@@ -36,6 +38,7 @@ use tessivum_core::{CancellationToken, ContextHandle};
 use tessivum_node_bridge::{
     BridgeClient, BridgeError, BridgeHandler, ClientConfig, Frame, FrameKind,
 };
+use tessivum_extism::{Capability, CapabilityHandler, CapabilityRequest, PluginError};
 
 fn bridge_services() -> (BridgeServices, ToolRuntime, SystemPrompt, SessionStore) {
     let tools = ToolRuntime::new();
@@ -65,6 +68,35 @@ fn remote_code(error: BridgeError) -> String {
     match error {
         BridgeError::Remote(error) => error.code,
         other => panic!("expected remote error, got {other:?}"),
+    }
+}
+
+fn wasm_policy(plugin_id: &str, permissions: &[(&str, &str)]) -> WasmEffectivePolicy {
+    WasmEffectivePolicy::new(
+        plugin_id,
+        permissions.iter().map(|(service, method)| ServiceMethodPermission {
+            service: (*service).into(),
+            method: (*method).into(),
+        }),
+    )
+}
+
+fn wasm_service_call(plugin_id: &str, payload: Value) -> CapabilityRequest {
+    CapabilityRequest {
+        capability: Capability::ServiceCall,
+        plugin_id: plugin_id.into(),
+        payload,
+    }
+}
+
+fn plugin_code(error: PluginError) -> String {
+    error.code
+}
+
+fn rejected<T>(result: Result<T, PluginError>) -> PluginError {
+    match result {
+        Ok(_) => panic!("expected PluginError"),
+        Err(error) => error,
     }
 }
 
@@ -835,5 +867,164 @@ async fn remaining_service_proxies_reject_invalid_ownership_or_routes() {
                 .unwrap_err()
         ),
         "OWNER_REQUIRED"
+    );
+}
+
+#[test]
+fn wasm_policy_registry_revokes_and_drains_admitted_calls() {
+    let registry = WasmPolicyRegistry::new();
+    assert_eq!(
+        plugin_code(rejected(registry.install(wasm_policy(" ", &[])))),
+        "MANIFEST_PERMISSION_INVALID"
+    );
+
+    let registration = registry
+        .install(wasm_policy("plugin-a", &[(LOGGER_SERVICE, "log")]))
+        .unwrap();
+    assert_eq!(
+        plugin_code(rejected(registry.install(wasm_policy("plugin-a", &[])))),
+        "PLUGIN_POLICY_ALREADY_REGISTERED"
+    );
+    let lease = registry
+        .authorize("plugin-a", LOGGER_SERVICE, "log")
+        .unwrap();
+    assert_eq!(
+        plugin_code(rejected(registry.authorize("plugin-a", LOGGER_SERVICE, "other"))),
+        "SERVICE_PERMISSION_DENIED"
+    );
+    assert_eq!(
+        plugin_code(rejected(registry.authorize("plugin-a", TOOLS_SERVICE, "schemas"))),
+        "SERVICE_PERMISSION_DENIED"
+    );
+    assert_eq!(
+        plugin_code(rejected(registration.drain(Duration::ZERO))),
+        "RESOURCE_LIMIT"
+    );
+    let registry_for_check = registry.clone();
+    let (revoked, observed) = std::sync::mpsc::sync_channel(0);
+    let shutdown = std::thread::spawn(move || {
+        assert!(registration.revoke());
+        revoked.send(()).unwrap();
+        registration.drain(Duration::from_secs(1))
+    });
+    observed.recv().unwrap();
+    assert_eq!(
+        plugin_code(rejected(registry_for_check.authorize("plugin-a", LOGGER_SERVICE, "log"))),
+        "PLUGIN_POLICY_NOT_FOUND"
+    );
+    drop(lease);
+    shutdown.join().unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
+    let (services, _, _, _) = bridge_services();
+    let logger = Arc::new(RecordingLogger::default());
+    let registry = WasmPolicyRegistry::new();
+    let registration = registry
+        .install(wasm_policy("plugin-a", &[(LOGGER_SERVICE, "log")]))
+        .unwrap();
+    let _other = registry
+        .install(wasm_policy("plugin-b", &[(TOOLS_SERVICE, "schemas")]))
+        .unwrap();
+    let mut limits = BridgeLimits::default();
+    limits.max_json_bytes = 128;
+    let bridge = DomainBridge::with_limits_and_policy_registry(
+        services.with_logger(logger.clone()),
+        limits,
+        registry,
+    )
+    .unwrap();
+
+    assert_eq!(
+        CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-a",
+                json!({
+                    "service": LOGGER_SERVICE,
+                    "method": "log",
+                    "params": {"level": "info", "message": "allowed"},
+                }),
+            ),
+        )
+        .unwrap(),
+        json!({"logged": true})
+    );
+    assert_eq!(logger.0.lock().len(), 1);
+
+    assert_eq!(
+        plugin_code(rejected(CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-a",
+                json!({"service": LOGGER_SERVICE, "method": "other", "params": {}}),
+            ),
+        ))),
+        "SERVICE_PERMISSION_DENIED"
+    );
+    assert_eq!(
+        plugin_code(rejected(CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-b",
+                json!({"service": LOGGER_SERVICE, "method": "log", "params": {}}),
+            ),
+        ))),
+        "SERVICE_PERMISSION_DENIED"
+    );
+    assert_eq!(
+        plugin_code(rejected(CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "missing",
+                json!({"service": LOGGER_SERVICE, "method": "log", "params": {}}),
+            ),
+        ))),
+        "PLUGIN_POLICY_NOT_FOUND"
+    );
+
+    let spoofed = rejected(CapabilityHandler::call(
+        &bridge,
+        wasm_service_call(
+            "plugin-a",
+            json!({
+                "service": LOGGER_SERVICE,
+                "method": "log",
+                "params": {"level": "info", "message": "payload-secret"},
+                "pluginId": "plugin-b",
+            }),
+        ),
+    ));
+    assert_eq!(spoofed.code, "INVALID_SCHEMA");
+    assert!(spoofed.details.is_none());
+    assert!(!spoofed.message.contains("payload-secret"));
+
+    let oversized = rejected(CapabilityHandler::call(
+        &bridge,
+        wasm_service_call(
+            "plugin-a",
+            json!({
+                "service": LOGGER_SERVICE,
+                "method": "log",
+                "params": {"level": "info", "message": "payload-secret".repeat(32)},
+            }),
+        ),
+    ));
+    assert_eq!(oversized.code, "PAYLOAD_TOO_LARGE");
+    assert!(oversized.details.is_none());
+    assert!(!oversized.message.contains("payload-secret"));
+    assert_eq!(logger.0.lock().len(), 1);
+
+    registration.revoke();
+    assert_eq!(
+        plugin_code(rejected(CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-a",
+                json!({"service": LOGGER_SERVICE, "method": "log", "params": {}}),
+            ),
+        ))),
+        "PLUGIN_POLICY_NOT_FOUND"
     );
 }

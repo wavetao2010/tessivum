@@ -7,12 +7,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::{Arc, Weak},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use futures_util::stream;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tessivum_core::CancellationToken;
@@ -30,6 +30,7 @@ use crate::{
     agent::{AgentAuthority, AgentRegistry, InboxTarget},
     credentials::{CredentialRef, Credentials},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream},
+    plugins::ServiceMethodPermission,
     protocol::{GenerateRequest, Message, SessionEvent, SessionId, StreamChunk, ToolCallId},
     session::SessionStore,
     settings::Settings,
@@ -38,7 +39,7 @@ use crate::{
         ToolDefinition, ToolHandler, ToolOutput, ToolRegistration, ToolRunContext, ToolRuntime,
     },
     TessivumError,
-};
+}
 
 /// Stable domain service identifiers. Versioning is part of the wire contract.
 pub const TOOLS_SERVICE: &str = "tools@1";
@@ -104,6 +105,192 @@ pub struct DomainRequest {
     pub method: String,
     #[serde(default)]
     pub params: Value,
+}
+
+/// Product authorization installed for one running WASM plugin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmEffectivePolicy {
+    pub plugin_id: String,
+    pub methods: BTreeSet<ServiceMethodPermission>,
+}
+
+impl WasmEffectivePolicy {
+    pub fn new(
+        plugin_id: impl Into<String>,
+        methods: impl IntoIterator<Item = ServiceMethodPermission>,
+    ) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            methods: methods.into_iter().collect(),
+        }
+    }
+}
+
+/// Cloneable authorization registry shared by WASM lifecycle owners and the bridge.
+#[derive(Clone, Default)]
+pub struct WasmPolicyRegistry {
+    inner: Arc<WasmPolicyRegistryInner>,
+}
+
+#[derive(Default)]
+struct WasmPolicyRegistryInner {
+    policies: Mutex<BTreeMap<String, Arc<WasmPolicyEntry>>>,
+}
+
+struct WasmPolicyEntry {
+    state: Mutex<WasmPolicyState>,
+    drained: Condvar,
+}
+
+struct WasmPolicyState {
+    methods: BTreeSet<ServiceMethodPermission>,
+    revoked: bool,
+    active: usize,
+}
+
+/// The sole policy owner for one plugin lifecycle. Dropping it revokes admission only.
+pub struct WasmPolicyRegistration {
+    plugin_id: String,
+    entry: Arc<WasmPolicyEntry>,
+    registry: Weak<WasmPolicyRegistryInner>,
+}
+
+/// An admitted service call. Its lifetime prevents policy drain from completing.
+pub struct WasmPolicyLease {
+    entry: Arc<WasmPolicyEntry>,
+}
+
+impl WasmPolicyRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn install(&self, policy: WasmEffectivePolicy) -> WasmResult<WasmPolicyRegistration> {
+        validate_policy(&policy)?;
+        let entry = Arc::new(WasmPolicyEntry {
+            state: Mutex::new(WasmPolicyState {
+                methods: policy.methods,
+                revoked: false,
+                active: 0,
+            }),
+            drained: Condvar::new(),
+        });
+        let mut policies = lock(&self.inner.policies);
+        if policies.contains_key(&policy.plugin_id) {
+            return Err(policy_error(
+                "PLUGIN_POLICY_ALREADY_REGISTERED",
+                "a policy is already installed for this plugin",
+            ));
+        }
+        policies.insert(policy.plugin_id.clone(), Arc::clone(&entry));
+        Ok(WasmPolicyRegistration {
+            plugin_id: policy.plugin_id,
+            entry,
+            registry: Arc::downgrade(&self.inner),
+        })
+    }
+
+    /// Admits an exact service/method call and returns a guard held through dispatch.
+    pub fn authorize(
+        &self,
+        plugin_id: &str,
+        service: &str,
+        method: &str,
+    ) -> WasmResult<WasmPolicyLease> {
+        let policies = lock(&self.inner.policies);
+        let entry = policies
+            .get(plugin_id)
+            .cloned()
+            .ok_or_else(|| policy_error("PLUGIN_POLICY_NOT_FOUND", "plugin policy is not installed"))?;
+        let mut state = lock(&entry.state);
+        if state.revoked {
+            return Err(policy_error(
+                "PLUGIN_POLICY_NOT_FOUND",
+                "plugin policy is not installed",
+            ));
+        }
+        if !state.methods.contains(&ServiceMethodPermission {
+            service: service.into(),
+            method: method.into(),
+        }) {
+            return Err(policy_error(
+                "SERVICE_PERMISSION_DENIED",
+                "service method is not permitted",
+            ));
+        }
+        state.active = state.active.checked_add(1).ok_or_else(|| {
+            policy_error("RESOURCE_LIMIT", "too many active service calls")
+        })?;
+        drop(state);
+        drop(policies);
+        Ok(WasmPolicyLease { entry })
+    }
+}
+
+impl WasmPolicyRegistration {
+    /// Synchronously rejects future calls. Existing leases remain valid until dropped.
+    pub fn revoke(&self) -> bool {
+        let mut revoked = false;
+        if let Some(registry) = self.registry.upgrade() {
+            let mut policies = lock(&registry.policies);
+            if policies
+                .get(&self.plugin_id)
+                .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
+            {
+                let mut state = lock(&self.entry.state);
+                state.revoked = true;
+                policies.remove(&self.plugin_id);
+                revoked = true;
+            }
+        }
+        let mut state = lock(&self.entry.state);
+        if !state.revoked {
+            state.revoked = true;
+            revoked = true;
+        }
+        revoked
+    }
+
+    /// Waits no longer than `timeout` for calls admitted before revocation to finish.
+    pub fn drain(&self, timeout: Duration) -> WasmResult<()> {
+        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
+        let mut state = lock(&self.entry.state);
+        while state.active != 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || self.entry.drained.wait_for(&mut state, remaining).timed_out()
+            {
+                if state.active != 0 {
+                    return Err(policy_error("RESOURCE_LIMIT", "service calls did not drain in time"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_revoked(&self) -> bool {
+        lock(&self.entry.state).revoked
+    }
+
+    pub fn active_calls(&self) -> usize {
+        lock(&self.entry.state).active
+    }
+}
+
+impl Drop for WasmPolicyRegistration {
+    fn drop(&mut self) {
+        self.revoke();
+    }
+}
+
+impl Drop for WasmPolicyLease {
+    fn drop(&mut self) {
+        let mut state = lock(&self.entry.state);
+        debug_assert!(state.active != 0, "policy lease underflow");
+        state.active = state.active.saturating_sub(1);
+        if state.active == 0 {
+            self.entry.drained.notify_all();
+        }
+    }
 }
 
 /// A level accepted by the logger proxy.
@@ -223,6 +410,7 @@ impl std::fmt::Debug for DomainBridge {
 struct BridgeInner {
     services: BridgeServices,
     limits: BridgeLimits,
+    policy_registry: WasmPolicyRegistry,
     handle: Handle,
     callbacks: Arc<Semaphore>,
     generations: Mutex<BTreeMap<u64, GenerationState>>,
@@ -255,12 +443,28 @@ enum NativeRegistration {
 }
 
 impl DomainBridge {
-    /// Creates a bridge with conservative bounded defaults.
+    /// Creates a bridge with conservative bounded defaults and no WASM policies.
     pub fn new(services: BridgeServices) -> BridgeResult<Self> {
         Self::with_limits(services, BridgeLimits::default())
     }
 
     pub fn with_limits(services: BridgeServices, limits: BridgeLimits) -> BridgeResult<Self> {
+        Self::with_limits_and_policy_registry(services, limits, WasmPolicyRegistry::new())
+    }
+
+    /// Creates a bridge whose WASM calls are authorized by `policy_registry`.
+    pub fn with_policy_registry(
+        services: BridgeServices,
+        policy_registry: WasmPolicyRegistry,
+    ) -> BridgeResult<Self> {
+        Self::with_limits_and_policy_registry(services, BridgeLimits::default(), policy_registry)
+    }
+
+    pub fn with_limits_and_policy_registry(
+        services: BridgeServices,
+        limits: BridgeLimits,
+        policy_registry: WasmPolicyRegistry,
+    ) -> BridgeResult<Self> {
         limits.validate()?;
         let handle = Handle::try_current()
             .map_err(|_| invalid("DomainBridge requires construction inside a Tokio runtime"))?;
@@ -269,6 +473,7 @@ impl DomainBridge {
                 services,
                 callbacks: Arc::new(Semaphore::new(limits.max_callback_concurrency)),
                 limits,
+                policy_registry,
                 handle,
                 generations: Mutex::new(BTreeMap::new()),
                 retired_generations: Mutex::new(BTreeSet::new()),
@@ -976,12 +1181,17 @@ impl CapabilityHandler for DomainBridge {
                 "only cordis.service.call is handled",
             ));
         }
-        // ponytail: deny all WASM service calls until manifest permissions are wired per plugin.
-        let _ = request;
-        Err(plugin_error(
-            "CAPABILITY_DENIED",
-            "WASM service-call permissions are not configured",
-        ))
+        bounded_json(&request.payload, self.inner.limits.max_json_bytes)
+            .map_err(bridge_to_plugin_error)?;
+        let domain: DomainRequest = decode(request.payload).map_err(bridge_to_plugin_error)?;
+        self.validate_request(&domain, self.inner.limits.max_json_bytes)
+            .map_err(bridge_to_plugin_error)?;
+        let _lease = self.inner.policy_registry.authorize(
+            &request.plugin_id,
+            &domain.service,
+            &domain.method,
+        )?;
+        self.dispatch_native(domain).map_err(bridge_to_plugin_error)
     }
 }
 
@@ -1185,6 +1395,28 @@ fn bounded_json(value: &Value, limit: usize) -> BridgeResult<()> {
     Ok(())
 }
 
+fn validate_policy(policy: &WasmEffectivePolicy) -> WasmResult<()> {
+    if policy.plugin_id.trim().is_empty() {
+        return Err(policy_error(
+            "MANIFEST_PERMISSION_INVALID",
+            "plugin id must not be blank",
+        ));
+    }
+    for permission in &policy.methods {
+        if permission.service.trim().is_empty()
+            || permission.method.trim().is_empty()
+            || permission.service.contains('*')
+            || permission.method.contains('*')
+        {
+            return Err(policy_error(
+                "MANIFEST_PERMISSION_INVALID",
+                "service permissions must be exact nonblank names",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_registration(registration_id: &str, callback_id: &str) -> BridgeResult<()> {
     nonblank("registrationId", registration_id)?;
     nonblank("callbackId", callback_id)
@@ -1253,6 +1485,33 @@ fn bridge_to_tessivum(error: BridgeError) -> TessivumError {
     TessivumError::new(code, message, "bridge", details)
 }
 
+fn bridge_to_plugin_error(error: BridgeError) -> PluginError {
+    let code = match error {
+        BridgeError::Remote(error) => error.code,
+        BridgeError::Cancelled => "CANCELLED".into(),
+        BridgeError::Timeout => "RESOURCE_LIMIT".into(),
+        BridgeError::FrameTooLarge { .. } => "PAYLOAD_TOO_LARGE".into(),
+        BridgeError::InvalidFrame(_) => "INVALID_SCHEMA".into(),
+        BridgeError::QueueFull => "RESOURCE_LIMIT".into(),
+        BridgeError::Generation { .. } => "INSTANCE_STOPPED".into(),
+        BridgeError::Io(_)
+        | BridgeError::ProtocolVersion { .. }
+        | BridgeError::Handshake(_)
+        | BridgeError::Disconnected(_)
+        | BridgeError::Process(_) => "SERVICE_CALL_FAILED".into(),
+    };
+    let message = match code.as_str() {
+        "PAYLOAD_TOO_LARGE" => "service request exceeds its configured limit",
+        "INVALID_SCHEMA" => "service request does not match the expected schema",
+        "RESOURCE_LIMIT" => "service call exceeded a resource limit",
+        "INSTANCE_STOPPED" => "plugin instance has stopped",
+        "UNKNOWN_SERVICE" | "UNKNOWN_METHOD" => "service method is unavailable",
+        "SERVICE_UNAVAILABLE" => "service is unavailable",
+        _ => "service call failed",
+    };
+    PluginError::new(code, message, "bridge")
+}
+
 fn callback_error(code: impl Into<String>, message: impl Into<String>) -> TessivumError {
     TessivumError::new(code, message, "bridge", Value::Null)
 }
@@ -1279,6 +1538,10 @@ fn credential_error(error: crate::credentials::CredentialError) -> BridgeError {
 
 fn plugin_error(code: impl Into<String>, message: impl Into<String>) -> PluginError {
     PluginError::new(code, message, "bridge")
+}
+
+fn policy_error(code: impl Into<String>, message: impl Into<String>) -> PluginError {
+    PluginError::new(code, message, "policy")
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
