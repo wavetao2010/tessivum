@@ -635,6 +635,10 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
             .len(),
         1
     );
+    let default_workspace_id = initial["result"]["value"]["items"][0]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let create = |rpc_id: &'static str, path: &Path| {
         browser_rpc(
             &client,
@@ -683,18 +687,47 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
     )
     .await;
     assert_eq!(
-        conflict["result"]["error"]["code"],
-        "workspace-name-conflict"
+        conflict["result"]["error"],
+        json!({
+            "code": "workspace-name-conflict",
+            "message": "workspace name is already used",
+            "details": {"name": "renamed"},
+        })
     );
-    let order = browser_rpc(
+    let blank_rename = browser_rpc(
         &client,
         &base,
-        "workspace.insertBefore",
-        "order",
-        json!({"workspaceId": second_id, "beforeWorkspaceId": first_id}),
+        "workspace.rename",
+        "rename-blank",
+        json!({"workspaceId": first_id, "title": "  "}),
     )
     .await;
-    assert!(order["result"]["value"]["workspaceIds"].is_array());
+    assert_eq!(
+        blank_rename["result"]["error"],
+        json!({
+            "code": "bad-request",
+            "message": "title must not be blank",
+            "details": {"issues": []},
+        })
+    );
+    let unknown = browser_rpc(
+        &client,
+        &base,
+        "workspace.rename",
+        "rename-missing",
+        json!({"workspaceId": "missing-workspace", "title": "unused"}),
+    )
+    .await;
+    assert_eq!(
+        unknown["result"]["error"],
+        json!({
+            "code": "workspace-not-found",
+            "message": "workspace was not found",
+            "details": {"workspaceId": "missing-workspace"},
+        })
+    );
+
+
 
     for (rpc_id, session_id) in [("session-one", "multi-one"), ("session-two", "multi-two")] {
         let created = browser_rpc(
@@ -707,6 +740,57 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
         .await;
         assert_eq!(created["result"]["value"]["sessionId"], session_id);
     }
+    let outside = browser_rpc(
+        &client,
+        &base,
+        "session.create",
+        "session-outside",
+        json!({"workspaceId": first_id, "sessionId": "multi-outside"}),
+    )
+    .await;
+    assert_eq!(outside["result"]["ok"], true);
+    let invalid_move = browser_rpc(
+        &client,
+        &base,
+        "workspace.insertSessionBefore",
+        "session-order-invalid",
+        json!({
+            "workspaceId": second_id,
+            "sessionId": "multi-one",
+            "beforeSessionId": "multi-outside",
+        }),
+    )
+    .await;
+    assert_eq!(
+        invalid_move["result"]["error"],
+        json!({
+            "code": "workspace-move-invalid",
+            "message": "workspace move is invalid",
+            "details": {
+                "workspaceId": second_id,
+                "sessionId": "multi-one",
+                "beforeSessionId": "multi-outside",
+            },
+        })
+    );
+    let invalid_session = browser_rpc(
+        &client,
+        &base,
+        "workspace.insertSessionBefore",
+        "session-outside-invalid",
+        json!({"workspaceId": second_id, "sessionId": "multi-outside"}),
+    )
+    .await;
+    assert_eq!(
+        invalid_session["result"]["error"],
+        json!({
+            "code": "workspace-move-invalid",
+            "message": "workspace move is invalid",
+            "details": {"workspaceId": second_id, "sessionId": "multi-outside"},
+        })
+    );
+
+
     let moved = browser_rpc(
         &client,
         &base,
@@ -740,8 +824,12 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
     )
     .await;
     assert_eq!(
-        invalid_cwd["result"]["error"]["code"],
-        "workspace-invalid-path"
+        invalid_cwd["result"]["error"],
+        json!({
+            "code": "workspace-invalid-path",
+            "message": "workspace path is invalid",
+            "details": {"path": unregistered.to_string_lossy()},
+        })
     );
     let deleted = browser_rpc(
         &client,
@@ -752,6 +840,31 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
     )
     .await;
     assert_eq!(deleted["result"]["value"], json!({"deleted": true}));
+    let deleted_default = browser_rpc(
+        &client,
+        &base,
+        "workspace.delete",
+        "delete-default",
+        json!({"workspaceId": default_workspace_id}),
+    )
+    .await;
+    assert_eq!(deleted_default["result"]["value"], json!({"deleted": true}));
+    let implicit = browser_rpc(
+        &client,
+        &base,
+        "session.create",
+        "implicit-without-host-workspace",
+        json!({"sessionId": "implicit-without-host-workspace"}),
+    )
+    .await;
+    assert_eq!(
+        implicit["result"]["error"],
+        json!({
+            "code": "workspace-not-found",
+            "message": "workspace was not found",
+            "details": {"workspaceId": fixture.path().to_string_lossy()},
+        })
+    );
 
     server.shutdown().await.unwrap();
     runtime.shutdown().await.unwrap();

@@ -739,6 +739,75 @@ async fn browser_host_websocket_wraps_compatibility_frames_as_server_requests() 
     server.shutdown().await.expect("server shuts down");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_workspace_archives_publish_monotonic_snapshots() {
+    let fixture = BrowserStopFixture::new();
+    let runtime = HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
+        .await
+        .expect("real Host boots");
+    let handle = runtime.handle();
+    let host: Arc<dyn HostApi> = Arc::new(handle.clone());
+    let mut server = ApiServer::bind(host).await.expect("real API binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    let workspaces = browser_call(&client, &base, "workspace-list", "workspace.list", json!({})).await;
+    let workspace_id = workspaces["result"]["value"]["items"][0]["workspaceId"]
+        .as_str()
+        .expect("default workspace id")
+        .to_owned();
+    for session_id in ["archive-first", "archive-second"] {
+        let created = browser_call(
+            &client,
+            &base,
+            session_id,
+            "session.create",
+            json!({"workspaceId": workspace_id, "sessionId": session_id}),
+        )
+        .await;
+        assert_eq!(created["result"]["ok"], true);
+    }
+    let mut downlink = RawWebSocket::connect_path(server.local_addr(), "/api/events.host").await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let (first, second) = tokio::join!(
+        browser_call(
+            &client,
+            &base,
+            "archive-first",
+            "workspace.archiveSession",
+            json!({"sessionId": "archive-first"}),
+        ),
+        browser_call(
+            &client,
+            &base,
+            "archive-second",
+            "workspace.archiveSession",
+            json!({"sessionId": "archive-second"}),
+        )
+    );
+    assert_eq!(first["result"]["ok"], true);
+    assert_eq!(second["result"]["ok"], true);
+    let mut snapshots = Vec::new();
+    while snapshots.len() < 2 {
+        let frame: Value = serde_json::from_str(
+            &timeout(Duration::from_secs(1), downlink.read_text())
+                .await
+                .expect("archive frame arrives")
+                .expect("archive frame is text"),
+        )
+        .expect("archive frame is JSON");
+        if frame["payload"]["type"] == "host/archived-sessions-changed" {
+            snapshots.push(frame["payload"]["archivedSessionIds"].clone());
+        }
+    }
+    assert_eq!(snapshots[0].as_array().unwrap().len(), 1);
+    assert_eq!(snapshots[1].as_array().unwrap().len(), 2);
+    assert!(snapshots[1].as_array().unwrap().iter().any(|id| id == "archive-first"));
+    assert!(snapshots[1].as_array().unwrap().iter().any(|id| id == "archive-second"));
+
+    server.shutdown().await.expect("API shuts down");
+    runtime.shutdown().await.expect("Host shuts down");
+}
+
 #[tokio::test]
 async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
     let (mut server, host, _base) = start().await;
