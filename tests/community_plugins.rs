@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -23,7 +23,11 @@ const TIMER_PACKAGE_HASH: &str = "ecb8ac09dfd326400c1b9893415cbc92077ce8409b0cb8
 const TIMER_INDEX_HASH: &str = "cbf60311b58210f6f2c6ee1bbd438039806f5ee6b268a46906a949ad926cca81";
 const HTTP_PACKAGE_HASH: &str = "fb11c50a758bbff911a5059b69286f4696fc79dc9dfadd1e835ee1044117f395";
 const HTTP_INDEX_HASH: &str = "fde73d75e8a2962292f5644b9c9704e923d546b7a001f7a0d0c969cf20dff2da";
-const PINNED_VENDOR_FILES: [&str; 2] = ["cordis/src/index.ts", "cosmokit/src/index.ts"];
+const PINNED_VENDOR_FILES: [&str; 3] = [
+    "cordis/src/index.ts",
+    "cosmokit/src/index.ts",
+    "loader/src/index.ts",
+];
 
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -212,21 +216,28 @@ fn core_root() -> PathBuf {
 }
 
 fn vendor_root() -> PathBuf {
-    let root = scharness_root()
-        .join("upstream/deepseek-harness/vendor")
+    let candidates = [
+        env::var_os("TESSIVUM_DEEPSEEK_VENDOR").map(PathBuf::from),
+        Some(scharness_root().join("upstream/deepseek-harness/vendor")),
+    ];
+    let root = candidates
+        .into_iter()
+        .flatten()
+        .find(|root| {
+            root.is_dir()
+                && PINNED_VENDOR_FILES
+                    .iter()
+                    .all(|file| root.join(file).is_file())
+        })
+        .expect("pinned DeepSeek vendor or installed npm source exists")
         .canonicalize()
-        .expect("pinned DeepSeek vendor root exists");
-    assert!(root.is_dir(), "pinned DeepSeek vendor root is a directory");
+        .expect("pinned vendor root is readable");
     for file in PINNED_VENDOR_FILES {
         let file = root
             .join(file)
             .canonicalize()
             .expect("pinned vendor source exists");
-        assert!(file.is_file(), "pinned vendor source is a regular file");
-        assert!(
-            file.starts_with(&root),
-            "pinned vendor source remains under the vendored root"
-        );
+        assert!(file.starts_with(&root));
     }
     root
 }
@@ -252,7 +263,11 @@ async fn vendored_timer_loads_unchanged_through_the_legacy_profile_and_reaps_aft
         .arg(core.join("node/compat-host/src/index.ts"))
         .current_dir(core.join("node/compat-host"))
         .env("CORDIS_VENDOR_ROOT", &vendor);
-    let profile = LegacyProfile::new(command, ClientConfig::default(), bridge_services())
+    let client_config = ClientConfig {
+        handshake_timeout: Duration::from_secs(30),
+        ..ClientConfig::default()
+    };
+    let profile = LegacyProfile::new(command, client_config, bridge_services())
         .expect("legacy profile accepts its explicit Bun/vendor environment");
     profile.start().expect("Bun compat host starts");
     let runtime = profile

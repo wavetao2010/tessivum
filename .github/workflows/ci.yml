@@ -10,12 +10,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  TESSIVUM_DEEPSEEK_VENDOR: ${{ github.workspace }}/.ci/deepseek-harness/vendor
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: .ci/deepseek-harness
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,11 +43,11 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run Rust tests
-        run: cargo test --all-targets
-
       - name: Build Browser shell
         working-directory: web
         run: |
           bun install --frozen-lockfile
           bun run build
+
+      - name: Run Rust tests
+        run: cargo test --all-targets
