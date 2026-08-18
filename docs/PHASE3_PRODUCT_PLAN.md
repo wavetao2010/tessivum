@@ -126,12 +126,14 @@ HostRuntime
 
 # 里程碑 A：WASM 权限与真实插件
 
+> 状态：已完成，发布目标 `v0.1.0-alpha.2`。
+
 ## 6. A 阶段目标
 
 把当前“全部 Host service call 默认拒绝”升级为“双层授权”：
 
 1. `tessivum-core` 继续检查通用 Capability，例如 `cordis.service.call`；
-2. Tessivum 根据不可伪造的 `plugin_id` 检查精确的 `service@version + method`。
+2. Tessivum 根据不可伪造的 `instance_id`、manifest `plugin_id` 与 Loader `entry_id` 检查精确的 `service@version + method`。
 
 两层必须同时允许，请求才可进入 `DomainBridge::dispatch_native`。
 
