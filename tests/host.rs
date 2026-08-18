@@ -7,12 +7,22 @@ use std::{
 use serde_json::json;
 use tessivum::{
     host::{HostApi, HostConfig, HostRuntime},
-    protocol::{ContentBlock, SessionPromptParams},
+    protocol::{AgentCancelCause, ContentBlock, SessionPromptParams, SessionStatus},
     SessionId,
 };
 use uuid::Uuid;
 
 const REPLAY: &str = include_str!("../fixtures/headless/recorded-replay.jsonl");
+const RESUME_REPLAY: &str = concat!(
+    "{\"requestId\":\"one\",\"chunk\":{\"type\":\"block-start\",\"index\":0,\"blockType\":\"text\"}}\n",
+    "{\"requestId\":\"one\",\"chunk\":{\"type\":\"text-delta\",\"index\":0,\"text\":\"first\"}}\n",
+    "{\"requestId\":\"one\",\"chunk\":{\"type\":\"block-end\",\"index\":0,\"block\":{\"type\":\"text\",\"text\":\"first\"}}}\n",
+    "{\"requestId\":\"one\",\"chunk\":{\"type\":\"finish\",\"reason\":{\"kind\":\"stop\"}}}\n",
+    "{\"requestId\":\"two\",\"chunk\":{\"type\":\"block-start\",\"index\":0,\"blockType\":\"text\"}}\n",
+    "{\"requestId\":\"two\",\"chunk\":{\"type\":\"text-delta\",\"index\":0,\"text\":\"second\"}}\n",
+    "{\"requestId\":\"two\",\"chunk\":{\"type\":\"block-end\",\"index\":0,\"block\":{\"type\":\"text\",\"text\":\"second\"}}}\n",
+    "{\"requestId\":\"two\",\"chunk\":{\"type\":\"finish\",\"reason\":{\"kind\":\"stop\"}}}\n",
+);
 
 struct TempDir(PathBuf);
 impl TempDir {
@@ -82,6 +92,16 @@ fn profile_patches_have_fixed_precedence() {
 async fn prompt_receipt_relays_committed_events_and_flushes_on_shutdown() {
     let root = TempDir::new();
     let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(root.path().join("data"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
     let handle = runtime.handle();
     let mut notifications = handle.subscribe();
     let receipt = handle.prompt(prompt("host-prompt")).await.unwrap();
@@ -157,6 +177,62 @@ async fn runtime_resumes_a_durable_session_without_replacing_it() {
             > first_len
     );
     second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_session_resumes_with_a_fresh_agent_generation() {
+    let root = TempDir::new();
+    let config =
+        HostConfig::new(root.path(), root.path().join("data")).with_recorded_replay(RESUME_REPLAY);
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    let handle = runtime.handle();
+    let session = SessionId::from("cancel-resume");
+
+    handle.prompt(prompt(session.as_str())).await.unwrap();
+    for _ in 0..100 {
+        if handle.status(session.clone()).await.unwrap() == Some(SessionStatus::Idle)
+            && handle
+                .events(session.clone(), 0)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event.event_type == "assistant/message"
+                        && event.data.to_string().contains("first")
+                })
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(handle
+        .cancel(session.clone(), AgentCancelCause::User)
+        .await
+        .unwrap());
+    handle.prompt(prompt(session.as_str())).await.unwrap();
+    for _ in 0..100 {
+        if handle
+            .events(session.clone(), 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event.event_type == "assistant/message" && event.data.to_string().contains("second")
+            })
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(handle
+        .events(session, 0)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event.event_type == "assistant/message" && event.data.to_string().contains("second")
+        }));
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]

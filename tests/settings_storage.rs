@@ -104,6 +104,14 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
     yaml.update("demo", json!({"value": 2}), None)
         .await
         .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     fs::write(&path, "demo: [not-a-document\n").unwrap();
     assert_eq!(
         yaml.reload("demo").await.unwrap().value,
@@ -156,6 +164,16 @@ async fn credentials_shadow_live_environment_and_never_describe_values() {
         .set(token.clone(), "file-secret".into())
         .await
         .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(root.join("credentials.yaml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     assert_eq!(
         credentials.resolve(&token).await.unwrap(),
         Some("file-secret".into())
@@ -214,6 +232,18 @@ async fn attachments_validate_batch_atomically_and_verify_reads() {
     assert_eq!(reference.name, None);
     assert_eq!(store.read_ref(&reference).await.unwrap(), png(2, 3));
     let filename = &reference.attachment_id.as_str()[7..];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(root.join("v1").join(filename))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
     fs::write(root.join("v1").join(filename), png(4, 5)).unwrap();
     assert!(store.read(&reference.attachment_id).await.is_err());
     fs::remove_dir_all(root).unwrap();

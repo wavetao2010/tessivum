@@ -619,14 +619,13 @@ impl YamlSettingsProvider {
             .unwrap_or("settings.yaml");
         let temporary = parent.join(format!(".{filename}-{}.tmp", Uuid::new_v4()));
         let result = async {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .await
-                .map_err(|error| {
-                    SettingsError::Persistence(format!("create settings temporary: {error}"))
-                })?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary).await.map_err(|error| {
+                SettingsError::Persistence(format!("create settings temporary: {error}"))
+            })?;
             file.write_all(&bytes).await.map_err(|error| {
                 SettingsError::Persistence(format!("write settings temporary: {error}"))
             })?;

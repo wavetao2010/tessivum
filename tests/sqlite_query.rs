@@ -52,6 +52,12 @@ async fn sqlite_commits_exact_dtos_and_rejects_partial_or_concurrent_duplicates(
     let root = root();
     let path = root.join("nested/sessions.sqlite");
     let persistence = Arc::new(SqliteSessionPersistence::open(&path).unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     let original_header = header("sqlite");
     persistence
         .create(&original_header, cancellation())

@@ -223,14 +223,13 @@ impl YamlCredentialFile {
             .unwrap_or("credentials.yaml");
         let temporary = parent.join(format!(".{name}-{}.tmp", Uuid::new_v4()));
         let result = async {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .await
-                .map_err(|error| {
-                    CredentialError::Persistence(format!("create credential temporary: {error}"))
-                })?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary).await.map_err(|error| {
+                CredentialError::Persistence(format!("create credential temporary: {error}"))
+            })?;
             file.write_all(&bytes).await.map_err(|error| {
                 CredentialError::Persistence(format!("write credential temporary: {error}"))
             })?;
@@ -239,7 +238,17 @@ impl YamlCredentialFile {
             })?;
             fs::rename(&temporary, &self.path).await.map_err(|error| {
                 CredentialError::Persistence(format!("rename credential temporary: {error}"))
-            })
+            })?;
+            #[cfg(unix)]
+            {
+                let directory = fs::File::open(parent).await.map_err(|error| {
+                    CredentialError::Persistence(format!("open credential directory: {error}"))
+                })?;
+                directory.sync_all().await.map_err(|error| {
+                    CredentialError::Persistence(format!("sync credential directory: {error}"))
+                })?;
+            }
+            Ok(())
         }
         .await;
         if result.is_err() {

@@ -252,6 +252,24 @@ pub enum HostNotification {
     SubagentFinished(SubagentFinishedNotification),
 }
 
+/// Durable session metadata needed by reconnecting transports without replaying logs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostSessionInfo {
+    pub session_id: SessionId,
+    pub created_at: u64,
+    pub cwd: Option<String>,
+    pub event_count: u64,
+}
+
+/// Immutable identity and model route exposed to transports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostDescriptor {
+    pub cwd: String,
+    pub provider: String,
+    pub model: String,
+    pub max_tokens: Option<u64>,
+}
+
 /// One object-safe host contract for API and SDK transports.
 #[async_trait]
 pub trait HostApi: Send + Sync {
@@ -261,6 +279,12 @@ pub trait HostApi: Send + Sync {
         &self,
         params: SessionPromptParams,
     ) -> Result<SessionPromptResult, TessivumError>;
+    async fn steer(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptResult, TessivumError> {
+        self.prompt(params).await
+    }
     async fn cancel(
         &self,
         session: SessionId,
@@ -272,6 +296,31 @@ pub trait HostApi: Send + Sync {
         from_seq: u64,
     ) -> Result<Vec<SessionEvent>, TessivumError>;
     async fn status(&self, session: SessionId) -> Result<Option<SessionStatus>, TessivumError>;
+    async fn create_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<HostSessionInfo, TessivumError> {
+        Ok(HostSessionInfo {
+            session_id,
+            created_at: 0,
+            cwd: None,
+            event_count: 0,
+        })
+    }
+    async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
+        Ok(Vec::new())
+    }
+    fn descriptor(&self) -> HostDescriptor {
+        HostDescriptor {
+            cwd: std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .to_string_lossy()
+                .into_owned(),
+            provider: "recorded".into(),
+            model: "recorded".into(),
+            max_tokens: None,
+        }
+    }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification>;
     async fn shutdown(&self) -> Result<(), TessivumError>;
 }
@@ -375,6 +424,16 @@ impl HostRuntime {
                 path: config.data_dir.clone(),
                 source,
             })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700))
+                .await
+                .map_err(|source| HostError::CreateDataDir {
+                    path: config.data_dir.clone(),
+                    source,
+                })?;
+        }
         let data_dir =
             config
                 .data_dir
@@ -549,7 +608,7 @@ impl HostHandle {
 
     async fn initialize_inner(
         &self,
-        params: InitializeParams,
+        mut params: InitializeParams,
     ) -> Result<InitializeResult, HostError> {
         let _admission = self.admit()?;
         params.validate()?;
@@ -573,6 +632,7 @@ impl HostHandle {
         {
             return Err(HostError::InitializationConflict);
         }
+        params.cwd = cwd.to_string_lossy().into_owned();
         let mut state = lock(&self.inner.state);
         if state
             .initialized
@@ -590,9 +650,78 @@ impl HostHandle {
         })
     }
 
+    async fn create_session_inner(
+        &self,
+        session_id: SessionId,
+    ) -> Result<HostSessionInfo, HostError> {
+        let _admission = self.admit()?;
+        validate_session(&session_id)?;
+        if let Some(session) = self.inner.sessions.get(&session_id) {
+            let header = session.header();
+            return Ok(HostSessionInfo {
+                session_id,
+                created_at: header.created_at,
+                cwd: header.cwd,
+                event_count: session.events().len() as u64,
+            });
+        }
+        if let Some(session) = self
+            .inner
+            .persistence
+            .inspect(&session_id, self.inner.cancellation.clone())
+            .await?
+        {
+            return Ok(HostSessionInfo {
+                session_id: session.header.id,
+                created_at: session.header.created_at,
+                cwd: session.header.cwd,
+                event_count: session.event_count,
+            });
+        }
+        let created_at = now();
+        self.inner
+            .sessions
+            .create(
+                SessionHeader {
+                    version: SESSION_FORMAT_VERSION,
+                    id: session_id.clone(),
+                    created_at,
+                    cwd: Some(self.inner.identity.cwd.to_string_lossy().into_owned()),
+                    parent_session: None,
+                    seed_length: None,
+                    origin: None,
+                    delegation_depth: Some(0),
+                    agent_preset: Some(self.inner.identity.profile.clone()),
+                },
+                self.inner.cancellation.clone(),
+            )
+            .await?;
+        Ok(HostSessionInfo {
+            session_id,
+            created_at,
+            cwd: Some(self.inner.identity.cwd.to_string_lossy().into_owned()),
+            event_count: 0,
+        })
+    }
+
     async fn prompt_inner(
         &self,
         params: SessionPromptParams,
+    ) -> Result<SessionPromptResult, HostError> {
+        self.send_inner(params, false).await
+    }
+
+    async fn steer_inner(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptResult, HostError> {
+        self.send_inner(params, true).await
+    }
+
+    async fn send_inner(
+        &self,
+        params: SessionPromptParams,
+        steer: bool,
     ) -> Result<SessionPromptResult, HostError> {
         let _admission = self.admit()?;
         validate_prompt(&params)?;
@@ -600,14 +729,17 @@ impl HostHandle {
         let session = agent.session();
         let mut commits = session.subscribe();
         let message_id = MessageId::random();
-        agent
-            .followup(Message {
-                id: message_id.clone(),
-                role: MessageRole::User,
-                content: params.content_blocks,
-                source: MessageSource::User,
-            })
-            .await?;
+        let message = Message {
+            id: message_id.clone(),
+            role: MessageRole::User,
+            content: params.content_blocks,
+            source: MessageSource::User,
+        };
+        if steer {
+            agent.steer(message).await?;
+        } else {
+            agent.followup(message).await?;
+        }
         self.transition(params.session_id.clone(), SessionStatus::Running);
         let idle_agent =
             self.inner.registry.get(&params.session_id).ok_or_else(|| {
@@ -619,7 +751,7 @@ impl HostHandle {
                 && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())
         }) {
             loop {
-                tokio::select! { received = commits.recv() => match received { Ok(event) if event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str()) => break, Ok(_) => continue, Err(broadcast::error::RecvError::Lagged(_)) => { if session.events().iter().any(|event| event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())) { break; } }, Err(broadcast::error::RecvError::Closed) => return Err(HostError::invalid("PROMPT_NOT_DURABLE", "agent session closed before prompt admission")), }, result = agent.when_idle() => { if session.events().iter().any(|event| event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())) { break; } return Err(HostError::invalid("PROMPT_NOT_DURABLE", format!("agent became idle before prompt admission: {}", result.err().map_or_else(|| "no committed user message".into(), |error| error.to_string())))); }, _ = self.inner.cancellation.cancelled() => return Err(HostError::invalid("CANCELLED", "host stopped before prompt admission")), }
+                tokio::select! { received = commits.recv() => match received { Ok(event) if event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str()) => break, Ok(_) => continue, Err(broadcast::error::RecvError::Lagged(_)) => { if session.events().iter().any(|event| event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())) { break; } }, Err(broadcast::error::RecvError::Closed) => return Err(HostError::invalid("PROMPT_NOT_DURABLE", "agent session closed before prompt admission")), }, result = agent.when_idle() => { if session.events().iter().any(|event| event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())) { break; } return Err(result.err().unwrap_or(AgentError::Disposed).into()); } }
             }
         }
         Ok(SessionPromptResult { message_id })
@@ -631,12 +763,17 @@ impl HostHandle {
         cause: AgentCancelCause,
     ) -> Result<bool, HostError> {
         let _admission = self.admit()?;
+        let agent = self.inner.registry.get(&session);
         let cancelled = match self.inner.registry.cancel(&session, cause, false) {
             Ok(value) => value,
             Err(AgentError::NotFound(_)) => false,
             Err(error) => return Err(error.into()),
         };
         if cancelled {
+            if let Some(agent) = agent {
+                agent.dispose().await?;
+            }
+            lock(&self.inner.owned_agents).remove(&session);
             self.transition(session, SessionStatus::Idle);
         }
         Ok(cancelled)
@@ -698,6 +835,12 @@ impl HostHandle {
             self.wait_drained().await;
             return Ok(());
         }
+        self.inner.registry.cancel_all(
+            AgentCancelCause::Hook {
+                reason: "host shutdown".into(),
+            },
+            false,
+        );
         self.wait_drained().await;
         let mut failures = Vec::new();
         if let Err(error) = self.inner.registry.dispose_all().await {
@@ -837,22 +980,34 @@ impl HostHandle {
         let inner = Arc::clone(&self.inner);
         let mut receiver = session.subscribe();
         let task = tokio::spawn(async move {
+            let mut next_seq = session
+                .events()
+                .last()
+                .map_or(0, |event| event.seq.saturating_add(1));
             loop {
                 if inner.relays_closed.load(Ordering::Acquire) {
                     break;
                 }
                 tokio::select! {
                     event = receiver.recv() => match event {
-                        Ok(event) => relay_event(&inner, &session_id, event),
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(event) => {
+                            if event.seq > next_seq {
+                                relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+                            }
+                            if event.seq >= next_seq {
+                                next_seq = event.seq.saturating_add(1);
+                                relay_event(&inner, &session_id, event);
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
                     _ = inner.relay_stop.notified() => break,
                 }
             }
-            while let Ok(event) = receiver.try_recv() {
-                relay_event(&inner, &session_id, event);
-            }
+            relay_missing_events(&inner, &session, &session_id, &mut next_seq);
         });
         lock(&self.inner.relays).push(task);
     }
@@ -908,6 +1063,12 @@ impl HostApi for HostHandle {
     ) -> Result<SessionPromptResult, TessivumError> {
         self.prompt_inner(params).await.map_err(HostError::wire)
     }
+    async fn steer(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptResult, TessivumError> {
+        self.steer_inner(params).await.map_err(HostError::wire)
+    }
     async fn cancel(
         &self,
         session: SessionId,
@@ -928,6 +1089,41 @@ impl HostApi for HostHandle {
     }
     async fn status(&self, session: SessionId) -> Result<Option<SessionStatus>, TessivumError> {
         self.status_inner(session).await.map_err(HostError::wire)
+    }
+    async fn create_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<HostSessionInfo, TessivumError> {
+        self.create_session_inner(session_id)
+            .await
+            .map_err(HostError::wire)
+    }
+    async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
+        self.inner
+            .persistence
+            .list(self.inner.cancellation.clone())
+            .await
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|session| HostSessionInfo {
+                        session_id: session.header.id,
+                        created_at: session.header.created_at,
+                        cwd: session.header.cwd,
+                        event_count: session.event_count,
+                    })
+                    .collect()
+            })
+            .map_err(HostError::from)
+            .map_err(HostError::wire)
+    }
+    fn descriptor(&self) -> HostDescriptor {
+        HostDescriptor {
+            cwd: self.inner.identity.cwd.to_string_lossy().into_owned(),
+            provider: self.inner.config.provider.clone(),
+            model: self.inner.config.model.clone(),
+            max_tokens: self.inner.config.max_tokens,
+        }
     }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.inner.notices.subscribe()
@@ -951,6 +1147,12 @@ impl HostApi for HostRuntime {
     ) -> Result<SessionPromptResult, TessivumError> {
         self.handle.prompt(params).await
     }
+    async fn steer(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptResult, TessivumError> {
+        self.handle.steer(params).await
+    }
     async fn cancel(
         &self,
         session: SessionId,
@@ -967,6 +1169,18 @@ impl HostApi for HostRuntime {
     }
     async fn status(&self, session: SessionId) -> Result<Option<SessionStatus>, TessivumError> {
         self.handle.status(session).await
+    }
+    async fn create_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<HostSessionInfo, TessivumError> {
+        self.handle.create_session(session_id).await
+    }
+    async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
+        self.handle.list_sessions().await
+    }
+    fn descriptor(&self) -> HostDescriptor {
+        self.handle.descriptor()
     }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.handle.subscribe()
@@ -1159,6 +1373,23 @@ fn merge_object(base: &mut Map<String, Value>, patch: &Map<String, Value>) {
                 base.insert(key.clone(), value.clone());
             }
         }
+    }
+}
+
+fn relay_missing_events(
+    inner: &HostInner,
+    session: &crate::session::Session,
+    session_id: &SessionId,
+    next_seq: &mut u64,
+) {
+    let start = *next_seq;
+    for event in session
+        .events()
+        .into_iter()
+        .filter(|event| event.seq >= start)
+    {
+        *next_seq = event.seq.saturating_add(1);
+        relay_event(inner, session_id, event);
     }
 }
 

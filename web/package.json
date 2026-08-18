@@ -1,0 +1,45 @@
+{
+  "name": "tessivum-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun run typecheck && bun -e \"import { build } from 'vite'; import { resolve } from 'node:path'; const main = resolve('src/main.ts'); await build({ resolve: { alias: { 'node:module': main, '@deepseek-ai/dsh-client-modules/client': main } }, define: { 'process.versions.node': JSON.stringify('0.0.0'), 'process.execArgv': '[]', 'process.env.CORDIS_SHARED': 'undefined' } });\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1-rc.1",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.1-rc.1",
+    "@deepseek-ai/dsh-api-gateway": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-api-remotes": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-connection": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-locale": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-runtime": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-layout": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-theme": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-tool": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-trajectory": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-web": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-typert-registry": "0.0.1-rc.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.24",
+    "@types/react-dom": "18.3.7",
+    "typescript": "5.8.2",
+    "vite": "6.2.3"
+  },
+  "overrides": {
+    "@deepseek-ai/dsh-compact": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1",
+    "@deepseek-ai/dsh-paths": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1",
+    "@deepseek-ai/dsh-type-meta": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1",
+    "@deepseek-ai/dsh-user-interaction": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slash": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1"
+  }
+}

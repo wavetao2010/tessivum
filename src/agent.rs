@@ -573,6 +573,24 @@ impl AgentRegistry {
             .cancel(AgentCancelOptions { cause, keep_inbox }))
     }
 
+    /// Signals cancellation to every live generation without waiting for disposal.
+    pub fn cancel_all(&self, cause: AgentCancelCause, keep_inbox: bool) -> usize {
+        let agents = lock(&self.inner.state)
+            .live
+            .values()
+            .map(|live| Arc::clone(&live.inner))
+            .collect::<Vec<_>>();
+        agents
+            .into_iter()
+            .filter(|agent| {
+                agent.cancel(AgentCancelOptions {
+                    cause: cause.clone(),
+                    keep_inbox,
+                })
+            })
+            .count()
+    }
+
     /// Cancels and awaits every current runtime. All are awaited even if one fails.
     pub async fn dispose_all(&self) -> Result<(), AgentError> {
         let agents = lock(&self.inner.state)

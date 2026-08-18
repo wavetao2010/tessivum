@@ -976,10 +976,12 @@ impl CapabilityHandler for DomainBridge {
                 "only cordis.service.call is handled",
             ));
         }
-        bounded_json(&request.payload, self.inner.limits.max_json_bytes)
-            .map_err(plugin_from_bridge)?;
-        let request: DomainRequest = decode(request.payload).map_err(plugin_from_bridge)?;
-        self.dispatch_native(request).map_err(plugin_from_bridge)
+        // ponytail: deny all WASM service calls until manifest permissions are wired per plugin.
+        let _ = request;
+        Err(plugin_error(
+            "CAPABILITY_DENIED",
+            "WASM service-call permissions are not configured",
+        ))
     }
 }
 
@@ -1277,13 +1279,6 @@ fn credential_error(error: crate::credentials::CredentialError) -> BridgeError {
 
 fn plugin_error(code: impl Into<String>, message: impl Into<String>) -> PluginError {
     PluginError::new(code, message, "bridge")
-}
-
-fn plugin_from_bridge(error: BridgeError) -> PluginError {
-    match error {
-        BridgeError::Remote(error) => PluginError::new(error.code, error.message, "bridge"),
-        other => PluginError::new("BRIDGE_ERROR", other.to_string(), "bridge"),
-    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

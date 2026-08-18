@@ -262,3 +262,46 @@ async fn hmr_is_opt_in_bounded_and_publishes_rebuilt_graphs() {
         .subscribe_hmr()
         .is_none());
 }
+
+#[tokio::test]
+async fn conditional_client_exports_ignore_types_and_prefer_browser_targets() {
+    let dist = dist();
+    let packages = Fixture::new("conditional-exports");
+    packages.write(
+        "published/package.json",
+        r#"{"name":"published","exports":{"./client":{"types":"./dist/client.d.ts","default":"./dist/client.js"}},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    packages.write("published/dist/client.js", "export const published = true");
+    packages.write(
+        "priority/package.json",
+        r#"{"name":"priority","exports":{"./client":{"default":"./dist/default.js","import":"./dist/import.js","browser":"./dist/browser.js"}},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    packages.write(
+        "priority/dist/default.js",
+        "export const target = 'default'",
+    );
+    packages.write("priority/dist/import.js", "export const target = 'import'");
+    packages.write(
+        "priority/dist/browser.js",
+        "export const target = 'browser'",
+    );
+    let frontend = FrontendStatic::new(dist.path()).unwrap();
+
+    let graph = frontend.scan_packages([packages.path()]).unwrap();
+    assert_eq!(
+        graph
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["priority", "published"]
+    );
+    assert_eq!(
+        body(frontend.serve(Method::GET, "/plugins/published/client.js")).await,
+        "export const published = true"
+    );
+    assert_eq!(
+        body(frontend.serve(Method::GET, "/plugins/priority/client.js")).await,
+        "export const target = 'browser'"
+    );
+}

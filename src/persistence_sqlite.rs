@@ -76,6 +76,18 @@ impl SqliteSessionPersistence {
         create_parent(&path)?;
         let connection =
             Connection::open(&path).map_err(|error| sqlite_error("open database", error))?;
+        #[cfg(unix)]
+        if path.as_os_str() != ":memory:" {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    persistence_error(
+                        "secure database permissions",
+                        format!("{}: {error}", path.display()),
+                    )
+                },
+            )?;
+        }
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| sqlite_error("configure busy timeout", error))?;

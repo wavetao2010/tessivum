@@ -466,62 +466,40 @@ Native API 优先为 Harness 核心服务服务，不追求模拟 TypeScript 的
 
 验收：选择真实社区插件样本，而不是只使用自制 fixture；至少覆盖工具、服务、事件、Node API 和浏览器 client half 类型。
 
-### 2.5 Host、API 与 SDK
+### 2.5 Host、API 与 SDK（已落地）
 
-迁移：
+Rust `HostApi` 现在是 HTTP/SSE/WebSocket 与 bounded NDJSON SDK 的共同权威，接口包含 initialize、prompt、cancel、events、status、durable session listing、subscribe 和 shutdown（`src/host.rs`、`src/api.rs`、`src/sdk.rs`）。TypeScript/Python SDK 与真实 `tessivum sdk` binary 均已完成 initialize/session-new/shutdown smoke；Web API 另保留 published full-form Remote 兼容路由。
 
-- app boot 与命令行交接；
-- HTTP/SSE/WebSocket；
-- API Gateway/Remote；
-- Headless SDK/ACP/JSON-RPC；
-- frontend static 与 client module manifest；
-- graceful shutdown。
+已验证：
 
-验收：
+- `tests/sdk.rs` duplex、EOF、frame limit 和 notification drain；
+- `tests/web_integration.rs` 静态 boot graph、SSE、Host shutdown/reboot、session/workspace listing 与 durable event recovery；
+- `tests/host.rs` admission fence、flush、agent dispose 和重启恢复。
 
-- 现有 TypeScript/Python SDK 契约测试通过；
-- 浏览器可建立连接、创建/恢复会话、发送消息、接收流式事件；
-- 断线重连不丢持久事实；
-- Host 退出没有孤儿子进程或 Node Bridge。
+### 2.6 Web 集成（已落地，保留 Browser 边界）
 
-### 2.6 Web 集成
+Rust Host 生成同源、哈希绑定的 `window.__DSH_BOOT__`，扫描 `dsh.client` package 并发布 published client bundle。Browser Cordis 保持现有 connection/remotes、runtime、React UI 与 dynamic client half。直接 roster 见 `tessivum/web/package.json`；未发布的 session-log/workflow-run 包不伪造，当前 browser ESM module sink 与 fail-loud `createRequire` shim 记录在 `web/src/main.ts`。
 
-第一轮保留 React/TypeScript Browser Cordis：
+Remote wire 已保持：`POST /api/<method>` full-form RPC、`/api/events.mux` 与 `/api/events.host` downlink WebSocket、`/events/<session>` durable SSE、SessionEvent、workspace/session baseline 与 Host-owned durable recovery。真实 Chromium smoke 已覆盖 workspace 选择、新会话、实时文本、tool card、reload 恢复和 published UI。
 
-- Rust Host 生成兼容的 `window.__DSH_BOOT__` 或替代 manifest；
-- 继续提供 client bundle；
-- 保持 Remote、SessionEvent 和 SSE wire；
-- 保持现有 UI 插件 roster；
-- 动态 browser half 继续运行在浏览器 JavaScript guard 中。
+当前 Host profile 只拥有一个 canonical cwd：`workspace.create` 对其他目录 fail-loud，不创建易失的假 workspace；`session.create` 在响应前先持久化 blank SessionHeader，因此进程重启仍能恢复。
 
-只有在 Host/Agent Runtime 稳定后，才决定是否：
-
-1. 保留浏览器 Cordis 作为长期边界；
-2. 将 Rust Cordis 编译到浏览器 WASM；
-3. 用普通 React store/API 替代浏览器 Cordis。
-
-这项选择不得阻塞阶段二 Host 迁移。
-
-真实验收：使用浏览器完成新会话、流式响应、工具展示、审批、停止、恢复、插件 UI 和设置更新。
+未纳入本轮 Host 能力的审批交互、长任务停止和可写 settings form 仍是独立产品 gate；当前 Web settings surface 明确只读，不能把它们标成已迁移。
 
 ### 2.7 正式切换与删除旧主干
 
-切换条件：
+切换证据必须同时记录：
 
-- Headless、ACP、SDK、Web 关键场景全部通过；
-- 持久 Session 兼容；
-- 目标社区插件样本通过；
-- 性能、内存、启动和关闭基准不低于批准阈值；
-- 安全边界复核完成；
-- 故障回滚路径经过演练。
+- Headless、ACP/SDK、Web、持久 Session、真实社区插件和 rollback 测试；
+- release 启动/关闭/RSS 基线与批准阈值；
+- loopback/API Origin、私有 session/credential 文件、Legacy Node trusted-process、WASM default-deny 的安全复核。
 
-切换动作：
+当前切换结论：
 
-- CLI 默认入口改为 Rust；
-- TypeScript Host/Agent Runtime 停止发布；
-- 删除仅供双运行时过渡使用的适配胶水；
-- 保留 Legacy Node Host 和 Browser Cordis，因为它们是明确的兼容产品边界，而非临时旧主干；
-- 更新用户迁移说明和插件作者指南。
+- Rust CLI 默认入口已实现：无子命令进入 Headless，`web`、`sdk` 为显式入口；`plugin-report` 明确转交独立 `plugin_report` binary；
+- `tessivum` 内没有 TypeScript Host/Agent runner；上游 `deepseek-harness` 仍公开发布 TS `@deepseek-ai/dsh`、agent/headless/host 包，停发动作属于上游发布仓库，不能在本仓库伪造完成；
+- 没有证据支持删除 API compatibility routes 或 Browser `createRequire` shim；Legacy Node 与 Browser Cordis 是保留边界；
+- 用户/插件迁移说明必须区分 Native、WASM、Legacy Node 和 Browser，不得以“支持 TypeScript”暗示 npm 插件可直接进 WASM。
 
 ## 10. 测试与验证策略
 
@@ -561,26 +539,25 @@ Native API 优先为 Harness 核心服务服务，不追求模拟 TypeScript 的
 
 ### 10.4 基准
 
-阶段一发布前建立基线：
+2026-08-17 Darwin arm64 release baseline，5 次冷启动，记录脚本使用 `/usr/bin/time -l`；首轮结果不是跨机器承诺：
 
-- 空 Context/每 Fiber 内存；
-- 1/100/1000 插件启动与卸载；
-- 服务替换风暴；
-- emit/waterfall 吞吐；
-- Native/WASM/Node Bridge 单次和批量调用；
-- LLM 流式转发；
-- Headless 启动时间和完整任务资源峰值。
+| profile | median | max/p95 sample | RSS |
+|---|---:|---:|---:|
+| Headless recorded replay wall | 96.058 ms | 710.351 ms | median 10,960,896 B；max 10,977,280 B |
+| Web startup-to-ready | 11.240 ms | 25.437 ms | ready median 10,816 KiB；max RSS 11,255,808 B |
+| Web SIGTERM-to-exit | 1.534 ms | 1.553 ms | all 5 exited 0 |
 
-阈值由首轮测量和产品目标共同批准；计划中不预先伪造结果。
+输入是 `fixtures/headless/recorded-replay.jsonl` 和已构建 `web/dist`，每次 stdout/HTTP readiness/exit 均成功。当前回归门槛：Headless ≤10 s、Web readiness ≤5 s、SIGTERM exit ≤5 s；RSS 先以该基线的 1.20× 作为回归门槛，绝对产品上限仍待批准。Legacy idle 与真实 WASM guest 未测量，标记 NOT RUN。
 
 ## 11. 安全要求
 
 - Native Rust 插件与 Legacy Node 插件均视为可信代码；权限由进程和 Harness policy 约束。
-- WASM 插件默认无文件、网络、环境变量、时钟和随机数能力；逐项授予。
-- Host Functions 必须检查插件身份、Scope、权限和输入上限。
-- Legacy Node Bridge 不宣称是安全沙箱；它必须能被独立终止并清理归属资源。
+- WASM service call 在 manifest permissions 尚未接线前由 `CapabilityHandler` 默认拒绝；不能宣称 WASM 权限生态已完成。
+- Host Functions 必须检查插件身份、Scope、权限和输入上限；当前未配置 per-plugin permissions 的路径必须 fail closed。
+- Web API 只允许 loopback bind；WebSocket 拒绝跨 Origin，HTTP/SSE/Remote 仍由 schema、大小上限和本地边界约束。
+- Session JSONL/SQLite、settings、credentials 与 attachments 文件使用 0600，Host data directory 使用 0700；Legacy Node Bridge 不宣称是安全沙箱。
 - 动态插件不得获得真实 Context、Rust 引用、数据库连接或未包装的文件句柄。
-- 跨边界消息必须设置大小、并发、超时和队列上限。
+- 跨边界消息必须设置大小、并发、超时和队列上限；历史分页上限仍是后续 hardening gate。
 - 配置表达式不允许在 Rust 主进程执行任意 JavaScript。
 
 ## 12. 主要风险与控制

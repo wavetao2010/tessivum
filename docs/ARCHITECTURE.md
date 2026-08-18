@@ -429,22 +429,23 @@ Entry {
 
 ## 13. Browser 平面
 
-第一轮架构明确保留浏览器 TypeScript Cordis：
+浏览器 TypeScript Cordis 已确认为长期兼容边界，Rust Host 不在浏览器内重建 Context：
 
 ```text
 Rust Host
-  ├── 产生 boot graph/client bundle 路由
-  ├── 提供 HTTP/SSE/RPC
-  └── 持有 durable truth
+  ├── 扫描 dsh.client 并产生 window.__DSH_BOOT__
+  ├── 提供 HTTP/durable SSE 与 published WebSocket downlinks
+  └── 持有 Session、workspace 与事件的 durable truth
 
 Browser Cordis
-  ├── connection/remotes
-  ├── client runtime
+  ├── connection/remotes 与 client runtime
   ├── React slots/UI plugins
-  └── dynamic client half
+  └── dynamic client half 与页面生命周期
 ```
 
-浏览器不直接访问 Rust Context。所有权限和持久事实由 Host 判定；UI 本地 Context 只管理展示和页面生命周期。
+`web/package.json` 固定 published Cordis、gateway/remotes、connection/locale/runtime、conversation/layout/settings/sidebar/theme/tool/trajectory/workspace、client-web 与 typert roster。`web/src/main.ts` 只补 published client-modules 当前缺失的浏览器 ESM sink；`createRequire` shim 保持 fail-loud，只有上游发布 runtime-safe 模块后才删除。Host 对 conditional `./client` export 做严格解析、同源 bundle 路由和内容哈希校验。
+
+浏览器不直接访问 Rust Context。API 只允许 loopback 监听，WebSocket 校验同源 `Origin`；所有权限和持久事实由 Host 判定。重连通过 `HostApi::list_sessions`、workspace baseline 和 durable SessionEvent 恢复，不把浏览器本地状态当作事实源。
 
 ## 14. 并发、取消与背压
 
@@ -494,9 +495,9 @@ CordisError {
 | 平面 | 默认信任 | 能力控制 |
 |---|---|---|
 | Native Rust | 可信 | 编译/发布审核、Harness policy |
-| Extism/WASM | 非可信或半可信 | manifest permissions、Host Functions、WASI/HTTP 限制、资源额度 |
+| Extism/WASM | 非可信或半可信 | 未配置 per-plugin permissions 时 Host service call 默认拒绝；接线后再按 manifest、WASI/HTTP 和资源额度逐项授予 |
 | Legacy Node | 可信旧代码 | 独立进程、OS sandbox、Bridge 输入限制 |
-| Browser | 非可信客户端 | Host 鉴权、RPC schema、服务端状态权威 |
+| Browser | 非可信客户端 | loopback-only、WebSocket 同源校验、RPC schema、服务端状态权威 |
 
 ## 18. 架构验收不变量
 
@@ -506,5 +507,5 @@ CordisError {
 4. Node/WASM 崩溃不会污染 Native Registry。
 5. 配置失败保留最后可运行树。
 6. 持久事实只由 Host 写入并可重放。
-7. 非可信 WASM 只能使用 manifest 授予的 Host Functions。
+7. 未接入 manifest permissions 的非可信 WASM Host service call 必须 fail closed；接入后只能使用声明授予的 Host Functions。
 8. 现有浏览器插件不因 Host Rust 化而被迫重写。

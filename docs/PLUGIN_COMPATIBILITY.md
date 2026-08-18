@@ -253,15 +253,15 @@ Host 持有 timer、subscription 和后台任务。Guest 只保存 Handle，不�
 
 ## 8. 浏览器插件
 
-浏览器插件不进入 Extism JS PDK。第一轮保持：
+浏览器插件不进入 Extism JS PDK。当前产品边界是：
 
-- package `dsh.client` 声明；
-- Host 扫描和提供 client bundle；
-- 浏览器 TypeScript Cordis 进行 inject/lifecycle；
-- React component、slot 和 browser remote 保持现有方式；
-- 动态 client half 继续使用浏览器 guard。
+- Rust Host 严格扫描 package `dsh.client` 与 conditional `./client` export，生成 `window.__DSH_BOOT__` 并按哈希提供 bundle；
+- 浏览器 TypeScript Cordis 保持 inject/lifecycle、React component/slot、remote 和 dynamic client half；
+- `web/package.json` 固定 gateway/remotes、connection/locale/runtime、conversation/layout/settings/sidebar/theme/tool/trajectory/workspace、client-web 与 typert 等 published roster；
+- npm 未发布 `dsh-session-log-export` 和 `dsh-client-ui-workflow-run`，因此不伪造条目；`dsh-client-ui-slash` 及少数未发布传递包仅用显式 override 维持 published bundle 解析；
+- `web/src/main.ts` 的 module sink/`createRequire` shim 是 fail-loud 兼容层，上游发布 browser-safe client module 后删除。
 
-Rust Host 只需要保持 boot graph、bundle 路由和 wire 契约。后续是否替换 Browser Cordis 是独立决策。
+Rust Host 保持 boot graph、bundle 路由、full-form RPC/SessionEvent、published mux/host WebSocket downlinks 与 durable SSE；Browser Cordis 是明确保留的兼容平面，不是待删除的服务端旧主干。
 
 ## 9. 插件迁移等级
 
@@ -269,7 +269,7 @@ Rust Host 只需要保持 boot graph、bundle 路由和 wire 契约。后续是�
 
 插件不改源码，运行在 Legacy Node Host。
 
-适合所有当前社区插件的默认过渡路径。
+适合已经过兼容报告和真实样本验证的 npm 插件；未验证插件必须返回具体诊断，不做“全部兼容”承诺。
 
 ### Level 1：打包兼容
 
@@ -449,7 +449,7 @@ Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 - 样本社区插件无需修改地运行；
 - Native Agent 能看到 Legacy 插件注册的工具/提示词；
 - Node 崩溃或插件卸载后无残留；
-- 新 WASM 插件有稳定 ABI、权限和至少两种语言 PDK；
+- 新 WASM 插件 ABI 已冻结；per-plugin manifest permissions 接线前，Host service call 默认拒绝，不能宣称权限生态已完成；
 - 浏览器插件继续工作；
 - 不支持的插件获得具体、可行动的诊断；
 - 文档明确区分 Node 兼容与 WASM 沙箱，不做误导性安全承诺。

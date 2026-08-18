@@ -157,9 +157,11 @@ impl JsonlSessionPersistence {
             Uuid::new_v4()
         ));
         let result = async {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options
                 .open(&temp)
                 .await
                 .map_err(|error| io_error("create temporary log", &temp, error))?;
@@ -171,7 +173,18 @@ impl JsonlSessionPersistence {
                 .map_err(|error| io_error("sync temporary log", &temp, error))?;
             fs::rename(&temp, path)
                 .await
-                .map_err(|error| io_error("rename temporary log", path, error))
+                .map_err(|error| io_error("rename temporary log", path, error))?;
+            #[cfg(unix)]
+            {
+                let directory = fs::File::open(&self.root)
+                    .await
+                    .map_err(|error| io_error("open log directory", &self.root, error))?;
+                directory
+                    .sync_all()
+                    .await
+                    .map_err(|error| io_error("sync log directory", &self.root, error))?;
+            }
+            Ok(())
         }
         .await;
         if result.is_err() {

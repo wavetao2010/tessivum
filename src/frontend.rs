@@ -633,8 +633,7 @@ fn scan_manifest(manifest: &Path) -> Result<Option<ScannedRow>, FrontendManifest
         .get("exports")
         .and_then(Value::as_object)
         .ok_or_else(|| manifest_error(manifest, "exports must be an object with ./client"))?;
-    let client_export =
-        required_string(manifest, exports.get("./client"), "exports[\"./client\"]")?;
+    let client_export = select_client_export(manifest, exports.get("./client"))?;
     let package_root = manifest
         .parent()
         .ok_or_else(|| manifest_error(manifest, "package manifest has no parent directory"))?;
@@ -760,6 +759,46 @@ fn optional_string(
     value
         .map(|value| required_string(manifest, Some(value), field))
         .transpose()
+}
+
+fn select_client_export(
+    manifest: &Path,
+    export: Option<&Value>,
+) -> Result<String, FrontendManifestError> {
+    let export =
+        export.ok_or_else(|| manifest_error(manifest, "exports[\"./client\"] is required"))?;
+    let Value::Object(conditions) = export else {
+        return required_string(manifest, Some(export), "exports[\"./client\"]");
+    };
+    for (condition, target) in conditions {
+        if !matches!(
+            condition.as_str(),
+            "browser" | "import" | "default" | "types"
+        ) {
+            return Err(manifest_error(
+                manifest,
+                format!("exports[\"./client\"] has unsupported condition {condition:?}"),
+            ));
+        }
+        required_string(
+            manifest,
+            Some(target),
+            &format!("exports[\"./client\"].{condition}"),
+        )?;
+    }
+    for condition in ["browser", "import", "default"] {
+        if let Some(target) = conditions.get(condition) {
+            return required_string(
+                manifest,
+                Some(target),
+                &format!("exports[\"./client\"].{condition}"),
+            );
+        }
+    }
+    Err(manifest_error(
+        manifest,
+        "exports[\"./client\"] must declare browser, import, or default",
+    ))
 }
 
 fn optional_inject(

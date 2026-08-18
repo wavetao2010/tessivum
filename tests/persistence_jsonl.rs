@@ -102,6 +102,16 @@ async fn appends_reopen_in_order_and_confines_traversal_ids() {
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(persistence.raw_path(&unsafe_id))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     fs::remove_dir_all(root).unwrap();
 }
 

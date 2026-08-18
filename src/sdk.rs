@@ -147,16 +147,9 @@ impl JsonRpcServer {
         }
     }
 
-    /// Serves Unix standard streams without using a second protocol channel.
-    /// Call [`Self::serve`] with platform-native streams where `/dev/stdin` and
-    /// `/dev/stdout` are unavailable.
+    /// Serves the process standard streams on every Tokio-supported platform.
     pub async fn serve_stdio(&self) -> Result<(), SdkError> {
-        let reader = tokio::fs::File::open("/dev/stdin").await?;
-        let writer = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/stdout")
-            .await?;
-        self.serve(reader, writer).await
+        self.serve(tokio::io::stdin(), tokio::io::stdout()).await
     }
 
     async fn serve_requests(

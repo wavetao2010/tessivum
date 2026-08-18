@@ -419,14 +419,13 @@ impl AttachmentStore {
             Uuid::new_v4()
         ));
         let result = async {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .await
-                .map_err(|error| {
-                    AttachmentError::Storage(format!("create attachment temporary: {error}"))
-                })?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary).await.map_err(|error| {
+                AttachmentError::Storage(format!("create attachment temporary: {error}"))
+            })?;
             file.write_all(data).await.map_err(|error| {
                 AttachmentError::Storage(format!("write attachment temporary: {error}"))
             })?;
