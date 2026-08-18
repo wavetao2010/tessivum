@@ -14,8 +14,8 @@ use tessivum::{
         AgentStatus, Inbox,
     },
     approval::{
-        ApprovalAnswerer, ApprovalError, ApprovalOutcome, ApprovalPolicy, ApprovalRequest,
-        ApprovalService,
+        ApprovalAnswerer, ApprovalAsked, ApprovalDecision, ApprovalError, ApprovalOutcome,
+        ApprovalPolicy, ApprovalRequest, ApprovalService, HostApprovalRegistry,
     },
     goal::{GoalError, GoalPhase, GoalRef, GoalService, GoalSnapshot},
     planning::{PlanMode, PlanningService},
@@ -23,10 +23,14 @@ use tessivum::{
         MemorySessionPersistence, Session, SessionError, SessionInspection, SessionPersistence,
         SessionStore,
     },
-    SessionEvent, SessionHeader, SessionId, TessivumError, TodoItem, TodoStatus,
+    SessionEvent, SessionHeader, SessionId, TessivumError, TodoItem, TodoStatus, ToolCallId,
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::Notify;
+use tessivum::tools::{
+    ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRestrictions, ToolRunContext,
+    ToolRuntime,
+};
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -354,6 +358,16 @@ impl ApprovalAnswerer for CountingAnswerer {
     ) -> Result<Option<bool>, TessivumError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(Some(true))
+    }
+}
+
+struct CountingTool(AtomicUsize);
+
+#[async_trait]
+impl ToolHandler for CountingTool {
+    async fn run(&self, _: ToolRunContext, _: serde_json::Value) -> ToolHandlerResult {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::new(Vec::new(), false, serde_json::Value::Null))
     }
 }
 
@@ -948,4 +962,140 @@ async fn cancellation_waiting_for_finalization_is_recorded() {
             .outcome,
         ApprovalOutcome::Cancelled,
     );
+}
+
+#[tokio::test]
+async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry.register_factory(Arc::new(Factory)).unwrap();
+    let session_id = SessionId::from("approval-host-registry");
+    let first = registry
+        .create(header(session_id.as_str()), options(), cancellation())
+        .await
+        .unwrap();
+    let session = first.session();
+    append_turn_start(&session, 1).await;
+    let authority = first.authority();
+    let approvals = ApprovalService::new(registry.get(&session_id).unwrap()).unwrap();
+    let host_approvals = HostApprovalRegistry::new();
+    let stale_slot = host_approvals.install(&authority, approvals).unwrap();
+    let duplicate = ApprovalService::new(registry.get(&session_id).unwrap()).unwrap();
+    assert!(host_approvals.install(&authority, duplicate).is_err());
+
+    let tools = ToolRuntime::new();
+    tools.set_approval(Some(Arc::new(host_approvals.clone())));
+    let asked_tools = tools
+        .scoped(ToolRestrictions::new().ask("danger"))
+        .unwrap();
+    let calls = Arc::new(CountingTool(AtomicUsize::new(0)));
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "danger",
+            "requires approval",
+            json!({"type":"object"}),
+            calls.clone(),
+        ))
+        .unwrap();
+
+    let denied = asked_tools
+        .execute(
+            ToolRunContext {
+                session: session_id.clone(),
+                call: ToolCallId::from("no-answer"),
+                cancellation: cancellation(),
+            },
+            "danger",
+            json!({"path":"/tmp/a"}),
+        )
+        .await;
+    assert!(denied.is_error);
+    assert_eq!(calls.0.load(Ordering::SeqCst), 0);
+
+    let _answerer = host_approvals
+        .register_answerer(&session_id, Arc::new(CountingAnswerer(AtomicUsize::new(0))))
+        .unwrap();
+    let allowed = asked_tools
+        .execute(
+            ToolRunContext {
+                session: session_id.clone(),
+                call: ToolCallId::from("allowed-once"),
+                cancellation: cancellation(),
+            },
+            "danger",
+            json!({"path":"/tmp/b"}),
+        )
+        .await;
+    assert!(!allowed.is_error);
+    assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+
+    let asked = session
+        .events()
+        .into_iter()
+        .filter_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let decided = session
+        .events()
+        .into_iter()
+        .filter_map(|event| {
+            (event.event_type == "approval/decided")
+                .then(|| serde_json::from_value::<ApprovalDecision>(event.data).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(decided.len(), 2);
+    let audit_types = session
+        .events()
+        .into_iter()
+        .filter(|event| event.event_type.starts_with("approval/"))
+        .map(|event| event.event_type)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        audit_types.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "approval/asked",
+            "approval/decided",
+            "approval/asked",
+            "approval/decided",
+        ]
+    );
+    assert_eq!(asked[0].tool_name, "danger");
+    assert_eq!(asked[0].policy, ApprovalPolicy::Ask);
+    assert_eq!(
+        asked[0].request,
+        ApprovalRequest {
+            action: "danger".into(),
+            details: json!({"path":"/tmp/a"}),
+        }
+    );
+    assert_eq!(asked[0].call_id.as_ref().map(ToolCallId::as_str), Some("no-answer"));
+    assert_eq!(asked[0].reason, None);
+    assert!(!asked[0].approval_id.as_str().is_empty());
+    assert_eq!(asked[0].approval_id, decided[0].approval_id);
+    assert_eq!(asked[1].approval_id, decided[1].approval_id);
+    assert_eq!(decided[0].outcome, ApprovalOutcome::Unavailable);
+    assert_eq!(decided[1].outcome, ApprovalOutcome::AllowedOnce);
+
+    first.dispose().await.unwrap();
+    assert!(host_approvals.lookup(&session_id).is_none());
+    let replacement = registry
+        .resume(session_id.clone(), options(), cancellation())
+        .await
+        .unwrap();
+    let replacement_authority = replacement.authority();
+    let blocked_replacement = ApprovalService::new(registry.get(&session_id).unwrap()).unwrap();
+    assert!(host_approvals
+        .install(&replacement_authority, blocked_replacement)
+        .is_err());
+    assert!(stale_slot.close());
+    let replacement_service = ApprovalService::new(registry.get(&session_id).unwrap()).unwrap();
+    let replacement_slot = host_approvals
+        .install(&replacement_authority, replacement_service)
+        .unwrap();
+    assert!(!stale_slot.close());
+    assert!(host_approvals.lookup(&session_id).is_some());
+    drop(replacement_slot);
+    replacement.dispose().await.unwrap();
 }

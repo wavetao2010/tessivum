@@ -21,7 +21,7 @@ use crate::{
     agent::{same_authority, AgentAuthority, AgentHandle},
     session::{Session, SessionError},
     tools::{ToolApproval, ToolApprovalResult, ToolRunContext},
-    SessionEvent, SessionId, TessivumError, ToolSchema,
+    SessionEvent, SessionId, TessivumError, ToolCallId, ToolSchema,
 };
 
 /// Stable key for the agent-owned approval service.
@@ -55,6 +55,25 @@ impl ApprovalOutcome {
     }
 }
 
+/// Opaque durable identity joining one asked event to its final decision.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ApprovalId(String);
+
+impl ApprovalId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    fn random() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Untrusted action and lossless arguments requesting a one-shot decision.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,15 +104,25 @@ pub struct ApprovalPolicyChange {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalAsked {
+    #[serde(default)]
+    pub approval_id: ApprovalId,
     pub turn: u64,
     pub policy: ApprovalPolicy,
     pub request: ApprovalRequest,
+    #[serde(default)]
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<ToolCallId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Durable audit event emitted after the final decision is known.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalDecision {
+    #[serde(default)]
+    pub approval_id: ApprovalId,
     pub turn: u64,
     pub outcome: ApprovalOutcome,
 }
@@ -315,6 +344,19 @@ impl ApprovalService {
         request: ApprovalRequest,
         cancellation: CancellationToken,
     ) -> ApprovalOutcome {
+        let tool_name = request.action.clone();
+        self.approve_with_audit(request, cancellation, tool_name, None, None)
+            .await
+    }
+
+    async fn approve_with_audit(
+        &self,
+        request: ApprovalRequest,
+        cancellation: CancellationToken,
+        tool_name: String,
+        call_id: Option<ToolCallId>,
+        reason: Option<String>,
+    ) -> ApprovalOutcome {
         if self.require_live().is_err() || request.validate().is_err() {
             return ApprovalOutcome::Unavailable;
         }
@@ -324,6 +366,7 @@ impl ApprovalService {
         let Some(turn) = active_turn(&self.inner.session) else {
             return ApprovalOutcome::Unavailable;
         };
+        let approval_id = ApprovalId::random();
 
         let (generation, policy, hooks, answerers) = {
             let _gate = self.inner.write_gate.lock().await;
@@ -331,17 +374,6 @@ impl ApprovalService {
                 return ApprovalOutcome::Cancelled;
             }
             if self.require_live().is_err() || active_turn(&self.inner.session) != Some(turn) {
-                let _ = append(
-                    &self.inner.session,
-                    "approval/decided",
-                    serde_json::to_value(ApprovalDecision {
-                        turn,
-                        outcome: ApprovalOutcome::Rejected,
-                    })
-                    .expect("approval decision is serializable"),
-                    ContextHandle::root().scope().cancellation(),
-                )
-                .await;
                 return ApprovalOutcome::Rejected;
             }
 
@@ -355,9 +387,13 @@ impl ApprovalService {
                 (generation, policy, consumes_next_step, hooks, answerers)
             };
             let asked = ApprovalAsked {
+                approval_id: approval_id.clone(),
                 turn,
                 policy,
                 request: request.clone(),
+                tool_name,
+                call_id,
+                reason,
             };
             if append(
                 &self.inner.session,
@@ -419,8 +455,12 @@ impl ApprovalService {
         if append(
             &self.inner.session,
             "approval/decided",
-            serde_json::to_value(ApprovalDecision { turn, outcome })
-                .expect("approval decision is serializable"),
+            serde_json::to_value(ApprovalDecision {
+                approval_id,
+                turn,
+                outcome,
+            })
+            .expect("approval decision is serializable"),
             finalization,
         )
         .await
@@ -454,6 +494,9 @@ impl ApprovalService {
         } else {
             Err(ApprovalError::NotLive)
         }
+    }
+    fn matches_owner(&self, owner: &AgentAuthority) -> bool {
+        same_authority(owner, &self.inner.authority)
     }
 }
 
@@ -515,6 +558,171 @@ impl Drop for ApprovalRegistration {
     }
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum HostApprovalError {
+    #[error("approval owner is not live")]
+    NotLive,
+    #[error("approval service does not belong to the supplied owner")]
+    OwnerMismatch,
+    #[error("an approval service is already installed for this session")]
+    AlreadyInstalled,
+    #[error(transparent)]
+    Approval(#[from] ApprovalError),
+}
+
+struct HostApprovalSlot {
+    authority: AgentAuthority,
+    approvals: ApprovalService,
+}
+
+struct HostApprovalRegistryInner {
+    slots: Mutex<BTreeMap<SessionId, HostApprovalSlot>>,
+}
+
+/// Host-wide router for approval services owned by exact live agent generations.
+#[derive(Clone)]
+pub struct HostApprovalRegistry {
+    inner: Arc<HostApprovalRegistryInner>,
+}
+
+impl Default for HostApprovalRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostApprovalRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(HostApprovalRegistryInner {
+                slots: Mutex::new(BTreeMap::new()),
+            }),
+        }
+    }
+
+    /// Installs the only service slot for one exact live agent generation.
+    pub fn install(
+        &self,
+        owner: &AgentAuthority,
+        approvals: ApprovalService,
+    ) -> Result<HostApprovalRegistration, HostApprovalError> {
+        if !owner.is_live() {
+            return Err(HostApprovalError::NotLive);
+        }
+        if !approvals.matches_owner(owner) {
+            return Err(HostApprovalError::OwnerMismatch);
+        }
+        let session = owner.id();
+        let mut slots = lock(&self.inner.slots);
+        if slots.contains_key(&session) {
+            return Err(HostApprovalError::AlreadyInstalled);
+        }
+        slots.insert(
+            session.clone(),
+            HostApprovalSlot {
+                authority: owner.clone(),
+                approvals,
+            },
+        );
+        Ok(HostApprovalRegistration {
+            inner: Arc::downgrade(&self.inner),
+            session,
+            authority: owner.clone(),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// Looks up the currently live generation's approval service for trusted host code.
+    pub fn lookup(&self, session: &SessionId) -> Option<ApprovalService> {
+        let slots = lock(&self.inner.slots);
+        slots
+            .get(session)
+            .filter(|slot| slot.authority.is_live())
+            .map(|slot| slot.approvals.clone())
+    }
+
+    /// Registers an API-owned answerer against the current exact agent generation.
+    pub fn register_answerer(
+        &self,
+        session: &SessionId,
+        answerer: Arc<dyn ApprovalAnswerer>,
+    ) -> Result<ApprovalRegistration, HostApprovalError> {
+        let (authority, approvals) = {
+            let slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get(session) else {
+                return Err(HostApprovalError::NotLive);
+            };
+            if !slot.authority.is_live() {
+                return Err(HostApprovalError::NotLive);
+            }
+            (slot.authority.clone(), slot.approvals.clone())
+        };
+        Ok(approvals.register_answerer(&authority, answerer)?)
+    }
+}
+
+/// Lifetime owner of one exact host approval service slot.
+pub struct HostApprovalRegistration {
+    inner: Weak<HostApprovalRegistryInner>,
+    session: SessionId,
+    authority: AgentAuthority,
+    closed: AtomicBool,
+}
+
+impl HostApprovalRegistration {
+    /// Removes this exact slot once, never a later generation for the same session.
+    pub fn close(&self) -> bool {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        self.inner.upgrade().is_some_and(|inner| {
+            let mut slots = lock(&inner.slots);
+            if slots
+                .get(&self.session)
+                .is_some_and(|slot| same_authority(&slot.authority, &self.authority))
+            {
+                slots.remove(&self.session);
+                true
+            } else {
+                false
+            }
+        })
+    }
+}
+
+impl Drop for HostApprovalRegistration {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+#[async_trait]
+impl ToolApproval for HostApprovalRegistry {
+    async fn approve(
+        &self,
+        context: &ToolRunContext,
+        schema: &ToolSchema,
+        arguments: &Value,
+    ) -> ToolApprovalResult {
+        let Some(approvals) = self.lookup(&context.session) else {
+            return Ok(Some(false));
+        };
+        let outcome = approvals
+            .approve_with_audit(
+                ApprovalRequest {
+                    action: schema.name.clone(),
+                    details: arguments.clone(),
+                },
+                context.cancellation.clone(),
+                schema.name.clone(),
+                Some(context.call.clone()),
+                None,
+            )
+            .await;
+        Ok(Some(outcome.allows()))
+    }
+}
+
 struct ApprovalToolGate {
     approvals: ApprovalService,
 }
@@ -532,12 +740,15 @@ impl ToolApproval for ApprovalToolGate {
         }
         let outcome = self
             .approvals
-            .approve(
+            .approve_with_audit(
                 ApprovalRequest {
                     action: schema.name.clone(),
                     details: arguments.clone(),
                 },
                 context.cancellation.clone(),
+                schema.name.clone(),
+                Some(context.call.clone()),
+                None,
             )
             .await;
         Ok(Some(outcome.allows()))

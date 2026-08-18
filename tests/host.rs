@@ -261,3 +261,26 @@ async fn shutdown_fences_new_admission_and_leaves_no_owned_processes() {
         "all host-owned file/process resources release before shutdown returns"
     );
 }
+
+#[tokio::test]
+async fn host_approval_registry_tracks_owned_agent_generations() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let handle = runtime.handle();
+    let approvals = handle.approval_registry().unwrap();
+    let session = SessionId::from("host-approval-lifetime");
+    assert!(approvals.lookup(&session).is_none());
+
+    handle.prompt(prompt(session.as_str())).await.unwrap();
+    assert!(approvals.lookup(&session).is_some());
+    assert!(handle
+        .cancel(session.clone(), AgentCancelCause::User)
+        .await
+        .unwrap());
+    assert!(approvals.lookup(&session).is_none());
+
+    handle.prompt(prompt(session.as_str())).await.unwrap();
+    assert!(approvals.lookup(&session).is_some());
+    runtime.shutdown().await.unwrap();
+    assert!(approvals.lookup(&session).is_none());
+}

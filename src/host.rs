@@ -24,6 +24,7 @@ use crate::{
         AgentError, AgentFactoryRegistration, AgentHandle, AgentOptions, AgentRegistry, AgentStatus,
     },
     agent_loop::AgentLoopFactory,
+    approval::{ApprovalError, ApprovalService, HostApprovalError, HostApprovalRegistration, HostApprovalRegistry},
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     code_runtime::{CodeRuntime, ProcessCodeRuntime},
@@ -212,6 +213,10 @@ pub enum HostError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Core(#[from] CoreError),
+    #[error(transparent)]
+    Approval(#[from] ApprovalError),
+    #[error(transparent)]
+    ApprovalRegistry(#[from] HostApprovalError),
 }
 
 impl HostError {
@@ -233,6 +238,7 @@ impl HostError {
             Self::Agent(AgentError::Cancelled) => "CANCELLED",
             Self::Agent(_) => "HOST_AGENT_ERROR",
             Self::Core(_) => "HOST_CORE_ERROR",
+            Self::Approval(_) | Self::ApprovalRegistry(_) => "HOST_APPROVAL_ERROR",
         }
     }
 
@@ -326,6 +332,9 @@ pub trait HostApi: Send + Sync {
         }
     }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification>;
+    fn approval_registry(&self) -> Option<HostApprovalRegistry> {
+        None
+    }
     async fn shutdown(&self) -> Result<(), TessivumError>;
 }
 
@@ -348,13 +357,14 @@ struct HostInner {
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
     registry: AgentRegistry,
+    approvals: HostApprovalRegistry,
     telemetry: Option<TelemetryCoordinator>,
     code_runtime: Option<ProcessCodeRuntime>,
     subprocesses: SubprocessRuntime,
     legacy: Option<LegacyProfile>,
     loader: AsyncMutex<Option<Loader>>,
     services: Services,
-    owned_agents: Mutex<BTreeMap<SessionId, AgentHandle>>,
+    owned_agents: Mutex<BTreeMap<SessionId, OwnedAgent>>,
     state: Mutex<State>,
     // ponytail: one Host-wide generation gate; shard by session only if prompt churn contends.
     setup: AsyncMutex<()>,
@@ -365,6 +375,11 @@ struct HostInner {
     relay_stop: Notify,
     relays_closed: AtomicBool,
     relays: Mutex<Vec<JoinHandle<()>>>,
+}
+
+struct OwnedAgent {
+    _approval: HostApprovalRegistration,
+    _agent: AgentHandle,
 }
 
 struct Services {
@@ -471,6 +486,8 @@ impl HostRuntime {
             .transpose()?;
         let prompt_service = prompt.clone().publish(&root)?;
         let tools = ToolRuntime::new();
+        let approvals = HostApprovalRegistry::new();
+        tools.set_approval(Some(Arc::new(approvals.clone())));
         let builtin_tools = BuiltinTools::new(
             &tools,
             BuiltinToolsConfig {
@@ -582,6 +599,7 @@ impl HostRuntime {
             sessions,
             persistence,
             registry,
+            approvals,
             telemetry: config.telemetry.clone(),
             code_runtime: config.code_runtime.clone(),
             subprocesses,
@@ -811,10 +829,11 @@ impl HostHandle {
             Err(error) => return Err(error.into()),
         };
         if cancelled {
+            let owned = lock(&self.inner.owned_agents).remove(&session);
+            drop(owned);
             if let Some(agent) = agent {
                 agent.dispose().await?;
             }
-            lock(&self.inner.owned_agents).remove(&session);
             self.transition(session, SessionStatus::Idle);
         }
         Ok(cancelled)
@@ -887,6 +906,8 @@ impl HostHandle {
         if let Err(error) = self.inner.registry.dispose_all().await {
             failures.push(format!("agents: {error}"));
         }
+        let owned_agents = std::mem::take(&mut *lock(&self.inner.owned_agents));
+        drop(owned_agents);
         if let Some(code) = &self.inner.code_runtime {
             if let Err(error) = code.dispose().await {
                 failures.push(format!("code: {error}"));
@@ -941,7 +962,6 @@ impl HostHandle {
         if let Err(error) = self.inner.services.root.scope().dispose().await {
             failures.push(format!("root: {error}"));
         }
-        lock(&self.inner.owned_agents).clear();
         if failures.is_empty() {
             Ok(())
         } else {
@@ -1002,8 +1022,38 @@ impl HostHandle {
                 self.inner.cancellation.clone(),
             )
             .await?;
+        let observer = match self.inner.registry.get(session_id) {
+            Some(agent) => agent,
+            None => {
+                let _ = owned.dispose().await;
+                return Err(HostError::InvalidConfiguration(
+                    "created agent was not published".into(),
+                ));
+            }
+        };
+        let authority = owned.authority();
+        let approvals = match ApprovalService::new(observer) {
+            Ok(approvals) => approvals,
+            Err(error) => {
+                let _ = owned.dispose().await;
+                return Err(error.into());
+            }
+        };
+        let approval = match self.inner.approvals.install(&authority, approvals) {
+            Ok(approval) => approval,
+            Err(error) => {
+                let _ = owned.dispose().await;
+                return Err(error.into());
+            }
+        };
         let session = owned.session();
-        lock(&self.inner.owned_agents).insert(session_id.clone(), owned);
+        lock(&self.inner.owned_agents).insert(
+            session_id.clone(),
+            OwnedAgent {
+                _approval: approval,
+                _agent: owned,
+            },
+        );
         self.ensure_relay(session);
         self.transition(session_id.clone(), SessionStatus::Idle);
         self.inner.registry.get(session_id).ok_or_else(|| {
@@ -1164,6 +1214,9 @@ impl HostApi for HostHandle {
             max_tokens: self.inner.config.max_tokens,
         }
     }
+    fn approval_registry(&self) -> Option<HostApprovalRegistry> {
+        Some(self.inner.approvals.clone())
+    }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.inner.notices.subscribe()
     }
@@ -1220,6 +1273,9 @@ impl HostApi for HostRuntime {
     }
     fn descriptor(&self) -> HostDescriptor {
         self.handle.descriptor()
+    }
+    fn approval_registry(&self) -> Option<HostApprovalRegistry> {
+        self.handle.approval_registry()
     }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.handle.subscribe()
