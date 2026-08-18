@@ -301,18 +301,18 @@ impl HostError {
             Self::WorkspaceAttach {
                 session_id,
                 workspace_id,
-                source,
+                source: _,
             } => TessivumError::new(
                 "WORKSPACE_ATTACH_FAILED",
-                format!(
-                    "failed to attach session {session_id} to workspace {workspace_id}: {source}"
-                ),
+                format!("failed to attach session {session_id} to workspace {workspace_id}"),
                 "host",
-                json!({
-                    "sessionId": session_id,
-                    "workspaceId": workspace_id,
-                    "cause": source.code(),
-                }),
+                json!({"sessionId": session_id, "workspaceId": workspace_id}),
+            ),
+            Self::Workspace(error) => TessivumError::new(
+                error.code(),
+                "workspace operation failed",
+                "host",
+                Value::Null,
             ),
             error => {
                 let code = error.code().to_owned();
@@ -959,13 +959,13 @@ impl HostHandle {
     }
 
     fn default_workspace_id(&self) -> Result<WorkspaceId, HostError> {
-        self.inner
-            .workspace_registry
-            .list()
-            .into_iter()
+        let workspaces = self.inner.workspace_registry.list();
+        workspaces
+            .iter()
             .find(|workspace| workspace.path == self.inner.identity.cwd.to_string_lossy())
-            .map(|workspace| workspace.workspace_id)
-            .ok_or_else(|| HostError::InvalidConfiguration("default workspace is missing".into()))
+            .or_else(|| workspaces.first())
+            .map(|workspace| workspace.workspace_id.clone())
+            .ok_or_else(|| HostError::InvalidConfiguration("workspace registry is empty".into()))
     }
 
     fn require_session_root(&self, header: &SessionHeader, root: &Path) -> Result<(), HostError> {

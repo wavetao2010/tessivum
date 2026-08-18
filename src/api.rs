@@ -10,7 +10,6 @@ use std::{
     future::Future,
     io,
     net::{Ipv4Addr, SocketAddr},
-    path::Path as FsPath,
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -54,6 +53,7 @@ use crate::{
         SessionPromptParams, MAX_SAFE_INTEGER,
     },
     settings::{SettingsDescriptor, SettingsError, SettingsPathOp},
+    workspace::{WorkspaceError, WorkspaceId},
     TessivumError,
 };
 use uuid::Uuid;
@@ -310,25 +310,15 @@ struct CompatibilityState {
 }
 
 struct CompatibilityData {
-    workspaces: BTreeMap<String, CompatWorkspace>,
+    // Presentation-only state. Durable session/workspace authority lives in Host.
     sessions: BTreeMap<SessionId, CompatSession>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CompatWorkspace {
-    workspace_id: String,
-    path: String,
-    title: String,
-    session_ids: Vec<SessionId>,
-    created_at: String,
-    updated_at: String,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompatSession {
     session_id: SessionId,
+    workspace_id: Option<WorkspaceId>,
     updated_at: u64,
     running: bool,
     blank: bool,
@@ -350,15 +340,6 @@ struct CompatFrame {
 
 impl CompatibilityState {
     fn new(descriptor: HostDescriptor) -> Self {
-        let timestamp = compat_timestamp();
-        let workspace = CompatWorkspace {
-            workspace_id: "default".into(),
-            path: descriptor.cwd.clone(),
-            title: workspace_title(&descriptor.cwd),
-            session_ids: Vec::new(),
-            created_at: timestamp.clone(),
-            updated_at: timestamp,
-        };
         let (frames, _) = broadcast::channel(MAX_COMPAT_FRAME_QUEUE);
         Self {
             cwd: descriptor.cwd,
@@ -366,7 +347,6 @@ impl CompatibilityState {
             model: descriptor.model,
             max_tokens: descriptor.max_tokens,
             data: Mutex::new(CompatibilityData {
-                workspaces: BTreeMap::from([(workspace.workspace_id.clone(), workspace)]),
                 sessions: BTreeMap::new(),
             }),
             initialized: AsyncMutex::new(false),
@@ -375,25 +355,12 @@ impl CompatibilityState {
     }
 }
 
-fn compat_timestamp() -> String {
-    "1970-01-01T00:00:00.000Z".into()
-}
-
 fn compat_updated_at() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(MAX_SAFE_INTEGER as u128) as u64
-}
-
-fn workspace_title(path: &str) -> String {
-    FsPath::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(path)
-        .to_owned()
 }
 
 fn compat_data(state: &CompatibilityState) -> std::sync::MutexGuard<'_, CompatibilityData> {
@@ -588,6 +555,34 @@ struct CompatEmptyPayload {}
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatWorkspaceCreate {
     path: String,
+}
+ 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatWorkspaceRename {
+    workspace_id: String,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatWorkspaceDelete {
+    workspace_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatWorkspaceMove {
+    workspace_id: String,
+    before_workspace_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionMove {
+    workspace_id: String,
+    session_id: SessionId,
+    before_session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -849,32 +844,36 @@ async fn compat_dispatch(
     match method {
         "host.describe" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
-            let data = compat_data(&state.compat);
+            let attached_sessions = state
+                .host
+                .list_sessions()
+                .await
+                .map_err(compat_host_error)?
+                .len();
             Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "cwd": state.compat.cwd,
                 "provider": state.compat.provider,
                 "model": state.compat.model,
-                "attachedSessions": data.sessions.len(),
+                "attachedSessions": attached_sessions,
             }))
         }
-        "settings.describe" => {
-            let _: CompatEmptyPayload = compat_decode(payload)?;
-            compat_settings_describe(state)
-        }
-        "settings.update" => compat_settings_update(state, compat_decode(payload)?).await,
-        "settings.replace" => compat_settings_replace(state, compat_decode(payload)?).await,
-        "settings.mutate" => compat_settings_mutate(state, compat_decode(payload)?).await,
         "workspace.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
-            compat_sync_sessions(state).await?;
-            let data = compat_data(&state.compat);
+            let snapshot = compat_registry(state)?.snapshot();
             Ok(json!({
-                "items": data.workspaces.values().cloned().collect::<Vec<_>>(),
-                "archivedSessionIds": [],
+                "items": snapshot.items,
+                "archivedSessionIds": snapshot.archived_session_ids,
             }))
         }
         "workspace.create" => compat_workspace_create(state, compat_decode(payload)?),
+        "workspace.rename" => compat_workspace_rename(state, compat_decode(payload)?),
+        "workspace.delete" => compat_workspace_delete(state, compat_decode(payload)?),
+        "workspace.insertBefore" => compat_workspace_move(state, compat_decode(payload)?),
+        "workspace.insertSessionBefore" => {
+            compat_session_move(state, compat_decode(payload)?)
+        }
+        "workspace.archiveSession" => compat_archive_session(state, compat_decode(payload)?),
         "session.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
             compat_sync_sessions(state).await?;
@@ -1185,12 +1184,71 @@ fn compat_require_session(session: &SessionId) -> Result<(), CompatError> {
 
 fn compat_canonical_directory(path: &str) -> Result<String, CompatError> {
     compat_require_nonblank("path", path)?;
-    let path = fs::canonicalize(path)
-        .map_err(|error| CompatError::invalid(format!("path cannot be canonicalized: {error}")))?;
-    if !path.is_dir() {
-        return Err(CompatError::invalid("path must be a directory"));
+    let canonical = fs::canonicalize(path).map_err(|_| CompatError {
+        code: "workspace-invalid-path".into(),
+        message: "workspace path is invalid".into(),
+        details: json!({}),
+    })?;
+    if !canonical.is_dir() || fs::read_dir(&canonical).is_err() {
+        return Err(CompatError {
+            code: "workspace-invalid-path".into(),
+            message: "workspace path is invalid".into(),
+            details: json!({}),
+        });
     }
-    Ok(path.to_string_lossy().into_owned())
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+fn compat_registry(state: &ApiState) -> Result<crate::workspace::WorkspaceRegistry, CompatError> {
+    state
+        .host
+        .workspace_registry()
+        .ok_or_else(|| CompatError::internal("workspace registry is unavailable"))
+}
+
+fn compat_workspace_error(error: WorkspaceError) -> CompatError {
+    match error {
+        WorkspaceError::InvalidPath(_) => CompatError {
+            code: "workspace-invalid-path".into(),
+            message: "workspace path is invalid".into(),
+            details: json!({}),
+        },
+        WorkspaceError::TitleConflict | WorkspaceError::InvalidTitle => CompatError {
+            code: "workspace-name-conflict".into(),
+            message: "workspace name is already used".into(),
+            details: json!({}),
+        },
+        WorkspaceError::NotFound(workspace_id) => CompatError {
+            code: "workspace-not-found".into(),
+            message: "workspace was not found".into(),
+            details: json!({"workspaceId": workspace_id}),
+        },
+        WorkspaceError::InvalidPosition => CompatError {
+            code: "workspace-move-invalid".into(),
+            message: "workspace move is invalid".into(),
+            details: json!({}),
+        },
+        WorkspaceError::UnknownSession(session_id)
+        | WorkspaceError::UnaccountedSession(session_id) => CompatError {
+            code: "session-not-found".into(),
+            message: "session was not found".into(),
+            details: json!({"sessionId": session_id}),
+        },
+        WorkspaceError::SessionBelongsElsewhere(session_id) => CompatError {
+            code: "session-conflict".into(),
+            message: "session belongs to another workspace".into(),
+            details: json!({"sessionId": session_id}),
+        },
+        other => CompatError::internal(format!("workspace operation failed: {}", other.code())),
+    }
+}
+
+fn workspace_ids(snapshot: &crate::workspace::WorkspaceSnapshot) -> Vec<WorkspaceId> {
+    snapshot
+        .items
+        .iter()
+        .map(|workspace| workspace.workspace_id.clone())
+        .collect()
 }
 
 fn compat_workspace_create(
@@ -1198,22 +1256,142 @@ fn compat_workspace_create(
     args: CompatWorkspaceCreate,
 ) -> Result<Value, CompatError> {
     let path = compat_canonical_directory(&args.path)?;
-    if path != state.compat.cwd {
-        return Err(CompatError::invalid(
-            "this Host runtime supports only its configured workspace cwd",
-        ));
+    let registry = compat_registry(state)?;
+    let result = registry
+        .create(path, None)
+        .map_err(compat_workspace_error)?;
+    if result.created {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({"type": "host/workspace-changed", "workspace": result.workspace.clone()}),
+        );
     }
-    let workspace = compat_data(&state.compat)
-        .workspaces
-        .get("default")
-        .expect("default workspace exists")
-        .clone();
-    broadcast_compat(
-        &state.compat,
-        CompatStream::Host,
-        json!({"type": "host/workspace-changed", "workspace": workspace}),
-    );
-    Ok(json!({"workspace": workspace, "created": false}))
+    Ok(json!({"workspace": result.workspace, "created": result.created}))
+}
+fn compat_workspace_rename(
+    state: &ApiState,
+    args: CompatWorkspaceRename,
+) -> Result<Value, CompatError> {
+    compat_require_nonblank("workspaceId", &args.workspace_id)?;
+    let registry = compat_registry(state)?;
+    let before = registry.snapshot();
+    let workspace = registry
+        .rename(&args.workspace_id, args.title, None)
+        .map_err(compat_workspace_error)?;
+    let changed = before
+        .items
+        .iter()
+        .find(|item| item.workspace_id == workspace.workspace_id)
+        != Some(&workspace);
+    if changed {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({"type": "host/workspace-changed", "workspace": workspace.clone()}),
+        );
+    }
+    Ok(json!({"workspace": workspace}))
+}
+
+fn compat_workspace_delete(
+    state: &ApiState,
+    args: CompatWorkspaceDelete,
+) -> Result<Value, CompatError> {
+    compat_require_nonblank("workspaceId", &args.workspace_id)?;
+    let registry = compat_registry(state)?;
+    let deleted = registry
+        .delete(&args.workspace_id, None)
+        .map_err(compat_workspace_error)?;
+    if deleted {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({"type": "host/workspace-removed", "workspaceId": args.workspace_id.clone()}),
+        );
+    }
+    Ok(json!({"deleted": deleted, "workspaceId": args.workspace_id}))
+}
+
+fn compat_workspace_move(
+    state: &ApiState,
+    args: CompatWorkspaceMove,
+) -> Result<Value, CompatError> {
+    compat_require_nonblank("workspaceId", &args.workspace_id)?;
+    let registry = compat_registry(state)?;
+    let before = registry.snapshot();
+    registry
+        .insert_before(&args.workspace_id, args.before_workspace_id.as_deref(), None)
+        .map_err(compat_workspace_error)?;
+    let after = registry.snapshot();
+    if workspace_ids(&before) != workspace_ids(&after) {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({
+                "type": "host/workspace-order-changed",
+                "workspaceIds": workspace_ids(&after),
+            }),
+        );
+    }
+    Ok(json!({"workspaceIds": workspace_ids(&after)}))
+}
+
+fn compat_session_move(
+    state: &ApiState,
+    args: CompatSessionMove,
+) -> Result<Value, CompatError> {
+    compat_require_nonblank("workspaceId", &args.workspace_id)?;
+    compat_require_session(&args.session_id)?;
+    let registry = compat_registry(state)?;
+    let before = registry.snapshot();
+    registry
+        .insert_session_before(
+            &args.workspace_id,
+            &args.session_id,
+            args.before_session_id.as_deref(),
+            None,
+        )
+        .map_err(compat_workspace_error)?;
+    let after = registry.snapshot();
+    let workspace = after
+        .items
+        .iter()
+        .find(|workspace| workspace.workspace_id.as_str() == args.workspace_id)
+        .cloned()
+        .ok_or_else(|| compat_workspace_error(WorkspaceError::NotFound(WorkspaceId::from(args.workspace_id))))?;
+    if before != after {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({"type": "host/workspace-changed", "workspace": workspace.clone()}),
+        );
+    }
+    Ok(json!({"workspace": workspace}))
+}
+
+fn compat_archive_session(
+    state: &ApiState,
+    args: CompatSessionRef,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.session_id)?;
+    let registry = compat_registry(state)?;
+    let before = registry.snapshot();
+    registry
+        .archive_session(&args.session_id, None)
+        .map_err(compat_workspace_error)?;
+    let after = registry.snapshot();
+    if before.archived_session_ids != after.archived_session_ids {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({
+                "type": "host/archived-sessions-changed",
+                "archivedSessionIds": after.archived_session_ids.clone(),
+            }),
+        );
+    }
+    Ok(json!({"archivedSessionIds": after.archived_session_ids}))
 }
 
 async fn compat_initialize(state: &ApiState) -> Result<(), CompatError> {
@@ -1242,40 +1420,70 @@ async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
         .await
         .map_err(compat_host_error)?;
     let mut data = compat_data(&state.compat);
+    let live_ids: BTreeSet<_> = sessions
+        .iter()
+        .map(|session| session.session_id.clone())
+        .collect();
+    data.sessions.retain(|id, _| live_ids.contains(id));
     for session in sessions {
-        if data.sessions.contains_key(&session.session_id) {
-            continue;
-        }
-        let workspace_id = session
-            .cwd
-            .as_deref()
-            .and_then(|cwd| {
-                data.workspaces
-                    .values()
-                    .find(|workspace| workspace.path == cwd)
-                    .map(|workspace| workspace.workspace_id.clone())
-            })
-            .unwrap_or_else(|| "default".into());
-        let session_id = session.session_id.clone();
-        data.sessions.insert(
-            session_id.clone(),
-            CompatSession {
-                session_id: session.session_id,
+        let entry = data
+            .sessions
+            .entry(session.session_id.clone())
+            .or_insert_with(|| CompatSession {
+                session_id: session.session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
                 updated_at: session.created_at.min(MAX_SAFE_INTEGER),
                 running: false,
                 blank: session.event_count == 0,
-                cwd: session.cwd,
-            },
-        );
-        let workspace = data
-            .workspaces
-            .get_mut(&workspace_id)
-            .expect("default workspace exists");
-        if !workspace.session_ids.contains(&session_id) {
-            workspace.session_ids.push(session_id);
-        }
+                cwd: session.cwd.clone(),
+            });
+        entry.workspace_id = session.workspace_id;
+        entry.updated_at = entry.updated_at.max(session.created_at.min(MAX_SAFE_INTEGER));
+        entry.blank = session.event_count == 0;
+        entry.cwd = session.cwd;
     }
     Ok(())
+}
+
+fn compat_session_conflict(
+    session_id: &SessionId,
+    requested_cwd: Option<&str>,
+    existing_cwd: Option<&str>,
+) -> CompatError {
+    let mut details = Map::from_iter([(
+        "sessionId".into(),
+        serde_json::to_value(session_id).expect("session id serializes"),
+    )]);
+    details.insert(
+        "requestedCwd".into(),
+        requested_cwd.map_or(Value::Null, |cwd| Value::String(cwd.to_owned())),
+    );
+    if let Some(cwd) = existing_cwd {
+        details.insert("existingCwd".into(), Value::String(cwd.to_owned()));
+    }
+    CompatError {
+        code: "session-conflict".into(),
+        message: "session conflicts with an existing durable session".into(),
+        details: Value::Object(details),
+    }
+}
+
+fn compat_session_host_error(
+    error: TessivumError,
+    session_id: &SessionId,
+    workspace_id: &WorkspaceId,
+    requested_cwd: Option<&str>,
+    existing_cwd: Option<&str>,
+) -> CompatError {
+    match error.code.as_str() {
+        "SESSION_CONFLICT" => compat_session_conflict(session_id, requested_cwd, existing_cwd),
+        "WORKSPACE_ATTACH_FAILED" => CompatError {
+            code: "workspace-attach-failed".into(),
+            message: "session workspace attachment failed".into(),
+            details: json!({"sessionId": session_id, "workspaceId": workspace_id}),
+        },
+        _ => compat_host_error(error),
+    }
 }
 
 async fn compat_session_create(
@@ -1290,73 +1498,132 @@ async fn compat_session_create(
     if let Some(session_id) = &args.session_id {
         compat_require_session(session_id)?;
     }
-    let cwd = args
-        .cwd
-        .as_deref()
-        .map(compat_canonical_directory)
-        .transpose()?;
-    if args
-        .workspace_id
-        .as_deref()
-        .is_some_and(|id| id != "default")
-    {
-        return Err(CompatError::invalid("workspaceId is not known"));
-    }
-    if cwd.as_deref().is_some_and(|cwd| cwd != state.compat.cwd) {
-        return Err(CompatError::invalid(
-            "this Host runtime supports only its configured workspace cwd",
-        ));
-    }
     compat_initialize(state).await?;
-    compat_sync_sessions(state).await?;
     let session_id = args.session_id.unwrap_or_else(SessionId::random);
-    if compat_data(&state.compat)
-        .sessions
-        .contains_key(&session_id)
-    {
+    let existing = state
+        .host
+        .list_sessions()
+        .await
+        .map_err(compat_host_error)?
+        .into_iter()
+        .find(|session| session.session_id == session_id);
+
+    let registry = state.host.workspace_registry();
+    let Some(registry) = registry else {
+        let persisted = state
+            .host
+            .create_session(session_id.clone())
+            .await
+            .map_err(compat_host_error)?;
+        let session = CompatSession {
+            session_id: session_id.clone(),
+            workspace_id: persisted.workspace_id.clone(),
+            updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
+            running: false,
+            blank: persisted.event_count == 0,
+            cwd: persisted.cwd,
+        };
+        compat_data(&state.compat)
+            .sessions
+            .insert(session_id.clone(), session.clone());
+        if existing.is_none() {
+            broadcast_compat(
+                &state.compat,
+                CompatStream::Host,
+                json!({
+                    "type": "host/session-added",
+                    "sessionId": session.session_id,
+                    "blank": session.blank,
+                    "cwd": session.cwd,
+                }),
+            );
+        }
         return Ok(json!({"sessionId": session_id}));
-    }
+    };
+
+    let requested_cwd = if let Some(workspace_id) = args.workspace_id {
+        let workspace = registry
+            .list()
+            .into_iter()
+            .find(|workspace| workspace.workspace_id.as_str() == workspace_id)
+            .ok_or_else(|| {
+                compat_workspace_error(WorkspaceError::NotFound(WorkspaceId::from(workspace_id)))
+            })?;
+        (workspace.workspace_id, workspace.path)
+    } else if let Some(cwd) = args.cwd {
+        let canonical = compat_canonical_directory(&cwd)?;
+        let workspace = registry
+            .list()
+            .into_iter()
+            .find(|workspace| workspace.path == canonical)
+            .ok_or_else(|| CompatError {
+                code: "workspace-invalid-path".into(),
+                message: "cwd must name an already registered workspace".into(),
+                details: json!({}),
+            })?;
+        (workspace.workspace_id, workspace.path)
+    } else {
+        let workspaces = registry.list();
+        let workspace = workspaces
+            .iter()
+            .find(|workspace| workspace.path == state.compat.cwd)
+            .or_else(|| workspaces.first())
+            .ok_or_else(|| CompatError::internal("workspace registry is empty"))?;
+        (workspace.workspace_id.clone(), workspace.path.clone())
+    };
+
     let persisted = state
         .host
-        .create_session(session_id.clone())
+        .create_session_in(session_id.clone(), requested_cwd.0.clone())
         .await
-        .map_err(compat_host_error)?;
+        .map_err(|error| {
+            compat_session_host_error(
+                error,
+                &session_id,
+                &requested_cwd.0,
+                Some(&requested_cwd.1),
+                existing.as_ref().and_then(|session| session.cwd.as_deref()),
+            )
+        })?;
     let session = CompatSession {
         session_id: session_id.clone(),
+        workspace_id: persisted.workspace_id.clone().or_else(|| Some(requested_cwd.0.clone())),
         updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
         running: false,
         blank: persisted.event_count == 0,
-        cwd: persisted.cwd.or_else(|| Some(state.compat.cwd.clone())),
+        cwd: persisted.cwd.or_else(|| Some(requested_cwd.1.clone())),
     };
-    let mut data = compat_data(&state.compat);
-    data.sessions
-        .entry(session_id.clone())
-        .or_insert_with(|| session.clone());
-    let workspace = data
-        .workspaces
-        .get_mut("default")
-        .expect("default workspace exists");
-    if !workspace.session_ids.contains(&session_id) {
-        workspace.session_ids.push(session_id.clone());
+    compat_data(&state.compat)
+        .sessions
+        .insert(session_id.clone(), session.clone());
+    let snapshot = registry.snapshot();
+    let workspace = snapshot
+        .items
+        .iter()
+        .find(|workspace| workspace.workspace_id == requested_cwd.0)
+        .cloned()
+        .ok_or_else(|| CompatError::internal("workspace disappeared after session admission"))?;
+    let changed = existing
+        .as_ref()
+        .is_none_or(|session| session.workspace_id != Some(requested_cwd.0.clone()));
+    if changed {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({"type": "host/workspace-changed", "workspace": workspace}),
+        );
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({
+                "type": "host/session-added",
+                "sessionId": session.session_id,
+                "blank": session.blank,
+                "cwd": session.cwd,
+                "workspaceId": requested_cwd.0,
+            }),
+        );
     }
-    workspace.updated_at = compat_timestamp();
-    let workspace = workspace.clone();
-    drop(data);
-    broadcast_compat(
-        &state.compat,
-        CompatStream::Host,
-        json!({"type": "host/workspace-changed", "workspace": workspace}),
-    );
-    broadcast_compat(
-        &state.compat,
-        CompatStream::Host,
-        json!({
-            "type": "host/session-added",
-            "sessionId": session.session_id,
-            "blank": session.blank,
-            "cwd": session.cwd,
-        }),
-    );
     Ok(json!({"sessionId": session_id}))
 }
 
