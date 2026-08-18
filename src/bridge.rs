@@ -1532,7 +1532,7 @@ fn bridge_to_plugin_error(error: BridgeError) -> PluginError {
         "SERVICE_UNAVAILABLE" => "service is unavailable",
         _ => "service call failed",
     };
-    PluginError::new(code, message, "bridge")
+    PluginError::new(code, message, "host")
 }
 
 fn callback_error(code: impl Into<String>, message: impl Into<String>) -> TessivumError {
@@ -1560,11 +1560,11 @@ fn credential_error(error: crate::credentials::CredentialError) -> BridgeError {
 }
 
 fn plugin_error(code: impl Into<String>, message: impl Into<String>) -> PluginError {
-    PluginError::new(code, message, "bridge")
+    PluginError::new(code, message, "host")
 }
 
 fn policy_error(code: impl Into<String>, message: impl Into<String>) -> PluginError {
-    PluginError::new(code, message, "policy")
+    PluginError::new(code, message, "host")
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

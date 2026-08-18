@@ -5,15 +5,22 @@
 //! crash cannot leave stale services or dependencies looking active.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, Weak},
     time::Duration,
 };
 
+use sha2::{Digest, Sha256};
 use tessivum_core::{
-    Loader, LoaderError, LoaderFuture, LoaderRuntime, PackageResolver, ResolvedPackage, RuntimeKind,
+    ContextHandle, Entry, Loader, LoaderError, LoaderFuture, LoaderRuntime, PackageResolver,
+    ResolvedPackage, RuntimeHandle, RuntimeKind,
+};
+use tessivum_extism::{
+    CapabilityRegistry, PluginError as WasmPluginError, PluginManifest, ResourceLimits,
+    WasmLifecycleGuard, WasmLifecycleHook, WasmPackage, WasmPluginRuntime, WasmResult,
 };
 use tessivum_node_bridge::{
     BridgeClient, BridgeError, ClientConfig, ConnectionStatus, HostCommand, LegacyNodeRuntime,
@@ -23,8 +30,14 @@ use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
-    bridge::{BridgeServices, DomainBridge},
-    plugins::{CompatibilityReport, PluginError, PluginRouter, PluginRuntime},
+    bridge::{
+        BridgeServices, DomainBridge, WasmEffectivePolicy, WasmPolicyRegistration,
+        WasmPolicyRegistry,
+    },
+    plugins::{
+        CompatibilityReport, PluginError, PluginPackage, PluginRouter, PluginRuntime,
+        ServiceMethodPermission,
+    },
 };
 
 /// Failure while configuring or operating a [`LegacyProfile`].
@@ -432,6 +445,141 @@ fn executable(path: &Path) -> bool {
     path.is_file()
 }
 
+const MAX_WASM_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
+type WasmPolicyDefinitions = Arc<Mutex<BTreeMap<String, BTreeSet<ServiceMethodPermission>>>>;
+
+/// Adapts validated product manifests to the generic Extism runtime.
+pub struct WasmProductRuntime {
+    inner: Arc<WasmPluginRuntime>,
+    definitions: WasmPolicyDefinitions,
+    registered: Mutex<BTreeSet<String>>,
+    // ponytail: cold-path serialization binds a staged policy to the manifest being instantiated;
+    // replace with generation-scoped hook inputs only if parallel plugin startup becomes material.
+    instantiate_gate: AsyncMutex<()>,
+}
+
+impl WasmProductRuntime {
+    pub fn new(
+        capabilities: Arc<CapabilityRegistry>,
+        policies: WasmPolicyRegistry,
+        limits: ResourceLimits,
+    ) -> Self {
+        let definitions = Arc::new(Mutex::new(BTreeMap::new()));
+        let hook = Arc::new(ProductWasmLifecycle {
+            definitions: Arc::clone(&definitions),
+            policies,
+        });
+        Self {
+            inner: Arc::new(WasmPluginRuntime::new(capabilities, limits).with_lifecycle_hook(hook)),
+            definitions,
+            registered: Mutex::new(BTreeSet::new()),
+            instantiate_gate: AsyncMutex::new(()),
+        }
+    }
+
+    fn prepare_package(&self, package: &ResolvedPackage) -> Result<ResolvedPackage, LoaderError> {
+        let inspected = PluginPackage::inspect(&package.specifier).map_err(router_error)?;
+        let product = inspected.wasm_product_declaration().map_err(router_error)?;
+        let resolved = fs::canonicalize(&package.location).map_err(|error| {
+            LoaderError::Validation(format!(
+                "WASM package {:?} is unavailable: {error}",
+                package.location
+            ))
+        })?;
+        if resolved != product.entry {
+            return Err(LoaderError::Validation(format!(
+                "WASM package {:?} resolved to an unexpected artifact",
+                package.specifier
+            )));
+        }
+        let metadata = fs::metadata(&resolved).map_err(|error| {
+            LoaderError::Validation(format!("cannot inspect {}: {error}", resolved.display()))
+        })?;
+        if metadata.len() > MAX_WASM_PACKAGE_BYTES {
+            return Err(LoaderError::Validation(format!(
+                "WASM package exceeds the {MAX_WASM_PACKAGE_BYTES}-byte limit"
+            )));
+        }
+        let wasm = fs::read(&resolved).map_err(|error| {
+            LoaderError::Validation(format!("cannot read {}: {error}", resolved.display()))
+        })?;
+        let digest = format!("{:x}", Sha256::digest(&wasm));
+        let runtime_specifier = format!("{}#sha256:{digest}", package.specifier);
+        let manifest = product.manifest;
+        let plugin_id = manifest.id.clone();
+        let wasm_package = WasmPackage::from_bytes(manifest, wasm).map_err(wasm_loader_error)?;
+        let should_register = lock(&self.registered).insert(runtime_specifier.clone());
+        if should_register {
+            if let Err(error) = self.inner.register(runtime_specifier.clone(), wasm_package) {
+                lock(&self.registered).remove(&runtime_specifier);
+                return Err(wasm_loader_error(error));
+            }
+        }
+        lock(&self.definitions).insert(plugin_id, product.service_permissions);
+        Ok(ResolvedPackage {
+            specifier: runtime_specifier,
+            location: package.location.clone(),
+        })
+    }
+}
+
+impl LoaderRuntime for WasmProductRuntime {
+    fn kind(&self) -> RuntimeKind {
+        RuntimeKind::Wasm
+    }
+
+    fn instantiate<'a>(
+        &'a self,
+        package: ResolvedPackage,
+        entry: Entry,
+        context: ContextHandle,
+    ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>> {
+        Box::pin(async move {
+            let _gate = self.instantiate_gate.lock().await;
+            let package = self.prepare_package(&package)?;
+            self.inner.instantiate(package, entry, context).await
+        })
+    }
+}
+
+struct ProductWasmLifecycle {
+    definitions: WasmPolicyDefinitions,
+    policies: WasmPolicyRegistry,
+}
+
+impl WasmLifecycleHook for ProductWasmLifecycle {
+    fn install(&self, manifest: &PluginManifest) -> WasmResult<Box<dyn WasmLifecycleGuard>> {
+        let methods = lock(&self.definitions)
+            .get(&manifest.id)
+            .cloned()
+            .ok_or_else(|| {
+                WasmPluginError::new(
+                    "PLUGIN_POLICY_NOT_FOUND",
+                    "validated product policy is not staged",
+                    "policy",
+                )
+            })?;
+        let registration = self
+            .policies
+            .install(WasmEffectivePolicy::new(manifest.id.clone(), methods))?;
+        Ok(Box::new(ProductWasmGuard { registration }))
+    }
+}
+
+struct ProductWasmGuard {
+    registration: WasmPolicyRegistration,
+}
+
+impl WasmLifecycleGuard for ProductWasmGuard {
+    fn drain(&mut self, timeout: Duration) -> WasmResult<()> {
+        self.registration.drain(timeout)
+    }
+
+    fn revoke(&mut self) {
+        self.registration.revoke();
+    }
+}
+
 /// Resolves product packages through the deterministic compatibility router.
 ///
 /// Locations given to a runtime are canonical absolute paths. An optional root
@@ -543,6 +691,19 @@ impl PackageResolver for ProductPackageResolver {
     }
 }
 
+/// Creates a Core Loader with the product WASM runtime and an optional Legacy Node runtime.
+pub fn product_loader(
+    profile: Option<&LegacyProfile>,
+    resolver: Arc<dyn PackageResolver>,
+    wasm: Arc<WasmProductRuntime>,
+) -> Result<Loader, LegacyProfileError> {
+    let mut runtimes: Vec<Arc<dyn LoaderRuntime>> = vec![wasm];
+    if let Some(profile) = profile {
+        runtimes.push(Arc::new(profile.runtime()?));
+    }
+    Ok(Loader::try_new(resolver, runtimes)?)
+}
+
 /// Creates a Core Loader with the currently active Legacy Node runtime.
 pub fn legacy_loader(
     profile: &LegacyProfile,
@@ -561,6 +722,10 @@ fn plugin_runtime(runtime: RuntimeKind) -> PluginRuntime {
 }
 
 fn router_error(error: PluginError) -> LoaderError {
+    LoaderError::Validation(error.to_string())
+}
+
+fn wasm_loader_error(error: WasmPluginError) -> LoaderError {
     LoaderError::Validation(error.to_string())
 }
 

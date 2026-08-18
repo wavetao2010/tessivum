@@ -12,6 +12,7 @@ use std::{
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use tessivum_core::{ContextHandle, CoreError, EntryTree, Loader, PackageResolver, ServiceHandle};
+use tessivum_extism::{Capability, CapabilityHandler, CapabilityRegistry, ResourceLimits};
 use thiserror::Error;
 use tokio::{
     sync::{broadcast, Mutex as AsyncMutex, Notify},
@@ -23,9 +24,10 @@ use crate::{
         AgentError, AgentFactoryRegistration, AgentHandle, AgentOptions, AgentRegistry, AgentStatus,
     },
     agent_loop::AgentLoopFactory,
+    bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     code_runtime::{CodeRuntime, ProcessCodeRuntime},
-    legacy::{legacy_loader, LegacyProfile, ProductPackageResolver},
+    legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream, RecordedLlmAdapter},
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
@@ -83,10 +85,11 @@ pub struct HostConfig {
     pub enable_trusted_bash: bool,
     pub notification_capacity: usize,
     pub max_live_sessions: usize,
-    /// Entries use the Core Loader and therefore require a configured Legacy runtime.
+    /// Entries use the Core Loader with the product WASM runtime and optional Legacy Node runtime.
     pub entries: Option<EntryTree>,
     pub legacy_profile: Option<LegacyProfile>,
     pub package_resolver: Option<Arc<dyn PackageResolver>>,
+    pub wasm_limits: ResourceLimits,
     pub telemetry: Option<TelemetryCoordinator>,
     pub code_runtime: Option<ProcessCodeRuntime>,
 }
@@ -136,6 +139,7 @@ impl HostConfig {
             entries: None,
             legacy_profile: None,
             package_resolver: None,
+            wasm_limits: ResourceLimits::default(),
             telemetry: None,
             code_runtime: None,
         }
@@ -479,7 +483,7 @@ impl HostRuntime {
         let factory = registry.register_factory(Arc::new(AgentLoopFactory::new(
             llm.clone(),
             prompt.clone(),
-            tools,
+            tools.clone(),
         )))?;
         let agents_service = registry.clone().publish(&root)?;
         let subprocesses = SubprocessRuntime::new();
@@ -495,9 +499,14 @@ impl HostRuntime {
             .map(|value| value.clone().publish(&root))
             .transpose()?;
 
-        let legacy = config.legacy_profile.clone();
+        let needs_legacy = config.entries.as_ref().is_some_and(|entries| {
+            entries
+                .active_entries()
+                .iter()
+                .any(|entry| entry.options.runtime == tessivum_core::RuntimeKind::LegacyNode)
+        });
+        let legacy = config.legacy_profile.clone().filter(|_| needs_legacy);
         let loader = if let Some(entries) = config.entries.clone() {
-            let legacy_profile = legacy.as_ref().expect("validated legacy profile");
             let resolver: Arc<dyn PackageResolver> = match &config.package_resolver {
                 Some(value) => Arc::clone(value),
                 None => Arc::new(
@@ -506,19 +515,49 @@ impl HostRuntime {
                         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
                 ),
             };
-            legacy_profile
-                .start()
+            if let Some(profile) = &legacy {
+                profile
+                    .start()
+                    .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+            }
+            let policies = WasmPolicyRegistry::new();
+            let capabilities = Arc::new(CapabilityRegistry::new());
+            let wasm_bridge = DomainBridge::with_policy_registry(
+                BridgeServices::new(
+                    tools,
+                    prompt.clone(),
+                    llm.clone(),
+                    sessions.clone(),
+                    registry.clone(),
+                ),
+                policies.clone(),
+            )
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+            capabilities
+                .register(Capability::ServiceCall, move |request| {
+                    CapabilityHandler::call(&wasm_bridge, request)
+                })
                 .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-            let mut loader = match legacy_loader(legacy_profile, resolver) {
+            capabilities.grant(Capability::ServiceCall);
+            let wasm = Arc::new(WasmProductRuntime::new(
+                capabilities,
+                policies,
+                config.wasm_limits.clone(),
+            ));
+            let mut loader = match product_loader(legacy.as_ref(), resolver, wasm) {
                 Ok(loader) => loader.with_context(root.clone()),
                 Err(error) => {
-                    let _ = legacy_profile.shutdown().await;
+                    if let Some(profile) = &legacy {
+                        let _ = profile.shutdown().await;
+                    }
                     let _ = root.scope().dispose().await;
                     return Err(HostError::InvalidConfiguration(error.to_string()));
                 }
             };
             if let Err(error) = loader.load(entries).await {
-                let _ = legacy_profile.shutdown().await;
+                if let Some(profile) = &legacy {
+                    let _ = profile.shutdown().await;
+                }
                 let _ = root.scope().dispose().await;
                 return Err(HostError::InvalidConfiguration(format!(
                     "Core Loader activation failed: {error}"
@@ -1318,12 +1357,26 @@ fn validate_config(config: &HostConfig) -> Result<(), HostError> {
             "host capacities are outside their bounds".into(),
         ));
     }
-    if config.cli_patches.len() > 64 || config.entries.is_some() && config.legacy_profile.is_none()
-    {
+    if config.cli_patches.len() > 64 {
         return Err(HostError::InvalidConfiguration(
-            "invalid loader or CLI patch configuration".into(),
+            "too many CLI patch layers".into(),
         ));
     }
+    let needs_legacy = config.entries.as_ref().is_some_and(|entries| {
+        entries
+            .active_entries()
+            .iter()
+            .any(|entry| entry.options.runtime == tessivum_core::RuntimeKind::LegacyNode)
+    });
+    if needs_legacy && config.legacy_profile.is_none() {
+        return Err(HostError::InvalidConfiguration(
+            "legacy-node entries require a Legacy profile".into(),
+        ));
+    }
+    config
+        .wasm_limits
+        .validate()
+        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
     for patch in std::iter::once(&config.bundle_patch)
         .chain(std::iter::once(&config.profile_patch))
         .chain(std::iter::once(&config.home_patch))
