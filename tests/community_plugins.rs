@@ -202,11 +202,7 @@ fn core_root() -> PathBuf {
         })
         .flat_map(|entry| fs::read_dir(entry.path()).into_iter().flatten().flatten())
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("2d3fd3c"))
-                && path.join("node/compat-host/src/index.ts").is_file()
-        })
+        .filter(|path| path.join("node/compat-host/src/index.ts").is_file())
         .collect::<Vec<_>>();
     candidates.sort();
     candidates
