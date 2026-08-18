@@ -67,7 +67,10 @@ jobs:
           workspaces: fixtures/wasm/rust-minimal
       - name: Rebuild pinned Rust WASM guest
         run: cargo build --locked --release --target wasm32-unknown-unknown
-      - name: Verify checked guest artifact
-        run: |
-          cmp plugin.wasm target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm
-          sha256sum -c plugin.wasm.sha256
+      - name: Verify checked guest artifact hash
+        run: sha256sum -c plugin.wasm.sha256
+      - name: Exercise rebuilt guest contract
+        working-directory: ${{ github.workspace }}
+        env:
+          TESSIVUM_WASM_GUEST: ${{ github.workspace }}/fixtures/wasm/rust-minimal/target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm
+        run: cargo test --locked --test wasm_plugins real_guest_denies_undeclared_service_and_traps_deterministically -- --exact

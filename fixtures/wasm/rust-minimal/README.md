@@ -9,6 +9,6 @@ cp target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm plugin.wasm
 shasum -a 256 plugin.wasm > plugin.wasm.sha256
 ```
 
-`Cargo.lock`, `plugin.wasm`, and `plugin.wasm.sha256` are checked artifacts. Update them together only with the commands above; normal tests load the checked artifact and do not require the WASM target.
+`Cargo.lock`, `plugin.wasm`, and `plugin.wasm.sha256` are checked artifacts. Update them together only with the commands above; normal tests load the checked artifact and do not require the WASM target. CI separately rebuilds the source and runs the same real allow/deny/trap/stop contract against the rebuilt module; byte equality is not required across compiler host platforms because producer metadata can differ.
 
 The guest uses the `tessivum-pdk` guest API only. `cordis_init` logs a fixed message through `logger@1.log`, then returns `{"abi":"cordis.plugin/v1","initialized":true}`. `cordis_call` echoes every normal payload. A payload with `{"mode":"denied"}` calls undeclared `settings@1.describe` and returns the host denial as `{"denial":{"code":"SERVICE_PERMISSION_DENIED"}}`; `{"mode":"trap"}` intentionally traps. The event and update exports return `{"accepted":true}` and `{"updated":true}`. `cordis_stop` logs through the same allowed service before returning `{"stopped":true}`, exercising shutdown-time HostFunction dispatch.

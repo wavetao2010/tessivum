@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -291,12 +291,18 @@ async fn real_guest_denies_undeclared_service_and_traps_deterministically() {
         .unwrap()
         .wasm_product_declaration()
         .unwrap();
-    let wasm = fs::read(&product.entry).unwrap();
-    let expected = fs::read_to_string(fixture().join("plugin.wasm.sha256")).unwrap();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&wasm)),
-        expected.split_whitespace().next().unwrap()
-    );
+    let rebuilt = env::var_os("TESSIVUM_WASM_GUEST");
+    let wasm = match &rebuilt {
+        Some(path) => fs::read(path).unwrap(),
+        None => fs::read(&product.entry).unwrap(),
+    };
+    if rebuilt.is_none() {
+        let expected = fs::read_to_string(fixture().join("plugin.wasm.sha256")).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&wasm)),
+            expected.split_whitespace().next().unwrap()
+        );
+    }
 
     let policies = WasmPolicyRegistry::new();
     let instance_id = "direct-real-guest";
