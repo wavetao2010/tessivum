@@ -880,9 +880,10 @@ async fn compat_dispatch(
 }
 
 fn compat_settings_describe(state: &ApiState) -> Result<Value, CompatError> {
-    let Some(settings) = state.host.settings() else {
-        return Ok(json!({"writable": false, "hasDocument": false, "namespaces": []}));
-    };
+    let settings = state
+        .host
+        .settings()
+        .ok_or_else(|| CompatError::internal("settings service is unavailable"))?;
     let namespaces = settings
         .describe_all()
         .map_err(|_| CompatError::internal("settings are unavailable"))?
@@ -1032,9 +1033,10 @@ async fn compat_credentials_describe(
         .map(CredentialRef::new)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| CompatError::invalid(error.to_string()))?;
-    let Some(credentials) = state.host.credentials() else {
-        return Ok(json!({"credentials": {}}));
-    };
+    let credentials = state
+        .host
+        .credentials()
+        .ok_or_else(|| CompatError::internal("credentials service is unavailable"))?;
     let mut described = Map::new();
     for reference in references {
         let descriptor = credentials
