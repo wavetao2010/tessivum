@@ -399,6 +399,9 @@ pub trait HostApi: Send + Sync {
     ) -> Result<HostSessionInfo, TessivumError> {
         self.create_session(session_id).await
     }
+    async fn delete_workspace(&self, _workspace_id: WorkspaceId) -> Result<bool, TessivumError> {
+        Ok(false)
+    }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         Ok(Vec::new())
     }
@@ -461,7 +464,7 @@ struct HostInner {
     services: Services,
     owned_agents: Mutex<BTreeMap<SessionId, OwnedAgent>>,
     state: Mutex<State>,
-    // ponytail: one Host-wide generation gate; shard by session only if prompt churn contends.
+    // ponytail: one Host-wide gate serializes session create/delete and agent handoff; shard by session only if contention matters.
     setup: AsyncMutex<()>,
     admission: Mutex<AdmissionState>,
     drained: Notify,
@@ -855,6 +858,7 @@ impl HostHandle {
         session_id: SessionId,
     ) -> Result<HostSessionInfo, HostError> {
         let _admission = self.admit()?;
+        let _setup = self.inner.setup.lock().await;
         self.create_session_in_unadmitted(session_id, self.default_workspace_id()?)
             .await
     }
@@ -865,6 +869,7 @@ impl HostHandle {
         workspace_id: WorkspaceId,
     ) -> Result<HostSessionInfo, HostError> {
         let _admission = self.admit()?;
+        let _setup = self.inner.setup.lock().await;
         self.create_session_in_unadmitted(session_id, workspace_id)
             .await
     }
@@ -958,14 +963,44 @@ impl HostHandle {
         })
     }
 
+    async fn delete_workspace_inner(&self, workspace_id: WorkspaceId) -> Result<bool, HostError> {
+        let _admission = self.admit()?;
+        let _setup = self.inner.setup.lock().await;
+        let sessions = self
+            .inner
+            .workspace_registry
+            .list()
+            .into_iter()
+            .find(|workspace| workspace.workspace_id == workspace_id)
+            .ok_or_else(|| WorkspaceError::NotFound(workspace_id.clone()))?
+            .session_ids;
+        for session_id in sessions {
+            self.inner.approvals.cancel_session(&session_id);
+            let owned = lock(&self.inner.owned_agents).remove(&session_id);
+            drop(owned);
+            if let Some(agent) = self.inner.registry.get(&session_id) {
+                agent.cancel(AgentCancelCause::Disposed, false);
+                agent.dispose().await?;
+            }
+            lock(&self.inner.state).statuses.remove(&session_id);
+        }
+        self.inner.workspace_registry.delete(workspace_id, None)?;
+        Ok(true)
+    }
+
     fn default_workspace_id(&self) -> Result<WorkspaceId, HostError> {
-        let workspaces = self.inner.workspace_registry.list();
-        workspaces
-            .iter()
+        self.inner
+            .workspace_registry
+            .list()
+            .into_iter()
             .find(|workspace| workspace.path == self.inner.identity.cwd.to_string_lossy())
-            .or_else(|| workspaces.first())
-            .map(|workspace| workspace.workspace_id.clone())
-            .ok_or_else(|| HostError::InvalidConfiguration("workspace registry is empty".into()))
+            .map(|workspace| workspace.workspace_id)
+            .ok_or_else(|| {
+                HostError::invalid(
+                    "WORKSPACE_NOT_FOUND",
+                    "host cwd workspace is not registered",
+                )
+            })
     }
 
     fn require_session_root(&self, header: &SessionHeader, root: &Path) -> Result<(), HostError> {
@@ -1005,27 +1040,30 @@ impl HostHandle {
     ) -> Result<SessionPromptResult, HostError> {
         let _admission = self.admit()?;
         validate_prompt(&params)?;
-        let agent = self.ensure_agent(&params.session_id).await?;
-        let session = agent.session();
-        let mut commits = session.subscribe();
-        let message_id = MessageId::random();
-        let message = Message {
-            id: message_id.clone(),
-            role: MessageRole::User,
-            content: params.content_blocks,
-            source: MessageSource::User,
-        };
-        if steer {
-            agent.steer(message).await?;
-        } else {
-            agent.followup(message).await?;
-        }
-        self.transition(params.session_id.clone(), SessionStatus::Running);
-        let idle_agent =
-            self.inner.registry.get(&params.session_id).ok_or_else(|| {
+        let (agent, session, mut commits, message_id) = {
+            let _setup = self.inner.setup.lock().await;
+            let agent = self.ensure_agent_under_setup(&params.session_id).await?;
+            let session = agent.session();
+            let commits = session.subscribe();
+            let message_id = MessageId::random();
+            let message = Message {
+                id: message_id.clone(),
+                role: MessageRole::User,
+                content: params.content_blocks,
+                source: MessageSource::User,
+            };
+            if steer {
+                agent.steer(message).await?;
+            } else {
+                agent.followup(message).await?;
+            }
+            self.transition(params.session_id.clone(), SessionStatus::Running);
+            let idle_agent = self.inner.registry.get(&params.session_id).ok_or_else(|| {
                 HostError::InvalidConfiguration("accepted agent disappeared".into())
             })?;
-        self.watch_idle(params.session_id, idle_agent);
+            self.watch_idle(params.session_id, idle_agent);
+            (agent, session, commits, message_id)
+        };
         if !session.events().iter().any(|event| {
             event.event_type == "user/message"
                 && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())
@@ -1216,14 +1254,16 @@ impl HostHandle {
         }
     }
 
+
     async fn ensure_agent(&self, session_id: &SessionId) -> Result<AgentHandle, HostError> {
         let _setup = self.inner.setup.lock().await;
-        if let Some(agent) = self.inner.registry.get(session_id) {
-            return Ok(agent);
-        }
-        if lock(&self.inner.owned_agents).len() >= self.inner.config.max_live_sessions {
-            return Err(HostError::SessionCapacity);
-        }
+        self.ensure_agent_under_setup(session_id).await
+    }
+
+    async fn ensure_agent_under_setup(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<AgentHandle, HostError> {
         let header = match self.inner.sessions.get(session_id) {
             Some(session) => session.header(),
             None => match self
@@ -1234,7 +1274,11 @@ impl HostHandle {
             {
                 Some(session) => session.header,
                 None => {
-                    self.create_session_inner(session_id.clone()).await?;
+                    self.create_session_in_unadmitted(
+                        session_id.clone(),
+                        self.default_workspace_id()?,
+                    )
+                    .await?;
                     self.inner
                         .sessions
                         .get(session_id)
@@ -1258,6 +1302,12 @@ impl HostHandle {
         let lease = self.inner.resources.resolve(session_id)?;
         let root = lease.validate_current()?;
         self.require_session_root(&header, &root)?;
+        if let Some(agent) = self.inner.registry.get(session_id) {
+            return Ok(agent);
+        }
+        if lock(&self.inner.owned_agents).len() >= self.inner.config.max_live_sessions {
+            return Err(HostError::SessionCapacity);
+        }
         let owned = self
             .inner
             .registry
@@ -1537,6 +1587,11 @@ impl HostApi for HostHandle {
             .await
             .map_err(HostError::wire)
     }
+    async fn delete_workspace(&self, workspace_id: WorkspaceId) -> Result<bool, TessivumError> {
+        self.delete_workspace_inner(workspace_id)
+            .await
+            .map_err(HostError::wire)
+    }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         self.inner
             .persistence
@@ -1640,6 +1695,9 @@ impl HostApi for HostRuntime {
         self.handle
             .create_session_in(session_id, workspace_id)
             .await
+    }
+    async fn delete_workspace(&self, workspace_id: WorkspaceId) -> Result<bool, TessivumError> {
+        self.handle.delete_workspace(workspace_id).await
     }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         self.handle.list_sessions().await

@@ -717,3 +717,118 @@ async fn host_boot_migrates_durable_session_cwds_once() {
     );
     restarted.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn deleting_workspace_disposes_agents_and_denies_default_sessions() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let registry = runtime.workspace_registry().unwrap();
+    let default_workspace = registry.list().into_iter().next().unwrap().workspace_id;
+    let other_dir = root.path().join("other-workspace");
+    fs::create_dir(&other_dir).unwrap();
+    let other_workspace = registry.create(&other_dir, None).unwrap().workspace.workspace_id;
+    let deleted_session = SessionId::from("deleted-live");
+
+    runtime
+        .create_session_in(deleted_session.clone(), default_workspace.clone())
+        .await
+        .unwrap();
+    runtime.prompt(prompt("deleted-live")).await.unwrap();
+    let approvals = runtime.approval_registry().unwrap();
+    assert!(approvals.lookup(&deleted_session).is_some());
+
+    assert!(runtime
+        .delete_workspace(default_workspace.clone())
+        .await
+        .unwrap());
+    assert!(registry.workspace_for_session(&deleted_session).is_none());
+    assert!(approvals.lookup(&deleted_session).is_none());
+    let after_delete = runtime.events(deleted_session.clone(), 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        runtime.events(deleted_session.clone(), 0).await.unwrap(),
+        after_delete
+    );
+    assert_eq!(
+        runtime.prompt(prompt("deleted-live")).await.unwrap_err().code,
+        "SESSION_UNGROUPED"
+    );
+    assert_eq!(
+        runtime
+            .create_session(SessionId::from("default-denied"))
+            .await
+            .unwrap_err()
+            .code,
+        "WORKSPACE_NOT_FOUND"
+    );
+    assert_eq!(
+        runtime
+            .create_session_in(SessionId::from("explicit-other"), other_workspace.clone())
+            .await
+            .unwrap()
+            .workspace_id,
+        Some(other_workspace)
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_creation_is_serial_idempotent_and_conflict_safe() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let registry = runtime.workspace_registry().unwrap();
+    let first_dir = root.path().join("first-workspace");
+    let second_dir = root.path().join("second-workspace");
+    fs::create_dir(&first_dir).unwrap();
+    fs::create_dir(&second_dir).unwrap();
+    let first_workspace = registry.create(&first_dir, None).unwrap().workspace.workspace_id;
+    let second_workspace = registry.create(&second_dir, None).unwrap().workspace.workspace_id;
+
+    let automatic = runtime.handle();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        automatic.prompt(prompt("automatic-session")),
+    )
+    .await
+    .expect("automatic session creation must not deadlock")
+    .unwrap();
+
+    let left_handle = runtime.handle();
+    let right_handle = runtime.handle();
+    let same_session = SessionId::from("concurrent-same");
+    let left_session = same_session.clone();
+    let right_session = same_session.clone();
+    let left_workspace = first_workspace.clone();
+    let right_workspace = first_workspace.clone();
+    let (left, right) = tokio::time::timeout(Duration::from_secs(1), async move {
+        tokio::join!(
+            left_handle.create_session_in(left_session, left_workspace),
+            right_handle.create_session_in(right_session, right_workspace),
+        )
+    })
+    .await
+    .expect("same-workspace creation must not deadlock");
+    assert_eq!(left.unwrap().workspace_id, Some(first_workspace.clone()));
+    assert_eq!(right.unwrap().workspace_id, Some(first_workspace.clone()));
+
+    let first_handle = runtime.handle();
+    let second_handle = runtime.handle();
+    let conflict_session = SessionId::from("concurrent-conflict");
+    let first_session = conflict_session.clone();
+    let second_session = conflict_session;
+    let first_workspace_id = first_workspace;
+    let second_workspace_id = second_workspace;
+    let (first, second) = tokio::time::timeout(Duration::from_secs(1), async move {
+        tokio::join!(
+            first_handle.create_session_in(first_session, first_workspace_id),
+            second_handle.create_session_in(second_session, second_workspace_id),
+        )
+    })
+    .await
+    .expect("conflicting creation must not deadlock");
+    match (first, second) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => assert_eq!(error.code, "SESSION_CONFLICT"),
+        result => panic!("expected one successful create and one conflict, got {result:?}"),
+    }
+    runtime.shutdown().await.unwrap();
+}
