@@ -601,3 +601,191 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
     resumed.shutdown().await.expect("resumed host shuts down");
     assert_eq!(resumed_handle.in_flight(), 0, "resumed host has no tasks");
 }
+
+#[tokio::test]
+async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() {
+    let fixture = Fixture::new("multi-workspace");
+    let first_path = fixture.path().join("workspace-a");
+    let second_path = fixture.path().join("workspace-b");
+    let duplicate_one = fixture.path().join("one/project");
+    let duplicate_two = fixture.path().join("two/project");
+    let unregistered = fixture.path().join("unregistered");
+    for path in [
+        &first_path,
+        &second_path,
+        &duplicate_one,
+        &duplicate_two,
+        &unregistered,
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let config = host_config(&fixture);
+    let runtime = HostRuntime::boot(config.clone()).await.unwrap();
+    let handle = runtime.handle();
+    let host: Arc<dyn HostApi> = Arc::new(handle.clone());
+    let mut server = ApiServer::bind(host).await.unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let initial = browser_rpc(&client, &base, "workspace.list", "initial", json!({})).await;
+    assert_eq!(
+        initial["result"]["value"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let create = |rpc_id: &'static str, path: &Path| {
+        browser_rpc(
+            &client,
+            &base,
+            "workspace.create",
+            rpc_id,
+            json!({"path": path.to_string_lossy()}),
+        )
+    };
+    let first = create("create-a", &first_path).await;
+    let second = create("create-b", &second_path).await;
+    let duplicate_a = create("create-dup-a", &duplicate_one).await;
+    let duplicate_b = create("create-dup-b", &duplicate_two).await;
+    assert_eq!(
+        duplicate_a["result"]["value"]["workspace"]["title"],
+        "project"
+    );
+    assert_eq!(
+        duplicate_b["result"]["value"]["workspace"]["title"],
+        "project"
+    );
+    let first_id = first["result"]["value"]["workspace"]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_id = second["result"]["value"]["workspace"]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let renamed = browser_rpc(
+        &client,
+        &base,
+        "workspace.rename",
+        "rename-b",
+        json!({"workspaceId": second_id, "title": "renamed"}),
+    )
+    .await;
+    assert_eq!(renamed["result"]["value"]["workspace"]["title"], "renamed");
+    let conflict = browser_rpc(
+        &client,
+        &base,
+        "workspace.rename",
+        "rename-conflict",
+        json!({"workspaceId": first_id, "title": "renamed"}),
+    )
+    .await;
+    assert_eq!(
+        conflict["result"]["error"]["code"],
+        "workspace-name-conflict"
+    );
+    let order = browser_rpc(
+        &client,
+        &base,
+        "workspace.insertBefore",
+        "order",
+        json!({"workspaceId": second_id, "beforeWorkspaceId": first_id}),
+    )
+    .await;
+    assert!(order["result"]["value"]["workspaceIds"].is_array());
+
+    for (rpc_id, session_id) in [("session-one", "multi-one"), ("session-two", "multi-two")] {
+        let created = browser_rpc(
+            &client,
+            &base,
+            "session.create",
+            rpc_id,
+            json!({"workspaceId": second_id, "sessionId": session_id}),
+        )
+        .await;
+        assert_eq!(created["result"]["value"]["sessionId"], session_id);
+    }
+    let moved = browser_rpc(
+        &client,
+        &base,
+        "workspace.insertSessionBefore",
+        "session-order",
+        json!({"workspaceId": second_id, "sessionId": "multi-one", "beforeSessionId": "multi-two"}),
+    )
+    .await;
+    assert_eq!(
+        moved["result"]["value"]["workspace"]["sessionIds"],
+        json!(["multi-one", "multi-two"])
+    );
+    let archived = browser_rpc(
+        &client,
+        &base,
+        "workspace.archiveSession",
+        "archive",
+        json!({"sessionId": "multi-one"}),
+    )
+    .await;
+    assert_eq!(
+        archived["result"]["value"]["archivedSessionIds"],
+        json!(["multi-one"])
+    );
+    let invalid_cwd = browser_rpc(
+        &client,
+        &base,
+        "session.create",
+        "raw-cwd",
+        json!({"cwd": unregistered.to_string_lossy(), "sessionId": "raw-cwd"}),
+    )
+    .await;
+    assert_eq!(
+        invalid_cwd["result"]["error"]["code"],
+        "workspace-invalid-path"
+    );
+    let deleted = browser_rpc(
+        &client,
+        &base,
+        "workspace.delete",
+        "delete-b",
+        json!({"workspaceId": second_id}),
+    )
+    .await;
+    assert_eq!(deleted["result"]["value"], json!({"deleted": true}));
+
+    server.shutdown().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    let resumed = HostRuntime::boot(config).await.unwrap();
+    let resumed_handle = resumed.handle();
+    let resumed_host: Arc<dyn HostApi> = Arc::new(resumed_handle.clone());
+    let mut resumed_server = ApiServer::bind(resumed_host).await.unwrap();
+    let resumed_base = format!("http://{}", resumed_server.local_addr());
+    let workspaces = browser_rpc(
+        &client,
+        &resumed_base,
+        "workspace.list",
+        "resumed-workspaces",
+        json!({}),
+    )
+    .await;
+    assert!(workspaces["result"]["value"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|workspace| workspace["workspaceId"] != second_id));
+    let sessions = browser_rpc(
+        &client,
+        &resumed_base,
+        "session.list",
+        "resumed-sessions",
+        json!({}),
+    )
+    .await;
+    assert!(sessions["result"]["value"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|session| session["sessionId"] == "multi-one"));
+    resumed_server.shutdown().await.unwrap();
+    resumed.shutdown().await.unwrap();
+}

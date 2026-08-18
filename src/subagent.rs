@@ -824,7 +824,8 @@ impl SubagentInner {
                 cancellation.clone(),
             )
             .await?;
-        if let Err(error) = self.attach_child_workspace(workspace.as_ref(), &descriptor.child_session_id)
+        if let Err(error) =
+            self.attach_child_workspace(workspace.as_ref(), &descriptor.child_session_id)
         {
             let _ = agent.dispose().await;
             return Err(error.into());
@@ -964,10 +965,7 @@ impl SubagentInner {
             return Ok(None);
         };
         let lease = resources.resolver.resolve(parent.id())?;
-        let cwd = lease
-            .validate_current()?
-            .to_string_lossy()
-            .into_owned();
+        let cwd = lease.validate_current()?.to_string_lossy().into_owned();
         Ok(Some(ParentWorkspace {
             registry: resources.registry.clone(),
             lease,
@@ -985,11 +983,9 @@ impl SubagentInner {
         };
         workspace.registry.recognize_session(child_session_id)?;
         workspace.lease.validate_current()?;
-        workspace.registry.attach_session(
-            workspace.lease.workspace_id(),
-            child_session_id,
-            None,
-        )
+        workspace
+            .registry
+            .attach_session(workspace.lease.workspace_id(), child_session_id, None)
     }
 
     async fn require_direct_parent(

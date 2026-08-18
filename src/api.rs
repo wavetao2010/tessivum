@@ -1315,7 +1315,7 @@ fn compat_workspace_delete(
             json!({"type": "host/workspace-removed", "workspaceId": args.workspace_id.clone()}),
         );
     }
-    Ok(json!({"deleted": deleted, "workspaceId": args.workspace_id}))
+    Ok(json!({"deleted": deleted}))
 }
 
 fn compat_workspace_move(

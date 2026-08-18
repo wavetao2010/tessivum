@@ -16,7 +16,9 @@ use tessivum::{
         AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry, AgentRuntime,
         AgentStatus, Inbox,
     },
-    protocol::{Message, SessionEvent, SessionHeader, SessionId, SessionOrigin, SESSION_FORMAT_VERSION},
+    protocol::{
+        Message, SessionEvent, SessionHeader, SessionId, SessionOrigin, SESSION_FORMAT_VERSION,
+    },
     session::{
         MemorySessionPersistence, SessionError, SessionInspection, SessionPersistence, SessionStore,
     },
@@ -190,7 +192,8 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("tessivum-subagent-{label}-{}", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("tessivum-subagent-{label}-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -233,7 +236,13 @@ async fn setup_workspace() -> WorkspaceHarness {
     let agents = AgentRegistry::new(sessions.clone());
     std::mem::forget(agents.register_factory(Arc::new(Factory)).unwrap());
     let mut parent_header = header("parent", None);
-    parent_header.cwd = Some(workspace.canonicalize().unwrap().to_string_lossy().into_owned());
+    parent_header.cwd = Some(
+        workspace
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
     let parent = Arc::new(
         agents
             .create(parent_header, options(), cancellation())
@@ -416,7 +425,14 @@ async fn workspace_children_inherit_and_resume_after_restart() {
         .start(request("workspace-child"), cancellation())
         .await
         .unwrap();
-    let expected_cwd = Some(harness.workspace.canonicalize().unwrap().to_string_lossy().into_owned());
+    let expected_cwd = Some(
+        harness
+            .workspace
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
     assert_eq!(
         harness
             .persistence
@@ -512,7 +528,10 @@ async fn workspace_resume_rejects_foreign_and_removed_parent_workspaces() {
         )
         .await
         .unwrap();
-    harness.registry.recognize_session("wrong-cwd-child").unwrap();
+    harness
+        .registry
+        .recognize_session("wrong-cwd-child")
+        .unwrap();
     harness
         .registry
         .attach_session(&harness.workspace_id, "wrong-cwd-child", None)
@@ -538,7 +557,14 @@ async fn workspace_resume_rejects_foreign_and_removed_parent_workspaces() {
         version: SESSION_FORMAT_VERSION,
         id: SessionId::from("foreign-child"),
         created_at: 0,
-        cwd: Some(harness.workspace.canonicalize().unwrap().to_string_lossy().into_owned()),
+        cwd: Some(
+            harness
+                .workspace
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ),
         parent_session: Some(SessionId::from("parent")),
         seed_length: None,
         origin: Some(SessionOrigin::Subagent),
@@ -627,7 +653,10 @@ async fn workspace_attach_failure_disposes_and_leaves_child_for_repair() {
         Err(SubagentError::Workspace(WorkspaceError::StaleLease))
     ));
     assert_eq!(provider.calls.load(Ordering::Acquire), 1);
-    assert!(harness.agents.get(&SessionId::from("repair-child")).is_none());
+    assert!(harness
+        .agents
+        .get(&SessionId::from("repair-child"))
+        .is_none());
     assert_eq!(
         harness
             .persistence
@@ -636,9 +665,19 @@ async fn workspace_attach_failure_disposes_and_leaves_child_for_repair() {
             .unwrap()
             .unwrap()
             .cwd,
-        Some(harness.workspace.canonicalize().unwrap().to_string_lossy().into_owned())
+        Some(
+            harness
+                .workspace
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        )
     );
-    assert!(harness.registry.workspace_for_session("repair-child").is_none());
+    assert!(harness
+        .registry
+        .workspace_for_session("repair-child")
+        .is_none());
     assert!(harness.parent.session().events().is_empty());
 
     let replacement = harness
