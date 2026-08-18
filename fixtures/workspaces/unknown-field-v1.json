@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "tessivum.workspaces/v1",
+  "revision": 7,
+  "items": [
+    {
+      "workspaceId": "7d6f34e4-c2cb-4d41-a09a-c5af70dc56e8",
+      "path": "/canonical/project",
+      "title": "project",
+      "sessionIds": [],
+      "createdAt": "2026-08-18T00:00:00.000Z",
+      "updatedAt": "2026-08-18T00:00:00.000Z",
+      "unexpected": true
+    }
+  ],
+  "archivedSessionIds": []
+}
