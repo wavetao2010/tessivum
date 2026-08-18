@@ -2,7 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
+    fmt, fs,
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Weak,
@@ -1007,7 +1008,7 @@ impl SubagentInner {
         {
             return Err(SubagentError::ResumeParentMismatch);
         }
-        if header.cwd != *expected_cwd
+        if !same_canonical_cwd(header.cwd.as_deref(), expected_cwd.as_deref())
             || workspace.is_some_and(|workspace| {
                 workspace
                     .registry
@@ -1018,6 +1019,16 @@ impl SubagentInner {
             return Err(SubagentError::ResumeWorkspaceMismatch);
         }
         Ok(())
+    }
+}
+
+fn same_canonical_cwd(stored: Option<&str>, expected: Option<&str>) -> bool {
+    match (stored, expected) {
+        (None, None) => true,
+        (Some(stored), Some(expected)) => {
+            fs::canonicalize(Path::new(stored)).is_ok_and(|stored| stored == Path::new(expected))
+        }
+        _ => false,
     }
 }
 

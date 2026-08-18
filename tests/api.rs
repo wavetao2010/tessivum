@@ -750,7 +750,14 @@ async fn concurrent_workspace_archives_publish_monotonic_snapshots() {
     let mut server = ApiServer::bind(host).await.expect("real API binds");
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
-    let workspaces = browser_call(&client, &base, "workspace-list", "workspace.list", json!({})).await;
+    let workspaces = browser_call(
+        &client,
+        &base,
+        "workspace-list",
+        "workspace.list",
+        json!({}),
+    )
+    .await;
     let workspace_id = workspaces["result"]["value"]["items"][0]["workspaceId"]
         .as_str()
         .expect("default workspace id")
@@ -801,8 +808,16 @@ async fn concurrent_workspace_archives_publish_monotonic_snapshots() {
     }
     assert_eq!(snapshots[0].as_array().unwrap().len(), 1);
     assert_eq!(snapshots[1].as_array().unwrap().len(), 2);
-    assert!(snapshots[1].as_array().unwrap().iter().any(|id| id == "archive-first"));
-    assert!(snapshots[1].as_array().unwrap().iter().any(|id| id == "archive-second"));
+    assert!(snapshots[1]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "archive-first"));
+    assert!(snapshots[1]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "archive-second"));
 
     server.shutdown().await.expect("API shuts down");
     runtime.shutdown().await.expect("Host shuts down");

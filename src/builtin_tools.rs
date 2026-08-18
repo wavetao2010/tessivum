@@ -236,15 +236,26 @@ async fn run_bash(
 
     use tokio::process::Command;
 
-    let cwd = match lease {
-        Some(lease) => lease
-            .execution_cwd()
-            .map_err(|error| workspace_error(context, error))?,
-        None => cwd.to_path_buf(),
-    };
-    let mut child = Command::new("/bin/sh")
-        .args(["-lc", "--", command])
-        .current_dir(&cwd)
+    let mut shell = Command::new("/bin/sh");
+    shell.args(["-lc", "--", command]);
+    if let Some(lease) = lease {
+        use std::os::unix::process::CommandExt;
+        let directory = lease
+            .directory_fd()
+            .map_err(|error| workspace_error(context, error))?;
+        unsafe {
+            shell.as_std_mut().pre_exec(move || {
+                if libc::fchdir(directory) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            });
+        }
+    } else {
+        shell.current_dir(cwd);
+    }
+    let mut child = shell
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)

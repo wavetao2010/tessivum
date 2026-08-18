@@ -454,6 +454,7 @@ async fn workspace_children_inherit_and_resume_after_restart() {
     );
     child.dispose().await.unwrap();
     harness.parent.dispose().await.unwrap();
+    harness.registry.shutdown();
 
     let registry = WorkspaceRegistry::open(
         harness.root.path().join("data"),

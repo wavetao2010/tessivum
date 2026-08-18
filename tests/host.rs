@@ -726,7 +726,11 @@ async fn deleting_workspace_disposes_agents_and_denies_default_sessions() {
     let default_workspace = registry.list().into_iter().next().unwrap().workspace_id;
     let other_dir = root.path().join("other-workspace");
     fs::create_dir(&other_dir).unwrap();
-    let other_workspace = registry.create(&other_dir, None).unwrap().workspace.workspace_id;
+    let other_workspace = registry
+        .create(&other_dir, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
     let deleted_session = SessionId::from("deleted-live");
 
     runtime
@@ -750,7 +754,11 @@ async fn deleting_workspace_disposes_agents_and_denies_default_sessions() {
         after_delete
     );
     assert_eq!(
-        runtime.prompt(prompt("deleted-live")).await.unwrap_err().code,
+        runtime
+            .prompt(prompt("deleted-live"))
+            .await
+            .unwrap_err()
+            .code,
         "SESSION_UNGROUPED"
     );
     assert_eq!(
@@ -781,8 +789,16 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
     let second_dir = root.path().join("second-workspace");
     fs::create_dir(&first_dir).unwrap();
     fs::create_dir(&second_dir).unwrap();
-    let first_workspace = registry.create(&first_dir, None).unwrap().workspace.workspace_id;
-    let second_workspace = registry.create(&second_dir, None).unwrap().workspace.workspace_id;
+    let first_workspace = registry
+        .create(&first_dir, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let second_workspace = registry
+        .create(&second_dir, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
 
     let automatic = runtime.handle();
     tokio::time::timeout(

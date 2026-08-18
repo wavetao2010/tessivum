@@ -727,8 +727,6 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
         })
     );
 
-
-
     for (rpc_id, session_id) in [("session-one", "multi-one"), ("session-two", "multi-two")] {
         let created = browser_rpc(
             &client,
@@ -790,7 +788,6 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
         })
     );
 
-
     let moved = browser_rpc(
         &client,
         &base,
@@ -845,7 +842,7 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
         &base,
         "workspace.delete",
         "delete-default",
-        json!({"workspaceId": default_workspace_id}),
+        json!({"workspaceId": default_workspace_id.clone()}),
     )
     .await;
     assert_eq!(deleted_default["result"]["value"], json!({"deleted": true}));
@@ -862,7 +859,7 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
         json!({
             "code": "workspace-not-found",
             "message": "workspace was not found",
-            "details": {"workspaceId": fixture.path().to_string_lossy()},
+            "details": {"workspaceId": default_workspace_id},
         })
     );
 

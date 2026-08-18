@@ -429,6 +429,9 @@ pub trait HostApi: Send + Sync {
     fn workspace_registry(&self) -> Option<WorkspaceRegistry> {
         None
     }
+    fn default_workspace_id(&self) -> Option<WorkspaceId> {
+        None
+    }
     async fn shutdown(&self) -> Result<(), TessivumError>;
 }
 
@@ -453,6 +456,7 @@ struct HostInner {
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
     workspace_registry: WorkspaceRegistry,
+    default_workspace_id: Option<WorkspaceId>,
     resources: Arc<SessionResourceResolver>,
     registry: AgentRegistry,
     approvals: HostApprovalRegistry,
@@ -596,6 +600,11 @@ impl HostRuntime {
             Arc::new(JsonlSessionPersistence::new(&data_dir));
         let persisted_sessions = persistence.list(cancellation.clone()).await?;
         let workspace_registry = WorkspaceRegistry::open(&data_dir, &cwd, persisted_sessions)?;
+        let default_workspace_id = workspace_registry
+            .list()
+            .into_iter()
+            .find(|workspace| workspace.path == cwd.to_string_lossy())
+            .map(|workspace| workspace.workspace_id);
         let resources = Arc::new(SessionResourceResolver::new(workspace_registry.clone()));
         let sessions = SessionStore::new(Arc::clone(&persistence));
         let session_service = root.provide(session_service_key(), sessions.clone())?;
@@ -739,6 +748,7 @@ impl HostRuntime {
             sessions,
             persistence,
             workspace_registry,
+            default_workspace_id,
             resources,
             registry,
             approvals,
@@ -989,18 +999,14 @@ impl HostHandle {
     }
 
     fn default_workspace_id(&self) -> Result<WorkspaceId, HostError> {
-        self.inner
-            .workspace_registry
-            .list()
-            .into_iter()
-            .find(|workspace| workspace.path == self.inner.identity.cwd.to_string_lossy())
-            .map(|workspace| workspace.workspace_id)
-            .ok_or_else(|| {
-                HostError::invalid(
-                    "WORKSPACE_NOT_FOUND",
-                    "host cwd workspace is not registered",
-                )
-            })
+        let workspace_id = self.inner.default_workspace_id.clone().ok_or_else(|| {
+            HostError::invalid(
+                "WORKSPACE_NOT_FOUND",
+                "host cwd workspace is not registered",
+            )
+        })?;
+        self.inner.workspace_registry.resolve(&workspace_id)?;
+        Ok(workspace_id)
     }
 
     fn require_session_root(&self, header: &SessionHeader, root: &Path) -> Result<(), HostError> {
@@ -1157,6 +1163,7 @@ impl HostHandle {
         }
         self.inner.settings.shutdown().await;
         self.inner.credentials.shutdown().await;
+        self.inner.workspace_registry.close();
         self.inner.approvals.cancel_all();
         self.inner.registry.cancel_all(
             AgentCancelCause::Hook {
@@ -1171,6 +1178,7 @@ impl HostHandle {
         }
         let owned_agents = std::mem::take(&mut *lock(&self.inner.owned_agents));
         drop(owned_agents);
+        self.inner.workspace_registry.shutdown();
         if let Some(code) = &self.inner.code_runtime {
             if let Err(error) = code.dispose().await {
                 failures.push(format!("code: {error}"));
@@ -1252,12 +1260,6 @@ impl HostHandle {
             }
             notified.await;
         }
-    }
-
-
-    async fn ensure_agent(&self, session_id: &SessionId) -> Result<AgentHandle, HostError> {
-        let _setup = self.inner.setup.lock().await;
-        self.ensure_agent_under_setup(session_id).await
     }
 
     async fn ensure_agent_under_setup(
@@ -1630,6 +1632,9 @@ impl HostApi for HostHandle {
     fn workspace_registry(&self) -> Option<WorkspaceRegistry> {
         Some(self.inner.workspace_registry.clone())
     }
+    fn default_workspace_id(&self) -> Option<WorkspaceId> {
+        self.inner.default_workspace_id.clone()
+    }
     fn settings(&self) -> Option<Arc<Settings>> {
         Some(Arc::clone(&self.inner.settings))
     }
@@ -1710,6 +1715,9 @@ impl HostApi for HostRuntime {
     }
     fn workspace_registry(&self) -> Option<WorkspaceRegistry> {
         self.handle.workspace_registry()
+    }
+    fn default_workspace_id(&self) -> Option<WorkspaceId> {
+        HostApi::default_workspace_id(&self.handle)
     }
     fn settings(&self) -> Option<Arc<Settings>> {
         self.handle.settings()

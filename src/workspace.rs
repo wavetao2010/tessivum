@@ -10,7 +10,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -222,7 +225,6 @@ impl WorkspaceError {
             Self::RevisionConflict { .. } => "WORKSPACE_REVISION_CONFLICT",
             Self::StaleLease => "STALE_WORKSPACE_LEASE",
             Self::Persistence(_) => "WORKSPACE_PERSISTENCE_FAILED",
-
         }
     }
 }
@@ -239,7 +241,9 @@ struct RegistryInner {
     file: PathBuf,
     data_dir: PathBuf,
     data_dir_identity: FileIdentity,
-    _lock: File,
+    _data_dir: File,
+    lock: Mutex<Option<File>>,
+    closed: AtomicBool,
     state: Mutex<RegistryState>,
 }
 
@@ -287,19 +291,10 @@ impl WorkspaceLease {
         &self.canonical_root
     }
 
-    /// Returns a cwd path backed by this lease's retained directory descriptor.
-    pub fn execution_cwd(&self) -> Result<PathBuf, WorkspaceError> {
+    #[cfg(unix)]
+    pub(crate) fn directory_fd(&self) -> Result<RawFd, WorkspaceError> {
         self.validate_current()?;
-        #[cfg(unix)]
-        {
-            return fd_path(self.directory.as_raw_fd());
-        }
-        #[cfg(not(unix))]
-        {
-            Err(WorkspaceError::Persistence(
-                "fd-backed cwd is unsupported on this platform".into(),
-            ))
-        }
+        Ok(self.directory.as_raw_fd())
     }
 
     /// Verifies registration, generation, and the current pathname identity.
@@ -307,6 +302,9 @@ impl WorkspaceLease {
         let Some(registry) = self.registry.upgrade() else {
             return Err(WorkspaceError::StaleLease);
         };
+        if registry.closed.load(Ordering::Acquire) {
+            return Err(WorkspaceError::StaleLease);
+        }
         let state = registry
             .state
             .lock()
@@ -325,8 +323,8 @@ impl WorkspaceLease {
         if *generation != self.generation || workspace.path != path_string(&self.canonical_root) {
             return Err(WorkspaceError::StaleLease);
         }
-        let current = open_directory(&self.canonical_root)
-            .map_err(|_| WorkspaceError::StaleLease)?;
+        let current =
+            open_directory(&self.canonical_root).map_err(|_| WorkspaceError::StaleLease)?;
         if current.1 != self.identity
             || fs::canonicalize(&self.canonical_root).ok().as_deref()
                 != Some(self.canonical_root.as_path())
@@ -382,13 +380,11 @@ impl WorkspaceRegistry {
         I: IntoIterator<Item = SessionInspection>,
     {
         let requested_data_dir = data_dir.as_ref();
-        fs::create_dir_all(requested_data_dir)
-            .map_err(|e| io_error("create data directory", e))?;
+        fs::create_dir_all(requested_data_dir).map_err(|e| io_error("create data directory", e))?;
         let data_dir = fs::canonicalize(requested_data_dir)
             .map_err(|e| io_error("canonicalize data directory", e))?;
         let (data_handle, data_dir_identity) =
             open_directory(&data_dir).map_err(|e| io_error("open data directory", e))?;
-        drop(data_handle);
         let lock = open_registry_lock(&data_dir)?;
         cleanup_stale_temps(&data_dir)?;
         let file = data_dir.join(REGISTRY_FILE);
@@ -406,14 +402,15 @@ impl WorkspaceRegistry {
             validate_session_id(&inspection.header.id)
                 .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
             if !known_sessions.insert(inspection.header.id.clone()) {
-                return Err(WorkspaceError::Corrupt("duplicate durable session id".into()));
+                return Err(WorkspaceError::Corrupt(
+                    "duplicate durable session id".into(),
+                ));
             }
         }
 
         let snapshot = if let Some(mut file_handle) = file_handle {
             let mut bytes = Vec::new();
-            file_handle
-                .by_ref()
+            std::io::Read::by_ref(&mut file_handle)
                 .take((MAX_REGISTRY_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
                 .map_err(|e| io_error("read workspace registry", e))?;
@@ -449,7 +446,9 @@ impl WorkspaceRegistry {
                 file,
                 data_dir,
                 data_dir_identity,
-                _lock: lock,
+                _data_dir: data_handle,
+                lock: Mutex::new(Some(lock)),
+                closed: AtomicBool::new(false),
                 state: Mutex::new(RegistryState {
                     snapshot,
                     known_sessions,
@@ -473,6 +472,26 @@ impl WorkspaceRegistry {
             )?;
         }
         Ok(registry)
+    }
+
+    pub fn close(&self) {
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
+            drop(
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()),
+            );
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.close();
+        self.inner
+            .lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
     }
 
     pub fn snapshot(&self) -> WorkspaceSnapshot {
@@ -619,7 +638,6 @@ impl WorkspaceRegistry {
         })
     }
 
-
     pub fn attach_session(
         &self,
         workspace_id: impl AsRef<str>,
@@ -738,6 +756,9 @@ impl WorkspaceRegistry {
     }
 
     pub fn resolve(&self, workspace_id: impl AsRef<str>) -> Result<WorkspaceLease, WorkspaceError> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(WorkspaceError::Locked);
+        }
         let id = WorkspaceId::from(workspace_id.as_ref());
         validate_workspace_id(&id)?;
         let state = self
@@ -772,6 +793,9 @@ impl WorkspaceRegistry {
     where
         F: FnOnce(&mut WorkspaceSnapshot, &mut RegistryState) -> Result<(bool, T), WorkspaceError>,
     {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(WorkspaceError::Locked);
+        }
         let mut state = self
             .inner
             .state
@@ -889,7 +913,12 @@ fn open_directory(path: &Path) -> io::Result<(File, FileIdentity)> {
         let bytes = path.as_os_str().as_bytes();
         let c_path = CString::new(bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -924,7 +953,7 @@ fn open_no_follow(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<Fil
     use std::os::unix::ffi::OsStrExt;
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-    let fd = unsafe { libc::open(c_path.as_ptr(), flags, mode) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -950,7 +979,9 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
         .map_err(|error| io_error("open workspace lock", error))?;
     #[cfg(unix)]
     {
-        let metadata = file.metadata().map_err(|e| io_error("inspect workspace lock", e))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| io_error("inspect workspace lock", e))?;
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o600
@@ -961,7 +992,8 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
         }
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = io::Error::last_os_error();
-            if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN) {
+            if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+            {
                 return Err(WorkspaceError::Locked);
             }
             return Err(io_error("lock workspace registry", error));
@@ -972,7 +1004,11 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
 
 fn open_registry_file(path: &Path) -> Result<Option<File>, WorkspaceError> {
     #[cfg(unix)]
-    let file = match open_no_follow(path, libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW, 0) {
+    let file = match open_no_follow(
+        path,
+        libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+        0,
+    ) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(WorkspaceError::Corrupt(format!("open registry: {error}"))),
@@ -985,7 +1021,9 @@ fn open_registry_file(path: &Path) -> Result<Option<File>, WorkspaceError> {
     };
     #[cfg(unix)]
     {
-        let metadata = file.metadata().map_err(|e| io_error("inspect workspace registry", e))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| io_error("inspect workspace registry", e))?;
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o600
@@ -998,32 +1036,18 @@ fn open_registry_file(path: &Path) -> Result<Option<File>, WorkspaceError> {
     Ok(Some(file))
 }
 
-#[cfg(unix)]
-fn fd_path(fd: RawFd) -> Result<PathBuf, WorkspaceError> {
-    #[cfg(target_os = "linux")]
-    {
-        return Ok(PathBuf::from(format!("/proc/self/fd/{fd}")));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return Ok(PathBuf::from(format!("/dev/fd/{fd}")));
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err(WorkspaceError::Persistence(
-            "fd-backed cwd is unsupported on this Unix target".into(),
-        ))
-    }
-}
-
 fn canonical_directory(path: &Path) -> Result<PathBuf, WorkspaceError> {
     if path.to_string_lossy().len() > MAX_PATH_BYTES {
-        return Err(WorkspaceError::InvalidPath("workspace path exceeds 4096 bytes".into()));
+        return Err(WorkspaceError::InvalidPath(
+            "workspace path exceeds 4096 bytes".into(),
+        ));
     }
     let canonical = fs::canonicalize(path)
         .map_err(|e| WorkspaceError::InvalidPath(format!("{}: {e}", path.display())))?;
     if canonical.to_string_lossy().len() > MAX_PATH_BYTES {
-        return Err(WorkspaceError::InvalidPath("workspace path exceeds 4096 bytes".into()));
+        return Err(WorkspaceError::InvalidPath(
+            "workspace path exceeds 4096 bytes".into(),
+        ));
     }
     let metadata = fs::metadata(&canonical)
         .map_err(|e| WorkspaceError::InvalidPath(format!("{}: {e}", canonical.display())))?;
@@ -1195,7 +1219,9 @@ fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceError>
             return Err(WorkspaceError::Corrupt("duplicate workspace id".into()));
         }
         if item.path.len() > MAX_PATH_BYTES {
-            return Err(WorkspaceError::InvalidPath("workspace path exceeds 4096 bytes".into()));
+            return Err(WorkspaceError::InvalidPath(
+                "workspace path exceeds 4096 bytes".into(),
+            ));
         }
         let canonical = canonical_directory(Path::new(&item.path))?;
         if path_string(&canonical) != item.path || !paths.insert(item.path.clone()) {
@@ -1248,59 +1274,36 @@ fn validate_membership(
     for workspace in &snapshot.items {
         for session in &workspace.session_ids {
             if !known.contains(session) {
-                return Err(WorkspaceError::Corrupt("workspace session id is stale".into()));
+                return Err(WorkspaceError::Corrupt(
+                    "workspace session id is stale".into(),
+                ));
             }
         }
     }
     for session in &snapshot.archived_session_ids {
         if !known.contains(session) {
-            return Err(WorkspaceError::Corrupt("archived session id is stale".into()));
+            return Err(WorkspaceError::Corrupt(
+                "archived session id is stale".into(),
+            ));
         }
     }
     for inspection in sessions {
-        if snapshot.archived_session_ids.contains(&inspection.header.id)
-            && !snapshot
-                .items
-                .iter()
-                .any(|workspace| workspace.session_ids.contains(&inspection.header.id))
-        {
-            continue;
-        }
         let session = &inspection.header.id;
-        let Some(cwd) = inspection.header.cwd.as_deref() else {
-            if snapshot
-                .items
-                .iter()
-                .any(|workspace| workspace.session_ids.contains(session))
-            {
-                return Err(WorkspaceError::Corrupt(
-                    "session with missing cwd must remain ungrouped".into(),
-                ));
-            }
-            continue;
-        };
-        let Ok(canonical) = canonical_directory(Path::new(cwd)) else {
-            if snapshot
-                .items
-                .iter()
-                .any(|workspace| workspace.session_ids.contains(session))
-            {
-                return Err(WorkspaceError::Corrupt(
-                    "session with invalid cwd must remain ungrouped".into(),
-                ));
-            }
-            continue;
-        };
-        let Some(expected) = snapshot
+        let Some(owner) = snapshot
             .items
             .iter()
-            .find(|workspace| workspace.path == path_string(&canonical))
+            .find(|workspace| workspace.session_ids.contains(session))
         else {
+            continue;
+        };
+        let Some(cwd) = inspection.header.cwd.as_deref() else {
             return Err(WorkspaceError::Corrupt(
-                "durable session workspace is not registered".into(),
+                "accounted session is missing cwd".into(),
             ));
         };
-        if !expected.session_ids.contains(session) {
+        let canonical = canonical_directory(Path::new(cwd))
+            .map_err(|_| WorkspaceError::Corrupt("accounted session cwd is invalid".into()))?;
+        if owner.path != path_string(&canonical) {
             return Err(WorkspaceError::Corrupt(
                 "durable session membership does not match registry".into(),
             ));

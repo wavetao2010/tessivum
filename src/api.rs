@@ -572,7 +572,6 @@ struct CompatWorkspaceDelete {
     workspace_id: String,
 }
 
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatSessionMove {
@@ -1315,7 +1314,6 @@ fn compat_workspace_host_error(error: TessivumError, workspace_id: &str) -> Comp
     }
 }
 
-
 fn compat_workspace_create(
     state: &ApiState,
     args: CompatWorkspaceCreate,
@@ -1386,8 +1384,6 @@ async fn compat_workspace_delete(
     }
     Ok(json!({"deleted": deleted}))
 }
-
-
 
 fn compat_session_move(state: &ApiState, args: CompatSessionMove) -> Result<Value, CompatError> {
     compat_require_nonblank("workspaceId", &args.workspace_id)?;
@@ -1618,12 +1614,16 @@ async fn compat_session_create(
             .ok_or_else(|| compat_workspace_invalid_path(&cwd))?;
         (workspace.workspace_id, workspace.path)
     } else {
-        let workspaces = registry.list();
-        let workspace = workspaces
-            .iter()
-            .find(|workspace| workspace.path == state.compat.cwd)
+        let workspace_id = state
+            .host
+            .default_workspace_id()
             .ok_or_else(|| compat_workspace_not_found(state.compat.cwd.clone()))?;
-        (workspace.workspace_id.clone(), workspace.path.clone())
+        let workspace = registry
+            .list()
+            .into_iter()
+            .find(|workspace| workspace.workspace_id == workspace_id)
+            .ok_or_else(|| compat_workspace_not_found(workspace_id.to_string()))?;
+        (workspace.workspace_id, workspace.path)
     };
 
     let persisted = state
