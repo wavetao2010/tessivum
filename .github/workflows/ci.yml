@@ -51,3 +51,23 @@ jobs:
 
       - name: Run Rust tests
         run: cargo test --all-targets
+
+  wasm-fixture:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fixtures/wasm/rust-minimal
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fixtures/wasm/rust-minimal
+      - name: Rebuild pinned Rust WASM guest
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Verify checked guest artifact
+        run: |
+          cmp plugin.wasm target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm
+          sha256sum -c plugin.wasm.sha256

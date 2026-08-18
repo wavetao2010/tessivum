@@ -3,8 +3,8 @@
 From this directory, build the checked guest artifact exactly as follows:
 
 ```sh
-rustup target add wasm32-unknown-unknown
-cargo build --locked --release --target wasm32-unknown-unknown
+rustup toolchain install 1.97.1 --component rust-std --target wasm32-unknown-unknown
+cargo +1.97.1 build --locked --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm plugin.wasm
 shasum -a 256 plugin.wasm > plugin.wasm.sha256
 ```
