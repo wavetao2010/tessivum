@@ -1177,7 +1177,10 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     let _slot = browser.install(&authority, approvals.clone()).unwrap();
     let secret_details = json!({"private": "approval-secret-not-durable"});
     let _details = browser
-        .register_answerer(&session_id, Arc::new(DetailsObserver(secret_details.clone())))
+        .register_answerer(
+            &session_id,
+            Arc::new(DetailsObserver(secret_details.clone())),
+        )
         .unwrap();
     let mut notices = browser.subscribe();
 

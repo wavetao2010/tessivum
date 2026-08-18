@@ -933,7 +933,9 @@ fn set_at_path(document: &mut Value, path: &[String], value: Value) {
                 current = next;
             }
             Value::Array(array) => {
-                let Some(index) = array_index(member) else { return };
+                let Some(index) = array_index(member) else {
+                    return;
+                };
                 if array.len() <= index {
                     array.resize(index + 1, Value::Null);
                 }
@@ -951,7 +953,9 @@ fn set_at_path(document: &mut Value, path: &[String], value: Value) {
             object.insert(member.clone(), value);
         }
         Value::Array(array) => {
-            let Some(index) = array_index(member) else { return };
+            let Some(index) = array_index(member) else {
+                return;
+            };
             if array.len() <= index {
                 array.resize(index + 1, Value::Null);
             }
@@ -971,7 +975,8 @@ fn remove_at_path(document: &mut Value, path: &[String]) {
                 Some(value) => value,
                 None => return,
             },
-            Value::Array(array) => match array_index(member).and_then(|index| array.get_mut(index)) {
+            Value::Array(array) => match array_index(member).and_then(|index| array.get_mut(index))
+            {
                 Some(value) => value,
                 None => return,
             },

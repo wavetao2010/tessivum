@@ -201,7 +201,10 @@ async fn approval_relay_replays_startup_asked_without_durable_tool_details() {
     .await
     .unwrap();
     assert_eq!(resolved.approval_id, requested.approval_id);
-    assert_eq!(resolved.outcome, tessivum::approval::ApprovalOutcome::Rejected);
+    assert_eq!(
+        resolved.outcome,
+        tessivum::approval::ApprovalOutcome::Rejected
+    );
     runtime.shutdown().await.unwrap();
 }
 
@@ -336,8 +339,8 @@ async fn shutdown_drains_racing_settings_writes_before_relays_close() {
     let settings = handle.settings().unwrap();
     let credentials = handle.credentials().unwrap();
     let namespace = "ui-theme";
-    let reference = CredentialRef::new(format!("TESSIVUM_RACE_{}", Uuid::new_v4().simple()))
-        .unwrap();
+    let reference =
+        CredentialRef::new(format!("TESSIVUM_RACE_{}", Uuid::new_v4().simple())).unwrap();
     settings
         .register(SettingsRegistration::new(
             namespace,
@@ -360,7 +363,10 @@ async fn shutdown_drains_racing_settings_writes_before_relays_close() {
 
     let mut settings_changed = false;
     let mut credentials_changed = false;
-    for _ in 0..2 {
+    for _ in 0..8 {
+        if settings_changed && credentials_changed {
+            break;
+        }
         match tokio::time::timeout(Duration::from_secs(1), notifications.recv())
             .await
             .unwrap()

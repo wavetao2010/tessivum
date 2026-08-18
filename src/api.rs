@@ -12,7 +12,6 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     path::Path as FsPath,
     pin::Pin,
-    str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -122,7 +121,12 @@ impl ApiServer {
         let address = listener.local_addr()?;
         let (socket_shutdown, _) = broadcast::channel(1);
         let (listener_shutdown, listener_stopped) = oneshot::channel();
-        let app = router_with_shutdown(host, config.frontend, socket_shutdown.clone(), Some(address));
+        let app = router_with_shutdown(
+            host,
+            config.frontend,
+            socket_shutdown.clone(),
+            Some(address),
+        );
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
@@ -1501,17 +1505,11 @@ async fn compat_session_cancel(
     Ok(json!({"accepted": true}))
 }
 
-async fn compat_events_mux(
-    State(state): State<ApiState>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
+async fn compat_events_mux(State(state): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
     compat_upgrade(state, upgrade, CompatStream::Mux)
 }
 
-async fn compat_events_host(
-    State(state): State<ApiState>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
+async fn compat_events_host(State(state): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
     compat_upgrade(state, upgrade, CompatStream::Host)
 }
 
@@ -2186,10 +2184,7 @@ fn sse_error_event(event: &str, error: ApiError) -> Event {
     )
 }
 
-async fn websocket_upgrade(
-    State(state): State<ApiState>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
+async fn websocket_upgrade(State(state): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
     upgrade
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)

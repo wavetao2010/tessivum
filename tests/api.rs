@@ -201,7 +201,9 @@ async fn raw_http_status(
     origins: &[&str],
     body: &str,
 ) -> String {
-    let stream = TcpStream::connect(address).await.expect("HTTP TCP connects");
+    let stream = TcpStream::connect(address)
+        .await
+        .expect("HTTP TCP connects");
     let mut stream = BufReader::new(stream);
     let origins = origins
         .iter()
@@ -221,9 +223,16 @@ async fn raw_http_status(
         .write_all(request.as_bytes())
         .await
         .expect("HTTP request writes");
-    stream.get_mut().flush().await.expect("HTTP request flushes");
+    stream
+        .get_mut()
+        .flush()
+        .await
+        .expect("HTTP request flushes");
     let mut status = String::new();
-    stream.read_line(&mut status).await.expect("HTTP status reads");
+    stream
+        .read_line(&mut status)
+        .await
+        .expect("HTTP status reads");
     status
 }
 
@@ -235,7 +244,10 @@ async fn assert_http_forbidden(
     origins: &[&str],
 ) {
     let status = raw_http_status(address, method, path, host, origins, "").await;
-    assert!(status.contains(" 403 "), "{path} allowed rebinding: {status}");
+    assert!(
+        status.contains(" 403 "),
+        "{path} allowed rebinding: {status}"
+    );
 }
 
 struct BrowserStopFixture(PathBuf);
@@ -341,7 +353,8 @@ async fn bound_listener_rejects_dns_rebinding_across_http_routes() {
     let authority = address.to_string();
     let origin = format!("http://{authority}");
     let exact_origin = [origin.as_str()];
-    let session_body = r#"{"requestId":"authority-session","args":{"session":"authority-session"}}"#;
+    let session_body =
+        r#"{"requestId":"authority-session","args":{"session":"authority-session"}}"#;
     let respond_body = r#"{"type":"client-response","rpcId":"authority-approval","result":{"ok":true,"value":{"sessionId":"session","approvalId":"approval","outcome":"allowed-once"}}}"#;
 
     assert!(
@@ -399,16 +412,15 @@ async fn bound_listener_rejects_dns_rebinding_across_http_routes() {
         &["http://attacker.example"],
     )
     .await;
-    assert_http_forbidden(address, "GET", "/events/authority-session", "attacker.example", &[])
-        .await;
     assert_http_forbidden(
         address,
-        "POST",
-        "/api/respond",
-        &authority,
-        &["null"],
+        "GET",
+        "/events/authority-session",
+        "attacker.example",
+        &[],
     )
     .await;
+    assert_http_forbidden(address, "POST", "/api/respond", &authority, &["null"]).await;
     assert_http_forbidden(
         address,
         "POST",
@@ -442,7 +454,14 @@ async fn bound_listener_uses_bracketed_ipv6_authority_when_available() {
     let host: Arc<dyn HostApi> = Arc::new(FakeHost::new());
     let mut server = match ApiServer::bind_at(host, "[::1]:0".parse().unwrap()).await {
         Ok(server) => server,
-        Err(error) if matches!(error.kind(), io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported) => return,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported
+            ) =>
+        {
+            return
+        }
         Err(error) => panic!("IPv6 loopback bind failed: {error}"),
     };
     let authority = server.local_addr().to_string();
@@ -458,7 +477,10 @@ async fn bound_listener_uses_bracketed_ipv6_authority_when_available() {
         r#"{"requestId":"ipv6-authority","args":{"session":"ipv6-authority"}}"#,
     )
     .await;
-    assert!(status.contains(" 200 "), "bracketed IPv6 authority accepted: {status}");
+    assert!(
+        status.contains(" 200 "),
+        "bracketed IPv6 authority accepted: {status}"
+    );
     server.shutdown().await.expect("IPv6 server shuts down");
 }
 
@@ -471,17 +493,13 @@ async fn websocket_rejects_dns_rebinding_handshakes() {
     let exact_origin = [origin.as_str()];
 
     for path in ["/ws", "/api/events.mux", "/api/events.host"] {
-        let socket = match RawWebSocket::connect_path_with_headers(
-            address,
-            path,
-            &authority,
-            &exact_origin,
-        )
-        .await
-        {
-            Ok(socket) => socket,
-            Err(status) => panic!("exact authority WebSocket rejected: {status}"),
-        };
+        let socket =
+            match RawWebSocket::connect_path_with_headers(address, path, &authority, &exact_origin)
+                .await
+            {
+                Ok(socket) => socket,
+                Err(status) => panic!("exact authority WebSocket rejected: {status}"),
+            };
         drop(socket);
     }
     let attacker_origin = ["http://attacker.example"];
@@ -493,10 +511,11 @@ async fn websocket_rejects_dns_rebinding_handshakes() {
         ("/api/events.host", authority.as_str(), &https_origin[..]),
         ("/ws", "attacker.example", &exact_origin[..]),
     ] {
-        let status = match RawWebSocket::connect_path_with_headers(address, path, host, origins).await {
-            Ok(_) => panic!("{path} accepted rebinding handshake"),
-            Err(status) => status,
-        };
+        let status =
+            match RawWebSocket::connect_path_with_headers(address, path, host, origins).await {
+                Ok(_) => panic!("{path} accepted rebinding handshake"),
+                Err(status) => status,
+            };
         assert!(status.contains(" 403 "), "{path} status: {status}");
     }
     server.shutdown().await.expect("server shuts down");

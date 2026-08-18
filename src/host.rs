@@ -1156,7 +1156,9 @@ impl HostHandle {
             loop {
                 if settings_inner.relays_closed.load(Ordering::Acquire) {
                     while let Ok(event) = settings_events.try_recv() {
-                        let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
+                        let _ = settings_inner
+                            .notices
+                            .send(HostNotification::SettingsChanged(event));
                     }
                     break;
                 }
@@ -1181,7 +1183,9 @@ impl HostHandle {
             loop {
                 if credentials_inner.relays_closed.load(Ordering::Acquire) {
                     while let Ok(event) = credential_events.try_recv() {
-                        let _ = credentials_inner.notices.send(HostNotification::CredentialsChanged(event));
+                        let _ = credentials_inner
+                            .notices
+                            .send(HostNotification::CredentialsChanged(event));
                     }
                     break;
                 }
@@ -1208,6 +1212,7 @@ impl HostHandle {
         if !lock(&self.inner.state).relayed.insert(session_id.clone()) {
             return;
         }
+        let inner = Arc::clone(&self.inner);
         let starting_next_seq = session.next_seq().unwrap_or(u64::MAX);
         let mut receiver = session.subscribe();
         let task = tokio::spawn(async move {

@@ -48,12 +48,12 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
                 json!({"nested": {"default": true}, "array": [1], "secret": "default"}),
                 json!({"nested": {"base": true}, "array": [2]}),
             )
-                .with_secret_paths(vec![
-                    vec!["secret".into()],
-                    vec!["tokens".into(), "1".into()],
-                    vec!["items".into(), "0".into(), "token".into()],
-                    vec!["items".into(), "1".into(), "token".into()],
-                ]),
+            .with_secret_paths(vec![
+                vec!["secret".into()],
+                vec!["tokens".into(), "1".into()],
+                vec!["items".into(), "0".into(), "token".into()],
+                vec!["items".into(), "1".into(), "token".into()],
+            ]),
         )
         .await
         .unwrap();
@@ -112,7 +112,13 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
         .unwrap();
     let described = settings.describe("demo").unwrap();
     assert_eq!(described.secret_set, vec![true, true, false, true]);
-    assert_eq!(settings.get("demo").unwrap().value["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        settings.get("demo").unwrap().value["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     settings
         .remove_path("demo", vec!["nested".into(), "user".into()], Some(3))
         .await
