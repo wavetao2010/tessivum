@@ -8,6 +8,8 @@ use serde_json::json;
 use tessivum::{
     host::{HostApi, HostConfig, HostRuntime},
     protocol::{AgentCancelCause, ContentBlock, SessionPromptParams, SessionStatus},
+    credentials::{CredentialError, CredentialRef},
+    settings::{SettingsError, SettingsRegistration},
     SessionId,
 };
 use uuid::Uuid;
@@ -283,4 +285,137 @@ async fn host_approval_registry_tracks_owned_agent_generations() {
     assert!(approvals.lookup(&session).is_some());
     runtime.shutdown().await.unwrap();
     assert!(approvals.lookup(&session).is_none());
+}
+
+#[tokio::test]
+async fn host_services_use_default_paths_persist_and_drain_on_shutdown() {
+    let root = TempDir::new();
+    let namespace = format!("host-{}", Uuid::new_v4().simple());
+    let reference = CredentialRef::new(format!("TESSIVUM_HOST_{}", Uuid::new_v4().simple()))
+        .unwrap();
+    let value = "host-credential-value";
+    let first = HostRuntime::boot(config(&root)).await.unwrap();
+    let handle = first.handle();
+    let settings = handle.settings().unwrap();
+    let credentials = handle.credentials().unwrap();
+    settings
+        .register(SettingsRegistration::new(
+            namespace.clone(),
+            json!({}),
+            json!({}),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    settings
+        .update(&namespace, json!({"saved": true}), None)
+        .await
+        .unwrap();
+    let mut credential_events = credentials.subscribe();
+    credentials.set(reference.clone(), value.into()).await.unwrap();
+    assert!(!format!("{credentials:?}").contains(value));
+    assert!(!serde_json::to_string(&credential_events.recv().await.unwrap())
+        .unwrap()
+        .contains(value));
+    let shadow_reference =
+        CredentialRef::new(format!("TESSIVUM_SHADOW_{}", Uuid::new_v4().simple())).unwrap();
+    let shadow_value = "host-environment-secret";
+    std::env::set_var(shadow_reference.as_str(), shadow_value);
+    let shadowed_set = credentials
+        .set(shadow_reference.clone(), "host-file-secret".into())
+        .await;
+    let shadowed_unset = credentials.unset(&shadow_reference).await;
+    std::env::remove_var(shadow_reference.as_str());
+    let shadowed_set = shadowed_set.unwrap_err();
+    assert!(matches!(&shadowed_set, CredentialError::Shadowed(_)));
+    assert!(
+        !shadowed_set.to_string().contains(shadow_value)
+            && !shadowed_set.to_string().contains("host-file-secret")
+    );
+    assert!(matches!(shadowed_unset, Err(CredentialError::Shadowed(_))));
+    assert!(root.path().join("data/settings.yaml").is_file());
+    assert!(root.path().join("data/credentials.yaml").is_file());
+
+    first.shutdown().await.unwrap();
+    assert!(matches!(
+        settings.update(&namespace, json!({"after": true}), None).await,
+        Err(SettingsError::Closed)
+    ));
+    assert!(matches!(
+        credentials.set(reference.clone(), value.into()).await,
+        Err(CredentialError::Closed)
+    ));
+
+    let second = HostRuntime::boot(config(&root)).await.unwrap();
+    let settings = second.handle().settings().unwrap();
+    let credentials = second.handle().credentials().unwrap();
+    settings
+        .register(SettingsRegistration::new(
+            namespace.clone(),
+            json!({}),
+            json!({}),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(settings.get(&namespace).unwrap().value, json!({"saved": true}));
+    assert_eq!(credentials.resolve(&reference).await.unwrap(), Some(value.into()));
+    credentials.unset(&reference).await.unwrap();
+    second.shutdown().await.unwrap();
+
+    let third = HostRuntime::boot(config(&root)).await.unwrap();
+    assert_eq!(
+        third
+            .handle()
+            .credentials()
+            .unwrap()
+            .resolve(&reference)
+            .await
+            .unwrap(),
+        None
+    );
+    third.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_uses_selected_storage_files_and_rejects_directories() {
+    let root = TempDir::new();
+    let settings_path = root.path().join("selected/settings.yaml");
+    let credentials_path = root.path().join("selected/credentials.yaml");
+    let runtime = HostRuntime::boot(
+        config(&root)
+            .with_settings_path(&settings_path)
+            .with_credentials_path(&credentials_path),
+    )
+    .await
+    .unwrap();
+    let settings = runtime.handle().settings().unwrap();
+    settings
+        .register(SettingsRegistration::new(
+            "selected",
+            json!({}),
+            json!({}),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    settings.update("selected", json!({"on": true}), None).await.unwrap();
+    runtime
+        .handle()
+        .credentials()
+        .unwrap()
+        .set(CredentialRef::new("TESSIVUM_SELECTED").unwrap(), "value".into())
+        .await
+        .unwrap();
+    assert!(settings_path.is_file());
+    assert!(credentials_path.is_file());
+    assert!(!root.path().join("data/settings.yaml").exists());
+    assert!(!root.path().join("data/credentials.yaml").exists());
+    runtime.shutdown().await.unwrap();
+
+    let rejected = HostRuntime::boot(config(&root).with_settings_path(root.path()))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(rejected.code(), "INVALID_HOST_CONFIG");
 }

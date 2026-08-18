@@ -148,15 +148,21 @@ async fn credentials_shadow_live_environment_and_never_describe_values() {
         environment.clone(),
         Arc::new(YamlCredentialFile::new(root.join("credentials.yaml"))),
     );
+    let mut events = credentials.subscribe();
     let token = CredentialRef::new("TOKEN").unwrap();
     assert_eq!(
         credentials.resolve(&token).await.unwrap(),
         Some("environment-secret".into())
     );
-    assert!(matches!(
-        credentials.set(token.clone(), "file-secret".into()).await,
-        Err(CredentialError::Shadowed(_))
-    ));
+    let shadowed = credentials
+        .set(token.clone(), "file-secret".into())
+        .await
+        .unwrap_err();
+    assert!(matches!(&shadowed, CredentialError::Shadowed(_)));
+    assert!(
+        !shadowed.to_string().contains("environment-secret")
+            && !shadowed.to_string().contains("file-secret")
+    );
     let descriptor = serde_json::to_string(&credentials.describe(&token).await.unwrap()).unwrap();
     assert!(!descriptor.contains("environment-secret") && !descriptor.contains("file-secret"));
     environment.0.lock().unwrap().remove("TOKEN");
@@ -164,6 +170,12 @@ async fn credentials_shadow_live_environment_and_never_describe_values() {
         .set(token.clone(), "file-secret".into())
         .await
         .unwrap();
+    assert!(!format!("{credentials:?}").contains("file-secret"));
+    assert!(
+        !serde_json::to_string(&events.recv().await.unwrap())
+            .unwrap()
+            .contains("file-secret")
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

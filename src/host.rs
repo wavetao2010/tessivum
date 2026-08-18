@@ -29,6 +29,7 @@ use crate::{
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     code_runtime::{CodeRuntime, ProcessCodeRuntime},
     legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
+    credentials::{credentials_service_key, Credentials, YamlCredentialFile},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream, RecordedLlmAdapter},
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
@@ -39,6 +40,7 @@ use crate::{
         SESSION_FORMAT_VERSION,
     },
     session::{session_service_key, SessionError, SessionPersistence, SessionStore},
+    settings::{settings_service_key, Settings, YamlSettingsProvider},
     subprocess::SubprocessRuntime,
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     telemetry::TelemetryCoordinator,
@@ -71,6 +73,10 @@ pub struct HostIdentity {
 pub struct HostConfig {
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
+    /// Host-selected writable settings file. `None` uses `data_dir/settings.yaml`.
+    pub settings_path: Option<PathBuf>,
+    /// Host-selected writable credentials file. `None` uses `data_dir/credentials.yaml`.
+    pub credentials_path: Option<PathBuf>,
     pub profile: String,
     pub provider: String,
     pub model: String,
@@ -101,6 +107,8 @@ impl std::fmt::Debug for HostConfig {
             .debug_struct("HostConfig")
             .field("cwd", &self.cwd)
             .field("data_dir", &self.data_dir)
+            .field("settings_path", &self.settings_path)
+            .field("credentials_path", &self.credentials_path)
             .field("profile", &self.profile)
             .field("provider", &self.provider)
             .field("model", &self.model)
@@ -122,6 +130,8 @@ impl HostConfig {
         Self {
             cwd: cwd.into(),
             data_dir: data_dir.into(),
+            settings_path: None,
+            credentials_path: None,
             profile: "default".into(),
             provider: "recorded".into(),
             model: "recorded".into(),
@@ -144,6 +154,16 @@ impl HostConfig {
             telemetry: None,
             code_runtime: None,
         }
+    }
+
+    pub fn with_settings_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.settings_path = Some(path.into());
+        self
+    }
+
+    pub fn with_credentials_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.credentials_path = Some(path.into());
+        self
     }
 
     pub fn with_recorded_replay(mut self, replay: impl Into<String>) -> Self {
@@ -331,6 +351,12 @@ pub trait HostApi: Send + Sync {
             max_tokens: None,
         }
     }
+    fn settings(&self) -> Option<Arc<Settings>> {
+        None
+    }
+    fn credentials(&self) -> Option<Arc<Credentials>> {
+        None
+    }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification>;
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         None
@@ -353,6 +379,8 @@ struct HostInner {
     identity: HostIdentity,
     profile: Value,
     config: HostConfig,
+    settings: Arc<Settings>,
+    credentials: Arc<Credentials>,
     cancellation: tessivum_core::CancellationToken,
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
@@ -390,6 +418,8 @@ struct Services {
     _tools: ServiceHandle<ToolRuntime>,
     _agents: ServiceHandle<AgentRegistry>,
     _subprocesses: ServiceHandle<SubprocessRuntime>,
+    _settings: ServiceHandle<Arc<Settings>>,
+    _credentials: ServiceHandle<Arc<Credentials>>,
     _telemetry: Option<ServiceHandle<TelemetryCoordinator>>,
     _code: Option<ServiceHandle<ProcessCodeRuntime>>,
     _provider: LlmProviderRegistration,
@@ -468,8 +498,28 @@ impl HostRuntime {
             ));
         }
 
+        let settings_path = host_file_path(
+            &data_dir,
+            config.settings_path.as_deref(),
+            "settings.yaml",
+            "settings_path",
+        )?;
+        let credentials_path = host_file_path(
+            &data_dir,
+            config.credentials_path.as_deref(),
+            "credentials.yaml",
+            "credentials_path",
+        )?;
+
         let root = ContextHandle::root();
         let cancellation = root.scope().cancellation();
+        let settings = Arc::new(Settings::new(Arc::new(YamlSettingsProvider::new(settings_path))));
+        let settings_service = root.provide(settings_service_key(), Arc::clone(&settings))?;
+        let credentials = Arc::new(Credentials::new(Arc::new(YamlCredentialFile::new(
+            credentials_path,
+        ))));
+        let credentials_service =
+            root.provide(credentials_service_key(), Arc::clone(&credentials))?;
         let persistence: Arc<dyn SessionPersistence> =
             Arc::new(JsonlSessionPersistence::new(&data_dir));
         let sessions = SessionStore::new(Arc::clone(&persistence));
@@ -547,7 +597,9 @@ impl HostRuntime {
                     llm.clone(),
                     sessions.clone(),
                     registry.clone(),
-                ),
+                )
+                .with_settings(Arc::clone(&settings))
+                .with_credentials(Arc::clone(&credentials)),
                 policies.clone(),
             )
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
@@ -595,6 +647,8 @@ impl HostRuntime {
             },
             profile,
             config: config.clone(),
+            settings,
+            credentials,
             cancellation,
             sessions,
             persistence,
@@ -613,6 +667,8 @@ impl HostRuntime {
                 _tools: tools_service,
                 _agents: agents_service,
                 _subprocesses: subprocess_service,
+                _settings: settings_service,
+                _credentials: credentials_service,
                 _telemetry: telemetry_service,
                 _code: code_service,
                 _provider: provider,
@@ -958,6 +1014,8 @@ impl HostHandle {
                 failures.push(format!("legacy: {error}"));
             }
         }
+        self.inner.settings.shutdown().await;
+        self.inner.credentials.shutdown().await;
         self.inner.cancellation.cancel();
         if let Err(error) = self.inner.services.root.scope().dispose().await {
             failures.push(format!("root: {error}"));
@@ -1216,6 +1274,11 @@ impl HostApi for HostHandle {
     }
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         Some(self.inner.approvals.clone())
+    fn settings(&self) -> Option<Arc<Settings>> {
+        Some(Arc::clone(&self.inner.settings))
+    }
+    fn credentials(&self) -> Option<Arc<Credentials>> {
+        Some(Arc::clone(&self.inner.credentials))
     }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.inner.notices.subscribe()
@@ -1276,6 +1339,11 @@ impl HostApi for HostRuntime {
     }
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         self.handle.approval_registry()
+    fn settings(&self) -> Option<Arc<Settings>> {
+        self.handle.settings()
+    }
+    fn credentials(&self) -> Option<Arc<Credentials>> {
+        self.handle.credentials()
     }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.handle.subscribe()
@@ -1384,6 +1452,23 @@ impl LlmAdapter for recorded_adapter::UnconfiguredAdapter {
             Value::Null,
         ))
     }
+}
+
+fn host_file_path(
+    data_dir: &Path,
+    override_path: Option<&Path>,
+    default_name: &str,
+    field: &str,
+) -> Result<PathBuf, HostError> {
+    let path = override_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.join(default_name));
+    if path.file_name().is_none() || path.is_dir() {
+        return Err(HostError::InvalidConfiguration(format!(
+            "{field} must name a file selected by the host"
+        )));
+    }
+    Ok(path)
 }
 
 fn validate_config(config: &HostConfig) -> Result<(), HostError> {
