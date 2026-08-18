@@ -193,6 +193,50 @@ async fn start() -> (ApiServer, Arc<FakeHost>, String) {
     let base = format!("http://{}", server.local_addr());
     (server, host, base)
 }
+async fn raw_http_status(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    origins: &[&str],
+    body: &str,
+) -> String {
+    let stream = TcpStream::connect(address).await.expect("HTTP TCP connects");
+    let mut stream = BufReader::new(stream);
+    let origins = origins
+        .iter()
+        .map(|origin| format!("Origin: {origin}\r\n"))
+        .collect::<String>();
+    let content_type = if body.is_empty() {
+        ""
+    } else {
+        "Content-Type: application/json\r\n"
+    };
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{origins}{content_type}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .get_mut()
+        .write_all(request.as_bytes())
+        .await
+        .expect("HTTP request writes");
+    stream.get_mut().flush().await.expect("HTTP request flushes");
+    let mut status = String::new();
+    stream.read_line(&mut status).await.expect("HTTP status reads");
+    status
+}
+
+async fn assert_http_forbidden(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    origins: &[&str],
+) {
+    let status = raw_http_status(address, method, path, host, origins, "").await;
+    assert!(status.contains(" 403 "), "{path} allowed rebinding: {status}");
+}
 
 struct BrowserStopFixture(PathBuf);
 
@@ -291,25 +335,171 @@ async fn api_rejects_non_loopback_binds_without_authentication() {
 }
 
 #[tokio::test]
-async fn websocket_rejects_a_cross_origin_browser_handshake() {
+async fn bound_listener_rejects_dns_rebinding_across_http_routes() {
     let (mut server, _host, _base) = start().await;
     let address = server.local_addr();
-    let mut stream = BufReader::new(TcpStream::connect(address).await.unwrap());
-    stream
-        .get_mut()
-        .write_all(
-            format!(
-                "GET /ws HTTP/1.1\r\nHost: {address}\r\nOrigin: http://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-            )
-            .as_bytes(),
+    let authority = address.to_string();
+    let origin = format!("http://{authority}");
+    let exact_origin = [origin.as_str()];
+    let session_body = r#"{"requestId":"authority-session","args":{"session":"authority-session"}}"#;
+    let respond_body = r#"{"type":"client-response","rpcId":"authority-approval","result":{"ok":true,"value":{"sessionId":"session","approvalId":"approval","outcome":"allowed-once"}}}"#;
+
+    assert!(
+        raw_http_status(address, "GET", "/", &authority, &exact_origin, "")
+            .await
+            .contains(" 404 "),
+        "exact authority reaches static fallback"
+    );
+    assert!(
+        raw_http_status(
+            address,
+            "POST",
+            "/api/session/status",
+            &authority,
+            &exact_origin,
+            session_body,
         )
         .await
-        .unwrap();
-    stream.get_mut().flush().await.unwrap();
-    let mut status = String::new();
-    stream.read_line(&mut status).await.unwrap();
-    assert!(status.contains("403"), "cross-origin handshake: {status}");
-    server.shutdown().await.unwrap();
+        .contains(" 200 "),
+        "exact authority reaches API"
+    );
+    assert!(
+        raw_http_status(
+            address,
+            "GET",
+            "/events/authority-session",
+            &authority,
+            &exact_origin,
+            "",
+        )
+        .await
+        .contains(" 200 "),
+        "exact authority reaches SSE"
+    );
+    assert!(
+        raw_http_status(
+            address,
+            "POST",
+            "/api/respond",
+            &authority,
+            &exact_origin,
+            respond_body,
+        )
+        .await
+        .contains(" 200 "),
+        "exact authority reaches approval response"
+    );
+
+    assert_http_forbidden(address, "GET", "/", "attacker.example", &exact_origin).await;
+    assert_http_forbidden(
+        address,
+        "POST",
+        "/api/session/status",
+        &authority,
+        &["http://attacker.example"],
+    )
+    .await;
+    assert_http_forbidden(address, "GET", "/events/authority-session", "attacker.example", &[])
+        .await;
+    assert_http_forbidden(
+        address,
+        "POST",
+        "/api/respond",
+        &authority,
+        &["null"],
+    )
+    .await;
+    assert_http_forbidden(
+        address,
+        "POST",
+        "/api/session/status",
+        &authority,
+        &["https://attacker.example"],
+    )
+    .await;
+    assert_http_forbidden(
+        address,
+        "POST",
+        "/api/session/status",
+        &authority,
+        &["not-an-origin"],
+    )
+    .await;
+    assert_http_forbidden(
+        address,
+        "POST",
+        "/api/session/status",
+        &authority,
+        &[origin.as_str(), "http://attacker.example"],
+    )
+    .await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn bound_listener_uses_bracketed_ipv6_authority_when_available() {
+    let host: Arc<dyn HostApi> = Arc::new(FakeHost::new());
+    let mut server = match ApiServer::bind_at(host, "[::1]:0".parse().unwrap()).await {
+        Ok(server) => server,
+        Err(error) if matches!(error.kind(), io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported) => return,
+        Err(error) => panic!("IPv6 loopback bind failed: {error}"),
+    };
+    let authority = server.local_addr().to_string();
+    assert!(authority.starts_with('['), "IPv6 authority is bracketed");
+    let origin = format!("http://{authority}");
+    let origins = [origin.as_str()];
+    let status = raw_http_status(
+        server.local_addr(),
+        "POST",
+        "/api/session/status",
+        &authority,
+        &origins,
+        r#"{"requestId":"ipv6-authority","args":{"session":"ipv6-authority"}}"#,
+    )
+    .await;
+    assert!(status.contains(" 200 "), "bracketed IPv6 authority accepted: {status}");
+    server.shutdown().await.expect("IPv6 server shuts down");
+}
+
+#[tokio::test]
+async fn websocket_rejects_dns_rebinding_handshakes() {
+    let (mut server, _host, _base) = start().await;
+    let address = server.local_addr();
+    let authority = address.to_string();
+    let origin = format!("http://{authority}");
+    let exact_origin = [origin.as_str()];
+
+    for path in ["/ws", "/api/events.mux", "/api/events.host"] {
+        let socket = match RawWebSocket::connect_path_with_headers(
+            address,
+            path,
+            &authority,
+            &exact_origin,
+        )
+        .await
+        {
+            Ok(socket) => socket,
+            Err(status) => panic!("exact authority WebSocket rejected: {status}"),
+        };
+        drop(socket);
+    }
+    let attacker_origin = ["http://attacker.example"];
+    let null_origin = ["null"];
+    let https_origin = ["https://attacker.example"];
+    for (path, host, origins) in [
+        ("/ws", authority.as_str(), &attacker_origin[..]),
+        ("/api/events.mux", authority.as_str(), &null_origin[..]),
+        ("/api/events.host", authority.as_str(), &https_origin[..]),
+        ("/ws", "attacker.example", &exact_origin[..]),
+    ] {
+        let status = match RawWebSocket::connect_path_with_headers(address, path, host, origins).await {
+            Ok(_) => panic!("{path} accepted rebinding handshake"),
+            Err(status) => status,
+        };
+        assert!(status.contains(" 403 "), "{path} status: {status}");
+    }
+    server.shutdown().await.expect("server shuts down");
 }
 
 async fn browser_call(
@@ -1160,12 +1350,31 @@ impl RawWebSocket {
     }
 
     async fn connect_path(address: SocketAddr, path: &str) -> Self {
+        let authority = address.to_string();
+        let origin = format!("http://{authority}");
+        let origins = [origin.as_str()];
+        match Self::connect_path_with_headers(address, path, &authority, &origins).await {
+            Ok(socket) => socket,
+            Err(status) => panic!("WebSocket handshake rejected: {status}"),
+        }
+    }
+
+    async fn connect_path_with_headers(
+        address: SocketAddr,
+        path: &str,
+        host: &str,
+        origins: &[&str],
+    ) -> Result<Self, String> {
         let stream = TcpStream::connect(address)
             .await
             .expect("WebSocket TCP connects");
         let mut stream = BufReader::new(stream);
+        let origins = origins
+            .iter()
+            .map(|origin| format!("Origin: {origin}\r\n"))
+            .collect::<String>();
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\n{origins}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
         stream
             .get_mut()
@@ -1177,23 +1386,25 @@ impl RawWebSocket {
             .flush()
             .await
             .expect("WebSocket handshake flushes");
-        let mut headers = Vec::new();
+        let mut status = String::new();
         stream
-            .read_until(b'\n', &mut headers)
+            .read_line(&mut status)
             .await
             .expect("WebSocket status reads");
-        assert!(String::from_utf8_lossy(&headers).contains("101"));
+        if !status.contains(" 101 ") {
+            return Err(status);
+        }
         loop {
-            headers.clear();
+            let mut header = Vec::new();
             stream
-                .read_until(b'\n', &mut headers)
+                .read_until(b'\n', &mut header)
                 .await
                 .expect("WebSocket header reads");
-            if headers == b"\r\n" {
+            if header == b"\r\n" {
                 break;
             }
         }
-        Self { stream }
+        Ok(Self { stream })
     }
 
     async fn send_json(&mut self, value: Value) {

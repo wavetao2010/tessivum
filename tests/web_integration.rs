@@ -369,6 +369,18 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
+    let rebinding_static = client
+        .get(&base)
+        .header(reqwest::header::HOST, "attacker.example")
+        .header(reqwest::header::ORIGIN, "http://attacker.example")
+        .send()
+        .await
+        .expect("rebound static response");
+    assert_eq!(
+        rebinding_static.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "static route rejects a rebinding authority"
+    );
     let index = client
         .get(&base)
         .send()

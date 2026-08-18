@@ -12,6 +12,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     path::Path as FsPath,
     pin::Pin,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -23,7 +24,8 @@ use axum::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
         Path, Request, State,
     },
-    http::{header, HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -120,7 +122,7 @@ impl ApiServer {
         let address = listener.local_addr()?;
         let (socket_shutdown, _) = broadcast::channel(1);
         let (listener_shutdown, listener_stopped) = oneshot::channel();
-        let app = router_with_shutdown(host, config.frontend, socket_shutdown.clone());
+        let app = router_with_shutdown(host, config.frontend, socket_shutdown.clone(), Some(address));
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
@@ -168,18 +170,19 @@ impl Drop for ApiServer {
     }
 }
 
-/// Builds the API router. `frontend` is intentionally accepted at this
-/// boundary so a frontend profile can compose the same host object without
-/// giving static routes any host privileges.
+/// Builds the in-memory API router test seam. `frontend` is intentionally
+/// accepted here so a frontend profile can compose the same host object without
+/// giving static routes any host privileges; network listeners add authority pinning.
 pub fn router(host: Arc<dyn HostApi>, frontend: Option<FrontendStatic>) -> Router {
     let (socket_shutdown, _) = broadcast::channel(1);
-    router_with_shutdown(host, frontend, socket_shutdown)
+    router_with_shutdown(host, frontend, socket_shutdown, None)
 }
 
 fn router_with_shutdown(
     host: Arc<dyn HostApi>,
     frontend: Option<FrontendStatic>,
     socket_shutdown: broadcast::Sender<()>,
+    bound_addr: Option<SocketAddr>,
 ) -> Router {
     let compat = Arc::new(CompatibilityState::new(host.descriptor()));
     let state = ApiState {
@@ -187,8 +190,10 @@ fn router_with_shutdown(
         socket_shutdown,
         frontend,
         compat,
+        bound_addr,
     };
-    Router::new()
+    let authority_guard = state.bound_addr.map(AuthorityGuard::new);
+    let router = Router::new()
         // Static routes are registered before the catch-all unary route.
         .route("/events/{session}", get(sse_events))
         .route("/ws", get(websocket_upgrade))
@@ -207,7 +212,14 @@ fn router_with_shutdown(
             post(unary).fallback(method_not_allowed),
         )
         .fallback(frontend_fallback)
-        .with_state(state)
+        .with_state(state);
+    if let Some(authority_guard) = authority_guard {
+        router.layer(middleware::from_fn(move |request, next| {
+            require_bound_authority(authority_guard.clone(), request, next)
+        }))
+    } else {
+        router
+    }
 }
 
 /// Returns the longest segment-aligned route prefix in `prefixes`.
@@ -235,6 +247,50 @@ struct ApiState {
     socket_shutdown: broadcast::Sender<()>,
     frontend: Option<FrontendStatic>,
     compat: Arc<CompatibilityState>,
+    bound_addr: Option<SocketAddr>,
+}
+
+#[derive(Clone)]
+struct AuthorityGuard {
+    host: HeaderValue,
+    origin: HeaderValue,
+}
+
+impl AuthorityGuard {
+    fn new(address: SocketAddr) -> Self {
+        let authority = address.to_string();
+        Self {
+            host: HeaderValue::from_str(&authority)
+                .expect("socket address is a valid HTTP authority"),
+            origin: HeaderValue::from_str(&format!("http://{authority}"))
+                .expect("loopback origin is a valid HTTP header"),
+        }
+    }
+
+    fn allows(&self, headers: &HeaderMap) -> bool {
+        let mut hosts = headers.get_all(header::HOST).iter();
+        if !matches!((hosts.next(), hosts.next()), (Some(host), None) if host == self.host) {
+            return false;
+        }
+        let mut origins = headers.get_all(header::ORIGIN).iter();
+        match (origins.next(), origins.next()) {
+            (None, None) => true,
+            (Some(origin), None) => origin == self.origin,
+            _ => false,
+        }
+    }
+}
+
+async fn require_bound_authority(
+    authority: AuthorityGuard,
+    request: Request,
+    next: Next,
+) -> Response {
+    if authority.allows(request.headers()) {
+        next.run(request).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
 }
 
 const MAX_COMPAT_FRAME_QUEUE: usize = 32;
@@ -1447,29 +1503,23 @@ async fn compat_session_cancel(
 
 async fn compat_events_mux(
     State(state): State<ApiState>,
-    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    compat_upgrade(state, headers, upgrade, CompatStream::Mux)
+    compat_upgrade(state, upgrade, CompatStream::Mux)
 }
 
 async fn compat_events_host(
     State(state): State<ApiState>,
-    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    compat_upgrade(state, headers, upgrade, CompatStream::Host)
+    compat_upgrade(state, upgrade, CompatStream::Host)
 }
 
 fn compat_upgrade(
     state: ApiState,
-    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
     stream_kind: CompatStream,
 ) -> Response {
-    if !websocket_origin_allowed(&headers) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     upgrade
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)
@@ -2138,37 +2188,12 @@ fn sse_error_event(event: &str, error: ApiError) -> Event {
 
 async fn websocket_upgrade(
     State(state): State<ApiState>,
-    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !websocket_origin_allowed(&headers) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     upgrade
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)
         .on_upgrade(move |socket| websocket(socket, state))
-}
-
-fn websocket_origin_allowed(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(header::ORIGIN) else {
-        return true;
-    };
-    let (Some(origin), Some(host)) = (
-        origin
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<Uri>().ok()),
-        headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok()),
-    ) else {
-        return false;
-    };
-    origin.scheme_str() == Some("http")
-        && origin
-            .authority()
-            .is_some_and(|authority| authority.as_str() == host)
 }
 
 type HostCall =
