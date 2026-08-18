@@ -65,9 +65,9 @@ fn snapshot_fixture_is_exact_and_unknown_fields_are_rejected() {
         serde_json::to_value(snapshot).unwrap(),
         serde_json::from_str::<serde_json::Value>(fixture).unwrap()
     );
-    assert!(serde_json::from_str::<WorkspaceSnapshot>(
-        r#"{"schemaVersion":"tessivum.workspaces/v1","revision":0,"items":[],"archivedSessionIds":[],"extra":true}"#
-    )
+    assert!(serde_json::from_str::<WorkspaceSnapshot>(include_str!(
+        "../fixtures/workspaces/unknown-field-v1.json"
+    ))
     .is_err());
 }
 
