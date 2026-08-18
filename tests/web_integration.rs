@@ -436,12 +436,24 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
         "API routes never receive the SPA fallback"
     );
 
+    let workspaces = browser_rpc(
+        &client,
+        &base,
+        "workspace.list",
+        "initial-workspaces",
+        json!({}),
+    )
+    .await;
+    let default_workspace = workspaces["result"]["value"]["items"][0]["workspaceId"]
+        .as_str()
+        .expect("default workspace id")
+        .to_owned();
     let blank = browser_rpc(
         &client,
         &base,
         "session.create",
         "blank-session",
-        json!({"workspaceId": "default", "sessionId": "blank-session"}),
+        json!({"workspaceId": default_workspace, "sessionId": "blank-session"}),
     )
     .await;
     assert_eq!(blank["result"]["value"]["sessionId"], "blank-session");

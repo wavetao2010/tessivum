@@ -556,7 +556,7 @@ struct CompatEmptyPayload {}
 struct CompatWorkspaceCreate {
     path: String,
 }
- 
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatWorkspaceRename {
@@ -858,6 +858,13 @@ async fn compat_dispatch(
                 "attachedSessions": attached_sessions,
             }))
         }
+        "settings.describe" => {
+            let _: CompatEmptyPayload = compat_decode(payload)?;
+            compat_settings_describe(state)
+        }
+        "settings.update" => compat_settings_update(state, compat_decode(payload)?).await,
+        "settings.replace" => compat_settings_replace(state, compat_decode(payload)?).await,
+        "settings.mutate" => compat_settings_mutate(state, compat_decode(payload)?).await,
         "workspace.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
             let snapshot = compat_registry(state)?.snapshot();
@@ -870,9 +877,7 @@ async fn compat_dispatch(
         "workspace.rename" => compat_workspace_rename(state, compat_decode(payload)?),
         "workspace.delete" => compat_workspace_delete(state, compat_decode(payload)?),
         "workspace.insertBefore" => compat_workspace_move(state, compat_decode(payload)?),
-        "workspace.insertSessionBefore" => {
-            compat_session_move(state, compat_decode(payload)?)
-        }
+        "workspace.insertSessionBefore" => compat_session_move(state, compat_decode(payload)?),
         "workspace.archiveSession" => compat_archive_session(state, compat_decode(payload)?),
         "session.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
@@ -1321,7 +1326,11 @@ fn compat_workspace_move(
     let registry = compat_registry(state)?;
     let before = registry.snapshot();
     registry
-        .insert_before(&args.workspace_id, args.before_workspace_id.as_deref(), None)
+        .insert_before(
+            &args.workspace_id,
+            args.before_workspace_id.as_deref(),
+            None,
+        )
         .map_err(compat_workspace_error)?;
     let after = registry.snapshot();
     if workspace_ids(&before) != workspace_ids(&after) {
@@ -1337,10 +1346,7 @@ fn compat_workspace_move(
     Ok(json!({"workspaceIds": workspace_ids(&after)}))
 }
 
-fn compat_session_move(
-    state: &ApiState,
-    args: CompatSessionMove,
-) -> Result<Value, CompatError> {
+fn compat_session_move(state: &ApiState, args: CompatSessionMove) -> Result<Value, CompatError> {
     compat_require_nonblank("workspaceId", &args.workspace_id)?;
     compat_require_session(&args.session_id)?;
     let registry = compat_registry(state)?;
@@ -1359,7 +1365,11 @@ fn compat_session_move(
         .iter()
         .find(|workspace| workspace.workspace_id.as_str() == args.workspace_id)
         .cloned()
-        .ok_or_else(|| compat_workspace_error(WorkspaceError::NotFound(WorkspaceId::from(args.workspace_id))))?;
+        .ok_or_else(|| {
+            compat_workspace_error(WorkspaceError::NotFound(WorkspaceId::from(
+                args.workspace_id,
+            )))
+        })?;
     if before != after {
         broadcast_compat(
             &state.compat,
@@ -1370,10 +1380,7 @@ fn compat_session_move(
     Ok(json!({"workspace": workspace}))
 }
 
-fn compat_archive_session(
-    state: &ApiState,
-    args: CompatSessionRef,
-) -> Result<Value, CompatError> {
+fn compat_archive_session(state: &ApiState, args: CompatSessionRef) -> Result<Value, CompatError> {
     compat_require_session(&args.session_id)?;
     let registry = compat_registry(state)?;
     let before = registry.snapshot();
@@ -1438,7 +1445,9 @@ async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
                 cwd: session.cwd.clone(),
             });
         entry.workspace_id = session.workspace_id;
-        entry.updated_at = entry.updated_at.max(session.created_at.min(MAX_SAFE_INTEGER));
+        entry.updated_at = entry
+            .updated_at
+            .max(session.created_at.min(MAX_SAFE_INTEGER));
         entry.blank = session.event_count == 0;
         entry.cwd = session.cwd;
     }
@@ -1587,7 +1596,10 @@ async fn compat_session_create(
         })?;
     let session = CompatSession {
         session_id: session_id.clone(),
-        workspace_id: persisted.workspace_id.clone().or_else(|| Some(requested_cwd.0.clone())),
+        workspace_id: persisted
+            .workspace_id
+            .clone()
+            .or_else(|| Some(requested_cwd.0.clone())),
         updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
         running: false,
         blank: persisted.event_count == 0,
