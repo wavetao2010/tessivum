@@ -8,6 +8,10 @@ use std::{
 
 use async_trait::async_trait;
 use serde_json::json;
+use tessivum::tools::{
+    ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRestrictions, ToolRunContext,
+    ToolRuntime,
+};
 use tessivum::{
     agent::{
         AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry, AgentRuntime,
@@ -27,10 +31,6 @@ use tessivum::{
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::Notify;
-use tessivum::tools::{
-    ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRestrictions, ToolRunContext,
-    ToolRuntime,
-};
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -984,15 +984,13 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
 
     let tools = ToolRuntime::new();
     tools.set_approval(Some(Arc::new(host_approvals.clone())));
-    let asked_tools = tools
-        .scoped(ToolRestrictions::new().ask("danger"))
-        .unwrap();
+    let asked_tools = tools.scoped(ToolRestrictions::new().ask("danger")).unwrap();
     let calls = Arc::new(CountingTool(AtomicUsize::new(0)));
     let _tool = tools
         .register(ToolDefinition::new(
             "danger",
             "requires approval",
-            json!({"type":"object"}),
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
             calls.clone(),
         ))
         .unwrap();
@@ -1070,7 +1068,10 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
             details: json!({"path":"/tmp/a"}),
         }
     );
-    assert_eq!(asked[0].call_id.as_ref().map(ToolCallId::as_str), Some("no-answer"));
+    assert_eq!(
+        asked[0].call_id.as_ref().map(ToolCallId::as_str),
+        Some("no-answer")
+    );
     assert_eq!(asked[0].reason, None);
     assert!(!asked[0].approval_id.as_str().is_empty());
     assert_eq!(asked[0].approval_id, decided[0].approval_id);

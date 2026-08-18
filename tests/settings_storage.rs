@@ -171,11 +171,9 @@ async fn credentials_shadow_live_environment_and_never_describe_values() {
         .await
         .unwrap();
     assert!(!format!("{credentials:?}").contains("file-secret"));
-    assert!(
-        !serde_json::to_string(&events.recv().await.unwrap())
-            .unwrap()
-            .contains("file-secret")
-    );
+    assert!(!serde_json::to_string(&events.recv().await.unwrap())
+        .unwrap()
+        .contains("file-secret"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

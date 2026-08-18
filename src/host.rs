@@ -24,12 +24,15 @@ use crate::{
         AgentError, AgentFactoryRegistration, AgentHandle, AgentOptions, AgentRegistry, AgentStatus,
     },
     agent_loop::AgentLoopFactory,
-    approval::{ApprovalError, ApprovalService, HostApprovalError, HostApprovalRegistration, HostApprovalRegistry},
+    approval::{
+        ApprovalError, ApprovalService, HostApprovalError, HostApprovalRegistration,
+        HostApprovalRegistry,
+    },
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     code_runtime::{CodeRuntime, ProcessCodeRuntime},
-    legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
     credentials::{credentials_service_key, Credentials, YamlCredentialFile},
+    legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream, RecordedLlmAdapter},
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
@@ -513,7 +516,9 @@ impl HostRuntime {
 
         let root = ContextHandle::root();
         let cancellation = root.scope().cancellation();
-        let settings = Arc::new(Settings::new(Arc::new(YamlSettingsProvider::new(settings_path))));
+        let settings = Arc::new(Settings::new(Arc::new(YamlSettingsProvider::new(
+            settings_path,
+        ))));
         let settings_service = root.provide(settings_service_key(), Arc::clone(&settings))?;
         let credentials = Arc::new(Credentials::new(Arc::new(YamlCredentialFile::new(
             credentials_path,
@@ -1274,6 +1279,7 @@ impl HostApi for HostHandle {
     }
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         Some(self.inner.approvals.clone())
+    }
     fn settings(&self) -> Option<Arc<Settings>> {
         Some(Arc::clone(&self.inner.settings))
     }
@@ -1339,6 +1345,7 @@ impl HostApi for HostRuntime {
     }
     fn approval_registry(&self) -> Option<HostApprovalRegistry> {
         self.handle.approval_registry()
+    }
     fn settings(&self) -> Option<Arc<Settings>> {
         self.handle.settings()
     }

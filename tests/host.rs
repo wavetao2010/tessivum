@@ -6,9 +6,9 @@ use std::{
 
 use serde_json::json;
 use tessivum::{
+    credentials::{CredentialError, CredentialRef},
     host::{HostApi, HostConfig, HostRuntime},
     protocol::{AgentCancelCause, ContentBlock, SessionPromptParams, SessionStatus},
-    credentials::{CredentialError, CredentialRef},
     settings::{SettingsError, SettingsRegistration},
     SessionId,
 };
@@ -291,8 +291,8 @@ async fn host_approval_registry_tracks_owned_agent_generations() {
 async fn host_services_use_default_paths_persist_and_drain_on_shutdown() {
     let root = TempDir::new();
     let namespace = format!("host-{}", Uuid::new_v4().simple());
-    let reference = CredentialRef::new(format!("TESSIVUM_HOST_{}", Uuid::new_v4().simple()))
-        .unwrap();
+    let reference =
+        CredentialRef::new(format!("TESSIVUM_HOST_{}", Uuid::new_v4().simple())).unwrap();
     let value = "host-credential-value";
     let first = HostRuntime::boot(config(&root)).await.unwrap();
     let handle = first.handle();
@@ -312,11 +312,16 @@ async fn host_services_use_default_paths_persist_and_drain_on_shutdown() {
         .await
         .unwrap();
     let mut credential_events = credentials.subscribe();
-    credentials.set(reference.clone(), value.into()).await.unwrap();
+    credentials
+        .set(reference.clone(), value.into())
+        .await
+        .unwrap();
     assert!(!format!("{credentials:?}").contains(value));
-    assert!(!serde_json::to_string(&credential_events.recv().await.unwrap())
-        .unwrap()
-        .contains(value));
+    assert!(
+        !serde_json::to_string(&credential_events.recv().await.unwrap())
+            .unwrap()
+            .contains(value)
+    );
     let shadow_reference =
         CredentialRef::new(format!("TESSIVUM_SHADOW_{}", Uuid::new_v4().simple())).unwrap();
     let shadow_value = "host-environment-secret";
@@ -338,7 +343,9 @@ async fn host_services_use_default_paths_persist_and_drain_on_shutdown() {
 
     first.shutdown().await.unwrap();
     assert!(matches!(
-        settings.update(&namespace, json!({"after": true}), None).await,
+        settings
+            .update(&namespace, json!({"after": true}), None)
+            .await,
         Err(SettingsError::Closed)
     ));
     assert!(matches!(
@@ -358,8 +365,14 @@ async fn host_services_use_default_paths_persist_and_drain_on_shutdown() {
         ))
         .await
         .unwrap();
-    assert_eq!(settings.get(&namespace).unwrap().value, json!({"saved": true}));
-    assert_eq!(credentials.resolve(&reference).await.unwrap(), Some(value.into()));
+    assert_eq!(
+        settings.get(&namespace).unwrap().value,
+        json!({"saved": true})
+    );
+    assert_eq!(
+        credentials.resolve(&reference).await.unwrap(),
+        Some(value.into())
+    );
     credentials.unset(&reference).await.unwrap();
     second.shutdown().await.unwrap();
 
@@ -399,12 +412,18 @@ async fn host_uses_selected_storage_files_and_rejects_directories() {
         ))
         .await
         .unwrap();
-    settings.update("selected", json!({"on": true}), None).await.unwrap();
+    settings
+        .update("selected", json!({"on": true}), None)
+        .await
+        .unwrap();
     runtime
         .handle()
         .credentials()
         .unwrap()
-        .set(CredentialRef::new("TESSIVUM_SELECTED").unwrap(), "value".into())
+        .set(
+            CredentialRef::new("TESSIVUM_SELECTED").unwrap(),
+            "value".into(),
+        )
         .await
         .unwrap();
     assert!(settings_path.is_file());
