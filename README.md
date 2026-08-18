@@ -112,6 +112,7 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Runtime architecture](docs/ARCHITECTURE.md)
 - [Development and cutover plan](docs/DEVELOPMENT_PLAN.md)
 - [Plugin compatibility](docs/PLUGIN_COMPATIBILITY.md)
+- [Phase 3 product capability plan](docs/PHASE3_PRODUCT_PLAN.md)
 
 ## License
 
