@@ -1,12 +1,14 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
 use tessivum::plugins::{
-    CompatibilityClass, PluginInspectionLimits, PluginRouter, PluginRuntime,
-    DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_RECURSIVE_DEPTH, DEFAULT_MAX_SOURCE_BYTES,
+    CompatibilityClass, PluginInspectionLimits, PluginPackage, PluginRouter, PluginRuntime,
+    ServiceMethodPermission, DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_RECURSIVE_DEPTH,
+    DEFAULT_MAX_SOURCE_BYTES,
 };
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
@@ -53,6 +55,45 @@ impl Drop for Fixture {
 
 fn package_json(name: &str, additions: &str) -> String {
     format!(r#"{{"name":"{name}","version":"1.2.3","license":"MIT"{additions}}}"#)
+}
+
+#[derive(Clone, Copy)]
+enum DeclarationLocation {
+    External,
+    Cordis,
+    Tessivum,
+}
+
+const DECLARATION_LOCATIONS: [DeclarationLocation; 3] = [
+    DeclarationLocation::External,
+    DeclarationLocation::Cordis,
+    DeclarationLocation::Tessivum,
+];
+
+fn wasm_product(id: &str, entry: &str, permissions: &str, service_permissions: &str) -> String {
+    format!(
+        r#"{{"schemaVersion":"cordis.plugin/v1","id":"{id}","version":"1.2.3","runtime":"wasm","entry":"{entry}","abi":"cordis.plugin/v1","inject":[],"permissions":{permissions},"servicePermissions":{service_permissions},"configSchema":{{"type":"object","additionalProperties":false}},"exports":["cordis_init","cordis_call","cordis_event","cordis_update","cordis_stop"]}}"#
+    )
+}
+
+fn write_wasm_product(
+    fixture: &Fixture,
+    location: DeclarationLocation,
+    id: &str,
+    declaration: &str,
+) {
+    match location {
+        DeclarationLocation::External => fixture.write("cordis.plugin.json", declaration),
+        DeclarationLocation::Cordis => fixture.write(
+            "package.json",
+            &package_json(id, &format!(r#", "cordis":{{"plugin":{declaration}}}"#)),
+        ),
+        DeclarationLocation::Tessivum => fixture.write(
+            "package.json",
+            &package_json(id, &format!(r#", "tessivum":{{"plugin":{declaration}}}"#)),
+        ),
+    }
+    fixture.write("plugin.wasm", "not executed");
 }
 
 #[test]
@@ -454,4 +495,266 @@ fn wasm_resolution_rejects_conflicting_declared_entries() {
 
     let error = router.resolve(package.path(), None).unwrap_err();
     assert_eq!(error.diagnostic().code, "PLUGIN_RUNTIME_AMBIGUOUS");
+}
+
+#[test]
+fn wasm_product_declaration_projects_exact_permissions_from_every_location() {
+    let permissions = r#"["cordis.log","cordis.service.call"]"#;
+    let service_permissions = r#"[
+        {"service":"tools@1","methods":["schemas"]},
+        {"service":"logger@1","methods":["log"]},
+        {"service":"credentials@1","methods":["describe"]},
+        {"service":"settings@1","methods":["describe"]}
+    ]"#;
+    let expected = BTreeSet::from([
+        ServiceMethodPermission {
+            service: "credentials@1".into(),
+            method: "describe".into(),
+        },
+        ServiceMethodPermission {
+            service: "logger@1".into(),
+            method: "log".into(),
+        },
+        ServiceMethodPermission {
+            service: "settings@1".into(),
+            method: "describe".into(),
+        },
+        ServiceMethodPermission {
+            service: "tools@1".into(),
+            method: "schemas".into(),
+        },
+    ]);
+
+    for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
+        let fixture = Fixture::new(&format!("wasm-product-{index}"));
+        let id = format!("com.example.product-{index}");
+        write_wasm_product(
+            &fixture,
+            location,
+            &id,
+            &wasm_product(&id, "plugin.wasm", permissions, service_permissions),
+        );
+
+        let product = PluginPackage::inspect(fixture.path())
+            .unwrap()
+            .wasm_product_declaration()
+            .unwrap();
+        assert_eq!(product.manifest.id, id);
+        assert_eq!(product.manifest.entry, "plugin.wasm");
+        assert_eq!(product.service_permissions, expected);
+        assert_eq!(product.entry, fs::canonicalize(fixture.path().join("plugin.wasm")).unwrap());
+        assert_eq!(product.root, fs::canonicalize(fixture.path()).unwrap());
+
+        let report = PluginRouter::new().inspect(fixture.path(), None).unwrap();
+        assert_eq!(report.service_permissions[0].service, "credentials@1");
+        assert_eq!(report.service_permissions[3].service, "tools@1");
+        let report = serde_json::to_string(&report).unwrap();
+        assert!(!report.contains("configSchema"));
+    }
+}
+
+#[test]
+fn empty_service_permissions_need_no_service_call_capability() {
+    for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
+        let fixture = Fixture::new(&format!("empty-service-permissions-{index}"));
+        let id = format!("com.example.empty-{index}");
+        write_wasm_product(
+            &fixture,
+            location,
+            &id,
+            &wasm_product(&id, "plugin.wasm", r#"["cordis.log"]"#, "[]"),
+        );
+        let product = PluginPackage::inspect(fixture.path())
+            .unwrap()
+            .wasm_product_declaration()
+            .unwrap();
+        assert!(product.service_permissions.is_empty());
+    }
+}
+
+#[test]
+fn service_permission_validation_rejects_every_invalid_edge_in_every_location() {
+    let cases = [
+        ("blank-service", r#"["cordis.service.call"]"#, r#"[{"service":"","methods":["log"]}]"#),
+        ("blank-method", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":[""]}]"#),
+        ("empty-methods", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":[]}]"#),
+        ("duplicate-method", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":["log","log"]}]"#),
+        ("duplicate-service", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":["log"]},{"service":"logger@1","methods":["log"]}]"#),
+        ("wildcard-service", r#"["cordis.service.call"]"#, r#"[{"service":"logger@*","methods":["log"]}]"#),
+        ("pattern-method", r#"["cordis.service.call"]"#, r#"[{"service":"logger@1","methods":["log*"]}]"#),
+        ("unknown-service", r#"["cordis.service.call"]"#, r#"[{"service":"llm@1","methods":["generate"]}]"#),
+        ("unknown-method", r#"["cordis.service.call"]"#, r#"[{"service":"tools@1","methods":["execute"]}]"#),
+        ("missing-capability", r#"["cordis.log"]"#, r#"[{"service":"logger@1","methods":["log"]}]"#),
+    ];
+    for (case_name, permissions, service_permissions) in cases {
+        for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
+            let fixture = Fixture::new(&format!("permission-{case_name}-{index}"));
+            let id = format!("com.example.{case_name}-{index}");
+            write_wasm_product(
+                &fixture,
+                location,
+                &id,
+                &wasm_product(&id, "plugin.wasm", permissions, service_permissions),
+            );
+            assert_eq!(
+                PluginPackage::inspect(fixture.path())
+                    .unwrap_err()
+                    .diagnostic()
+                    .code,
+                "MANIFEST_PERMISSION_INVALID",
+                "{case_name} at declaration location {index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wasm_product_declaration_requires_complete_confined_core_manifest() {
+    for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
+        let sparse = Fixture::new(&format!("sparse-wasm-product-{index}"));
+        let id = format!("com.example.sparse-{index}");
+        write_wasm_product(
+            &sparse,
+            location,
+            &id,
+            r#"{"schemaVersion":"cordis.plugin/v1","runtime":"wasm","entry":"plugin.wasm"}"#,
+        );
+        assert_eq!(
+            PluginPackage::inspect(sparse.path())
+                .unwrap()
+                .wasm_product_declaration()
+                .unwrap_err()
+                .diagnostic()
+                .code,
+            "PLUGIN_MANIFEST_INVALID"
+        );
+
+        let traversal = Fixture::new(&format!("traversal-wasm-product-{index}"));
+        write_wasm_product(
+            &traversal,
+            location,
+            &id,
+            &wasm_product(
+                &id,
+                "../plugin.wasm",
+                r#"["cordis.log"]"#,
+                "[]",
+            ),
+        );
+        assert_eq!(
+            PluginPackage::inspect(traversal.path())
+                .unwrap()
+                .wasm_product_declaration()
+                .unwrap_err()
+                .diagnostic()
+                .code,
+            "PLUGIN_MANIFEST_INVALID"
+        );
+    }
+}
+
+#[test]
+fn wasm_product_declaration_requires_every_core_projection_field() {
+    for field in [
+        "id",
+        "version",
+        "entry",
+        "abi",
+        "inject",
+        "permissions",
+        "configSchema",
+        "exports",
+    ] {
+        let id = format!("com.example.missing-{field}");
+        let mut declaration: serde_json::Value = serde_json::from_str(&wasm_product(
+            &id,
+            "plugin.wasm",
+            r#"["cordis.log"]"#,
+            "[]",
+        ))
+        .unwrap();
+        declaration.as_object_mut().unwrap().remove(field);
+        let declaration = serde_json::to_string(&declaration).unwrap();
+        for (index, location) in DECLARATION_LOCATIONS.into_iter().enumerate() {
+            let fixture = Fixture::new(&format!("missing-{field}-{index}"));
+            write_wasm_product(&fixture, location, &id, &declaration);
+            assert_eq!(
+                PluginPackage::inspect(fixture.path())
+                    .unwrap()
+                    .wasm_product_declaration()
+                    .unwrap_err()
+                    .diagnostic()
+                    .code,
+                "PLUGIN_MANIFEST_INVALID",
+                "missing {field} at declaration location {index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wasm_product_declaration_rejects_duplicate_or_conflicting_declarations() {
+    let declaration = wasm_product(
+        "com.example.duplicate",
+        "plugin.wasm",
+        r#"["cordis.log"]"#,
+        "[]",
+    );
+    let external_and_package = Fixture::new("external-and-package-wasm");
+    write_wasm_product(
+        &external_and_package,
+        DeclarationLocation::External,
+        "com.example.duplicate",
+        &declaration,
+    );
+    external_and_package.write(
+        "package.json",
+        &package_json(
+            "duplicate",
+            &format!(r#", "tessivum":{{"plugin":{declaration}}}"#),
+        ),
+    );
+    assert_eq!(
+        PluginPackage::inspect(external_and_package.path())
+            .unwrap()
+            .wasm_product_declaration()
+            .unwrap_err()
+            .diagnostic()
+            .code,
+        "PLUGIN_RUNTIME_AMBIGUOUS"
+    );
+
+    let conflicting = Fixture::new("conflicting-package-wasm");
+    let first = wasm_product(
+        "com.example.conflicting",
+        "first.wasm",
+        r#"["cordis.log"]"#,
+        "[]",
+    );
+    let second = wasm_product(
+        "com.example.conflicting",
+        "second.wasm",
+        r#"["cordis.log"]"#,
+        "[]",
+    );
+    conflicting.write(
+        "package.json",
+        &package_json(
+            "conflicting",
+            &format!(
+                r#", "cordis":{{"plugin":{first}}}, "tessivum":{{"plugin":{second}}}"#
+            ),
+        ),
+    );
+    conflicting.write("first.wasm", "not executed");
+    conflicting.write("second.wasm", "not executed");
+    assert_eq!(
+        PluginPackage::inspect(conflicting.path())
+            .unwrap()
+            .wasm_product_declaration()
+            .unwrap_err()
+            .diagnostic()
+            .code,
+        "PLUGIN_RUNTIME_AMBIGUOUS"
+    );
 }

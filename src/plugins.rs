@@ -10,9 +10,55 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tessivum_core::loader::RuntimeKind;
+use tessivum_extism::Capability;
 use thiserror::Error;
 
 const PLUGIN_SCHEMA: &str = "cordis.plugin/v1";
+const WASM_ABI: &str = "cordis.plugin/v1";
+const SERVICE_CATALOG: &[(&str, &[&str])] = &[
+    ("credentials@1", &["describe"]),
+    ("logger@1", &["log"]),
+    ("settings@1", &["describe"]),
+    ("tools@1", &["schemas"]),
+];
+
+/// A single exact service/method grant retained by the WASM policy layer.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceMethodPermission {
+    pub service: String,
+    pub method: String,
+}
+
+/// The grouped wire representation used by product declarations.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServicePermissionDeclaration {
+    pub service: String,
+    pub methods: Vec<String>,
+}
+
+/// A validated, loadable product declaration and its resolved package entry.
+#[derive(Clone, Debug)]
+pub struct WasmProductDeclaration {
+    pub manifest: tessivum_extism::PluginManifest,
+    pub service_permissions: BTreeSet<ServiceMethodPermission>,
+    pub declaration_path: PathBuf,
+    pub entry: PathBuf,
+    pub root: PathBuf,
+}
+
+impl WasmProductDeclaration {
+    pub fn manifest(&self) -> &tessivum_extism::PluginManifest {
+        &self.manifest
+    }
+
+    pub fn service_permissions(&self) -> &BTreeSet<ServiceMethodPermission> {
+        &self.service_permissions
+    }
+}
+
+
 /// Default bound for each package or external manifest before parsing.
 pub const DEFAULT_MAX_MANIFEST_BYTES: usize = 256 * 1024;
 /// Default bound for each scanned JavaScript or TypeScript source file.
@@ -186,6 +232,8 @@ pub enum PluginError {
     Unreadable { path: PathBuf, reason: String },
     #[error("malformed manifest {path}: {reason}")]
     MalformedManifest { path: PathBuf, reason: String },
+    #[error("invalid service permission manifest {path}: {reason}")]
+    ManifestPermissionInvalid { path: PathBuf, reason: String },
     #[error("plugin inspection limit exceeded: {limit}")]
     BudgetExceeded { limit: &'static str },
     #[error("unsupported plugin runtime {runtime:?}")]
@@ -214,6 +262,13 @@ impl PluginError {
         }
     }
 
+    fn permission_invalid(path: impl Into<PathBuf>, reason: impl fmt::Display) -> Self {
+        Self::ManifestPermissionInvalid {
+            path: path.into(),
+            reason: reason.to_string(),
+        }
+    }
+
     fn unsupported_runtime(runtime: impl Into<String>) -> Self {
         Self::UnsupportedRuntime {
             runtime: runtime.into(),
@@ -237,6 +292,11 @@ impl PluginError {
                 message: self.to_string(),
                 help: format!("Use schemaVersion {PLUGIN_SCHEMA} and a supported runtime declaration."),
             },
+            Self::ManifestPermissionInvalid { .. } => PluginDiagnostic {
+                code: "MANIFEST_PERMISSION_INVALID".into(),
+                message: self.to_string(),
+                help: "Use only the exact versioned service catalog and nonempty methods.".into(),
+            },
             Self::UnsupportedRuntime { .. } => PluginDiagnostic {
                 code: "PLUGIN_RUNTIME_UNSUPPORTED".into(),
                 message: self.to_string(),
@@ -256,12 +316,16 @@ impl PluginError {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct RuntimeDeclaration {
     runtime: PluginRuntime,
     entry: Option<PathBuf>,
     source: String,
+    manifest: Value,
+    declaration_path: PathBuf,
+    service_permissions: Vec<ServicePermissionDeclaration>,
 }
+
 
 /// Package facts retained by the inspector. It intentionally retains no plugin configuration or
 /// source text, so reports cannot disclose runtime secrets.
@@ -327,14 +391,22 @@ impl PluginPackage {
         } else {
             None
         };
-        let manifest = read_external_manifest(&root, &limits, &mut read_budget)?;
+        let external_manifest = read_external_manifest(&root, &limits, &mut read_budget)?;
+        let manifest = external_manifest
+            .as_ref()
+            .map(|(manifest, _)| manifest.clone());
         let mut declarations = package
             .as_ref()
-            .map(|package| package_declarations(package, &root))
+            .map(|package| package_declarations(package, &root, &package_path))
             .transpose()?
             .unwrap_or_default();
-        if let Some(manifest) = &manifest {
-            declarations.push(external_declaration(manifest, &root)?);
+        if let Some((manifest, declaration_path)) = external_manifest {
+            declarations.push(parse_runtime_declaration(
+                manifest,
+                &root,
+                &declaration_path,
+                "external-manifest",
+            )?);
         }
 
         let files = collect_files(&root, &limits)?;
@@ -384,6 +456,7 @@ impl PluginPackage {
 
     fn resolve_legacy_entry(&self) -> Result<PathBuf, PluginError> {
         let mut declared_entries = self
+
             .declarations
             .iter()
             .filter(|declaration| declaration.runtime == PluginRuntime::LegacyNode)
@@ -416,6 +489,82 @@ impl PluginPackage {
             runtime: PluginRuntime::LegacyNode,
             reason: "package has no resolvable declared entry, main, exports, or index entry"
                 .into(),
+        })
+    }
+
+    /// Projects the selected product declaration into the generic Extism manifest.
+    /// Sparse Legacy Node and browser declarations remain inspectable; this is the
+    /// explicit boundary that requires the complete WASM product contract.
+    pub fn wasm_product_declaration(&self) -> Result<WasmProductDeclaration, PluginError> {
+        let declarations = self
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.runtime == PluginRuntime::Wasm)
+            .collect::<Vec<_>>();
+        let declaration = match declarations.as_slice() {
+            [declaration] => *declaration,
+            [] => {
+                return Err(PluginError::InvalidRoute {
+                    runtime: PluginRuntime::Wasm,
+                    reason: "a loadable WASM product requires one versioned wasm declaration"
+                        .into(),
+                });
+            }
+            declarations => {
+                return Err(PluginError::AmbiguousRuntime {
+                    runtimes: declarations
+                        .iter()
+                        .map(|declaration| {
+                            format!("wasm:{}", declaration.declaration_path.display())
+                        })
+                        .collect(),
+                });
+            }
+        };
+        let manifest = project_wasm_manifest(&declaration.manifest, &declaration.declaration_path)?;
+        if Path::new(&manifest.entry)
+            .extension()
+            .is_none_or(|extension| extension != "wasm")
+        {
+            return Err(PluginError::malformed(
+                &declaration.declaration_path,
+                "WASM product entry must end in .wasm",
+            ));
+        }
+        let entry = self.canonical_entry(
+            declaration
+                .entry
+                .as_ref()
+                .ok_or_else(|| PluginError::malformed(&declaration.declaration_path, "entry is required"))?,
+            PluginRuntime::Wasm,
+        )?;
+        if !self
+            .wasm_artifacts
+            .iter()
+            .filter_map(|artifact| fs::canonicalize(artifact).ok())
+            .any(|artifact| artifact == entry)
+        {
+            return Err(PluginError::InvalidRoute {
+                runtime: PluginRuntime::Wasm,
+                reason: format!("declared wasm entry {} is not a package artifact", entry.display()),
+            });
+        }
+        let service_permissions = declaration
+            .service_permissions
+            .iter()
+            .flat_map(|declaration| {
+                declaration.methods.iter().map(|method| ServiceMethodPermission {
+                    service: declaration.service.clone(),
+                    method: method.clone(),
+                })
+            })
+            .collect();
+        Ok(WasmProductDeclaration {
+            manifest,
+            service_permissions,
+            declaration_path: declaration.declaration_path.clone(),
+            entry,
+            root: self.root.clone(),
         })
     }
 
@@ -563,6 +712,14 @@ impl PluginPackage {
             PluginError::malformed(self.root.join("package.json"), "dsh must be an object")
         })?;
         Ok(dsh.get("client").map(project_dsh_client))
+    }
+
+    fn service_permissions(&self, runtime: PluginRuntime) -> Vec<ServicePermissionDeclaration> {
+        self.declarations
+            .iter()
+            .find(|declaration| declaration.runtime == runtime)
+            .map(|declaration| declaration.service_permissions.clone())
+            .unwrap_or_default()
     }
 
     fn select_declaration(&self) -> Result<Option<&RuntimeDeclaration>, PluginError> {
@@ -806,6 +963,7 @@ pub struct CompatibilityReport {
     pub selected_rule: String,
     pub exports: ExportShape,
     pub inject: Vec<String>,
+    pub service_permissions: Vec<ServicePermissionDeclaration>,
     pub provide: Vec<String>,
     pub events: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -857,6 +1015,7 @@ impl CompatibilityReport {
         inject.dedup();
 
         let stable_cross_runtime_services = stable_services(&inject, &analysis.service_references);
+        let service_permissions = package.service_permissions(route.runtime);
         let mut reasons = vec![
             "Static source analysis is advisory only: it neither migrates this plugin nor proves runtime loadability."
                 .into(),
@@ -904,6 +1063,7 @@ impl CompatibilityReport {
             selected_rule: route.rule,
             exports: analysis.exports,
             inject,
+            service_permissions,
             provide: analysis.provide,
             events: analysis.events,
             dsh_client,
@@ -1239,7 +1399,7 @@ fn read_external_manifest(
     root: &Path,
     limits: &PluginInspectionLimits,
     budget: &mut ReadBudget,
-) -> Result<Option<Value>, PluginError> {
+) -> Result<Option<(Value, PathBuf)>, PluginError> {
     let candidates = [
         "cordis.plugin.json",
         "cordis.plugin.yaml",
@@ -1275,15 +1435,20 @@ fn read_external_manifest(
             .map_err(|error| PluginError::malformed(path, error))?;
         serde_json::to_value(yaml).map_err(|error| PluginError::malformed(path, error))?
     };
-    validate_manifest(&value, path)?;
-    Ok(Some(value))
+    Ok(Some((value, path.clone())))
 }
 
-fn external_declaration(manifest: &Value, root: &Path) -> Result<RuntimeDeclaration, PluginError> {
+fn parse_runtime_declaration(
+    manifest: Value,
+    root: &Path,
+    declaration_path: &Path,
+    source: impl Into<String>,
+) -> Result<RuntimeDeclaration, PluginError> {
+    let service_permissions = validate_manifest(&manifest, declaration_path)?;
     let runtime = manifest
         .get("runtime")
         .and_then(Value::as_str)
-        .ok_or_else(|| PluginError::malformed(root.join("plugin manifest"), "runtime is required"))?
+        .expect("manifest validation requires runtime")
         .parse()?;
     let entry = manifest
         .get("entry")
@@ -1292,51 +1457,49 @@ fn external_declaration(manifest: &Value, root: &Path) -> Result<RuntimeDeclarat
     Ok(RuntimeDeclaration {
         runtime,
         entry,
-        source: "external-manifest".into(),
+        source: source.into(),
+        manifest,
+        declaration_path: declaration_path.to_path_buf(),
+        service_permissions,
     })
 }
 
 fn package_declarations(
     package: &Value,
     directory: &Path,
+    package_path: &Path,
 ) -> Result<Vec<RuntimeDeclaration>, PluginError> {
     let package = package
         .as_object()
-        .ok_or_else(|| PluginError::malformed("package.json", "package root must be an object"))?;
+        .ok_or_else(|| PluginError::malformed(package_path, "package root must be an object"))?;
     let mut declarations = Vec::new();
     for key in ["cordis", "tessivum"] {
         let Some(value) = package.get(key) else {
             continue;
         };
         let object = value.as_object().ok_or_else(|| {
-            PluginError::malformed("package.json", format!("{key} must be an object"))
+            PluginError::malformed(package_path, format!("{key} must be an object"))
         })?;
         let candidate = object.get("plugin").unwrap_or(value);
         let candidate = candidate.as_object().ok_or_else(|| {
-            PluginError::malformed("package.json", format!("{key}.plugin must be an object"))
+            PluginError::malformed(package_path, format!("{key}.plugin must be an object"))
         })?;
         if candidate.contains_key("runtime") || candidate.contains_key("schemaVersion") {
-            validate_manifest(&Value::Object(candidate.clone()), Path::new("package.json"))?;
-            let runtime = candidate
-                .get("runtime")
-                .and_then(Value::as_str)
-                .expect("manifest validation requires runtime")
-                .parse()?;
-            let entry = candidate
-                .get("entry")
-                .and_then(Value::as_str)
-                .map(|entry| directory.join(entry));
-            declarations.push(RuntimeDeclaration {
-                runtime,
-                entry,
-                source: format!("package.{key}"),
-            });
+            declarations.push(parse_runtime_declaration(
+                Value::Object(candidate.clone()),
+                directory,
+                package_path,
+                format!("package.{key}"),
+            )?);
         }
     }
     Ok(declarations)
 }
 
-fn validate_manifest(value: &Value, path: &Path) -> Result<(), PluginError> {
+fn validate_manifest(
+    value: &Value,
+    path: &Path,
+) -> Result<Vec<ServicePermissionDeclaration>, PluginError> {
     let object = value
         .as_object()
         .ok_or_else(|| PluginError::malformed(path, "manifest must be an object"))?;
@@ -1362,7 +1525,174 @@ fn validate_manifest(value: &Value, path: &Path) -> Result<(), PluginError> {
     {
         return Err(PluginError::malformed(path, "id must not be blank"));
     }
-    Ok(())
+    parse_service_permissions(value, path)
+}
+
+fn parse_service_permissions(
+    manifest: &Value,
+    path: &Path,
+) -> Result<Vec<ServicePermissionDeclaration>, PluginError> {
+    let Some(value) = manifest.get("servicePermissions") else {
+        return Ok(Vec::new());
+    };
+    let declarations = serde_json::from_value::<Vec<ServicePermissionDeclaration>>(value.clone())
+        .map_err(|error| PluginError::permission_invalid(path, error))?;
+    let mut services = BTreeSet::new();
+    let mut grouped = Vec::with_capacity(declarations.len());
+    for mut declaration in declarations {
+        if declaration.service.is_empty() || contains_permission_pattern(&declaration.service) {
+            return Err(PluginError::permission_invalid(
+                path,
+                format!("service {:?} must be an exact catalog name", declaration.service),
+            ));
+        }
+        let Some((_, allowed_methods)) = SERVICE_CATALOG
+            .iter()
+            .find(|(service, _)| *service == declaration.service.as_str())
+        else {
+            return Err(PluginError::permission_invalid(
+                path,
+                format!("service {:?} is not in the catalog", declaration.service),
+            ));
+        };
+        if !services.insert(declaration.service.clone()) {
+            return Err(PluginError::permission_invalid(
+                path,
+                format!("service {:?} is declared more than once", declaration.service),
+            ));
+        }
+        if declaration.methods.is_empty() {
+            return Err(PluginError::permission_invalid(
+                path,
+                format!("service {:?} must declare at least one method", declaration.service),
+            ));
+        }
+        let mut methods = BTreeSet::new();
+        for method in declaration.methods {
+            if method.is_empty() || contains_permission_pattern(&method) {
+                return Err(PluginError::permission_invalid(
+                    path,
+                    format!("method {method:?} must be an exact catalog name"),
+                ));
+            }
+            if !allowed_methods
+                .iter()
+                .any(|allowed| *allowed == method.as_str())
+            {
+                return Err(PluginError::permission_invalid(
+                    path,
+                    format!("method {method:?} is not allowed for {}", declaration.service),
+                ));
+            }
+            if !methods.insert(method) {
+                return Err(PluginError::permission_invalid(
+                    path,
+                    format!("service method {} is declared more than once", declaration.service),
+                ));
+            }
+        }
+        declaration.methods = methods.into_iter().collect();
+        grouped.push(declaration);
+    }
+    grouped.sort_by(|left, right| left.service.cmp(&right.service));
+    if !grouped.is_empty()
+        && !manifest
+            .get("permissions")
+            .and_then(Value::as_array)
+            .is_some_and(|permissions| {
+                permissions.iter().any(|permission| {
+                    permission.as_str() == Some(Capability::ServiceCall.as_str())
+                })
+            })
+    {
+        return Err(PluginError::permission_invalid(
+            path,
+            "servicePermissions requires permissions to include cordis.service.call",
+        ));
+    }
+    Ok(grouped)
+}
+
+fn contains_permission_pattern(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character,
+            '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '|' | '^' | '$' | '+' | '\\'
+        )
+    })
+}
+
+fn project_wasm_manifest(
+    declaration: &Value,
+    path: &Path,
+) -> Result<tessivum_extism::PluginManifest, PluginError> {
+    let object = declaration
+        .as_object()
+        .ok_or_else(|| PluginError::malformed(path, "manifest must be an object"))?;
+    const PRODUCT_FIELDS: &[&str] = &[
+        "schemaVersion",
+        "runtime",
+        "id",
+        "version",
+        "entry",
+        "abi",
+        "inject",
+        "permissions",
+        "servicePermissions",
+        "configSchema",
+        "exports",
+    ];
+    const CORE_FIELDS: &[&str] = &[
+        "id",
+        "version",
+        "entry",
+        "abi",
+        "inject",
+        "permissions",
+        "configSchema",
+        "exports",
+    ];
+    for field in object.keys() {
+        if !PRODUCT_FIELDS.contains(&field.as_str()) {
+            return Err(PluginError::malformed(
+                path,
+                format!("unknown WASM product field {field:?}"),
+            ));
+        }
+    }
+    for field in CORE_FIELDS {
+        if !object.contains_key(*field) {
+            return Err(PluginError::malformed(
+                path,
+                format!("{field} is required for a loadable WASM product"),
+            ));
+        }
+    }
+    if object.get("runtime").and_then(Value::as_str) != Some("wasm") {
+        return Err(PluginError::malformed(path, "loadable product runtime must be wasm"));
+    }
+    if object.get("abi").and_then(Value::as_str) != Some(WASM_ABI) {
+        return Err(PluginError::malformed(
+            path,
+            format!("abi must be {WASM_ABI}"),
+        ));
+    }
+    let mut projected = Map::new();
+    for field in CORE_FIELDS {
+        projected.insert(
+            (*field).to_owned(),
+            object
+                .get(*field)
+                .expect("required product fields were checked")
+                .clone(),
+        );
+    }
+    let manifest = serde_json::from_value::<tessivum_extism::PluginManifest>(Value::Object(projected))
+        .map_err(|error| PluginError::malformed(path, error))?;
+    manifest
+        .validate()
+        .map_err(|error| PluginError::malformed(path, error))?;
+    Ok(manifest)
 }
 
 #[derive(Default)]
