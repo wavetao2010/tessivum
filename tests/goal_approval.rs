@@ -361,6 +361,20 @@ impl ApprovalAnswerer for CountingAnswerer {
     }
 }
 
+struct DetailsObserver(serde_json::Value);
+
+#[async_trait]
+impl ApprovalAnswerer for DetailsObserver {
+    async fn answer(
+        &self,
+        asked: ApprovalAsked,
+        _: CancellationToken,
+    ) -> Result<Option<bool>, TessivumError> {
+        assert_eq!(asked.request.details, self.0);
+        Ok(None)
+    }
+}
+
 struct CountingTool(AtomicUsize);
 
 #[async_trait]
@@ -1069,7 +1083,7 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
         asked[0].request,
         ApprovalRequest {
             action: "danger".into(),
-            details: json!({"path":"/tmp/a"}),
+            details: json!(null),
         }
     );
     assert_eq!(
@@ -1111,6 +1125,46 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
     replacement.dispose().await.unwrap();
 }
 
+#[test]
+fn approval_asked_redacts_details_and_replays_legacy_history() {
+    let secret = "approval-secret-not-durable";
+    let asked = ApprovalAsked {
+        approval_id: tessivum::approval::ApprovalId::new("asked-id"),
+        session_id: SessionId::from("approval-serialize"),
+        turn: 7,
+        policy: ApprovalPolicy::Ask,
+        request: ApprovalRequest {
+            action: "write".into(),
+            details: json!({"token": secret}),
+        },
+        tool_name: "write".into(),
+        call_id: Some(ToolCallId::from("call-id")),
+        reason: Some("policy".into()),
+    };
+
+    let durable = serde_json::to_value(&asked).unwrap();
+    assert_eq!(durable["approvalId"], json!("asked-id"));
+    assert_eq!(durable["sessionId"], json!("approval-serialize"));
+    assert_eq!(durable["toolName"], json!("write"));
+    assert_eq!(durable["callId"], json!("call-id"));
+    assert_eq!(durable["reason"], json!("policy"));
+    assert_eq!(durable["request"], json!({"action": "write"}));
+    assert!(!durable.to_string().contains(secret));
+
+    let legacy: ApprovalAsked = serde_json::from_value(json!({
+        "approvalId": "asked-id",
+        "sessionId": "approval-serialize",
+        "turn": 7,
+        "policy": "ask",
+        "request": {"action": "write", "details": {"token": secret}},
+        "toolName": "write",
+        "callId": "call-id",
+        "reason": "policy",
+    }))
+    .unwrap();
+    assert_eq!(legacy.request.details, json!({"token": secret}));
+}
+
 #[tokio::test]
 async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     let (agent, _registry) = agent("approval-browser-pending").await;
@@ -1121,6 +1175,10 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     let approvals = ApprovalService::new(agent).unwrap();
     let browser = HostApprovalRegistry::new();
     let _slot = browser.install(&authority, approvals.clone()).unwrap();
+    let secret_details = json!({"private": "approval-secret-not-durable"});
+    let _details = browser
+        .register_answerer(&session_id, Arc::new(DetailsObserver(secret_details.clone())))
+        .unwrap();
     let mut notices = browser.subscribe();
 
     let first = tokio::spawn({
@@ -1130,7 +1188,7 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
                 .approve(
                     ApprovalRequest {
                         action: "identical".into(),
-                        details: json!({"private": "never on wire"}),
+                        details: secret_details,
                     },
                     cancellation(),
                 )
@@ -1146,6 +1204,17 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
         }
         tokio::task::yield_now().await;
     };
+    let durable_asked = session
+        .events()
+        .into_iter()
+        .find(|event| event.event_type == "approval/asked")
+        .unwrap()
+        .data;
+    assert_eq!(durable_asked["request"], json!({"action": "identical"}));
+    assert!(!durable_asked
+        .to_string()
+        .contains("approval-secret-not-durable"));
+    assert_eq!(asked.request.details, json!(null));
     browser.observe_asked(&asked);
     let requested = browser.snapshots().pop().unwrap();
     assert_eq!(requested.session_id, session_id);
@@ -1212,7 +1281,7 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
                 .approve(
                     ApprovalRequest {
                         action: "identical".into(),
-                        details: json!({"private": "still never on wire"}),
+                        details: json!({"private": "approval-secret-not-durable"}),
                     },
                     cancellation(),
                 )
@@ -1349,4 +1418,109 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
             .accepted
     );
     assert_eq!(cancelled.await.unwrap(), ApprovalOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn delayed_turn_end_cannot_cancel_later_pending_approval() {
+    let (agent, _registry) = agent("approval-delayed-turn-end").await;
+    let session = agent.session();
+    let session_id = session.id();
+    let authority = agent.authority();
+    let approvals = ApprovalService::new(agent).unwrap();
+    let browser = HostApprovalRegistry::new();
+    let _slot = browser.install(&authority, approvals.clone()).unwrap();
+
+    append_turn_start(&session, 1).await;
+    let first = tokio::spawn({
+        let approvals = approvals.clone();
+        async move {
+            approvals
+                .approve(
+                    ApprovalRequest {
+                        action: "first".into(),
+                        details: json!({}),
+                    },
+                    cancellation(),
+                )
+                .await
+        }
+    });
+    let first_asked = loop {
+        if let Some(asked) = session.events().into_iter().find_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+        }) {
+            break asked;
+        }
+        tokio::task::yield_now().await;
+    };
+    browser.observe_asked(&first_asked);
+    let first_pending = browser
+        .snapshots()
+        .into_iter()
+        .find(|requested| requested.approval_id == first_asked.approval_id)
+        .unwrap();
+
+    append_turn_end(&session, 1).await;
+    append_turn_start(&session, 2).await;
+    let second = tokio::spawn({
+        let approvals = approvals.clone();
+        async move {
+            approvals
+                .approve(
+                    ApprovalRequest {
+                        action: "second".into(),
+                        details: json!({}),
+                    },
+                    cancellation(),
+                )
+                .await
+        }
+    });
+    let second_asked = loop {
+        if let Some(asked) = session.events().into_iter().rev().find_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+                .filter(|asked| asked.approval_id != first_asked.approval_id)
+        }) {
+            break asked;
+        }
+        tokio::task::yield_now().await;
+    };
+    browser.observe_asked(&second_asked);
+    let second_pending = browser
+        .snapshots()
+        .into_iter()
+        .find(|requested| requested.approval_id == second_asked.approval_id)
+        .unwrap();
+
+    browser.cancel_turn(&session_id, 1);
+    assert!(
+        !browser
+            .respond(
+                &first_pending.rpc_id,
+                &first_pending.session_id,
+                &first_pending.approval_id,
+                ApprovalOutcome::AllowedOnce,
+            )
+            .accepted
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .unwrap()
+            .unwrap(),
+        ApprovalOutcome::Cancelled
+    );
+    assert!(
+        browser
+            .respond(
+                &second_pending.rpc_id,
+                &second_pending.session_id,
+                &second_pending.approval_id,
+                ApprovalOutcome::AllowedOnce,
+            )
+            .accepted
+    );
+    assert_eq!(second.await.unwrap(), ApprovalOutcome::AllowedOnce);
 }

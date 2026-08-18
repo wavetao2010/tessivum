@@ -83,6 +83,7 @@ impl ApprovalId {
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequest {
     pub action: String,
+    #[serde(default)]
     pub details: Value,
 }
 
@@ -93,6 +94,21 @@ impl ApprovalRequest {
         }
         Ok(())
     }
+}
+
+fn serialize_durable_request<S>(request: &ApprovalRequest, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    #[derive(Serialize)]
+    struct DurableRequest<'a> {
+        action: &'a str,
+    }
+
+    DurableRequest {
+        action: &request.action,
+    }
+    .serialize(serializer)
 }
 
 /// Durable policy payload. `next_step` records a single-use override.
@@ -114,6 +130,7 @@ pub struct ApprovalAsked {
     pub session_id: SessionId,
     pub turn: u64,
     pub policy: ApprovalPolicy,
+    #[serde(serialize_with = "serialize_durable_request")]
     pub request: ApprovalRequest,
     #[serde(default)]
     pub tool_name: String,
@@ -692,7 +709,8 @@ struct PendingKey {
 
 struct PendingInteraction {
     requested: ApprovalRequested,
-    authority: AgentAuthority,
+    generation: AgentAuthority,
+    turn: u64,
     cancellation: CancellationToken,
     sender: Option<oneshot::Sender<ApprovalOutcome>>,
     deadline: Instant,
@@ -921,6 +939,13 @@ impl HostApprovalRegistry {
         cancel_pending(&self.inner, |entry| &entry.requested.session_id == session);
     }
 
+    /// Cancels browser authority for one completed turn without disturbing later turns.
+    pub fn cancel_turn(&self, session: &SessionId, turn: u64) {
+        cancel_pending(&self.inner, |entry| {
+            &entry.requested.session_id == session && entry.turn == turn
+        });
+    }
+
     pub fn cancel_all(&self) {
         cancel_pending(&self.inner, |_| true);
     }
@@ -988,8 +1013,9 @@ impl HostApprovalRegistry {
                 requested.rpc_id.clone(),
                 PendingInteraction {
                     requested: requested.clone(),
-                    authority: authority.clone(),
+                    generation: authority.clone(),
                     cancellation,
+                    turn: asked.turn,
                     sender: Some(sender),
                     deadline,
                     claimed: false,
@@ -1070,7 +1096,7 @@ impl HostApprovalRegistration {
         };
         if removed {
             cancel_pending(&inner, |entry| {
-                same_authority(&entry.authority, &self.authority)
+                same_authority(&entry.generation, &self.authority)
             });
         }
         removed

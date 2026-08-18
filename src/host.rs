@@ -1192,13 +1192,11 @@ impl HostHandle {
         if !lock(&self.inner.state).relayed.insert(session_id.clone()) {
             return;
         }
-        let inner = Arc::clone(&self.inner);
+        let starting_next_seq = session.next_seq().unwrap_or(u64::MAX);
         let mut receiver = session.subscribe();
         let task = tokio::spawn(async move {
-            let mut next_seq = session
-                .events()
-                .last()
-                .map_or(0, |event| event.seq.saturating_add(1));
+            let mut next_seq = starting_next_seq;
+            relay_missing_events(&inner, &session, &session_id, &mut next_seq);
             loop {
                 if inner.relays_closed.load(Ordering::Acquire) {
                     break;
@@ -1703,7 +1701,11 @@ fn relay_event(inner: &HostInner, session_id: &SessionId, event: SessionEvent) {
                 inner.approvals.observe_decided(session_id, &decision);
             }
         }
-        "turn/end" => inner.approvals.cancel_session(session_id),
+        "turn/end" => {
+            if let Some(turn) = event.data.get("turn").and_then(Value::as_u64) {
+                inner.approvals.cancel_turn(session_id, turn);
+            }
+        }
         _ => {}
     }
 }

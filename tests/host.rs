@@ -142,6 +142,70 @@ async fn prompt_receipt_relays_committed_events_and_flushes_on_shutdown() {
 }
 
 #[tokio::test]
+async fn approval_relay_replays_startup_asked_without_durable_tool_details() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root).with_approval_required_tool("bash"))
+        .await
+        .unwrap();
+    let handle = runtime.handle();
+    let mut notifications = handle.subscribe();
+    handle.prompt(prompt("approval-relay")).await.unwrap();
+
+    let requested = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let tessivum::host::HostNotification::ApprovalRequested(requested) =
+                notifications.recv().await.unwrap()
+            {
+                return requested;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let asked = handle
+        .events(SessionId::from("approval-relay"), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "approval/asked")
+        .unwrap()
+        .data;
+    assert_eq!(asked["approvalId"], json!(requested.approval_id.as_str()));
+    assert_eq!(asked["sessionId"], json!("approval-relay"));
+    assert_eq!(asked["toolName"], json!("bash"));
+    assert_eq!(asked["callId"], json!("cli-smoke-call"));
+    assert_eq!(asked["request"], json!({"action": "bash"}));
+    assert!(!asked.to_string().contains("CLI_TOOL_ROUND_TRIP"));
+
+    assert!(
+        handle
+            .approval_registry()
+            .unwrap()
+            .respond(
+                &requested.rpc_id,
+                &requested.session_id,
+                &requested.approval_id,
+                tessivum::approval::ApprovalOutcome::Rejected,
+            )
+            .accepted
+    );
+    let resolved = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let tessivum::host::HostNotification::ApprovalResolved(resolved) =
+                notifications.recv().await.unwrap()
+            {
+                return resolved;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(resolved.approval_id, requested.approval_id);
+    assert_eq!(resolved.outcome, tessivum::approval::ApprovalOutcome::Rejected);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn runtime_resumes_a_durable_session_without_replacing_it() {
     let root = TempDir::new();
     let first = HostRuntime::boot(config(&root)).await.unwrap();
