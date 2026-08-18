@@ -96,7 +96,7 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-The Alpha cutover baseline passes 235 Rust tests across 37 suites, the Browser typecheck/build, real Headless and SDK process journeys, published Browser interaction, community plugin loading, real Extism allow/deny/trap/unload flows, rollback drills, and graceful shutdown checks.
+The Alpha cutover baseline passes 239 Rust tests across 37 suites, the Browser typecheck/build, real Headless and SDK process journeys, published Browser interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, and graceful shutdown checks.
 
 ## Known Alpha limits
 

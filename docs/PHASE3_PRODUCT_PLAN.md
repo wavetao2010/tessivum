@@ -209,17 +209,20 @@ ServiceMethodPermission {
 
 WasmEffectivePolicy {
   plugin_id,
+  instance_id, // opaque generation authority
+  entry_id,    // logical Loader owner
   methods: BTreeSet<ServiceMethodPermission>,
-  limits: ResourceLimits,
 }
 
 WasmPolicyRegistry {
   install(policy) -> WasmPolicyRegistration,
-  authorize(plugin_id, service, method),
+  authorize(instance_id, plugin_id, service, method),
 }
 ```
 
 `WasmPolicyRegistration` 是唯一卸载 handle。Drop 只能做同步撤销标记；完整停止仍走 async dispose。
+
+授权表以不可伪造的 `instance_id` 为调用 authority；同一 Loader `entry_id` 的 committed/candidate generation 可在事务切换期间短暂重叠。相同 `plugin_id` 被不同 entry 占用时必须拒绝，旧 generation 撤销后其 authority 不可复用。
 
 错误码冻结：
 
@@ -229,6 +232,7 @@ WasmPolicyRegistry {
 | `CAPABILITY_DENIED` | 核心 Capability 未授权 |
 | `SERVICE_PERMISSION_DENIED` | service/method 未授权 |
 | `PLUGIN_POLICY_NOT_FOUND` | plugin 未安装或已经卸载 |
+| `PLUGIN_POLICY_ALREADY_REGISTERED` | instance authority 重复，或 plugin id 被另一个 Loader entry 占用 |
 | `INSTANCE_STOPPED` | 实例停止后继续调用 |
 | `RESOURCE_LIMIT` | fuel/memory/input/output/concurrency 超限 |
 

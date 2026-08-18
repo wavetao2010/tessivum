@@ -9,9 +9,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tessivum::{
     agent::AgentRegistry,
-    bridge::{
-        BridgeServices, DomainBridge, WasmEffectivePolicy, WasmPolicyRegistry, LOGGER_SERVICE,
-    },
+    bridge::{BridgeServices, DomainBridge, WasmEffectivePolicy, WasmPolicyRegistry},
     host::{HostConfig, HostRuntime},
     legacy::{product_loader, ProductPackageResolver, WasmProductRuntime},
     llm::LlmRuntime,
@@ -21,7 +19,8 @@ use tessivum::{
     tools::ToolRuntime,
 };
 use tessivum_core::{
-    ContextHandle, Entry, EntryId, EntryOptions, EntryTree, PackageResolver, RuntimeKind,
+    ContextHandle, Entry, EntryId, EntryOptions, EntryTree, LoaderFuture, PackageResolver, Patch,
+    ResolvedPackage, RuntimeKind,
 };
 use tessivum_extism::{
     Capability, CapabilityHandler, CapabilityRegistry, ExtismGuestEngine, ResourceLimits,
@@ -60,11 +59,15 @@ fn fixture() -> PathBuf {
 }
 
 fn entry() -> Entry {
+    entry_for(&fixture(), "rust-minimal")
+}
+
+fn entry_for(package: &Path, id: &str) -> Entry {
     Entry::new(
-        fixture().to_string_lossy(),
+        package.to_string_lossy(),
         EntryOptions {
-            id: EntryId::new("rust-minimal").unwrap(),
-            name: Some("rust-minimal".into()),
+            id: EntryId::new(id).unwrap(),
+            name: Some(id.into()),
             runtime: RuntimeKind::Wasm,
             config: json!({}),
             inject: Vec::new(),
@@ -98,6 +101,33 @@ fn capabilities(policies: WasmPolicyRegistry) -> Arc<CapabilityRegistry> {
         .unwrap();
     capabilities.grant(Capability::ServiceCall);
     capabilities
+}
+
+struct LogicalResolver(PathBuf);
+
+impl PackageResolver for LogicalResolver {
+    fn resolve<'a>(
+        &'a self,
+        specifier: &'a str,
+        _: RuntimeKind,
+    ) -> LoaderFuture<'a, ResolvedPackage> {
+        let location = self.0.to_string_lossy().into_owned();
+        Box::pin(async move {
+            Ok(ResolvedPackage {
+                specifier: specifier.into(),
+                location,
+            })
+        })
+    }
+}
+
+fn copy_fixture(root: &TempDir) -> PathBuf {
+    let package = root.path().join("plugin");
+    fs::create_dir_all(&package).unwrap();
+    for file in ["plugin.json", "plugin.wasm"] {
+        fs::copy(fixture().join(file), package.join(file)).unwrap();
+    }
+    package
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -139,18 +169,119 @@ async fn product_loader_installs_exact_policy_and_revokes_it_on_unload() {
         })
         .await
         .unwrap();
-    drop(
-        policies
-            .authorize(PLUGIN_ID, LOGGER_SERVICE, "log")
-            .unwrap(),
-    );
+    let first = policies.active_instances(PLUGIN_ID);
+    assert_eq!(first.len(), 1);
+    loader
+        .update(&[Patch::UpdateConfig {
+            id: EntryId::new("rust-minimal").unwrap(),
+            config: json!({}),
+        }])
+        .await
+        .unwrap();
+    let second = policies.active_instances(PLUGIN_ID);
+    assert_eq!(second.len(), 1);
+    assert_ne!(first, second, "candidate receives a fresh authority");
 
     loader.unload().await.unwrap();
-    let error = match policies.authorize(PLUGIN_ID, LOGGER_SERVICE, "log") {
-        Ok(_) => panic!("unloaded plugin policy remained live"),
-        Err(error) => error,
+    assert!(policies.active_instances(PLUGIN_ID).is_empty());
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_resolver_loads_the_resolved_wasm_artifact() {
+    let policies = WasmPolicyRegistry::new();
+    let wasm = Arc::new(WasmProductRuntime::new(
+        capabilities(policies.clone()),
+        policies,
+        ResourceLimits::default(),
+    ));
+    let resolver: Arc<dyn PackageResolver> =
+        Arc::new(LogicalResolver(fixture().join("plugin.wasm")));
+    let root = ContextHandle::root();
+    let mut loader = product_loader(None, resolver, wasm)
+        .unwrap()
+        .with_context(root.clone());
+    loader
+        .load(EntryTree {
+            entries: vec![entry_for(Path::new("com.example.rust-minimal"), "logical")],
+            groups: Vec::new(),
+        })
+        .await
+        .unwrap();
+    loader.unload().await.unwrap();
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_only_reload_uses_the_new_identity_and_contract() {
+    let temp = TempDir::new();
+    let package = copy_fixture(&temp);
+    let policies = WasmPolicyRegistry::new();
+    let wasm = Arc::new(WasmProductRuntime::new(
+        capabilities(policies.clone()),
+        policies.clone(),
+        ResourceLimits::default(),
+    ));
+    let resolver: Arc<dyn PackageResolver> = Arc::new(
+        ProductPackageResolver::new()
+            .confine_to(temp.path())
+            .unwrap(),
+    );
+    let root = ContextHandle::root();
+    let mut loader = product_loader(None, resolver, wasm)
+        .unwrap()
+        .with_context(root.clone());
+    let tree = EntryTree {
+        entries: vec![entry_for(&package, "mutable")],
+        groups: Vec::new(),
     };
-    assert_eq!(error.code, "PLUGIN_POLICY_NOT_FOUND");
+
+    loader.load(tree.clone()).await.unwrap();
+    loader.unload().await.unwrap();
+    let next_id = "com.tessivum.fixture.rust-minimal-next";
+    let manifest_path = package.join("plugin.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["id"] = json!(next_id);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    loader.load(tree).await.unwrap();
+    assert!(policies.active_instances(PLUGIN_ID).is_empty());
+    assert_eq!(policies.active_instances(next_id).len(), 1);
+    loader.unload().await.unwrap();
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_manifest_id_across_entries_fails_closed() {
+    let policies = WasmPolicyRegistry::new();
+    let wasm = Arc::new(WasmProductRuntime::new(
+        capabilities(policies.clone()),
+        policies.clone(),
+        ResourceLimits::default(),
+    ));
+    let resolver: Arc<dyn PackageResolver> = Arc::new(
+        ProductPackageResolver::new()
+            .confine_to(repository_root())
+            .unwrap(),
+    );
+    let root = ContextHandle::root();
+    let mut loader = product_loader(None, resolver, wasm)
+        .unwrap()
+        .with_context(root.clone());
+
+    assert!(loader
+        .load(EntryTree {
+            entries: vec![entry_for(&fixture(), "one"), entry_for(&fixture(), "two")],
+            groups: Vec::new(),
+        })
+        .await
+        .is_err());
+    assert!(policies.active_instances(PLUGIN_ID).is_empty());
     root.scope().dispose().await.unwrap();
 }
 
@@ -168,20 +299,24 @@ async fn real_guest_denies_undeclared_service_and_traps_deterministically() {
     );
 
     let policies = WasmPolicyRegistry::new();
+    let instance_id = "direct-real-guest";
     let registration = policies
         .install(WasmEffectivePolicy::new(
             product.manifest.id.clone(),
+            instance_id,
+            "direct-real-entry",
             product.service_permissions.clone(),
         ))
         .unwrap();
     let capabilities = capabilities(policies);
     let package = WasmPackage::from_bytes(product.manifest, wasm).unwrap();
-    let instance = WasmPluginInstance::instantiate(
+    let instance = WasmPluginInstance::instantiate_with_instance_id(
         package,
         Arc::new(ExtismGuestEngine),
         capabilities,
         ResourceLimits::default(),
         json!({}),
+        instance_id,
     )
     .unwrap();
 

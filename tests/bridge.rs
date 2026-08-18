@@ -72,8 +72,24 @@ fn remote_code(error: BridgeError) -> String {
 }
 
 fn wasm_policy(plugin_id: &str, permissions: &[(&str, &str)]) -> WasmEffectivePolicy {
+    wasm_policy_for(
+        plugin_id,
+        &format!("{plugin_id}-instance"),
+        &format!("{plugin_id}-entry"),
+        permissions,
+    )
+}
+
+fn wasm_policy_for(
+    plugin_id: &str,
+    instance_id: &str,
+    entry_id: &str,
+    permissions: &[(&str, &str)],
+) -> WasmEffectivePolicy {
     WasmEffectivePolicy::new(
         plugin_id,
+        instance_id,
+        entry_id,
         permissions
             .iter()
             .map(|(service, method)| ServiceMethodPermission {
@@ -87,6 +103,7 @@ fn wasm_service_call(plugin_id: &str, payload: Value) -> CapabilityRequest {
     CapabilityRequest {
         capability: Capability::ServiceCall,
         plugin_id: plugin_id.into(),
+        instance_id: format!("{plugin_id}-instance"),
         payload,
     }
 }
@@ -888,21 +905,23 @@ fn wasm_policy_registry_revokes_and_drains_admitted_calls() {
         "PLUGIN_POLICY_ALREADY_REGISTERED"
     );
     let lease = registry
-        .authorize("plugin-a", LOGGER_SERVICE, "log")
+        .authorize("plugin-a-instance", "plugin-a", LOGGER_SERVICE, "log")
         .unwrap();
     assert_eq!(
         plugin_code(rejected(registry.authorize(
+            "plugin-a-instance",
             "plugin-a",
             LOGGER_SERVICE,
-            "other"
+            "other",
         ))),
         "SERVICE_PERMISSION_DENIED"
     );
     assert_eq!(
         plugin_code(rejected(registry.authorize(
+            "plugin-a-instance",
             "plugin-a",
             TOOLS_SERVICE,
-            "schemas"
+            "schemas",
         ))),
         "SERVICE_PERMISSION_DENIED"
     );
@@ -920,14 +939,43 @@ fn wasm_policy_registry_revokes_and_drains_admitted_calls() {
     observed.recv().unwrap();
     assert_eq!(
         plugin_code(rejected(registry_for_check.authorize(
+            "plugin-a-instance",
             "plugin-a",
             LOGGER_SERVICE,
-            "log"
+            "log",
         ))),
         "PLUGIN_POLICY_NOT_FOUND"
     );
     drop(lease);
     shutdown.join().unwrap().unwrap();
+}
+
+#[test]
+fn wasm_policy_allows_same_entry_candidate_and_rejects_duplicate_owner() {
+    let registry = WasmPolicyRegistry::new();
+    let committed = registry
+        .install(wasm_policy_for("plugin", "old", "entry-a", &[]))
+        .unwrap();
+    let candidate = registry
+        .install(wasm_policy_for("plugin", "new", "entry-a", &[]))
+        .unwrap();
+    assert_eq!(registry.active_instances("plugin"), vec!["new", "old"]);
+    assert_eq!(
+        plugin_code(rejected(registry.install(wasm_policy_for(
+            "plugin",
+            "duplicate",
+            "entry-b",
+            &[],
+        )))),
+        "PLUGIN_POLICY_ALREADY_REGISTERED"
+    );
+
+    drop(candidate);
+    drop(committed);
+    let replacement = registry
+        .install(wasm_policy_for("plugin", "replacement", "entry-b", &[]))
+        .unwrap();
+    assert_eq!(replacement.instance_id(), "replacement");
 }
 
 #[tokio::test(flavor = "multi_thread")]

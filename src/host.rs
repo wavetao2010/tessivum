@@ -911,7 +911,8 @@ impl HostHandle {
         let loader = { self.inner.loader.lock().await.take() };
         if let Some(mut loader) = loader {
             let unloaded = tokio::task::spawn_blocking(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .enable_all()
                     .build()
                     .map_err(|error| error.to_string())?;

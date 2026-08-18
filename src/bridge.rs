@@ -116,20 +116,26 @@ struct WasmServiceRequest {
     payload: Value,
 }
 
-/// Product authorization installed for one running WASM plugin.
+/// Product authorization installed for one running WASM plugin instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmEffectivePolicy {
     pub plugin_id: String,
+    pub instance_id: String,
+    pub entry_id: String,
     pub methods: BTreeSet<ServiceMethodPermission>,
 }
 
 impl WasmEffectivePolicy {
     pub fn new(
         plugin_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        entry_id: impl Into<String>,
         methods: impl IntoIterator<Item = ServiceMethodPermission>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
+            instance_id: instance_id.into(),
+            entry_id: entry_id.into(),
             methods: methods.into_iter().collect(),
         }
     }
@@ -143,7 +149,18 @@ pub struct WasmPolicyRegistry {
 
 #[derive(Default)]
 struct WasmPolicyRegistryInner {
-    policies: Mutex<BTreeMap<String, Arc<WasmPolicyEntry>>>,
+    maps: Mutex<WasmPolicyMaps>,
+}
+
+#[derive(Default)]
+struct WasmPolicyMaps {
+    policies: BTreeMap<String, Arc<WasmPolicyEntry>>,
+    owners: BTreeMap<String, WasmPluginOwner>,
+}
+
+struct WasmPluginOwner {
+    entry_id: String,
+    instances: usize,
 }
 
 struct WasmPolicyEntry {
@@ -152,14 +169,17 @@ struct WasmPolicyEntry {
 }
 
 struct WasmPolicyState {
+    plugin_id: String,
     methods: BTreeSet<ServiceMethodPermission>,
     revoked: bool,
     active: usize,
 }
 
-/// The sole policy owner for one plugin lifecycle. Dropping it revokes admission only.
+/// The sole policy owner for one plugin instance. Dropping it revokes admission only.
 pub struct WasmPolicyRegistration {
     plugin_id: String,
+    instance_id: String,
+    entry_id: String,
     entry: Arc<WasmPolicyEntry>,
     registry: Weak<WasmPolicyRegistryInner>,
 }
@@ -178,22 +198,47 @@ impl WasmPolicyRegistry {
         validate_policy(&policy)?;
         let entry = Arc::new(WasmPolicyEntry {
             state: Mutex::new(WasmPolicyState {
+                plugin_id: policy.plugin_id.clone(),
                 methods: policy.methods,
                 revoked: false,
                 active: 0,
             }),
             drained: Condvar::new(),
         });
-        let mut policies = lock(&self.inner.policies);
-        if policies.contains_key(&policy.plugin_id) {
+        let mut maps = lock(&self.inner.maps);
+        if maps.policies.contains_key(&policy.instance_id) {
             return Err(policy_error(
                 "PLUGIN_POLICY_ALREADY_REGISTERED",
-                "a policy is already installed for this plugin",
+                "a policy is already installed for this plugin instance",
             ));
         }
-        policies.insert(policy.plugin_id.clone(), Arc::clone(&entry));
+        if maps
+            .owners
+            .get(&policy.plugin_id)
+            .is_some_and(|owner| owner.entry_id != policy.entry_id)
+        {
+            return Err(policy_error(
+                "PLUGIN_POLICY_ALREADY_REGISTERED",
+                "plugin id belongs to another loader entry",
+            ));
+        }
+        let owner = maps
+            .owners
+            .entry(policy.plugin_id.clone())
+            .or_insert_with(|| WasmPluginOwner {
+                entry_id: policy.entry_id.clone(),
+                instances: 0,
+            });
+        owner.instances = owner
+            .instances
+            .checked_add(1)
+            .ok_or_else(|| policy_error("RESOURCE_LIMIT", "too many plugin instances"))?;
+        maps.policies
+            .insert(policy.instance_id.clone(), Arc::clone(&entry));
         Ok(WasmPolicyRegistration {
             plugin_id: policy.plugin_id,
+            instance_id: policy.instance_id,
+            entry_id: policy.entry_id,
             entry,
             registry: Arc::downgrade(&self.inner),
         })
@@ -202,16 +247,17 @@ impl WasmPolicyRegistry {
     /// Admits an exact service/method call and returns a guard held through dispatch.
     pub fn authorize(
         &self,
+        instance_id: &str,
         plugin_id: &str,
         service: &str,
         method: &str,
     ) -> WasmResult<WasmPolicyLease> {
-        let policies = lock(&self.inner.policies);
-        let entry = policies.get(plugin_id).cloned().ok_or_else(|| {
+        let maps = lock(&self.inner.maps);
+        let entry = maps.policies.get(instance_id).cloned().ok_or_else(|| {
             policy_error("PLUGIN_POLICY_NOT_FOUND", "plugin policy is not installed")
         })?;
         let mut state = lock(&entry.state);
-        if state.revoked {
+        if state.revoked || state.plugin_id != plugin_id {
             return Err(policy_error(
                 "PLUGIN_POLICY_NOT_FOUND",
                 "plugin policy is not installed",
@@ -231,8 +277,19 @@ impl WasmPolicyRegistry {
             .checked_add(1)
             .ok_or_else(|| policy_error("RESOURCE_LIMIT", "too many active service calls"))?;
         drop(state);
-        drop(policies);
+        drop(maps);
         Ok(WasmPolicyLease { entry })
+    }
+
+    pub fn active_instances(&self, plugin_id: &str) -> Vec<String> {
+        let maps = lock(&self.inner.maps);
+        maps.policies
+            .iter()
+            .filter_map(|(instance_id, entry)| {
+                let state = lock(&entry.state);
+                (!state.revoked && state.plugin_id == plugin_id).then(|| instance_id.clone())
+            })
+            .collect()
     }
 }
 
@@ -241,14 +298,28 @@ impl WasmPolicyRegistration {
     pub fn revoke(&self) -> bool {
         let mut revoked = false;
         if let Some(registry) = self.registry.upgrade() {
-            let mut policies = lock(&registry.policies);
-            if policies
-                .get(&self.plugin_id)
+            let mut maps = lock(&registry.maps);
+            if maps
+                .policies
+                .get(&self.instance_id)
                 .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
             {
                 let mut state = lock(&self.entry.state);
                 state.revoked = true;
-                policies.remove(&self.plugin_id);
+                maps.policies.remove(&self.instance_id);
+                let remove_owner = if let Some(owner) = maps.owners.get_mut(&self.plugin_id) {
+                    if owner.entry_id == self.entry_id {
+                        owner.instances = owner.instances.saturating_sub(1);
+                        owner.instances == 0
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if remove_owner {
+                    maps.owners.remove(&self.plugin_id);
+                }
                 revoked = true;
             }
         }
@@ -283,6 +354,10 @@ impl WasmPolicyRegistration {
             }
         }
         Ok(())
+    }
+
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     pub fn is_revoked(&self) -> bool {
@@ -1202,6 +1277,7 @@ impl CapabilityHandler for DomainBridge {
         bounded_json(&request.payload, self.inner.limits.max_json_bytes)
             .map_err(bridge_to_plugin_error)?;
         let plugin_id = request.plugin_id;
+        let instance_id = request.instance_id;
         let wire: WasmServiceRequest = decode(request.payload).map_err(bridge_to_plugin_error)?;
         let domain = DomainRequest {
             service: wire.service,
@@ -1210,10 +1286,12 @@ impl CapabilityHandler for DomainBridge {
         };
         self.validate_request(&domain, self.inner.limits.max_json_bytes)
             .map_err(bridge_to_plugin_error)?;
-        let _lease =
-            self.inner
-                .policy_registry
-                .authorize(&plugin_id, &domain.service, &domain.method)?;
+        let _lease = self.inner.policy_registry.authorize(
+            &instance_id,
+            &plugin_id,
+            &domain.service,
+            &domain.method,
+        )?;
         self.dispatch_native(domain).map_err(bridge_to_plugin_error)
     }
 }
@@ -1419,10 +1497,13 @@ fn bounded_json(value: &Value, limit: usize) -> BridgeResult<()> {
 }
 
 fn validate_policy(policy: &WasmEffectivePolicy) -> WasmResult<()> {
-    if policy.plugin_id.trim().is_empty() {
+    if policy.plugin_id.trim().is_empty()
+        || policy.instance_id.trim().is_empty()
+        || policy.entry_id.trim().is_empty()
+    {
         return Err(policy_error(
             "MANIFEST_PERMISSION_INVALID",
-            "plugin id must not be blank",
+            "plugin, instance, and entry ids must not be blank",
         ));
     }
     for permission in &policy.methods {

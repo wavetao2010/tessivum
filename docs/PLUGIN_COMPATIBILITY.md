@@ -117,7 +117,7 @@ exports:
 
 规则：
 
-- `id` 在同一运行时生命周期内唯一；
+- `id` 在不同 Loader entry 间唯一；同一 entry 的 committed/candidate generation 通过不透明 instance authority 隔离；
 - `abi` 不匹配、entry 越界或缺少五个生命周期 export 时在装载前失败；
 - `inject` 是激活门控，不是权限授予；
 - `permissions` 是通用 Host capability 上限；

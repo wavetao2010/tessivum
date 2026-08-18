@@ -38,6 +38,15 @@ impl Guest for RustMinimalGuest {
     }
 
     fn stop(_: Envelope) -> Result<Value> {
+        let _: Value = service_call(
+            "logger@1",
+            "log",
+            json!({
+                "level": "info",
+                "message": "tessivum-rust-minimal stopped",
+                "fields": {}
+            }),
+        )?;
         Ok(json!({ "stopped": true }))
     }
 }
