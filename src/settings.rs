@@ -650,6 +650,7 @@ impl SettingsProvider for MemorySettingsProvider {
 pub struct YamlSettingsProvider {
     path: PathBuf,
     last_good: Mutex<BTreeMap<String, Value>>,
+    write_gate: AsyncMutex<()>,
     writable: bool,
 }
 impl fmt::Debug for YamlSettingsProvider {
@@ -665,6 +666,7 @@ impl YamlSettingsProvider {
         Self {
             path: path.into(),
             last_good: Mutex::new(BTreeMap::new()),
+            write_gate: AsyncMutex::new(()),
             writable: true,
         }
     }
@@ -672,6 +674,7 @@ impl YamlSettingsProvider {
         Self {
             path: path.into(),
             last_good: Mutex::new(BTreeMap::new()),
+            write_gate: AsyncMutex::new(()),
             writable: false,
         }
     }
@@ -762,6 +765,7 @@ impl SettingsProvider for YamlSettingsProvider {
         }
         ensure_namespace(namespace)?;
         validate_document(user)?;
+        let _write_gate = self.write_gate.lock().await;
         let mut document = self.read_document().await?;
         document.insert(namespace.to_owned(), user.clone());
         self.write_document(&document).await?;
@@ -825,13 +829,26 @@ fn validate_path_or_root(path: &[String]) -> Result<(), SettingsError> {
     }
 }
 
+fn array_index(member: &str) -> Option<usize> {
+    (!member.is_empty() && member.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| member.parse().ok())
+        .flatten()
+}
+
 fn has_path(value: &Value, path: &[String]) -> bool {
     let mut current = value;
     for member in path {
-        let Some(next) = current.as_object().and_then(|object| object.get(member)) else {
-            return false;
+        current = match current {
+            Value::Object(object) => match object.get(member) {
+                Some(value) => value,
+                None => return false,
+            },
+            Value::Array(array) => match array_index(member).and_then(|index| array.get(index)) {
+                Some(value) => value,
+                None => return false,
+            },
+            _ => return false,
         };
-        current = next;
     }
     true
 }
@@ -890,31 +907,89 @@ fn merge(mut left: Value, right: &Value) -> Value {
         right.clone()
     }
 }
-fn set_at_path(document: &mut Value, path: &[String], value: Value) {
-    let mut current = document
-        .as_object_mut()
-        .expect("validated settings document");
-    for member in &path[..path.len() - 1] {
-        let next = current.entry(member.clone()).or_insert_with(empty_document);
-        if !next.is_object() {
-            *next = empty_document();
-        }
-        current = next.as_object_mut().expect("object inserted above");
+fn new_path_container(next: &str) -> Value {
+    if array_index(next).is_some() {
+        Value::Array(Vec::new())
+    } else {
+        empty_document()
     }
-    current.insert(path.last().expect("validated nonempty path").clone(), value);
+}
+fn set_at_path(document: &mut Value, path: &[String], value: Value) {
+    if path.is_empty() {
+        *document = value;
+        return;
+    }
+    let mut current = document;
+    for (position, member) in path[..path.len() - 1].iter().enumerate() {
+        let next_member = &path[position + 1];
+        match current {
+            Value::Object(object) => {
+                let next = object
+                    .entry(member.clone())
+                    .or_insert_with(|| new_path_container(next_member));
+                if !next.is_object() && !next.is_array() {
+                    *next = new_path_container(next_member);
+                }
+                current = next;
+            }
+            Value::Array(array) => {
+                let Some(index) = array_index(member) else { return };
+                if array.len() <= index {
+                    array.resize(index + 1, Value::Null);
+                }
+                if !array[index].is_object() && !array[index].is_array() {
+                    array[index] = new_path_container(next_member);
+                }
+                current = &mut array[index];
+            }
+            _ => return,
+        }
+    }
+    let member = path.last().expect("validated nonempty path");
+    match current {
+        Value::Object(object) => {
+            object.insert(member.clone(), value);
+        }
+        Value::Array(array) => {
+            let Some(index) = array_index(member) else { return };
+            if array.len() <= index {
+                array.resize(index + 1, Value::Null);
+            }
+            array[index] = value;
+        }
+        _ => {}
+    }
 }
 fn remove_at_path(document: &mut Value, path: &[String]) {
-    let mut current = match document.as_object_mut() {
-        Some(current) => current,
-        None => return,
-    };
-    for member in &path[..path.len() - 1] {
-        let Some(next) = current.get_mut(member).and_then(Value::as_object_mut) else {
-            return;
-        };
-        current = next;
+    if path.is_empty() {
+        return;
     }
-    current.remove(path.last().expect("validated nonempty path"));
+    let mut current = document;
+    for member in &path[..path.len() - 1] {
+        current = match current {
+            Value::Object(object) => match object.get_mut(member) {
+                Some(value) => value,
+                None => return,
+            },
+            Value::Array(array) => match array_index(member).and_then(|index| array.get_mut(index)) {
+                Some(value) => value,
+                None => return,
+            },
+            _ => return,
+        };
+    }
+    let member = path.last().expect("validated nonempty path");
+    match current {
+        Value::Object(object) => {
+            object.remove(member);
+        }
+        Value::Array(array) => {
+            if let Some(index) = array_index(member).filter(|index| *index < array.len()) {
+                array[index] = Value::Null;
+            }
+        }
+        _ => {}
+    }
 }
 fn redact(value: &Value, paths: &[SettingPath]) -> Value {
     let mut redacted = value.clone();

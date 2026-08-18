@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tessivum::{
     attachments::{AttachmentInput, AttachmentStore},
     credentials::{
@@ -36,7 +36,7 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
     provider
         .insert(
             "demo",
-            json!({"nested": {"user": true}, "array": [3], "secret": "saved"}),
+            json!({"nested": {"user": true}, "array": [3], "tokens": ["visible", "array-secret"], "items": [{"token": "saved-token"}, {"public": true}], "secret": "saved"}),
         )
         .unwrap();
     let settings = Settings::new(provider.clone());
@@ -48,13 +48,18 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
                 json!({"nested": {"default": true}, "array": [1], "secret": "default"}),
                 json!({"nested": {"base": true}, "array": [2]}),
             )
-            .with_secret_paths(vec![vec!["secret".into()]]),
+                .with_secret_paths(vec![
+                    vec!["secret".into()],
+                    vec!["tokens".into(), "1".into()],
+                    vec!["items".into(), "0".into(), "token".into()],
+                    vec!["items".into(), "1".into(), "token".into()],
+                ]),
         )
         .await
         .unwrap();
     assert_eq!(
         settings.get("demo").unwrap().value,
-        json!({"nested":{"default":true,"base":true,"user":true},"array":[3],"secret":"saved"})
+        json!({"nested":{"default":true,"base":true,"user":true},"array":[3],"tokens":["visible","array-secret"],"items":[{"token":"saved-token"},{"public":true}],"secret":"saved"})
     );
     let changed = settings
         .set_path(
@@ -74,10 +79,42 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
             .code(),
         "SETTINGS_CONFLICT"
     );
-    let redacted = serde_json::to_string(&settings.describe("demo").unwrap()).unwrap();
+    let described = settings.describe("demo").unwrap();
+    assert_eq!(described.secret_set, vec![true, true, true, false]);
+    assert_eq!(described.resolved["items"].as_array().unwrap().len(), 2);
+    let redacted = serde_json::to_string(&described).unwrap();
     assert!(!redacted.contains("saved"));
+    assert!(!redacted.contains("saved-token"));
+    assert!(!redacted.contains("array-secret"));
+    assert_eq!(described.resolved["items"][0]["token"], Value::Null);
+    assert_eq!(described.resolved["tokens"], json!(["visible", null]));
     settings
-        .remove_path("demo", vec!["nested".into(), "user".into()], Some(1))
+        .set_path(
+            "demo",
+            vec!["items".into(), "1".into(), "token".into()],
+            json!("second-token"),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    let described = settings.describe("demo").unwrap();
+    assert_eq!(described.secret_set, vec![true, true, true, true]);
+    assert!(!serde_json::to_string(&described)
+        .unwrap()
+        .contains("second-token"));
+    settings
+        .remove_path(
+            "demo",
+            vec!["items".into(), "0".into(), "token".into()],
+            Some(2),
+        )
+        .await
+        .unwrap();
+    let described = settings.describe("demo").unwrap();
+    assert_eq!(described.secret_set, vec![true, true, false, true]);
+    assert_eq!(settings.get("demo").unwrap().value["items"].as_array().unwrap().len(), 2);
+    settings
+        .remove_path("demo", vec!["nested".into(), "user".into()], Some(3))
         .await
         .unwrap();
     assert_eq!(
@@ -127,8 +164,15 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
                     path: vec!["nested".into(), "after".into()],
                     value: json!(true),
                 },
+                SettingsPathOp::Set {
+                    path: vec!["items".into(), "1".into(), "public".into()],
+                    value: json!(false),
+                },
                 SettingsPathOp::Unset {
                     path: vec!["nested".into(), "more".into()],
+                },
+                SettingsPathOp::Unset {
+                    path: vec!["array".into(), "0".into()],
                 },
             ],
             Some(reloaded.revision),
@@ -136,10 +180,12 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
         .await
         .unwrap();
     assert_eq!(atomically_mutated.revision, reloaded.revision + 1);
+    assert_eq!(atomically_mutated.value["items"][1]["public"], json!(false));
+    assert_eq!(atomically_mutated.value["array"], json!([null]));
 
     let path = root("settings").join("settings.yaml");
     let yaml_provider = Arc::new(YamlSettingsProvider::new(&path));
-    let yaml = Settings::new(yaml_provider);
+    let yaml = Settings::new(yaml_provider.clone());
     yaml.register(SettingsRegistration::new(
         "demo",
         json!({}),
@@ -171,6 +217,46 @@ async fn settings_precedence_reset_conflict_redaction_and_last_good_yaml() {
             .to_string_lossy()
             .contains(".tmp"))
     );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn yaml_provider_serializes_concurrent_namespace_writes() {
+    let path = root("settings-concurrent").join("settings.yaml");
+    let provider = Arc::new(YamlSettingsProvider::new(&path));
+    let settings = Settings::new(provider);
+    for namespace in ["first", "second"] {
+        settings
+            .register(SettingsRegistration::new(
+                namespace,
+                json!({}),
+                json!({}),
+                json!({}),
+            ))
+            .await
+            .unwrap();
+    }
+    let (first, second) = tokio::join!(
+        settings.update("first", json!({"value": 1}), None),
+        settings.update("second", json!({"value": 2}), None),
+    );
+    first.unwrap();
+    second.unwrap();
+
+    let reloaded = Settings::new(Arc::new(YamlSettingsProvider::new(&path)));
+    for namespace in ["first", "second"] {
+        reloaded
+            .register(SettingsRegistration::new(
+                namespace,
+                json!({}),
+                json!({}),
+                json!({}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(reloaded.get("first").unwrap().value, json!({"value": 1}));
+    assert_eq!(reloaded.get("second").unwrap().value, json!({"value": 2}));
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 

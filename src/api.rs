@@ -888,6 +888,7 @@ fn compat_settings_describe(state: &ApiState) -> Result<Value, CompatError> {
         .describe_all()
         .map_err(|_| CompatError::internal("settings are unavailable"))?
         .into_iter()
+        .filter(|descriptor| is_exposed_settings_namespace(&descriptor.namespace))
         .map(compat_settings_view)
         .collect::<Vec<_>>();
     Ok(json!({
@@ -924,9 +925,29 @@ fn compat_settings_view(descriptor: SettingsDescriptor) -> Value {
     }
     Value::Object(view)
 }
+fn is_exposed_settings_namespace(ns: &str) -> bool {
+    matches!(
+        ns,
+        "agent-loop"
+            | "shell"
+            | "locale"
+            | "permission"
+            | "ui-conversation"
+            | "ui-theme"
+            | "web-search-deepseek"
+            | "ui-onboarding"
+            | "agent-presets"
+    ) || ns
+        .strip_prefix("llm-")
+        .is_some_and(|provider| !provider.is_empty())
+}
 fn compat_require_ns(ns: &str) -> Result<(), CompatError> {
-    if ns.is_empty() {
-        Err(CompatError::invalid("ns must not be empty"))
+    if !is_exposed_settings_namespace(ns) {
+        Err(CompatError {
+            code: "settings-not-exposed".into(),
+            message: "settings namespace is not exposed".into(),
+            details: json!({"ns": ns}),
+        })
     } else {
         Ok(())
     }

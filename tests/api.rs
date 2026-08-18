@@ -595,7 +595,7 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
         .expect("real Host boots");
     let handle = runtime.handle();
     let settings = handle.settings().expect("settings service");
-    let namespace = format!("browser-{}", Uuid::new_v4().simple());
+    let namespace = "ui-theme".to_owned();
     settings
         .register(
             SettingsRegistration::new(
@@ -608,6 +608,16 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
         )
         .await
         .expect("namespace registers");
+    let internal_namespace = "internal-settings".to_owned();
+    settings
+        .register(SettingsRegistration::new(
+            internal_namespace.clone(),
+            json!({"type": "object"}),
+            json!({}),
+            json!({}),
+        ))
+        .await
+        .expect("internal namespace registers");
     let host: Arc<dyn HostApi> = Arc::new(handle.clone());
     let mut server = ApiServer::bind(host).await.expect("real API binds");
     let base = format!("http://{}", server.local_addr());
@@ -629,6 +639,7 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
         value["namespaces"][0]["ns"].as_str(),
         Some(namespace.as_str())
     );
+    assert_eq!(value["namespaces"].as_array().unwrap().len(), 1);
     assert_eq!(value["namespaces"][0]["applies"], "live");
     assert_eq!(
         value["namespaces"][0]["secrets"],
@@ -637,6 +648,20 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     assert_eq!(value["namespaces"][0]["base"], json!({"base": true}));
     assert!(value["namespaces"][0].get("user").is_none());
     assert!(!described.to_string().contains("default-secret"));
+    let hidden = browser_call(
+        &client,
+        &base,
+        "settings-hidden",
+        "settings.update",
+        json!({"ns": internal_namespace, "patch": {"hidden": true}}),
+    )
+    .await;
+    assert_eq!(hidden["result"]["error"]["code"], "settings-not-exposed");
+    assert_eq!(
+        hidden["result"]["error"]["details"],
+        json!({"ns": internal_namespace})
+    );
+    assert_eq!(settings.get(&internal_namespace).unwrap().value, json!({}));
 
     let secret = "settings-wire-secret";
     let updated = browser_call(

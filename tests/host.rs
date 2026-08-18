@@ -7,9 +7,9 @@ use std::{
 use serde_json::json;
 use tessivum::{
     credentials::{CredentialError, CredentialRef},
-    host::{HostApi, HostConfig, HostRuntime},
+    host::{HostApi, HostConfig, HostNotification, HostRuntime},
     protocol::{AgentCancelCause, ContentBlock, SessionPromptParams, SessionStatus},
-    settings::{SettingsError, SettingsRegistration},
+    settings::{SettingsError, SettingsEventKind, SettingsRegistration},
     SessionId,
 };
 use uuid::Uuid;
@@ -326,6 +326,58 @@ async fn shutdown_fences_new_admission_and_leaves_no_owned_processes() {
         fs::remove_dir_all(root.path()).is_ok(),
         "all host-owned file/process resources release before shutdown returns"
     );
+}
+
+#[tokio::test]
+async fn shutdown_drains_racing_settings_writes_before_relays_close() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let handle = runtime.handle();
+    let settings = handle.settings().unwrap();
+    let credentials = handle.credentials().unwrap();
+    let namespace = "ui-theme";
+    let reference = CredentialRef::new(format!("TESSIVUM_RACE_{}", Uuid::new_v4().simple()))
+        .unwrap();
+    settings
+        .register(SettingsRegistration::new(
+            namespace,
+            json!({}),
+            json!({}),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let mut notifications = handle.subscribe();
+
+    let (settings_result, credentials_result, shutdown_result) = tokio::join!(
+        settings.update(namespace, json!({"saved": true}), None),
+        credentials.set(reference.clone(), "racing-credential".into()),
+        runtime.shutdown(),
+    );
+    settings_result.unwrap();
+    credentials_result.unwrap();
+    shutdown_result.unwrap();
+
+    let mut settings_changed = false;
+    let mut credentials_changed = false;
+    for _ in 0..2 {
+        match tokio::time::timeout(Duration::from_secs(1), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            HostNotification::SettingsChanged(event)
+                if event.namespace == namespace && event.kind == SettingsEventKind::Updated =>
+            {
+                settings_changed = true;
+            }
+            HostNotification::CredentialsChanged(event) if event.reference == reference => {
+                credentials_changed = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(settings_changed && credentials_changed);
 }
 
 #[tokio::test]

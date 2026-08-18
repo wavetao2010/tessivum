@@ -988,6 +988,8 @@ impl HostHandle {
             false,
         );
         self.wait_drained().await;
+        self.inner.settings.shutdown().await;
+        self.inner.credentials.shutdown().await;
         let mut failures = Vec::new();
         if let Err(error) = self.inner.registry.dispose_all().await {
             failures.push(format!("agents: {error}"));
@@ -1044,8 +1046,6 @@ impl HostHandle {
                 failures.push(format!("legacy: {error}"));
             }
         }
-        self.inner.settings.shutdown().await;
-        self.inner.credentials.shutdown().await;
         self.inner.cancellation.cancel();
         if let Err(error) = self.inner.services.root.scope().dispose().await {
             failures.push(format!("root: {error}"));
@@ -1155,6 +1155,9 @@ impl HostHandle {
         let settings_relay = tokio::spawn(async move {
             loop {
                 if settings_inner.relays_closed.load(Ordering::Acquire) {
+                    while let Ok(event) = settings_events.try_recv() {
+                        let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
+                    }
                     break;
                 }
                 tokio::select! {
@@ -1163,7 +1166,12 @@ impl HostHandle {
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
-                    _ = settings_inner.relay_stop.notified() => break,
+                    _ = settings_inner.relay_stop.notified() => {
+                        while let Ok(event) = settings_events.try_recv() {
+                            let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
+                        }
+                        break;
+                    },
                 }
             }
         });
@@ -1172,6 +1180,9 @@ impl HostHandle {
         let credentials_relay = tokio::spawn(async move {
             loop {
                 if credentials_inner.relays_closed.load(Ordering::Acquire) {
+                    while let Ok(event) = credential_events.try_recv() {
+                        let _ = credentials_inner.notices.send(HostNotification::CredentialsChanged(event));
+                    }
                     break;
                 }
                 tokio::select! {
@@ -1180,7 +1191,12 @@ impl HostHandle {
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
-                    _ = credentials_inner.relay_stop.notified() => break,
+                    _ = credentials_inner.relay_stop.notified() => {
+                        while let Ok(event) = credential_events.try_recv() {
+                            let _ = credentials_inner.notices.send(HostNotification::CredentialsChanged(event));
+                        }
+                        break;
+                    },
                 }
             }
         });
