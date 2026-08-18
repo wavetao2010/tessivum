@@ -353,7 +353,7 @@ struct CountingAnswerer(AtomicUsize);
 impl ApprovalAnswerer for CountingAnswerer {
     async fn answer(
         &self,
-        _: ApprovalRequest,
+        _: ApprovalAsked,
         _: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -377,7 +377,7 @@ struct ThrowingAnswerer;
 impl ApprovalAnswerer for ThrowingAnswerer {
     async fn answer(
         &self,
-        _: ApprovalRequest,
+        _: ApprovalAsked,
         _: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
         Err(TessivumError::new(
@@ -398,7 +398,7 @@ struct WaitingAnswerer {
 impl ApprovalAnswerer for WaitingAnswerer {
     async fn answer(
         &self,
-        _: ApprovalRequest,
+        _: ApprovalAsked,
         _: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
         self.entered.notify_one();
@@ -413,7 +413,7 @@ struct PanickingAnswerer;
 impl ApprovalAnswerer for PanickingAnswerer {
     async fn answer(
         &self,
-        _: ApprovalRequest,
+        _: ApprovalAsked,
         _: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
         panic!("answerer panic");
@@ -430,7 +430,7 @@ struct GateHoldingAnswerer {
 impl ApprovalAnswerer for GateHoldingAnswerer {
     async fn answer(
         &self,
-        _: ApprovalRequest,
+        _: ApprovalAsked,
         cancellation: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
         let approvals = self.approvals.clone();
@@ -538,7 +538,7 @@ struct ReentrantAnswerer {
 impl ApprovalAnswerer for ReentrantAnswerer {
     async fn answer(
         &self,
-        _: ApprovalRequest,
+        _: ApprovalAsked,
         cancellation: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
         self.approvals
@@ -995,6 +995,9 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
         ))
         .unwrap();
 
+    let unavailable = host_approvals
+        .register_answerer(&session_id, Arc::new(ThrowingAnswerer))
+        .unwrap();
     let denied = asked_tools
         .execute(
             ToolRunContext {
@@ -1008,6 +1011,7 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
         .await;
     assert!(denied.is_error);
     assert_eq!(calls.0.load(Ordering::SeqCst), 0);
+    unavailable.close();
 
     let _answerer = host_approvals
         .register_answerer(&session_id, Arc::new(CountingAnswerer(AtomicUsize::new(0))))
@@ -1073,8 +1077,14 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
         Some("no-answer")
     );
     assert_eq!(asked[0].reason, None);
+    assert_eq!(asked[0].session_id, session_id);
     assert!(!asked[0].approval_id.as_str().is_empty());
     assert_eq!(asked[0].approval_id, decided[0].approval_id);
+    assert_ne!(asked[0].approval_id, asked[1].approval_id);
+    assert_eq!(
+        asked[1].call_id.as_ref().map(ToolCallId::as_str),
+        Some("allowed-once")
+    );
     assert_eq!(asked[1].approval_id, decided[1].approval_id);
     assert_eq!(decided[0].outcome, ApprovalOutcome::Unavailable);
     assert_eq!(decided[1].outcome, ApprovalOutcome::AllowedOnce);
@@ -1099,4 +1109,212 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
     assert!(host_approvals.lookup(&session_id).is_some());
     drop(replacement_slot);
     replacement.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
+    let (agent, _registry) = agent("approval-browser-pending").await;
+    let session = agent.session();
+    let session_id = session.id();
+    append_turn_start(&session, 1).await;
+    let authority = agent.authority();
+    let approvals = ApprovalService::new(agent).unwrap();
+    let browser = HostApprovalRegistry::new();
+    let _slot = browser.install(&authority, approvals.clone()).unwrap();
+    let mut notices = browser.subscribe();
+
+    let first = tokio::spawn({
+        let approvals = approvals.clone();
+        async move {
+            approvals
+                .approve(
+                    ApprovalRequest {
+                        action: "identical".into(),
+                        details: json!({"private": "never on wire"}),
+                    },
+                    cancellation(),
+                )
+                .await
+        }
+    });
+    let asked = loop {
+        if let Some(asked) = session.events().into_iter().find_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+        }) {
+            break asked;
+        }
+        tokio::task::yield_now().await;
+    };
+    browser.observe_asked(&asked);
+    let requested = browser.snapshots().pop().unwrap();
+    assert_eq!(requested.session_id, session_id);
+    assert_eq!(requested.approval_id, asked.approval_id);
+    assert_eq!(requested.tool_name, "identical");
+    assert!(requested.call_id.is_none());
+    assert!(requested.reason.is_none());
+    let notice = notices.recv().await.unwrap();
+    assert!(matches!(notice, tessivum::approval::ApprovalNotification::Requested(value) if value.rpc_id == requested.rpc_id));
+
+    assert!(!browser
+        .respond(
+            &requested.rpc_id,
+            &SessionId::from("wrong-session"),
+            &requested.approval_id,
+            ApprovalOutcome::AllowedOnce,
+        )
+        .accepted);
+    assert!(browser
+        .respond(
+            &requested.rpc_id,
+            &requested.session_id,
+            &requested.approval_id,
+            ApprovalOutcome::AllowedOnce,
+        )
+        .accepted);
+    assert!(!browser
+        .respond(
+            &requested.rpc_id,
+            &requested.session_id,
+            &requested.approval_id,
+            ApprovalOutcome::Rejected,
+        )
+        .accepted);
+    assert_eq!(first.await.unwrap(), ApprovalOutcome::AllowedOnce);
+    let decision = session
+        .events()
+        .into_iter()
+        .rev()
+        .find_map(|event| {
+            (event.event_type == "approval/decided")
+                .then(|| serde_json::from_value::<ApprovalDecision>(event.data).unwrap())
+        })
+        .unwrap();
+    assert_eq!(decision.approval_id, requested.approval_id);
+    browser.observe_decided(&session_id, &decision);
+    assert!(browser.snapshots().is_empty());
+    assert!(matches!(notices.recv().await.unwrap(), tessivum::approval::ApprovalNotification::Resolved(value) if value.approval_id == requested.approval_id && value.outcome == ApprovalOutcome::AllowedOnce));
+
+    let second = tokio::spawn({
+        let approvals = approvals.clone();
+        async move {
+            approvals
+                .approve(
+                    ApprovalRequest {
+                        action: "identical".into(),
+                        details: json!({"private": "still never on wire"}),
+                    },
+                    cancellation(),
+                )
+                .await
+        }
+    });
+    let rejected_asked = loop {
+        if let Some(asked) = session.events().into_iter().rev().find_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+                .filter(|asked| asked.approval_id != requested.approval_id)
+        }) {
+            break asked;
+        }
+        tokio::task::yield_now().await;
+    };
+    browser.observe_asked(&rejected_asked);
+    let rejected = browser.snapshots().pop().unwrap();
+    assert_ne!(rejected.approval_id, requested.approval_id);
+    assert!(browser
+        .respond(
+            &rejected.rpc_id,
+            &rejected.session_id,
+            &rejected.approval_id,
+            ApprovalOutcome::Rejected,
+        )
+        .accepted);
+    assert_eq!(second.await.unwrap(), ApprovalOutcome::Rejected);
+}
+
+#[tokio::test]
+async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
+    let (agent, _registry) = agent("approval-pending-cap").await;
+    let session = agent.session();
+    let session_id = session.id();
+    append_turn_start(&session, 1).await;
+    let authority = agent.authority();
+    let approvals = ApprovalService::new(agent).unwrap();
+    let browser = HostApprovalRegistry::with_limits(1, Duration::from_millis(50));
+    let _slot = browser.install(&authority, approvals.clone()).unwrap();
+
+    let first = tokio::spawn({
+        let approvals = approvals.clone();
+        async move {
+            approvals
+                .approve(ApprovalRequest { action: "one".into(), details: json!({}) }, cancellation())
+                .await
+        }
+    });
+    let first_asked = loop {
+        if let Some(asked) = session.events().into_iter().find_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+        }) {
+            break asked;
+        }
+        tokio::task::yield_now().await;
+    };
+    browser.observe_asked(&first_asked);
+    let stable_rpc_id = browser.snapshots().pop().unwrap().rpc_id;
+    assert_eq!(browser.snapshots().pop().unwrap().rpc_id, stable_rpc_id);
+    assert_eq!(
+        approvals
+            .approve(ApprovalRequest { action: "two".into(), details: json!({}) }, cancellation())
+            .await,
+        ApprovalOutcome::Unavailable
+    );
+    let first_outcome = tokio::time::timeout(Duration::from_secs(1), first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_outcome, ApprovalOutcome::Unavailable);
+    let first_decision = session
+        .events()
+        .into_iter()
+        .rev()
+        .find_map(|event| {
+            (event.event_type == "approval/decided")
+                .then(|| serde_json::from_value::<ApprovalDecision>(event.data).unwrap())
+                .filter(|decision| decision.approval_id == first_asked.approval_id)
+        })
+        .unwrap();
+    browser.observe_decided(&session_id, &first_decision);
+
+    let cancelled = tokio::spawn({
+        let approvals = approvals.clone();
+        async move {
+            approvals
+                .approve(ApprovalRequest { action: "three".into(), details: json!({}) }, cancellation())
+                .await
+        }
+    });
+    let cancelled_asked = loop {
+        if let Some(asked) = session.events().into_iter().rev().find_map(|event| {
+            (event.event_type == "approval/asked")
+                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+                .filter(|asked| asked.tool_name == "three")
+        }) {
+            break asked;
+        }
+        tokio::task::yield_now().await;
+    };
+    browser.observe_asked(&cancelled_asked);
+    let pending = browser.snapshots().pop().unwrap();
+    browser.cancel_session(&session_id);
+    assert!(!browser
+        .respond(
+            &pending.rpc_id,
+            &pending.session_id,
+            &pending.approval_id,
+            ApprovalOutcome::AllowedOnce,
+        )
+        .accepted);
+    assert_eq!(cancelled.await.unwrap(), ApprovalOutcome::Cancelled);
 }

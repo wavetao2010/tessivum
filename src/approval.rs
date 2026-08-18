@@ -1,12 +1,13 @@
 //! Fail-closed, durable approval decisions and deny-only scoped hooks.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard, Weak,
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -15,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
 use thiserror::Error;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::{
+    sync::{broadcast, oneshot, Mutex as AsyncMutex},
+    time::{sleep_until, Instant},
+};
 
 use crate::{
     agent::{same_authority, AgentAuthority, AgentHandle},
@@ -56,7 +60,7 @@ impl ApprovalOutcome {
 }
 
 /// Opaque durable identity joining one asked event to its final decision.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ApprovalId(String);
 
@@ -106,6 +110,8 @@ pub struct ApprovalPolicyChange {
 pub struct ApprovalAsked {
     #[serde(default)]
     pub approval_id: ApprovalId,
+    #[serde(default = "missing_session_id")]
+    pub session_id: SessionId,
     pub turn: u64,
     pub policy: ApprovalPolicy,
     pub request: ApprovalRequest,
@@ -132,7 +138,7 @@ pub struct ApprovalDecision {
 pub trait ApprovalAnswerer: Send + Sync {
     async fn answer(
         &self,
-        request: ApprovalRequest,
+        asked: ApprovalAsked,
         cancellation: CancellationToken,
     ) -> Result<Option<bool>, TessivumError>;
 }
@@ -144,10 +150,10 @@ where
 {
     async fn answer(
         &self,
-        request: ApprovalRequest,
+        asked: ApprovalAsked,
         cancellation: CancellationToken,
     ) -> Result<Option<bool>, TessivumError> {
-        (**self).answer(request, cancellation).await
+        (**self).answer(asked, cancellation).await
     }
 }
 
@@ -181,13 +187,13 @@ pub enum ApprovalError {
     Session(#[from] SessionError),
 }
 
-#[derive(Default)]
 struct ApprovalState {
     policy: ApprovalPolicy,
     next_step: Option<ApprovalPolicy>,
     next_id: u64,
     pending_decisions: BTreeSet<u64>,
     answerers: BTreeMap<u64, Arc<dyn ApprovalAnswerer>>,
+    host_answerers: BTreeMap<u64, Arc<dyn ApprovalAnswerer>>,
     hooks: BTreeMap<u64, Arc<dyn ApprovalHook>>,
 }
 
@@ -326,6 +332,22 @@ impl ApprovalService {
         ))
     }
 
+    /// Registers the host authority after ordinary answerers so trusted local
+    /// integrations can still answer without entering the browser flow.
+    fn register_host_answerer(
+        &self,
+        owner: &AgentAuthority,
+        answerer: Arc<dyn ApprovalAnswerer>,
+    ) -> Result<ApprovalRegistration, ApprovalError> {
+        self.require_owner(owner)?;
+        let id = next_id(&mut lock(&self.inner.state));
+        lock(&self.inner.state).host_answerers.insert(id, answerer);
+        Ok(ApprovalRegistration::host_answerer(
+            Arc::downgrade(&self.inner),
+            id,
+        ))
+    }
+
     /// Registers an owner-scoped deny-only hook until the returned handle is closed or dropped.
     pub fn register_hook(
         &self,
@@ -368,7 +390,7 @@ impl ApprovalService {
         };
         let approval_id = ApprovalId::random();
 
-        let (generation, policy, hooks, answerers) = {
+        let (generation, policy, hooks, answerers, asked) = {
             let _gate = self.inner.write_gate.lock().await;
             if cancellation.is_cancelled() {
                 return ApprovalOutcome::Cancelled;
@@ -383,11 +405,17 @@ impl ApprovalService {
                 let consumes_next_step = state.next_step.is_some();
                 let policy = state.next_step.unwrap_or(state.policy);
                 let hooks = state.hooks.values().cloned().collect::<Vec<_>>();
-                let answerers = state.answerers.values().cloned().collect::<Vec<_>>();
+                let answerers = state
+                    .answerers
+                    .values()
+                    .chain(state.host_answerers.values())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 (generation, policy, consumes_next_step, hooks, answerers)
             };
             let asked = ApprovalAsked {
                 approval_id: approval_id.clone(),
+                session_id: self.inner.authority.id(),
                 turn,
                 policy,
                 request: request.clone(),
@@ -398,7 +426,7 @@ impl ApprovalService {
             if append(
                 &self.inner.session,
                 "approval/asked",
-                serde_json::to_value(asked).expect("approval request is serializable"),
+                serde_json::to_value(asked.clone()).expect("approval request is serializable"),
                 cancellation.clone(),
             )
             .await
@@ -411,14 +439,14 @@ impl ApprovalService {
                 state.next_step = None;
             }
             state.pending_decisions.insert(generation);
-            (generation, policy, hooks, answerers)
+            (generation, policy, hooks, answerers, asked)
         };
 
         // Hooks and answerers may re-enter this service, so the write gate is released here.
         let outcome = if cancellation.is_cancelled() {
             ApprovalOutcome::Cancelled
         } else if hooks.iter().any(|hook| {
-            catch_unwind(AssertUnwindSafe(|| hook.deny(&request)))
+            catch_unwind(AssertUnwindSafe(|| hook.deny(&asked.request)))
                 .map_or(true, |denial| denial.is_some())
         }) {
             ApprovalOutcome::Rejected
@@ -430,7 +458,7 @@ impl ApprovalService {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => ApprovalOutcome::Cancelled,
-                        answer = waterfall(answerers, request, cancellation.clone()) => answer,
+                        answer = waterfall(answerers, asked, cancellation.clone()) => answer,
                     }
                 }
             }
@@ -508,9 +536,9 @@ pub struct ApprovalRegistration {
     closed: AtomicBool,
 }
 
-#[derive(Clone, Copy)]
 enum RegistrationKind {
     Answerer,
+    HostAnswerer,
     Hook,
 }
 
@@ -520,6 +548,15 @@ impl ApprovalRegistration {
             inner,
             id,
             kind: RegistrationKind::Answerer,
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn host_answerer(inner: Weak<ApprovalInner>, id: u64) -> Self {
+        Self {
+            inner,
+            id,
+            kind: RegistrationKind::HostAnswerer,
             closed: AtomicBool::new(false),
         }
     }
@@ -544,6 +581,9 @@ impl ApprovalRegistration {
         match self.kind {
             RegistrationKind::Answerer => {
                 state.answerers.remove(&self.id);
+            }
+            RegistrationKind::HostAnswerer => {
+                state.host_answerers.remove(&self.id);
             }
             RegistrationKind::Hook => {
                 state.hooks.remove(&self.id);
@@ -570,16 +610,116 @@ pub enum HostApprovalError {
     Approval(#[from] ApprovalError),
 }
 
+pub const DEFAULT_MAX_PENDING_APPROVALS: usize = 256;
+pub const DEFAULT_APPROVAL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Minimal browser-visible metadata. Tool arguments deliberately never cross
+/// this authority boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequested {
+    pub rpc_id: String,
+    pub session_id: SessionId,
+    pub approval_id: ApprovalId,
+    pub tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<ToolCallId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// A final host-side notice emitted only after the matching decision is durable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalResolved {
+    pub rpc_id: String,
+    pub session_id: SessionId,
+    pub approval_id: ApprovalId,
+    pub outcome: ApprovalOutcome,
+}
+
+#[derive(Clone, Debug)]
+pub enum ApprovalNotification {
+    Requested(ApprovalRequested),
+    Resolved(ApprovalResolved),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RpcReceiptReason {
+    NotPending,
+    BadResponse,
+}
+
+/// The exceptional raw receipt returned by `/api/respond`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcReceipt {
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RpcReceiptReason>,
+}
+
+impl RpcReceipt {
+    fn accepted() -> Self {
+        Self {
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn not_pending() -> Self {
+        Self {
+            accepted: false,
+            reason: Some(RpcReceiptReason::NotPending),
+        }
+    }
+
+    pub fn bad_response() -> Self {
+        Self {
+            accepted: false,
+            reason: Some(RpcReceiptReason::BadResponse),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PendingKey {
+    session_id: SessionId,
+    approval_id: ApprovalId,
+}
+
+struct PendingInteraction {
+    requested: ApprovalRequested,
+    authority: AgentAuthority,
+    cancellation: CancellationToken,
+    sender: Option<oneshot::Sender<ApprovalOutcome>>,
+    deadline: Instant,
+    claimed: bool,
+}
+
+#[derive(Default)]
+struct PendingState {
+    entries: BTreeMap<String, PendingInteraction>,
+    relayed_asked: BTreeSet<PendingKey>,
+    relayed_order: VecDeque<PendingKey>,
+}
+
 struct HostApprovalSlot {
     authority: AgentAuthority,
     approvals: ApprovalService,
+    _answerer: ApprovalRegistration,
 }
 
 struct HostApprovalRegistryInner {
     slots: Mutex<BTreeMap<SessionId, HostApprovalSlot>>,
+    pending: Mutex<PendingState>,
+    notices: broadcast::Sender<ApprovalNotification>,
+    max_pending: usize,
+    deadline: Duration,
 }
 
-/// Host-wide router for approval services owned by exact live agent generations.
+/// Host-wide, generation-bound authority for pending browser approvals.
 #[derive(Clone)]
 pub struct HostApprovalRegistry {
     inner: Arc<HostApprovalRegistryInner>,
@@ -593,14 +733,27 @@ impl Default for HostApprovalRegistry {
 
 impl HostApprovalRegistry {
     pub fn new() -> Self {
+        Self::with_limits(DEFAULT_MAX_PENDING_APPROVALS, DEFAULT_APPROVAL_DEADLINE)
+    }
+
+    pub fn with_limits(max_pending: usize, deadline: Duration) -> Self {
+        let (notices, _) = broadcast::channel(DEFAULT_MAX_PENDING_APPROVALS);
         Self {
             inner: Arc::new(HostApprovalRegistryInner {
                 slots: Mutex::new(BTreeMap::new()),
+                pending: Mutex::new(PendingState::default()),
+                notices,
+                max_pending,
+                deadline,
             }),
         }
     }
 
-    /// Installs the only service slot for one exact live agent generation.
+    pub fn subscribe(&self) -> broadcast::Receiver<ApprovalNotification> {
+        self.inner.notices.subscribe()
+    }
+
+    /// Installs the only service slot and its browser answerer for one exact live generation.
     pub fn install(
         &self,
         owner: &AgentAuthority,
@@ -613,6 +766,14 @@ impl HostApprovalRegistry {
             return Err(HostApprovalError::OwnerMismatch);
         }
         let session = owner.id();
+        let answerer = approvals.register_host_answerer(
+            owner,
+            Arc::new(HostRegistryAnswerer {
+                registry: Arc::downgrade(&self.inner),
+                session: session.clone(),
+                authority: owner.clone(),
+            }),
+        )?;
         let mut slots = lock(&self.inner.slots);
         if slots.contains_key(&session) {
             return Err(HostApprovalError::AlreadyInstalled);
@@ -622,6 +783,7 @@ impl HostApprovalRegistry {
             HostApprovalSlot {
                 authority: owner.clone(),
                 approvals,
+                _answerer: answerer,
             },
         );
         Ok(HostApprovalRegistration {
@@ -641,7 +803,7 @@ impl HostApprovalRegistry {
             .map(|slot| slot.approvals.clone())
     }
 
-    /// Registers an API-owned answerer against the current exact agent generation.
+    /// Registers a trusted local answerer against the current exact generation.
     pub fn register_answerer(
         &self,
         session: &SessionId,
@@ -659,6 +821,210 @@ impl HostApprovalRegistry {
         };
         Ok(approvals.register_answerer(&authority, answerer)?)
     }
+
+    /// Current unclaimed requests are replayed to a reconnecting mux client with their original rpc ids.
+    pub fn snapshots(&self) -> Vec<ApprovalRequested> {
+        let now = Instant::now();
+        lock(&self.inner.pending)
+            .entries
+            .values()
+            .filter(|entry| !entry.claimed && entry.deadline > now)
+            .map(|entry| entry.requested.clone())
+            .collect()
+    }
+
+    /// First valid browser response wins. Mismatches never disclose or mutate a pending request.
+    pub fn respond(
+        &self,
+        rpc_id: &str,
+        session_id: &SessionId,
+        approval_id: &ApprovalId,
+        outcome: ApprovalOutcome,
+    ) -> RpcReceipt {
+        if !matches!(outcome, ApprovalOutcome::AllowedOnce | ApprovalOutcome::Rejected) {
+            return RpcReceipt::bad_response();
+        }
+        let sender = {
+            let mut pending = lock(&self.inner.pending);
+            let Some(entry) = pending.entries.get_mut(rpc_id) else {
+                return RpcReceipt::not_pending();
+            };
+            if entry.claimed || entry.deadline <= Instant::now() {
+                return RpcReceipt::not_pending();
+            }
+            if &entry.requested.session_id != session_id
+                || &entry.requested.approval_id != approval_id
+            {
+                return RpcReceipt::bad_response();
+            }
+            entry.claimed = true;
+            entry.sender.take()
+        };
+        if sender.is_some_and(|sender| sender.send(outcome).is_err()) {
+            return RpcReceipt::not_pending();
+        }
+        RpcReceipt::accepted()
+    }
+
+    /// Called by the host's durable session relay after it has published the asked event.
+    pub fn observe_asked(&self, asked: &ApprovalAsked) {
+        let key = pending_key(asked);
+        let requested = {
+            let mut pending = lock(&self.inner.pending);
+            remember_relayed_asked(&mut pending, key.clone(), self.inner.max_pending);
+            pending
+                .entries
+                .values()
+                .find(|entry| pending_key_from_requested(&entry.requested) == key && !entry.claimed)
+                .map(|entry| entry.requested.clone())
+        };
+        if let Some(requested) = requested {
+            let _ = self.inner.notices.send(ApprovalNotification::Requested(requested));
+        }
+    }
+
+    /// Called by the host's durable session relay after it has published the decision event.
+    pub fn observe_decided(&self, session_id: &SessionId, decision: &ApprovalDecision) {
+        let rpc_id = {
+            let pending = lock(&self.inner.pending);
+            pending.entries.iter().find_map(|(rpc_id, entry)| {
+                (entry.requested.session_id == *session_id
+                    && entry.requested.approval_id == decision.approval_id)
+                    .then(|| rpc_id.clone())
+            })
+        };
+        let resolved = rpc_id
+            .and_then(|rpc_id| lock(&self.inner.pending).entries.remove(&rpc_id))
+            .map(|entry| ApprovalResolved {
+                rpc_id: entry.requested.rpc_id,
+                session_id: entry.requested.session_id,
+                approval_id: entry.requested.approval_id,
+                outcome: decision.outcome,
+            });
+        if let Some(resolved) = resolved {
+            let _ = self.inner.notices.send(ApprovalNotification::Resolved(resolved));
+        }
+    }
+
+    /// Cancellation is an authority decision: browser responses arriving afterwards are not pending.
+    pub fn cancel_session(&self, session: &SessionId) {
+        cancel_pending(&self.inner, |entry| &entry.requested.session_id == session);
+    }
+
+    pub fn cancel_all(&self) {
+        cancel_pending(&self.inner, |_| true);
+    }
+
+    async fn answer(
+        &self,
+        session: &SessionId,
+        authority: &AgentAuthority,
+        asked: ApprovalAsked,
+        cancellation: CancellationToken,
+    ) -> Result<Option<bool>, TessivumError> {
+        let Some((receiver, deadline)) = self.register_pending(session, authority, &asked, cancellation.clone()) else {
+            return Ok(None);
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Ok(None),
+            answer = receiver => Ok(match answer {
+                Ok(ApprovalOutcome::AllowedOnce) => Some(true),
+                Ok(ApprovalOutcome::Rejected) => Some(false),
+                Ok(ApprovalOutcome::Cancelled | ApprovalOutcome::Unavailable) | Err(_) => None,
+            }),
+            _ = sleep_until(deadline) => {
+                self.claim_timeout(&asked.approval_id, session);
+                Ok(None)
+            }
+        }
+    }
+
+    fn register_pending(
+        &self,
+        session: &SessionId,
+        authority: &AgentAuthority,
+        asked: &ApprovalAsked,
+        cancellation: CancellationToken,
+    ) -> Option<(oneshot::Receiver<ApprovalOutcome>, Instant)> {
+        if asked.session_id != *session || asked.approval_id.as_str().is_empty() {
+            return None;
+        }
+        let (sender, receiver) = oneshot::channel();
+        let deadline = Instant::now() + self.inner.deadline;
+        let requested = ApprovalRequested {
+            rpc_id: uuid::Uuid::new_v4().to_string(),
+            session_id: session.clone(),
+            approval_id: asked.approval_id.clone(),
+            tool_name: asked.tool_name.clone(),
+            call_id: asked.call_id.clone(),
+            reason: asked.reason.clone(),
+        };
+        let emit = {
+            let slots = lock(&self.inner.slots);
+            let slot = slots.get(session)?;
+            if !same_authority(&slot.authority, authority) || !authority.is_live() {
+                return None;
+            }
+            let mut pending = lock(&self.inner.pending);
+            if self.inner.max_pending == 0 || pending.entries.len() >= self.inner.max_pending {
+                return None;
+            }
+            let key = pending_key(asked);
+            let emit = pending.relayed_asked.contains(&key);
+            pending.entries.insert(
+                requested.rpc_id.clone(),
+                PendingInteraction {
+                    requested: requested.clone(),
+                    authority: authority.clone(),
+                    cancellation,
+                    sender: Some(sender),
+                    deadline,
+                    claimed: false,
+                },
+            );
+            emit
+        };
+        if emit {
+            let _ = self
+                .inner
+                .notices
+                .send(ApprovalNotification::Requested(requested));
+        }
+        Some((receiver, deadline))
+    }
+
+    fn claim_timeout(&self, approval_id: &ApprovalId, session: &SessionId) {
+        let mut pending = lock(&self.inner.pending);
+        if let Some(entry) = pending.entries.values_mut().find(|entry| {
+            entry.requested.session_id == *session && entry.requested.approval_id == *approval_id
+        }) {
+            entry.claimed = true;
+            entry.sender.take();
+        }
+    }
+}
+
+struct HostRegistryAnswerer {
+    registry: Weak<HostApprovalRegistryInner>,
+    session: SessionId,
+    authority: AgentAuthority,
+}
+
+#[async_trait]
+impl ApprovalAnswerer for HostRegistryAnswerer {
+    async fn answer(
+        &self,
+        asked: ApprovalAsked,
+        cancellation: CancellationToken,
+    ) -> Result<Option<bool>, TessivumError> {
+        let Some(inner) = self.registry.upgrade() else {
+            return Ok(None);
+        };
+        HostApprovalRegistry { inner }
+            .answer(&self.session, &self.authority, asked, cancellation)
+            .await
+    }
 }
 
 /// Lifetime owner of one exact host approval service slot.
@@ -675,7 +1041,10 @@ impl HostApprovalRegistration {
         if self.closed.swap(true, Ordering::AcqRel) {
             return false;
         }
-        self.inner.upgrade().is_some_and(|inner| {
+        let Some(inner) = self.inner.upgrade() else {
+            return false;
+        };
+        let removed = {
             let mut slots = lock(&inner.slots);
             if slots
                 .get(&self.session)
@@ -686,7 +1055,11 @@ impl HostApprovalRegistration {
             } else {
                 false
             }
-        })
+        };
+        if removed {
+            cancel_pending(&inner, |entry| same_authority(&entry.authority, &self.authority));
+        }
+        removed
     }
 }
 
@@ -720,6 +1093,43 @@ impl ToolApproval for HostApprovalRegistry {
             )
             .await;
         Ok(Some(outcome.allows()))
+    }
+}
+
+fn pending_key(asked: &ApprovalAsked) -> PendingKey {
+    PendingKey {
+        session_id: asked.session_id.clone(),
+        approval_id: asked.approval_id.clone(),
+    }
+}
+
+fn pending_key_from_requested(requested: &ApprovalRequested) -> PendingKey {
+    PendingKey {
+        session_id: requested.session_id.clone(),
+        approval_id: requested.approval_id.clone(),
+    }
+}
+
+fn remember_relayed_asked(state: &mut PendingState, key: PendingKey, limit: usize) {
+    if limit == 0 || !state.relayed_asked.insert(key.clone()) {
+        return;
+    }
+    state.relayed_order.push_back(key);
+    while state.relayed_order.len() > limit {
+        if let Some(oldest) = state.relayed_order.pop_front() {
+            state.relayed_asked.remove(&oldest);
+        }
+    }
+}
+
+fn cancel_pending(inner: &HostApprovalRegistryInner, matches: impl Fn(&PendingInteraction) -> bool) {
+    let mut pending = lock(&inner.pending);
+    for entry in pending.entries.values_mut().filter(|entry| matches(entry)) {
+        if !entry.claimed {
+            entry.claimed = true;
+            entry.cancellation.cancel();
+            entry.sender.take();
+        }
     }
 }
 
@@ -757,11 +1167,11 @@ impl ToolApproval for ApprovalToolGate {
 
 async fn waterfall(
     answerers: Vec<Arc<dyn ApprovalAnswerer>>,
-    request: ApprovalRequest,
+    asked: ApprovalAsked,
     cancellation: CancellationToken,
 ) -> ApprovalOutcome {
     for answerer in answerers {
-        match AssertUnwindSafe(answerer.answer(request.clone(), cancellation.clone()))
+        match AssertUnwindSafe(answerer.answer(asked.clone(), cancellation.clone()))
             .catch_unwind()
             .await
         {
@@ -820,6 +1230,10 @@ fn check_cancellation(cancellation: &CancellationToken) -> Result<(), ApprovalEr
     } else {
         Ok(())
     }
+}
+
+fn missing_session_id() -> SessionId {
+    SessionId::from("")
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

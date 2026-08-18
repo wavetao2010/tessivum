@@ -4,7 +4,7 @@
 //! authority for admission, event replay, and cancellation.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     fs,
     future::Future,
@@ -44,6 +44,7 @@ use tokio::{
 };
 
 use crate::{
+    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
     frontend::FrontendStatic,
     host::{HostApi, HostDescriptor, HostNotification},
     protocol::{
@@ -191,6 +192,7 @@ fn router_with_shutdown(
         .route("/ws", get(websocket_upgrade))
         .route("/api/events.mux", get(compat_events_mux))
         .route("/api/events.host", get(compat_events_host))
+        .route("/api/respond", post(compat_approval_response).fallback(method_not_allowed))
         .route(
             "/api/{method}",
             post(compat_unary).fallback(method_not_allowed),
@@ -277,6 +279,7 @@ enum CompatStream {
 #[derive(Clone)]
 struct CompatFrame {
     stream: CompatStream,
+    rpc_id: Option<String>,
     payload: Value,
 }
 
@@ -336,7 +339,11 @@ fn compat_data(state: &CompatibilityState) -> std::sync::MutexGuard<'_, Compatib
 }
 
 fn broadcast_compat(state: &CompatibilityState, stream: CompatStream, payload: Value) {
-    let _ = state.frames.send(CompatFrame { stream, payload });
+    let _ = state.frames.send(CompatFrame {
+        stream,
+        rpc_id: None,
+        payload,
+    });
 }
 
 async fn api_not_found() -> Response {
@@ -485,6 +492,30 @@ struct CompatRequestEnvelope {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatClientResponse {
+    #[serde(rename = "type")]
+    response_type: String,
+    rpc_id: String,
+    result: CompatApprovalResult,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatApprovalResult {
+    ok: bool,
+    value: CompatApprovalValue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatApprovalValue {
+    session_id: SessionId,
+    approval_id: ApprovalId,
+    outcome: ApprovalOutcome,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompatEmptyPayload {}
 
@@ -571,6 +602,42 @@ enum CompatPromptContent {
         data: String,
         name: Option<String>,
     },
+}
+
+async fn compat_approval_response(State(state): State<ApiState>, request: Request) -> Response {
+    if !is_json(request.headers()) || content_length_exceeds(request.headers(), MAX_FRAME_BYTES) {
+        return compat_receipt(RpcReceipt::bad_response());
+    }
+    let body = match to_bytes(request.into_body(), MAX_FRAME_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return compat_receipt(RpcReceipt::bad_response()),
+    };
+    let response: CompatClientResponse = match serde_json::from_slice(&body) {
+        Ok(response) => response,
+        Err(_) => return compat_receipt(RpcReceipt::bad_response()),
+    };
+    if response.response_type != "client-response"
+        || !response.result.ok
+        || validate_request_id(&response.rpc_id).is_err()
+    {
+        return compat_receipt(RpcReceipt::bad_response());
+    }
+    let receipt = state.host.approval_registry().map_or_else(
+        RpcReceipt::not_pending,
+        |registry| {
+            registry.respond(
+                &response.rpc_id,
+                &response.result.value.session_id,
+                &response.result.value.approval_id,
+                response.result.value.outcome,
+            )
+        },
+    );
+    compat_receipt(receipt)
+}
+
+fn compat_receipt(receipt: RpcReceipt) -> Response {
+    (StatusCode::OK, Json(receipt)).into_response()
 }
 
 async fn compat_unary(
@@ -1142,6 +1209,26 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
     let mut frames = state.compat.frames.subscribe();
     let mut notifications = state.host.subscribe();
     let mut shutdown = state.socket_shutdown.subscribe();
+    let mut replayed_approvals = BTreeSet::new();
+    if stream_kind == CompatStream::Mux {
+        if let Some(registry) = state.host.approval_registry() {
+            for requested in registry.snapshots() {
+                if !replayed_approvals.insert(requested.rpc_id.clone()) {
+                    continue;
+                }
+                let message = match compat_ws_message(
+                    approval_requested_payload(&requested),
+                    Some(&requested.rpc_id),
+                ) {
+                    Ok(message) => message,
+                    Err(_) => return,
+                };
+                if !compat_socket_send(&mut socket, message).await {
+                    return;
+                }
+            }
+        }
+    }
     loop {
         tokio::select! {
             _ = shutdown.recv() => return,
@@ -1155,9 +1242,9 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
             },
             frame = frames.recv() => match frame {
                 Ok(frame) if frame.stream == stream_kind => {
-                    let message = match compat_ws_message(frame.payload) {
+                    let message = match compat_ws_message(frame.payload, frame.rpc_id.as_deref()) {
                         Ok(message) => message,
-                        Err(message) => compat_ws_message(compat_stream_error_payload(message))
+                        Err(message) => compat_ws_message(compat_stream_error_payload(message), None)
                             .expect("stream error frame is bounded"),
                     };
                     if !compat_socket_send(&mut socket, message).await { return; }
@@ -1166,7 +1253,7 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
                 Err(broadcast::error::RecvError::Lagged(dropped)) => {
                     let message = compat_ws_message(compat_stream_error_payload(format!(
                         "{dropped} compatibility frames were dropped"
-                    ))).expect("stream error frame is bounded");
+                    )), None).expect("stream error frame is bounded");
                     let _ = compat_socket_send(&mut socket, message).await;
                     return;
                 }
@@ -1174,11 +1261,22 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
             },
             notification = notifications.recv() => match notification {
                 Ok(notification) => {
+                    match &notification {
+                        HostNotification::ApprovalRequested(requested) if stream_kind == CompatStream::Mux => {
+                            if !replayed_approvals.insert(requested.rpc_id.clone()) {
+                                continue;
+                            }
+                        }
+                        HostNotification::ApprovalResolved(resolved) if stream_kind == CompatStream::Mux => {
+                            replayed_approvals.remove(&resolved.rpc_id);
+                        }
+                        _ => {}
+                    }
                     if let Some(frame) = compat_notification(&state, notification) {
                         if frame.stream == stream_kind {
-                            let message = match compat_ws_message(frame.payload) {
+                            let message = match compat_ws_message(frame.payload, frame.rpc_id.as_deref()) {
                                 Ok(message) => message,
-                                Err(message) => compat_ws_message(compat_stream_error_payload(message))
+                                Err(message) => compat_ws_message(compat_stream_error_payload(message), None)
                                     .expect("stream error frame is bounded"),
                             };
                             if !compat_socket_send(&mut socket, message).await { return; }
@@ -1188,7 +1286,7 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
                 Err(broadcast::error::RecvError::Lagged(dropped)) => {
                     let message = compat_ws_message(compat_stream_error_payload(format!(
                         "{dropped} host notifications were dropped"
-                    ))).expect("stream error frame is bounded");
+                    )), None).expect("stream error frame is bounded");
                     let _ = compat_socket_send(&mut socket, message).await;
                     return;
                 }
@@ -1208,6 +1306,7 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
     match notification {
         HostNotification::SessionEvent(notification) => Some(CompatFrame {
             stream: CompatStream::Mux,
+            rpc_id: None,
             payload: json!({
                 "type": "session/event",
                 "sessionId": notification.session_id,
@@ -1224,6 +1323,7 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
             }
             Some(CompatFrame {
                 stream: CompatStream::Host,
+                rpc_id: None,
                 payload: json!({
                     "type": "host/session-status",
                     "sessionId": notification.session_id,
@@ -1231,18 +1331,49 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
                 }),
             })
         }
+        HostNotification::ApprovalRequested(requested) => Some(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: Some(requested.rpc_id.clone()),
+            payload: approval_requested_payload(&requested),
+        }),
+        HostNotification::ApprovalResolved(resolved) => Some(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "approval/resolved",
+                "sessionId": resolved.session_id,
+                "approvalId": resolved.approval_id,
+                "outcome": resolved.outcome,
+            }),
+        }),
         HostNotification::SubagentStarted(_) | HostNotification::SubagentFinished(_) => None,
     }
 }
 
-fn compat_ws_message(payload: Value) -> Result<WsMessage, String> {
+fn approval_requested_payload(requested: &ApprovalRequested) -> Value {
+    let mut payload = Map::from_iter([
+        ("type".into(), Value::String("approval/requested".into())),
+        ("sessionId".into(), serde_json::to_value(&requested.session_id).expect("session id serializes")),
+        ("approvalId".into(), serde_json::to_value(&requested.approval_id).expect("approval id serializes")),
+        ("toolName".into(), Value::String(requested.tool_name.clone())),
+    ]);
+    if let Some(call_id) = &requested.call_id {
+        payload.insert("callId".into(), serde_json::to_value(call_id).expect("call id serializes"));
+    }
+    if let Some(reason) = &requested.reason {
+        payload.insert("reason".into(), Value::String(reason.clone()));
+    }
+    Value::Object(payload)
+}
+
+fn compat_ws_message(payload: Value, rpc_id: Option<&str>) -> Result<WsMessage, String> {
     let method = payload
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| "compatibility frame has no type".to_owned())?;
     let data = serde_json::to_string(&json!({
         "type": "server-request",
-        "rpcId": Uuid::new_v4().to_string(),
+        "rpcId": rpc_id.map_or_else(|| Uuid::new_v4().to_string(), str::to_owned),
         "method": method,
         "payload": payload,
     }))
@@ -1896,6 +2027,21 @@ fn ws_notification(notification: &HostNotification) -> Result<WsMessage, ApiErro
         }
         HostNotification::SubagentFinished(value) => {
             json!({"kind": "subagent-finished", "payload": value})
+        }
+        HostNotification::ApprovalRequested(value) => {
+            let mut payload = approval_requested_payload(value);
+            payload
+                .as_object_mut()
+                .expect("approval payload is an object")
+                .remove("type");
+            json!({"kind": "approval-requested", "payload": payload})
+        }
+        HostNotification::ApprovalResolved(value) => {
+            json!({"kind": "approval-resolved", "payload": {
+                "sessionId": value.session_id,
+                "approvalId": value.approval_id,
+                "outcome": value.outcome,
+            }})
         }
     };
     ws_json(json!({"type": "notification", "notification": notification}))

@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use tessivum::{
+    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     api::{ApiServer, MAX_FRAME_BYTES},
     host::{HostApi, HostConfig, HostLlmAdapterFactory, HostNotification, HostRuntime},
     llm::{LlmAdapter, LlmStream},
@@ -455,6 +456,42 @@ async fn browser_rpc_rejects_a_body_method_that_differs_from_its_url() {
 }
 
 #[tokio::test]
+async fn browser_approval_responses_are_raw_and_fail_closed() {
+    let (mut server, _host, base) = start().await;
+    let client = reqwest::Client::new();
+    let response: Value = client
+        .post(format!("{base}/api/respond"))
+        .json(&json!({
+            "type": "client-response",
+            "rpcId": "unknown-approval",
+            "result": {"ok": true, "value": {
+                "sessionId": "session",
+                "approvalId": "approval",
+                "outcome": "allowed-once"
+            }}
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response, json!({"accepted": false, "reason": "not-pending"}));
+
+    let malformed: Value = client
+        .post(format!("{base}/api/respond"))
+        .json(&json!({"type": "client-request", "rpcId": "bad", "result": {}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(malformed, json!({"accepted": false, "reason": "bad-response"}));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn browser_host_websocket_wraps_compatibility_frames_as_server_requests() {
     let (mut server, _host, base) = start().await;
     let client = reqwest::Client::new();
@@ -484,6 +521,65 @@ async fn browser_host_websocket_wraps_compatibility_frames_as_server_requests() 
     assert_eq!(frame["payload"]["sessionId"], "ws-session");
 
     server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
+    let (mut server, host, _base) = start().await;
+    let mut mux = RawWebSocket::connect_path(server.local_addr(), "/api/events.mux").await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let requested = ApprovalRequested {
+        rpc_id: "stable-approval-rpc".into(),
+        session_id: SessionId::from("approval-session"),
+        approval_id: ApprovalId::new("approval-id"),
+        tool_name: "danger".into(),
+        call_id: Some("tool-call".into()),
+        reason: Some("policy".into()),
+    };
+    host
+        .notifications
+        .send(HostNotification::ApprovalRequested(requested.clone()))
+        .unwrap();
+    let requested_frame: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), mux.read_text())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(requested_frame["type"], "server-request");
+    assert_eq!(requested_frame["rpcId"], requested.rpc_id);
+    assert_eq!(requested_frame["method"], "approval/requested");
+    assert_eq!(
+        requested_frame["payload"],
+        json!({
+            "type": "approval/requested",
+            "sessionId": "approval-session",
+            "approvalId": "approval-id",
+            "toolName": "danger",
+            "callId": "tool-call",
+            "reason": "policy",
+        })
+    );
+    host
+        .notifications
+        .send(HostNotification::ApprovalResolved(ApprovalResolved {
+            rpc_id: requested.rpc_id,
+            session_id: SessionId::from("approval-session"),
+            approval_id: ApprovalId::new("approval-id"),
+            outcome: ApprovalOutcome::Rejected,
+        }))
+        .unwrap();
+    let resolved_frame: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), mux.read_text())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolved_frame["method"], "approval/resolved");
+    assert_eq!(resolved_frame["payload"]["outcome"], "rejected");
+    server.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

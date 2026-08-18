@@ -25,7 +25,8 @@ use crate::{
     },
     agent_loop::AgentLoopFactory,
     approval::{
-        ApprovalError, ApprovalService, HostApprovalError, HostApprovalRegistration,
+        ApprovalAsked, ApprovalDecision, ApprovalError, ApprovalNotification, ApprovalRequested,
+        ApprovalResolved, ApprovalService, HostApprovalError, HostApprovalRegistration,
         HostApprovalRegistry,
     },
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
@@ -283,6 +284,8 @@ pub enum HostNotification {
     SessionStatus(SessionStatusNotification),
     SubagentStarted(SubagentStartedNotification),
     SubagentFinished(SubagentFinishedNotification),
+    ApprovalRequested(ApprovalRequested),
+    ApprovalResolved(ApprovalResolved),
 }
 
 /// Durable session metadata needed by reconnecting transports without replaying logs.
@@ -692,9 +695,9 @@ impl HostRuntime {
             relays_closed: AtomicBool::new(false),
             relays: Mutex::new(Vec::new()),
         });
-        Ok(Self {
-            handle: HostHandle { inner },
-        })
+        let handle = HostHandle { inner };
+        handle.start_approval_relay();
+        Ok(Self { handle })
     }
 
     pub fn handle(&self) -> HostHandle {
@@ -881,7 +884,7 @@ impl HostHandle {
         session: SessionId,
         cause: AgentCancelCause,
     ) -> Result<bool, HostError> {
-        let _admission = self.admit()?;
+        self.inner.approvals.cancel_session(&session);
         let _setup = self.inner.setup.lock().await;
         let agent = self.inner.registry.get(&session);
         let cancelled = match self.inner.registry.cancel(&session, cause, false) {
@@ -956,6 +959,7 @@ impl HostHandle {
             self.wait_drained().await;
             return Ok(());
         }
+        self.inner.approvals.cancel_all();
         self.inner.registry.cancel_all(
             AgentCancelCause::Hook {
                 reason: "host shutdown".into(),
@@ -1160,6 +1164,31 @@ impl HostHandle {
                 }
             }
             relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+        });
+        lock(&self.inner.relays).push(task);
+    }
+
+    fn start_approval_relay(&self) {
+        let inner = Arc::clone(&self.inner);
+        let mut receiver = inner.approvals.subscribe();
+        let task = tokio::spawn(async move {
+            loop {
+                if inner.relays_closed.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::select! {
+                    notice = receiver.recv() => match notice {
+                        Ok(ApprovalNotification::Requested(notice)) => {
+                            let _ = inner.notices.send(HostNotification::ApprovalRequested(notice));
+                        }
+                        Ok(ApprovalNotification::Resolved(notice)) => {
+                            let _ = inner.notices.send(HostNotification::ApprovalResolved(notice));
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) | Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = inner.relay_stop.notified() => break,
+                }
+            }
         });
         lock(&self.inner.relays).push(task);
     }
@@ -1602,8 +1631,22 @@ fn relay_event(inner: &HostInner, session_id: &SessionId, event: SessionEvent) {
         .notices
         .send(HostNotification::SessionEvent(SessionEventNotification {
             session_id: session_id.clone(),
-            event,
+            event: event.clone(),
         }));
+    match event.event_type.as_str() {
+        "approval/asked" => {
+            if let Ok(asked) = serde_json::from_value::<ApprovalAsked>(event.data.clone()) {
+                inner.approvals.observe_asked(&asked);
+            }
+        }
+        "approval/decided" => {
+            if let Ok(decision) = serde_json::from_value::<ApprovalDecision>(event.data.clone()) {
+                inner.approvals.observe_decided(session_id, &decision);
+            }
+        }
+        "turn/end" => inner.approvals.cancel_session(session_id),
+        _ => {}
+    }
 }
 
 fn json_size(value: &impl serde::Serialize) -> usize {
