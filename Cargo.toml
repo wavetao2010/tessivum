@@ -1,7 +1,12 @@
 [package]
 name = "tessivum"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
+description = "Independent Rust-native agent harness inspired by DeepSeek Harness and Cordis"
+repository = "https://github.com/wavetao2010/tessivum"
+readme = "README.md"
+publish = false
+default-run = "tessivum"
 
 [dependencies]
 tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "2d3fd3c418d8ce28c4ca7a8180f6794963271db7" }
