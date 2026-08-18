@@ -238,7 +238,7 @@ async fn run_bash(
 
     let cwd = match lease {
         Some(lease) => lease
-            .validate_current()
+            .execution_cwd()
             .map_err(|error| workspace_error(context, error))?,
         None => cwd.to_path_buf(),
     };

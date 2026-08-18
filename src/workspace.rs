@@ -8,10 +8,16 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::{SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(unix)]
+use std::os::unix::{
+    fs::MetadataExt,
+    io::{AsRawFd, FromRawFd, RawFd},
 };
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +28,26 @@ use crate::{protocol::SessionId, session::SessionInspection};
 
 pub const WORKSPACE_SCHEMA_VERSION: &str = "tessivum.workspaces/v1";
 const REGISTRY_FILE: &str = "workspaces.json";
+const LOCK_FILE: &str = ".workspaces.lock";
+const MAX_REGISTRY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WORKSPACES: usize = 1024;
+const MAX_TOTAL_SESSIONS: usize = 100_000;
+const MAX_SESSIONS_PER_WORKSPACE: usize = 10_000;
+const MAX_ARCHIVED_SESSIONS: usize = 100_000;
+const MAX_ID_BYTES: usize = 256;
+const MAX_TITLE_BYTES: usize = 256;
+const MAX_PATH_BYTES: usize = 4096;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity;
 
 /// Opaque workspace identity.  The UUID is an implementation detail and is
 /// never derived from a path.
@@ -143,11 +169,15 @@ pub enum WorkspaceError {
     Corrupt(String),
     #[error("unsupported workspace registry schema: {0}")]
     UnsupportedSchema(String),
+    #[error("workspace registry is already open")]
+    Locked,
     #[error("workspace path is not an existing readable directory: {0}")]
     InvalidPath(String),
     #[error("workspace id is not an opaque UUID: {0}")]
     InvalidId(String),
-    #[error("workspace title must not be blank")]
+    #[error("session id exceeds the maximum length: {0}")]
+    InvalidSessionId(SessionId),
+    #[error("workspace title must not be blank or exceed the maximum length")]
     InvalidTitle,
     #[error("workspace {0} was not found")]
     NotFound(WorkspaceId),
@@ -177,8 +207,10 @@ impl WorkspaceError {
             Self::Io(_) => "WORKSPACE_REGISTRY_IO",
             Self::Corrupt(_) => "WORKSPACE_REGISTRY_CORRUPT",
             Self::UnsupportedSchema(_) => "UNSUPPORTED_WORKSPACE_SCHEMA",
+            Self::Locked => "WORKSPACE_REGISTRY_LOCKED",
             Self::InvalidPath(_) => "INVALID_WORKSPACE_PATH",
             Self::InvalidId(_) => "INVALID_WORKSPACE_ID",
+            Self::InvalidSessionId(_) => "INVALID_SESSION_ID",
             Self::InvalidTitle => "INVALID_WORKSPACE_TITLE",
             Self::NotFound(_) => "WORKSPACE_NOT_FOUND",
             Self::PathConflict => "WORKSPACE_PATH_CONFLICT",
@@ -190,6 +222,7 @@ impl WorkspaceError {
             Self::RevisionConflict { .. } => "WORKSPACE_REVISION_CONFLICT",
             Self::StaleLease => "STALE_WORKSPACE_LEASE",
             Self::Persistence(_) => "WORKSPACE_PERSISTENCE_FAILED",
+
         }
     }
 }
@@ -204,6 +237,9 @@ struct RegistryState {
 
 struct RegistryInner {
     file: PathBuf,
+    data_dir: PathBuf,
+    data_dir_identity: FileIdentity,
+    _lock: File,
     state: Mutex<RegistryState>,
 }
 
@@ -230,6 +266,8 @@ pub struct WorkspaceLease {
     workspace_id: WorkspaceId,
     generation: u64,
     canonical_root: PathBuf,
+    directory: File,
+    identity: FileIdentity,
 }
 
 impl fmt::Debug for WorkspaceLease {
@@ -240,7 +278,6 @@ impl fmt::Debug for WorkspaceLease {
             .finish_non_exhaustive()
     }
 }
-
 impl WorkspaceLease {
     pub fn workspace_id(&self) -> &WorkspaceId {
         &self.workspace_id
@@ -250,7 +287,22 @@ impl WorkspaceLease {
         &self.canonical_root
     }
 
-    /// Verifies registration, generation, and the filesystem root immediately before use.
+    /// Returns a cwd path backed by this lease's retained directory descriptor.
+    pub fn execution_cwd(&self) -> Result<PathBuf, WorkspaceError> {
+        self.validate_current()?;
+        #[cfg(unix)]
+        {
+            return fd_path(self.directory.as_raw_fd());
+        }
+        #[cfg(not(unix))]
+        {
+            Err(WorkspaceError::Persistence(
+                "fd-backed cwd is unsupported on this platform".into(),
+            ))
+        }
+    }
+
+    /// Verifies registration, generation, and the current pathname identity.
     pub fn validate_current(&self) -> Result<PathBuf, WorkspaceError> {
         let Some(registry) = self.registry.upgrade() else {
             return Err(WorkspaceError::StaleLease);
@@ -273,12 +325,15 @@ impl WorkspaceLease {
         if *generation != self.generation || workspace.path != path_string(&self.canonical_root) {
             return Err(WorkspaceError::StaleLease);
         }
-        let current =
-            canonical_directory(&self.canonical_root).map_err(|_| WorkspaceError::StaleLease)?;
-        if current != self.canonical_root {
+        let current = open_directory(&self.canonical_root)
+            .map_err(|_| WorkspaceError::StaleLease)?;
+        if current.1 != self.identity
+            || fs::canonicalize(&self.canonical_root).ok().as_deref()
+                != Some(self.canonical_root.as_path())
+        {
             return Err(WorkspaceError::StaleLease);
         }
-        Ok(current)
+        Ok(self.canonical_root.clone())
     }
 }
 
@@ -326,37 +381,60 @@ impl WorkspaceRegistry {
     where
         I: IntoIterator<Item = SessionInspection>,
     {
-        let data_dir = data_dir.as_ref();
-        fs::create_dir_all(data_dir).map_err(|e| io_error("create data directory", e))?;
-        cleanup_stale_temps(data_dir)?;
+        let requested_data_dir = data_dir.as_ref();
+        fs::create_dir_all(requested_data_dir)
+            .map_err(|e| io_error("create data directory", e))?;
+        let data_dir = fs::canonicalize(requested_data_dir)
+            .map_err(|e| io_error("canonicalize data directory", e))?;
+        let (data_handle, data_dir_identity) =
+            open_directory(&data_dir).map_err(|e| io_error("open data directory", e))?;
+        drop(data_handle);
+        let lock = open_registry_lock(&data_dir)?;
+        cleanup_stale_temps(&data_dir)?;
         let file = data_dir.join(REGISTRY_FILE);
-        let file_present = match fs::symlink_metadata(&file) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() {
-                    return Err(WorkspaceError::Corrupt(
-                        "workspace registry is not a regular file".into(),
-                    ));
-                }
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(io_error("inspect workspace registry", error)),
-        };
+        let file_handle = open_registry_file(&file)?;
+        let file_present = file_handle.is_some();
         let host_cwd = canonical_directory(host_cwd.as_ref())?;
         let sessions: Vec<SessionInspection> = sessions.into_iter().collect();
-        let known_sessions = sessions.iter().map(|s| s.header.id.clone()).collect();
+        if sessions.len() > MAX_TOTAL_SESSIONS {
+            return Err(WorkspaceError::Corrupt(
+                "workspace registry total session limit exceeded".into(),
+            ));
+        }
+        let mut known_sessions = BTreeSet::new();
+        for inspection in &sessions {
+            validate_session_id(&inspection.header.id)
+                .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
+            if !known_sessions.insert(inspection.header.id.clone()) {
+                return Err(WorkspaceError::Corrupt("duplicate durable session id".into()));
+            }
+        }
 
-        let snapshot = if file_present {
-            let bytes = fs::read(&file).map_err(|e| io_error("read workspace registry", e))?;
+        let snapshot = if let Some(mut file_handle) = file_handle {
+            let mut bytes = Vec::new();
+            file_handle
+                .by_ref()
+                .take((MAX_REGISTRY_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|e| io_error("read workspace registry", e))?;
+            if bytes.len() > MAX_REGISTRY_BYTES {
+                return Err(WorkspaceError::Corrupt(
+                    "workspace registry exceeds 4 MiB".into(),
+                ));
+            }
             let snapshot: WorkspaceSnapshot = serde_json::from_slice(&bytes)
                 .map_err(|e| WorkspaceError::Corrupt(e.to_string()))?;
             validate_snapshot(&snapshot).map_err(|error| match error {
                 WorkspaceError::UnsupportedSchema(_) => error,
                 other => WorkspaceError::Corrupt(other.to_string()),
             })?;
+            validate_membership(&snapshot, &sessions)?;
             snapshot
         } else {
-            migrate(&host_cwd, &sessions)?
+            migrate(&host_cwd, &sessions).map_err(|error| match error {
+                WorkspaceError::UnsupportedSchema(_) => error,
+                other => WorkspaceError::Corrupt(other.to_string()),
+            })?
         };
 
         let mut generations = BTreeMap::new();
@@ -369,6 +447,9 @@ impl WorkspaceRegistry {
         let registry = Self {
             inner: Arc::new(RegistryInner {
                 file,
+                data_dir,
+                data_dir_identity,
+                _lock: lock,
                 state: Mutex::new(RegistryState {
                     snapshot,
                     known_sessions,
@@ -384,7 +465,12 @@ impl WorkspaceRegistry {
                 .state
                 .lock()
                 .map_err(|_| WorkspaceError::StaleLease)?;
-            atomic_write(&registry.inner.file, &state.snapshot)?;
+            atomic_write(
+                &registry.inner.data_dir,
+                registry.inner.data_dir_identity,
+                &registry.inner.file,
+                &state.snapshot,
+            )?;
         }
         Ok(registry)
     }
@@ -405,11 +491,19 @@ impl WorkspaceRegistry {
     /// Membership remains ungrouped until `attach_session` commits it.
     pub fn recognize_session(&self, session_id: impl AsRef<str>) -> Result<(), WorkspaceError> {
         let session_id = SessionId::from(session_id.as_ref());
+        validate_session_id(&session_id)?;
         let mut state = self
             .inner
             .state
             .lock()
             .map_err(|_| WorkspaceError::StaleLease)?;
+        if !state.known_sessions.contains(&session_id)
+            && state.known_sessions.len() >= MAX_TOTAL_SESSIONS
+        {
+            return Err(WorkspaceError::Persistence(
+                "workspace registry total session limit exceeded".into(),
+            ));
+        }
         state.known_sessions.insert(session_id);
         Ok(())
     }
@@ -449,7 +543,15 @@ impl WorkspaceRegistry {
                     },
                 ));
             }
+            if snapshot.items.len() >= MAX_WORKSPACES {
+                return Err(WorkspaceError::Persistence(
+                    "workspace registry workspace limit exceeded".into(),
+                ));
+            }
             let title = workspace_title(&canonical);
+            if title.trim().is_empty() || title.len() > MAX_TITLE_BYTES {
+                return Err(WorkspaceError::InvalidTitle);
+            }
             let now = timestamp(None);
             let workspace = Workspace {
                 workspace_id: WorkspaceId::random(),
@@ -463,7 +565,7 @@ impl WorkspaceRegistry {
                 .generations
                 .insert(workspace.workspace_id.clone(), runtime.next_generation);
             runtime.next_generation = runtime.next_generation.saturating_add(1).max(1);
-            snapshot.items.push(workspace.clone());
+            snapshot.items.insert(0, workspace.clone());
             Ok((
                 true,
                 WorkspaceCreateResult {
@@ -481,8 +583,9 @@ impl WorkspaceRegistry {
         expected_revision: Option<u64>,
     ) -> Result<Workspace, WorkspaceError> {
         let id = WorkspaceId::from(workspace_id.as_ref());
+        validate_workspace_id(&id)?;
         let title = title.as_ref().trim().to_owned();
-        if title.is_empty() {
+        if title.is_empty() || title.len() > MAX_TITLE_BYTES {
             return Err(WorkspaceError::InvalidTitle);
         }
         self.mutate(expected_revision, |snapshot, _| {
@@ -503,6 +606,7 @@ impl WorkspaceRegistry {
         expected_revision: Option<u64>,
     ) -> Result<bool, WorkspaceError> {
         let id = WorkspaceId::from(workspace_id.as_ref());
+        validate_workspace_id(&id)?;
         self.mutate(expected_revision, |snapshot, runtime| {
             let index = snapshot
                 .items
@@ -515,47 +619,6 @@ impl WorkspaceRegistry {
         })
     }
 
-    /// DOM `insertBefore`: a null reference appends, and an item already in
-    /// the requested position is a no-op.
-    pub fn insert_before(
-        &self,
-        workspace_id: impl AsRef<str>,
-        before_workspace_id: Option<&str>,
-        expected_revision: Option<u64>,
-    ) -> Result<(), WorkspaceError> {
-        let id = WorkspaceId::from(workspace_id.as_ref());
-        let before = before_workspace_id.map(WorkspaceId::from);
-        self.mutate(expected_revision, |snapshot, _| {
-            let from = workspace_index(snapshot, &id)?;
-            match before.as_ref() {
-                None if from + 1 == snapshot.items.len() => Ok((false, ())),
-                None => {
-                    let item = snapshot.items.remove(from);
-                    snapshot.items.push(item);
-                    Ok((true, ()))
-                }
-                Some(before) if *before == id => Ok((false, ())),
-                Some(before) => {
-                    let target = snapshot
-                        .items
-                        .iter()
-                        .position(|item| item.workspace_id == *before)
-                        .ok_or(WorkspaceError::InvalidPosition)?;
-                    if from + 1 == target {
-                        return Ok((false, ()));
-                    }
-                    let item = snapshot.items.remove(from);
-                    let target = snapshot
-                        .items
-                        .iter()
-                        .position(|item| item.workspace_id == *before)
-                        .ok_or(WorkspaceError::InvalidPosition)?;
-                    snapshot.items.insert(target, item);
-                    Ok((true, ()))
-                }
-            }
-        })
-    }
 
     pub fn attach_session(
         &self,
@@ -564,7 +627,9 @@ impl WorkspaceRegistry {
         expected_revision: Option<u64>,
     ) -> Result<(), WorkspaceError> {
         let id = WorkspaceId::from(workspace_id.as_ref());
+        validate_workspace_id(&id)?;
         let session = SessionId::from(session_id.as_ref());
+        validate_session_id(&session)?;
         self.mutate(expected_revision, |snapshot, runtime| {
             let index = workspace_index(snapshot, &id)?;
             ensure_known(runtime, &session)?;
@@ -590,8 +655,13 @@ impl WorkspaceRegistry {
         expected_revision: Option<u64>,
     ) -> Result<(), WorkspaceError> {
         let id = WorkspaceId::from(workspace_id.as_ref());
+        validate_workspace_id(&id)?;
         let session = SessionId::from(session_id.as_ref());
         let before = before_session_id.map(SessionId::from);
+        if let Some(before) = &before {
+            validate_session_id(before)?;
+        }
+        validate_session_id(&session)?;
         self.mutate(expected_revision, |snapshot, runtime| {
             let index = workspace_index(snapshot, &id)?;
             ensure_known(runtime, &session)?;
@@ -642,20 +712,17 @@ impl WorkspaceRegistry {
             Ok((true, ()))
         })
     }
-
     pub fn archive_session(
         &self,
         session_id: impl AsRef<str>,
         expected_revision: Option<u64>,
     ) -> Result<(), WorkspaceError> {
         let session = SessionId::from(session_id.as_ref());
+        validate_session_id(&session)?;
         self.mutate(expected_revision, |snapshot, runtime| {
             ensure_known(runtime, &session)?;
             if snapshot.archived_session_ids.contains(&session) {
                 return Ok((false, ()));
-            }
-            if session_location(snapshot, &session).is_none() {
-                return Err(WorkspaceError::UnaccountedSession(session.clone()));
             }
             snapshot.archived_session_ids.push(session);
             Ok((true, ()))
@@ -672,6 +739,7 @@ impl WorkspaceRegistry {
 
     pub fn resolve(&self, workspace_id: impl AsRef<str>) -> Result<WorkspaceLease, WorkspaceError> {
         let id = WorkspaceId::from(workspace_id.as_ref());
+        validate_workspace_id(&id)?;
         let state = self
             .inner
             .state
@@ -687,11 +755,16 @@ impl WorkspaceRegistry {
             .generations
             .get(&id)
             .ok_or(WorkspaceError::StaleLease)?;
+        let canonical_root = PathBuf::from(&workspace.path);
+        let (directory, identity) =
+            open_directory(&canonical_root).map_err(|_| WorkspaceError::StaleLease)?;
         Ok(WorkspaceLease {
             registry: Arc::downgrade(&self.inner),
             workspace_id: id,
             generation,
-            canonical_root: PathBuf::from(&workspace.path),
+            canonical_root,
+            directory,
+            identity,
         })
     }
 
@@ -726,7 +799,12 @@ impl WorkspaceRegistry {
             .checked_add(1)
             .ok_or_else(|| WorkspaceError::Persistence("revision exhausted".into()))?;
         validate_snapshot(&candidate)?;
-        atomic_write(&self.inner.file, &candidate)?;
+        atomic_write(
+            &self.inner.data_dir,
+            self.inner.data_dir_identity,
+            &self.inner.file,
+            &candidate,
+        )?;
         state.snapshot = candidate;
         state.generations = candidate_runtime.generations;
         state.next_generation = candidate_runtime.next_generation;
@@ -742,10 +820,27 @@ fn ensure_known(runtime: &RegistryState, session: &SessionId) -> Result<(), Work
     }
 }
 
+fn validate_session_id(session: &SessionId) -> Result<(), WorkspaceError> {
+    if session.as_str().is_empty() || session.as_str().len() > MAX_ID_BYTES {
+        Err(WorkspaceError::InvalidSessionId(session.clone()))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_workspace_id(id: &WorkspaceId) -> Result<(), WorkspaceError> {
+    if id.as_str().len() > MAX_ID_BYTES {
+        Err(WorkspaceError::InvalidId(id.to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 fn workspace_index(
     snapshot: &WorkspaceSnapshot,
     id: &WorkspaceId,
 ) -> Result<usize, WorkspaceError> {
+    validate_workspace_id(id)?;
     snapshot
         .items
         .iter()
@@ -786,9 +881,150 @@ fn ensure_unique_title(
     }
 }
 
+fn open_directory(path: &Path) -> io::Result<(File, FileIdentity)> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let c_path = CString::new(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let identity = file_identity(&file)?;
+        Ok((file, identity))
+    }
+    #[cfg(not(unix))]
+    {
+        let file = File::open(path)?;
+        Ok((file, FileIdentity))
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_identity(_file: &File) -> io::Result<FileIdentity> {
+    Ok(FileIdentity)
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags, mode) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
+fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
+    let path = data_dir.join(LOCK_FILE);
+    #[cfg(unix)]
+    let file = open_no_follow(
+        &path,
+        libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW,
+        0o600,
+    )
+    .map_err(|error| io_error("open workspace lock", error))?;
+    #[cfg(not(unix))]
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .map_err(|error| io_error("open workspace lock", error))?;
+    #[cfg(unix)]
+    {
+        let metadata = file.metadata().map_err(|e| io_error("inspect workspace lock", e))?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(WorkspaceError::Corrupt(
+                "workspace lock must be an effective-user-owned regular 0600 file".into(),
+            ));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN) {
+                return Err(WorkspaceError::Locked);
+            }
+            return Err(io_error("lock workspace registry", error));
+        }
+    }
+    Ok(file)
+}
+
+fn open_registry_file(path: &Path) -> Result<Option<File>, WorkspaceError> {
+    #[cfg(unix)]
+    let file = match open_no_follow(path, libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW, 0) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(WorkspaceError::Corrupt(format!("open registry: {error}"))),
+    };
+    #[cfg(not(unix))]
+    let file = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("open registry", error)),
+    };
+    #[cfg(unix)]
+    {
+        let metadata = file.metadata().map_err(|e| io_error("inspect workspace registry", e))?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(WorkspaceError::Corrupt(
+                "workspace registry must be an effective-user-owned regular 0600 file".into(),
+            ));
+        }
+    }
+    Ok(Some(file))
+}
+
+#[cfg(unix)]
+fn fd_path(fd: RawFd) -> Result<PathBuf, WorkspaceError> {
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(PathBuf::from(format!("/proc/self/fd/{fd}")));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(PathBuf::from(format!("/dev/fd/{fd}")));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(WorkspaceError::Persistence(
+            "fd-backed cwd is unsupported on this Unix target".into(),
+        ))
+    }
+}
+
 fn canonical_directory(path: &Path) -> Result<PathBuf, WorkspaceError> {
+    if path.to_string_lossy().len() > MAX_PATH_BYTES {
+        return Err(WorkspaceError::InvalidPath("workspace path exceeds 4096 bytes".into()));
+    }
     let canonical = fs::canonicalize(path)
         .map_err(|e| WorkspaceError::InvalidPath(format!("{}: {e}", path.display())))?;
+    if canonical.to_string_lossy().len() > MAX_PATH_BYTES {
+        return Err(WorkspaceError::InvalidPath("workspace path exceeds 4096 bytes".into()));
+    }
     let metadata = fs::metadata(&canonical)
         .map_err(|e| WorkspaceError::InvalidPath(format!("{}: {e}", canonical.display())))?;
     if !metadata.is_dir() || fs::read_dir(&canonical).is_err() {
@@ -936,15 +1172,30 @@ fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceError>
             snapshot.schema_version.clone(),
         ));
     }
+    if snapshot.items.len() > MAX_WORKSPACES {
+        return Err(WorkspaceError::Persistence(
+            "workspace registry workspace limit exceeded".into(),
+        ));
+    }
+    if snapshot.archived_session_ids.len() > MAX_ARCHIVED_SESSIONS {
+        return Err(WorkspaceError::Persistence(
+            "workspace registry archived session limit exceeded".into(),
+        ));
+    }
     let mut paths = BTreeSet::new();
     let mut ids = BTreeSet::new();
     let mut sessions = BTreeSet::new();
     for item in &snapshot.items {
-        if Uuid::parse_str(item.workspace_id.as_str()).is_err() {
+        if item.workspace_id.as_str().len() > MAX_ID_BYTES
+            || Uuid::parse_str(item.workspace_id.as_str()).is_err()
+        {
             return Err(WorkspaceError::InvalidId(item.workspace_id.to_string()));
         }
         if !ids.insert(item.workspace_id.clone()) {
             return Err(WorkspaceError::Corrupt("duplicate workspace id".into()));
+        }
+        if item.path.len() > MAX_PATH_BYTES {
+            return Err(WorkspaceError::InvalidPath("workspace path exceeds 4096 bytes".into()));
         }
         let canonical = canonical_directory(Path::new(&item.path))?;
         if path_string(&canonical) != item.path || !paths.insert(item.path.clone()) {
@@ -952,19 +1203,16 @@ fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceError>
                 "workspace paths must be unique canonical directories".into(),
             ));
         }
-        if item.title.trim().is_empty() {
+        if item.title.trim().is_empty() || item.title.len() > MAX_TITLE_BYTES {
             return Err(WorkspaceError::InvalidTitle);
         }
-        if item
-            .session_ids
-            .iter()
-            .any(|session| session.as_str().trim().is_empty())
-        {
-            return Err(WorkspaceError::Corrupt(
-                "session id must not be blank".into(),
+        if item.session_ids.len() > MAX_SESSIONS_PER_WORKSPACE {
+            return Err(WorkspaceError::Persistence(
+                "workspace session limit exceeded".into(),
             ));
         }
         for session in &item.session_ids {
+            validate_session_id(session)?;
             if !sessions.insert(session.clone()) {
                 return Err(WorkspaceError::Corrupt(
                     "session accounting is not unique".into(),
@@ -972,16 +1220,89 @@ fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceError>
             }
         }
     }
+    if sessions.len() > MAX_TOTAL_SESSIONS {
+        return Err(WorkspaceError::Persistence(
+            "workspace registry total session limit exceeded".into(),
+        ));
+    }
     let mut archived = BTreeSet::new();
     for session in &snapshot.archived_session_ids {
-        if session.as_str().trim().is_empty() {
-            return Err(WorkspaceError::Corrupt(
-                "archived session id must not be blank".into(),
-            ));
-        }
+        validate_session_id(session)?;
         if !archived.insert(session.clone()) {
             return Err(WorkspaceError::Corrupt(
                 "archived session accounting is not unique".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_membership(
+    snapshot: &WorkspaceSnapshot,
+    sessions: &[SessionInspection],
+) -> Result<(), WorkspaceError> {
+    let known = sessions
+        .iter()
+        .map(|inspection| inspection.header.id.clone())
+        .collect::<BTreeSet<_>>();
+    for workspace in &snapshot.items {
+        for session in &workspace.session_ids {
+            if !known.contains(session) {
+                return Err(WorkspaceError::Corrupt("workspace session id is stale".into()));
+            }
+        }
+    }
+    for session in &snapshot.archived_session_ids {
+        if !known.contains(session) {
+            return Err(WorkspaceError::Corrupt("archived session id is stale".into()));
+        }
+    }
+    for inspection in sessions {
+        if snapshot.archived_session_ids.contains(&inspection.header.id)
+            && !snapshot
+                .items
+                .iter()
+                .any(|workspace| workspace.session_ids.contains(&inspection.header.id))
+        {
+            continue;
+        }
+        let session = &inspection.header.id;
+        let Some(cwd) = inspection.header.cwd.as_deref() else {
+            if snapshot
+                .items
+                .iter()
+                .any(|workspace| workspace.session_ids.contains(session))
+            {
+                return Err(WorkspaceError::Corrupt(
+                    "session with missing cwd must remain ungrouped".into(),
+                ));
+            }
+            continue;
+        };
+        let Ok(canonical) = canonical_directory(Path::new(cwd)) else {
+            if snapshot
+                .items
+                .iter()
+                .any(|workspace| workspace.session_ids.contains(session))
+            {
+                return Err(WorkspaceError::Corrupt(
+                    "session with invalid cwd must remain ungrouped".into(),
+                ));
+            }
+            continue;
+        };
+        let Some(expected) = snapshot
+            .items
+            .iter()
+            .find(|workspace| workspace.path == path_string(&canonical))
+        else {
+            return Err(WorkspaceError::Corrupt(
+                "durable session workspace is not registered".into(),
+            ));
+        };
+        if !expected.session_ids.contains(session) {
+            return Err(WorkspaceError::Corrupt(
+                "durable session membership does not match registry".into(),
             ));
         }
     }
@@ -1010,12 +1331,34 @@ fn cleanup_stale_temps(data_dir: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
-fn atomic_write(path: &Path, snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceError> {
+fn atomic_write(
+    data_dir: &Path,
+    expected_data_dir_identity: FileIdentity,
+    path: &Path,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), WorkspaceError> {
     let bytes = serde_json::to_vec_pretty(snapshot)
         .map_err(|e| WorkspaceError::Persistence(e.to_string()))?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| io_error("create workspace directory", e))?;
-    let temporary = parent.join(format!(".workspaces.json-{}.tmp", Uuid::new_v4()));
+    if bytes.len() > MAX_REGISTRY_BYTES {
+        return Err(WorkspaceError::Persistence(
+            "workspace registry exceeds 4 MiB".into(),
+        ));
+    }
+    if path.parent() != Some(data_dir)
+        || fs::canonicalize(data_dir).ok().as_deref() != Some(data_dir)
+    {
+        return Err(WorkspaceError::Persistence(
+            "workspace data directory changed identity".into(),
+        ));
+    }
+    let (directory, current_identity) =
+        open_directory(data_dir).map_err(|e| io_error("open workspace directory", e))?;
+    if current_identity != expected_data_dir_identity {
+        return Err(WorkspaceError::Persistence(
+            "workspace data directory changed identity".into(),
+        ));
+    }
+    let temporary = data_dir.join(format!(".workspaces.json-{}.tmp", Uuid::new_v4()));
     let result = (|| {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -1031,8 +1374,14 @@ fn atomic_write(path: &Path, snapshot: &WorkspaceSnapshot) -> Result<(), Workspa
             .map_err(|e| io_error("write workspace temporary", e))?;
         file.sync_all()
             .map_err(|e| io_error("sync workspace temporary", e))?;
+        let (_, current_identity) =
+            open_directory(data_dir).map_err(|e| io_error("verify workspace directory", e))?;
+        if current_identity != expected_data_dir_identity {
+            return Err(WorkspaceError::Persistence(
+                "workspace data directory changed identity".into(),
+            ));
+        }
         fs::rename(&temporary, path).map_err(|e| io_error("rename workspace temporary", e))?;
-        let directory = File::open(parent).map_err(|e| io_error("open workspace directory", e))?;
         directory
             .sync_all()
             .map_err(|e| io_error("sync workspace directory", e))?;

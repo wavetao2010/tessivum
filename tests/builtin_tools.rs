@@ -359,6 +359,64 @@ async fn bash_uses_only_the_workspace_bound_to_its_session() {
     assert_eq!(code(&deleted), "STALE_WORKSPACE_LEASE");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_keeps_the_resolved_directory_fd_across_a_path_swap() {
+    let root = TempDir::new();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    fs::write(first.join("marker"), "original").unwrap();
+    fs::write(second.join("marker"), "replacement").unwrap();
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &first, Vec::new()).unwrap();
+    let workspace_id = registry.list()[0].workspace_id.clone();
+    registry.recognize_session("builtin-tools").unwrap();
+    registry
+        .attach_session(&workspace_id, "builtin-tools", None)
+        .unwrap();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: root.path().to_path_buf(),
+            resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .unwrap();
+    let context_root = ContextHandle::root();
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        let context = context(&context_root, "path-swap");
+        async move {
+            runtime
+                .execute(
+                    context,
+                    "bash",
+                    json!({"command": ": > started; sleep 1; cat marker"}),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if first.join("started").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("shell entered descriptor-backed cwd");
+    fs::rename(&first, root.path().join("old-first")).unwrap();
+    fs::rename(&second, &first).unwrap();
+    let output = task.await.unwrap();
+    assert!(!output.is_error);
+    assert_eq!(text(&output), "original");
+}
+
 #[cfg(not(unix))]
 #[test]
 fn bash_registration_is_explicitly_unsupported_off_unix() {

@@ -125,7 +125,19 @@ fn migration_groups_canonical_cwds_and_keeps_invalid_sessions_ungrouped() {
         .into_iter()
         .map(|workspace| workspace.workspace_id)
         .collect::<Vec<_>>();
-    let reopened = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    drop(registry);
+    let reopened = WorkspaceRegistry::open(
+        root.path().join("data"),
+        &host,
+        vec![
+            inspection("host-session", Some(&host)),
+            inspection("other-session", Some(&other)),
+            inspection("alias-session", Some(&alias)),
+            inspection("missing-session", Some(&missing)),
+            inspection("no-cwd-session", None),
+        ],
+    )
+    .unwrap();
     assert_eq!(
         reopened
             .list()
@@ -142,7 +154,6 @@ fn mutations_are_ordered_idempotent_and_preserve_global_archive() {
     let host = root.dir("host");
     let one = root.dir("one");
     let two = root.dir("two");
-    let three = root.dir("three");
     let registry = WorkspaceRegistry::open(
         root.path().join("data"),
         &host,
@@ -159,7 +170,6 @@ fn mutations_are_ordered_idempotent_and_preserve_global_archive() {
     assert!(!registry.create(&one, None).unwrap().created);
     assert_eq!(registry.revision(), unchanged);
     let second = registry.create(&two, None).unwrap();
-    let third = registry.create(&three, None).unwrap();
     let renamed = registry
         .rename(&first.workspace.workspace_id, "  renamed  ", None)
         .unwrap();
@@ -178,28 +188,6 @@ fn mutations_are_ordered_idempotent_and_preserve_global_archive() {
         "WORKSPACE_TITLE_CONFLICT"
     );
 
-    registry
-        .insert_before(
-            &third.workspace.workspace_id,
-            Some(renamed.workspace_id.as_str()),
-            None,
-        )
-        .unwrap();
-    let ordered = registry.list();
-    let position = ordered
-        .iter()
-        .position(|workspace| workspace.workspace_id == third.workspace.workspace_id)
-        .unwrap();
-    assert_eq!(ordered[position + 1].workspace_id, renamed.workspace_id);
-    let revision = registry.revision();
-    registry
-        .insert_before(
-            &third.workspace.workspace_id,
-            Some(renamed.workspace_id.as_str()),
-            None,
-        )
-        .unwrap();
-    assert_eq!(registry.revision(), revision);
 
     registry
         .attach_session(&renamed.workspace_id, "a", None)
@@ -393,4 +381,172 @@ fn lists_one_hundred_workspaces_and_one_thousand_sessions() {
             .sum::<usize>(),
         1000
     );
+}
+
+#[cfg(unix)]
+fn write_mode_0600(path: &Path, contents: impl AsRef<[u8]>) {
+    fs::write(path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_rejects_untrusted_files_bounds_input_and_excludes_second_open() {
+    let root = TempDir::new("secure-registry");
+    let host = root.dir("host");
+    let data = root.dir("data");
+    let target = root.path().join("target.json");
+    write_mode_0600(&target, b"{}");
+    std::os::unix::fs::symlink(&target, data.join("workspaces.json")).unwrap();
+    assert_eq!(
+        WorkspaceRegistry::open(&data, &host, Vec::new())
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_CORRUPT"
+    );
+    fs::remove_file(data.join("workspaces.json")).unwrap();
+
+    let registry = WorkspaceRegistry::open(&data, &host, Vec::new()).unwrap();
+    assert_eq!(
+        WorkspaceRegistry::open(&data, &host, Vec::new())
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_LOCKED"
+    );
+    drop(registry);
+    let reopened = WorkspaceRegistry::open(&data, &host, Vec::new()).unwrap();
+    drop(reopened);
+
+    let file = data.join("workspaces.json");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        WorkspaceRegistry::open(&data, &host, Vec::new())
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_CORRUPT"
+    );
+    write_mode_0600(&file, vec![b' '; 4 * 1024 * 1024 + 1]);
+    assert_eq!(
+        WorkspaceRegistry::open(&data, &host, Vec::new())
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_CORRUPT"
+    );
+
+    let item = serde_json::json!({
+        "workspaceId": Uuid::new_v4(),
+        "path": host.canonicalize().unwrap(),
+        "title": "host",
+        "sessionIds": [],
+        "createdAt": "2026-08-18T00:00:00.000Z",
+        "updatedAt": "2026-08-18T00:00:00.000Z"
+    });
+    write_mode_0600(
+        &file,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": "tessivum.workspaces/v1",
+            "revision": 0,
+            "items": vec![item; 1025],
+            "archivedSessionIds": []
+        }))
+        .unwrap(),
+    );
+    assert_eq!(
+        WorkspaceRegistry::open(&data, &host, Vec::new())
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_CORRUPT"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn persisted_membership_drift_and_stale_ids_are_corrupt() {
+    let root = TempDir::new("membership");
+    let host = root.dir("host");
+    let data = root.dir("data");
+    let registry = WorkspaceRegistry::open(&data, &host, vec![inspection("known", Some(&host))]).unwrap();
+    drop(registry);
+    let file = data.join("workspaces.json");
+    let mut snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    snapshot["items"][0]["sessionIds"] = serde_json::json!([]);
+    write_mode_0600(&file, serde_json::to_vec(&snapshot).unwrap());
+    assert_eq!(
+        WorkspaceRegistry::open(&data, &host, vec![inspection("known", Some(&host))])
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_CORRUPT"
+    );
+
+    let stale_data = root.dir("stale-data");
+    let registry = WorkspaceRegistry::open(
+        &stale_data,
+        &host,
+        vec![inspection("known", Some(&host))],
+    )
+    .unwrap();
+    drop(registry);
+    let stale_file = stale_data.join("workspaces.json");
+    let mut snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&stale_file).unwrap()).unwrap();
+    snapshot["items"][0]["sessionIds"] = serde_json::json!(["stale"]);
+    write_mode_0600(&stale_file, serde_json::to_vec(&snapshot).unwrap());
+    assert_eq!(
+        WorkspaceRegistry::open(&stale_data, &host, vec![inspection("known", Some(&host))])
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_REGISTRY_CORRUPT"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lease_rejects_directory_substitution_and_creates_prepend_across_restart() {
+    let root = TempDir::new("lease-identity");
+    let host = root.dir("host");
+    let workspace = root.dir("workspace");
+    let replacement = root.dir("replacement");
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    let workspace_id = registry.create(&workspace, None).unwrap().workspace.workspace_id;
+    let lease = registry.resolve(&workspace_id).unwrap();
+    fs::rename(&workspace, root.path().join("old-workspace")).unwrap();
+    fs::rename(&replacement, &workspace).unwrap();
+    assert_eq!(lease.validate_current().unwrap_err().code(), "STALE_WORKSPACE_LEASE");
+    drop(lease);
+    drop(registry);
+
+    let one = root.dir("one");
+    let two = root.dir("two");
+    let registry = WorkspaceRegistry::open(root.path().join("prepend-data"), &host, Vec::new()).unwrap();
+    let first = registry.create(&one, None).unwrap().workspace.workspace_id;
+    let second = registry.create(&two, None).unwrap().workspace.workspace_id;
+    assert_eq!(
+        registry
+            .list()
+            .into_iter()
+            .take(2)
+            .map(|workspace| workspace.workspace_id)
+            .collect::<Vec<_>>(),
+        vec![second.clone(), first.clone()]
+    );
+    drop(registry);
+    let restarted = WorkspaceRegistry::open(root.path().join("prepend-data"), &host, Vec::new()).unwrap();
+    assert_eq!(
+        restarted
+            .list()
+            .into_iter()
+            .take(2)
+            .map(|workspace| workspace.workspace_id)
+            .collect::<Vec<_>>(),
+        vec![second, first]
+    );
+}
+
+#[test]
+fn known_ungrouped_sessions_can_be_archived() {
+    let root = TempDir::new("ungrouped-archive");
+    let host = root.dir("host");
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    registry.recognize_session("ungrouped").unwrap();
+    registry.archive_session("ungrouped", None).unwrap();
+    assert_eq!(registry.snapshot().archived_session_ids, vec![SessionId::from("ungrouped")]);
 }
