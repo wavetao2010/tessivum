@@ -222,13 +222,9 @@ fn mutations_are_ordered_idempotent_and_preserve_global_archive() {
 
     let lease = registry.resolve(&renamed.workspace_id).unwrap();
     assert!(registry.delete(&renamed.workspace_id, None).unwrap());
-    assert_eq!(
-        registry
-            .delete(&renamed.workspace_id, None)
-            .unwrap_err()
-            .code(),
-        "WORKSPACE_NOT_FOUND"
-    );
+    let deleted_revision = registry.revision();
+    assert!(!registry.delete(&renamed.workspace_id, None).unwrap());
+    assert_eq!(registry.revision(), deleted_revision);
     assert_eq!(
         registry.snapshot().archived_session_ids,
         vec![SessionId::from("a")]

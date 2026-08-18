@@ -976,14 +976,16 @@ impl HostHandle {
     async fn delete_workspace_inner(&self, workspace_id: WorkspaceId) -> Result<bool, HostError> {
         let _admission = self.admit()?;
         let _setup = self.inner.setup.lock().await;
-        let sessions = self
+        let Some(workspace) = self
             .inner
             .workspace_registry
             .list()
             .into_iter()
             .find(|workspace| workspace.workspace_id == workspace_id)
-            .ok_or_else(|| WorkspaceError::NotFound(workspace_id.clone()))?
-            .session_ids;
+        else {
+            return Ok(false);
+        };
+        let sessions = workspace.session_ids;
         for session_id in sessions {
             self.inner.approvals.cancel_session(&session_id);
             let owned = lock(&self.inner.owned_agents).remove(&session_id);

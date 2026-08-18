@@ -292,11 +292,18 @@ async fn require_bound_authority(
     request: Request,
     next: Next,
 ) -> Response {
-    if authority.allows(request.headers()) {
-        next.run(request).await
-    } else {
-        StatusCode::FORBIDDEN.into_response()
+    if !authority.allows(request.headers()) {
+        return StatusCode::FORBIDDEN.into_response();
     }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    response
+        .headers_mut()
+        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
 }
 
 const MAX_COMPAT_FRAME_QUEUE: usize = 32;
@@ -1382,7 +1389,7 @@ async fn compat_workspace_delete(
             json!({"type": "host/workspace-removed", "workspaceId": args.workspace_id.clone()}),
         );
     }
-    Ok(json!({"deleted": deleted}))
+    Ok(json!({"deleted": true}))
 }
 
 fn compat_session_move(state: &ApiState, args: CompatSessionMove) -> Result<Value, CompatError> {
@@ -1537,6 +1544,10 @@ fn compat_session_host_error(
             message: "session workspace attachment failed".into(),
             details: json!({"sessionId": session_id, "workspaceId": workspace_id}),
         },
+        "STALE_WORKSPACE_LEASE" | "WORKSPACE_REGISTRY_LOCKED" | "WORKSPACE_NOT_FOUND" => {
+            compat_workspace_not_found(workspace_id.clone())
+        }
+        "INVALID_WORKSPACE_PATH" => compat_workspace_invalid_path(requested_cwd.unwrap_or("")),
         _ => compat_host_error(error),
     }
 }
@@ -1545,9 +1556,9 @@ async fn compat_session_create(
     state: &ApiState,
     args: CompatSessionCreate,
 ) -> Result<Value, CompatError> {
-    if args.workspace_id.is_some() && args.cwd.is_some() {
+    if args.cwd.is_some() {
         return Err(CompatError::invalid(
-            "workspaceId and cwd are mutually exclusive",
+            "session.create requires workspaceId; register paths with workspace.create",
         ));
     }
     if let Some(session_id) = &args.session_id {
@@ -1605,14 +1616,8 @@ async fn compat_session_create(
                 compat_workspace_error(WorkspaceError::NotFound(WorkspaceId::from(workspace_id)))
             })?;
         (workspace.workspace_id, workspace.path)
-    } else if let Some(cwd) = args.cwd {
-        let canonical = compat_canonical_directory(&cwd)?;
-        let workspace = registry
-            .list()
-            .into_iter()
-            .find(|workspace| workspace.path == canonical)
-            .ok_or_else(|| compat_workspace_invalid_path(&cwd))?;
-        (workspace.workspace_id, workspace.path)
+    } else if args.cwd.is_some() {
+        unreachable!("cwd was rejected before workspace resolution")
     } else {
         let workspace_id = state
             .host

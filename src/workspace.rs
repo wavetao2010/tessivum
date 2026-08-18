@@ -627,11 +627,13 @@ impl WorkspaceRegistry {
         let id = WorkspaceId::from(workspace_id.as_ref());
         validate_workspace_id(&id)?;
         self.mutate(expected_revision, |snapshot, runtime| {
-            let index = snapshot
+            let Some(index) = snapshot
                 .items
                 .iter()
                 .position(|workspace| workspace.workspace_id == id)
-                .ok_or_else(|| WorkspaceError::NotFound(id.clone()))?;
+            else {
+                return Ok((false, false));
+            };
             snapshot.items.remove(index);
             runtime.generations.remove(&id);
             Ok((true, true))
@@ -683,16 +685,16 @@ impl WorkspaceRegistry {
         self.mutate(expected_revision, |snapshot, runtime| {
             let index = workspace_index(snapshot, &id)?;
             ensure_known(runtime, &session)?;
-            let Some((owner, _)) = session_location(snapshot, &session) else {
-                return Err(WorkspaceError::UnaccountedSession(session.clone()));
+            let current = match session_location(snapshot, &session) {
+                Some((owner, _)) if owner == id => snapshot.items[index]
+                    .session_ids
+                    .iter()
+                    .position(|candidate| candidate == &session),
+                Some(_) => {
+                    return Err(WorkspaceError::SessionBelongsElsewhere(session.clone()));
+                }
+                None => None,
             };
-            if owner != id {
-                return Err(WorkspaceError::SessionBelongsElsewhere(session.clone()));
-            }
-            let current = snapshot.items[index]
-                .session_ids
-                .iter()
-                .position(|candidate| candidate == &session);
             match before.as_ref() {
                 Some(before) if *before == session => return Ok((false, ())),
                 Some(before) => {

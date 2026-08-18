@@ -381,14 +381,22 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
         reqwest::StatusCode::FORBIDDEN,
         "static route rejects a rebinding authority"
     );
-    let index = client
-        .get(&base)
-        .send()
-        .await
-        .expect("index response")
-        .text()
-        .await
-        .expect("index body");
+    let index_response = client.get(&base).send().await.expect("index response");
+    assert_eq!(
+        index_response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok()),
+        Some("frame-ancestors 'none'")
+    );
+    assert_eq!(
+        index_response
+            .headers()
+            .get("x-frame-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
+    let index = index_response.text().await.expect("index body");
     let first_head_child = index.find("<head>").expect("head exists") + "<head>".len();
     assert_eq!(
         index.find("<script>window.__DSH_BOOT__="),
@@ -823,9 +831,9 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
     assert_eq!(
         invalid_cwd["result"]["error"],
         json!({
-            "code": "workspace-invalid-path",
-            "message": "workspace path is invalid",
-            "details": {"path": unregistered.to_string_lossy()},
+            "code": "bad-request",
+            "message": "session.create requires workspaceId; register paths with workspace.create",
+            "details": {"issues": []},
         })
     );
     let deleted = browser_rpc(
@@ -837,6 +845,15 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
     )
     .await;
     assert_eq!(deleted["result"]["value"], json!({"deleted": true}));
+    let delete_retry = browser_rpc(
+        &client,
+        &base,
+        "workspace.delete",
+        "delete-b-retry",
+        json!({"workspaceId": second_id}),
+    )
+    .await;
+    assert_eq!(delete_retry["result"]["value"], json!({"deleted": true}));
     let deleted_default = browser_rpc(
         &client,
         &base,
