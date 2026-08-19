@@ -30,8 +30,8 @@ use crate::{
         HostApprovalRegistry,
     },
     attachments::{
-        attachments_service_key, decode_inline_image, AttachmentError, AttachmentInput,
-        AttachmentLimits, AttachmentRef, AttachmentStore,
+        attachments_service_key, decode_inline_image, AttachmentData, AttachmentError,
+        AttachmentId, AttachmentInput, AttachmentLimits, AttachmentRef, AttachmentStore,
     },
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
@@ -600,6 +600,18 @@ pub trait HostApi: Send + Sync {
             Value::Null,
         ))
     }
+    async fn read_attachment(
+        &self,
+        _session: SessionId,
+        _attachment_id: AttachmentId,
+    ) -> Result<AttachmentData, TessivumError> {
+        Err(TessivumError::new(
+            "ATTACHMENTS_UNSUPPORTED",
+            "this host does not support attachments",
+            "host",
+            Value::Null,
+        ))
+    }
     async fn normalize_prompt(
         &self,
         params: SessionPromptParams,
@@ -862,7 +874,11 @@ impl HostRuntime {
             routes: Arc::new(Mutex::new(Arc::clone(&route_map))),
             credentials: Arc::clone(&credentials),
         });
-        let dynamic_routes = config.adapter_factory.is_none() && config.recorded_replay.is_none();
+        let dynamic_routes = config.adapter_factory.is_none()
+            && config.recorded_replay.is_none()
+            && (!route_map.is_empty()
+                || config.provider != "recorded"
+                || config.model != "recorded");
         let persistence: Arc<dyn SessionPersistence> =
             Arc::new(JsonlSessionPersistence::new(&data_dir));
         let session_inspections = persistence.list(cancellation.clone()).await?;
@@ -1130,15 +1146,16 @@ impl HostHandle {
                     })
                     .flatten()
                     .is_some();
+                let route_id = route.id.clone();
                 let active = state
                     .registrations
-                    .get(&route.id)
+                    .get(&route_id)
                     .is_some_and(LlmProviderRegistration::is_active);
                 HostProviderDirectoryEntry {
                     route,
                     credential_configured,
                     namespace: LLM_OPENAI_RESPONSES_NAMESPACE.into(),
-                    settings_path: vec!["providers".into()],
+                    settings_path: vec!["providers".into(), route_id],
                     active,
                     declared: true,
                 }
@@ -1171,8 +1188,7 @@ impl HostHandle {
                 .await?
         };
         let current = latest_model_selection(&events)
-            .or_else(|| self.default_selection())
-            .or_else(|| Some(self.config_selection()));
+            .or_else(|| (!self.inner.dynamic_routes).then(|| self.config_selection()));
         let groups = {
             let state = lock(&self.inner.route_state);
             state
@@ -1271,6 +1287,27 @@ impl HostHandle {
         }
     }
 
+    async fn append_model_selection(
+        &self,
+        session: &Arc<crate::session::Session>,
+        selection: &SessionModelSelection,
+    ) -> Result<(), HostError> {
+        let event = SessionEvent {
+            event_type: "session/model-selected".into(),
+            seq: session.next_seq()?,
+            time: now(),
+            data: serde_json::to_value(selection).unwrap_or(Value::Null),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        };
+        session
+            .append(event, self.inner.cancellation.clone())
+            .await?;
+        self.ensure_relay(Arc::clone(session));
+        Ok(())
+    }
+
     async fn selection_for_session(
         &self,
         session_id: &SessionId,
@@ -1278,21 +1315,51 @@ impl HostHandle {
         if !self.inner.dynamic_routes {
             return Ok(self.config_selection());
         }
-        let events = if let Some(session) = self.inner.sessions.get(session_id) {
-            session.events()
+        let session = if let Some(session) = self.inner.sessions.get(session_id) {
+            session
         } else {
-            self.inner
+            let events = self
+                .inner
                 .persistence
                 .read_from(session_id, 0, self.inner.cancellation.clone())
+                .await?;
+            if let Some(selection) = latest_model_selection(&events) {
+                self.validate_selection(&selection)?;
+                return Ok(selection);
+            }
+            if events.is_empty()
+                && self
+                    .inner
+                    .persistence
+                    .inspect(session_id, self.inner.cancellation.clone())
+                    .await?
+                    .is_none()
+            {
+                let selection = self
+                    .default_selection()
+                    .unwrap_or_else(|| self.config_selection());
+                self.validate_selection(&selection)?;
+                return Ok(selection);
+            }
+            self.inner
+                .sessions
+                .restore(
+                    session_id,
+                    crate::session::RestoreMode::Live,
+                    self.inner.cancellation.clone(),
+                )
                 .await?
         };
-        if let Some(selection) =
-            latest_model_selection(&events).or_else(|| self.default_selection())
-        {
+        if let Some(selection) = latest_model_selection(&session.events()) {
             self.validate_selection(&selection)?;
             return Ok(selection);
         }
-        Ok(self.config_selection())
+        let selection = self
+            .default_selection()
+            .unwrap_or_else(|| self.config_selection());
+        self.validate_selection(&selection)?;
+        self.append_model_selection(&session, &selection).await?;
+        Ok(selection)
     }
 
     fn selection_is_routable(
@@ -1302,9 +1369,9 @@ impl HostHandle {
     ) -> bool {
         let state = lock(&self.inner.route_state);
         let Some(route) = state.routes.get(&selection.provider) else {
-            if !self.inner.dynamic_routes
-                && selection.provider == self.inner.config.provider
+            if selection.provider == self.inner.config.provider
                 && selection.model == self.inner.config.model
+                && (!self.inner.dynamic_routes || state.routes.is_empty())
             {
                 return true;
             }
@@ -1366,6 +1433,37 @@ impl HostHandle {
     }
     pub fn attachment_limits(&self) -> AttachmentLimits {
         self.inner.attachments.limits().clone()
+    }
+
+    async fn read_attachment_inner(
+        &self,
+        session: SessionId,
+        attachment_id: AttachmentId,
+    ) -> Result<AttachmentData, HostError> {
+        validate_session(&session)?;
+        let attachment_id = AttachmentId::try_from(attachment_id.as_str())?;
+        let events = if let Some(session) = self.inner.sessions.get(&session) {
+            session.events()
+        } else {
+            self.inner
+                .persistence
+                .read_from(&session, 0, self.inner.cancellation.clone())
+                .await?
+        };
+        let reference = events
+            .iter()
+            .find_map(|event| find_attachment_ref(&event.data, &attachment_id))
+            .ok_or_else(|| {
+                HostError::invalid(
+                    "ATTACHMENT_NOT_REFERENCED",
+                    "attachment is not referenced by the session",
+                )
+            })?;
+        self.inner
+            .attachments
+            .read_ref_bounded(&reference, self.inner.attachments.limits().max_image_bytes)
+            .await
+            .map_err(HostError::from)
     }
 
     async fn upload_attachment_inner(
@@ -1606,7 +1704,15 @@ impl HostHandle {
 
         let created_at = now();
         let cwd = root.to_string_lossy().into_owned();
-        self.inner
+        let selection = if self.inner.dynamic_routes {
+            self.default_selection()
+                .unwrap_or_else(|| self.config_selection())
+        } else {
+            self.config_selection()
+        };
+        self.validate_selection(&selection)?;
+        let session = self
+            .inner
             .sessions
             .create(
                 SessionHeader {
@@ -1623,6 +1729,8 @@ impl HostHandle {
                 self.inner.cancellation.clone(),
             )
             .await?;
+        self.append_model_selection(&session, &selection).await?;
+
         self.inner
             .workspace_registry
             .recognize_session(&session_id)?;
@@ -1639,7 +1747,7 @@ impl HostHandle {
             workspace_id: Some(workspace_id),
             created_at,
             cwd: Some(cwd),
-            event_count: 0,
+            event_count: session.events().len() as u64,
         })
     }
 
@@ -2220,6 +2328,23 @@ impl HostHandle {
     }
 }
 
+fn find_attachment_ref(value: &Value, attachment_id: &AttachmentId) -> Option<AttachmentRef> {
+    if let Ok(reference) = AttachmentRef::from_value(value) {
+        if reference.attachment_id.as_str() == attachment_id.as_str() {
+            return Some(reference);
+        }
+    }
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_attachment_ref(value, attachment_id)),
+        Value::Object(values) => values
+            .values()
+            .find_map(|value| find_attachment_ref(value, attachment_id)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
 fn collect_image_plans(
     blocks: &[ContentBlock],
     store: &AttachmentStore,
@@ -2417,6 +2542,16 @@ impl HostApi for HostHandle {
             .await
             .map_err(HostError::wire)
     }
+    async fn read_attachment(
+        &self,
+        session: SessionId,
+        attachment_id: AttachmentId,
+    ) -> Result<AttachmentData, TessivumError> {
+        self.read_attachment_inner(session, attachment_id)
+            .await
+            .map_err(HostError::wire)
+    }
+
     async fn mutate_settings(
         &self,
         namespace: String,
@@ -2555,6 +2690,14 @@ impl HostApi for HostRuntime {
     ) -> Result<AttachmentRef, TessivumError> {
         self.handle.upload_attachment(data, name).await
     }
+    async fn read_attachment(
+        &self,
+        session: SessionId,
+        attachment_id: AttachmentId,
+    ) -> Result<AttachmentData, TessivumError> {
+        self.handle.read_attachment(session, attachment_id).await
+    }
+
     async fn normalize_prompt(
         &self,
         params: SessionPromptParams,
@@ -2617,7 +2760,11 @@ async fn mutate_settings_inner(
     mutation: HostSettingsMutation,
 ) -> Result<SettingsSnapshot, SettingsError> {
     let routed = inner.dynamic_routes && namespace == LLM_OPENAI_RESPONSES_NAMESPACE;
-    let _route_gate = routed.then(|| inner.route_gate.lock());
+    let _route_gate = if routed {
+        Some(inner.route_gate.lock().await)
+    } else {
+        None
+    };
     let previous = if routed {
         Some(inner.settings.user(&namespace)?)
     } else {

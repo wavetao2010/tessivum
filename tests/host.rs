@@ -11,7 +11,7 @@ use tessivum::{
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
         AgentCancelCause, ContentBlock, SessionHeader, SessionPromptParams, SessionStatus,
-        SESSION_FORMAT_VERSION,
+        ToolCallId, SESSION_FORMAT_VERSION,
     },
     session::SessionPersistence,
     settings::{SettingsError, SettingsEventKind, SettingsRegistration},
@@ -19,6 +19,15 @@ use tessivum::{
 };
 use tessivum_core::ContextHandle;
 use uuid::Uuid;
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes
+}
 
 const REPLAY: &str = include_str!("../fixtures/headless/recorded-replay.jsonl");
 const RESUME_REPLAY: &str = concat!(
@@ -658,6 +667,69 @@ async fn host_persists_workspace_session_attachment_and_retries_ungrouped_blanks
             .workspace_id,
         Some(default_workspace)
     );
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_reads_only_durable_session_attachments_without_resuming() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let session = SessionId::from("attachment-read");
+    let reference = runtime
+        .upload_attachment(png(1, 1), Some("nested.png".into()))
+        .await
+        .unwrap();
+    runtime
+        .prompt(SessionPromptParams {
+            session_id: session.clone(),
+            content_blocks: vec![ContentBlock::ToolResult {
+                tool_call_id: ToolCallId::from("attachment-tool"),
+                content: vec![ContentBlock::Image {
+                    attachment: serde_json::to_value(&reference).unwrap(),
+                }],
+                is_error: None,
+            }],
+        })
+        .await
+        .unwrap();
+
+    let live = runtime
+        .read_attachment(session.clone(), reference.attachment_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(live.reference, reference);
+    assert_eq!(live.data, png(1, 1));
+
+    let unreferenced = runtime.upload_attachment(png(2, 2), None).await.unwrap();
+    assert_eq!(
+        runtime
+            .read_attachment(session.clone(), unreferenced.attachment_id)
+            .await
+            .unwrap_err()
+            .code,
+        "ATTACHMENT_NOT_REFERENCED"
+    );
+    assert_eq!(
+        runtime
+            .read_attachment(SessionId::from(""), reference.attachment_id.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "INVALID_SESSION_ID"
+    );
+
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+
+    let restarted = HostRuntime::boot(config(&root)).await.unwrap();
+    let before = restarted.events(session.clone(), 0).await.unwrap();
+    let persisted = restarted
+        .read_attachment(session.clone(), reference.attachment_id)
+        .await
+        .unwrap();
+    assert_eq!(persisted.reference, live.reference);
+    assert_eq!(persisted.data, live.data);
+    assert_eq!(restarted.events(session, 0).await.unwrap(), before);
     restarted.shutdown().await.unwrap();
 }
 

@@ -45,11 +45,12 @@ use tokio::{
 
 use crate::{
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
+    attachments::{AttachmentId, AttachmentRef},
     credentials::{CredentialRef, CredentialSource},
     frontend::FrontendStatic,
     host::{
         HostApi, HostDescriptor, HostModelGroup, HostModelInfo, HostNotification,
-        HostProviderDirectoryEntry, HostSessionModels, HostSettingsMutation,
+        HostProviderDirectoryEntry, HostRouteFailure, HostSessionModels, HostSettingsMutation,
     },
     protocol::{
         AgentCancelCause, InitializeParams, SessionEventNotification, SessionId,
@@ -63,6 +64,7 @@ use reqwest::redirect::Policy;
 use url::Url;
 use uuid::Uuid;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+const MAX_PROMPT_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// Per-WebSocket outgoing message cap. A slow peer is disconnected instead of
 /// retaining unbounded host notifications.
 pub const MAX_SOCKET_QUEUE: usize = 32;
@@ -631,6 +633,12 @@ struct CompatHistory {
 struct CompatSessionModels {
     session_id: Option<SessionId>,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionAttachment {
+    session_id: SessionId,
+    attachment_id: AttachmentId,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -755,9 +763,10 @@ enum CompatPromptContent {
         text: String,
     },
     Image {
-        media_type: String,
-        data: String,
+        media_type: Option<String>,
+        data: Option<String>,
         name: Option<String>,
+        attachment: Option<Value>,
     },
 }
 
@@ -877,10 +886,15 @@ async fn compat_unary(
             CompatError::invalid("Content-Type must be application/json"),
         );
     }
-    if content_length_exceeds(request.headers(), MAX_FRAME_BYTES) {
+    let body_limit = if method == "session.prompt" {
+        prompt_body_limit(&state)
+    } else {
+        MAX_FRAME_BYTES
+    };
+    if content_length_exceeds(request.headers(), body_limit) {
         return compat_response_error(Value::Null, CompatError::too_large());
     }
-    let body = match to_bytes(request.into_body(), MAX_FRAME_BYTES).await {
+    let body = match to_bytes(request.into_body(), body_limit).await {
         Ok(body) => body,
         Err(_) => return compat_response_error(Value::Null, CompatError::too_large()),
     };
@@ -929,6 +943,18 @@ fn compat_response_error(rpc_id: Value, error: CompatError) -> Response {
             }
         }),
     )
+}
+fn prompt_body_limit(state: &ApiState) -> usize {
+    let limits = state.host.attachment_limits();
+    let encoded = limits
+        .max_message_image_bytes
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(4);
+    usize::try_from(encoded.saturating_add(MAX_FRAME_BYTES as u64))
+        .unwrap_or(MAX_PROMPT_FRAME_BYTES)
+        .clamp(MAX_FRAME_BYTES, MAX_PROMPT_FRAME_BYTES)
 }
 
 fn compat_response(rpc_id: Value, result: Value) -> Response {
@@ -1027,6 +1053,7 @@ async fn compat_dispatch(
             compat_require_session(&session_id)?;
             compat_session_models(state, session_id).await
         }
+        "session.attachment" => compat_session_attachment(state, compat_decode(payload)?).await,
         "session.selectModel" => {
             let args: CompatSessionSelectModel = compat_decode(payload)?;
             compat_require_session(&args.session_id)?;
@@ -1654,14 +1681,14 @@ async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
                 workspace_id: session.workspace_id.clone(),
                 updated_at: session.created_at.min(MAX_SAFE_INTEGER),
                 running: false,
-                blank: session.event_count == 0,
+                blank: session.event_count <= 1,
                 cwd: session.cwd.clone(),
             });
         entry.workspace_id = session.workspace_id;
         entry.updated_at = entry
             .updated_at
             .max(session.created_at.min(MAX_SAFE_INTEGER));
-        entry.blank = session.event_count == 0;
+        entry.blank = session.event_count <= 1;
         entry.cwd = session.cwd;
     }
     Ok(())
@@ -1746,7 +1773,7 @@ async fn compat_session_create(
             workspace_id: persisted.workspace_id.clone(),
             updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
             running: false,
-            blank: persisted.event_count == 0,
+            blank: persisted.event_count <= 1,
             cwd: persisted.cwd,
         };
         compat_data(&state.compat)
@@ -1812,7 +1839,7 @@ async fn compat_session_create(
             .or_else(|| Some(requested_cwd.0.clone())),
         updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
         running: false,
-        blank: persisted.event_count == 0,
+        blank: persisted.event_count <= 1,
         cwd: persisted.cwd.or_else(|| Some(requested_cwd.1.clone())),
     };
     compat_data(&state.compat)
@@ -1887,7 +1914,6 @@ async fn compat_session_history(
         "hasMore": has_more,
     }))
 }
-
 async fn compat_session_models(
     state: &ApiState,
     session_id: SessionId,
@@ -1901,8 +1927,53 @@ async fn compat_session_models(
         "current": models.current,
         "routable": models.routable,
         "groups": models.groups.into_iter().map(compat_model_group).collect::<Vec<_>>(),
-        "failures": models.failures,
+        "failures": models
+            .failures
+            .into_iter()
+            .map(|failure| compat_route_failure(failure, None))
+            .collect::<Vec<_>>(),
     }))
+}
+
+async fn compat_session_attachment(
+    state: &ApiState,
+    args: CompatSessionAttachment,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.session_id)?;
+    let data = state
+        .host
+        .read_attachment(args.session_id, args.attachment_id)
+        .await
+        .map_err(compat_host_error)?;
+    Ok(json!({
+        "attachment": data.reference.safe_metadata(),
+        "data": base64_encode(&data.data),
+    }))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        output.push(TABLE[(first >> 2) as usize] as char);
+        let second = chunk.get(1).copied().unwrap_or(0);
+        output.push(TABLE[((first & 0x03) << 4 | second >> 4) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(
+                TABLE[((second & 0x0f) << 2 | chunk.get(2).copied().unwrap_or(0) >> 6) as usize]
+                    as char,
+            );
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(chunk[2] & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
 }
 
 fn compat_provider(entry: HostProviderDirectoryEntry) -> Value {
@@ -1937,7 +2008,18 @@ fn compat_model_info(info: HostModelInfo) -> Value {
     Value::Object(model)
 }
 
+fn compat_route_failure(failure: HostRouteFailure, display_name: Option<&str>) -> Value {
+    let name = display_name.unwrap_or(&failure.provider);
+    json!({
+        "id": failure.provider,
+        "name": name,
+        "message": failure.message,
+    })
+}
+
 fn compat_model_group(group: HostModelGroup) -> Value {
+    let failure = group.failure.clone();
+    let display_name = group.display_name.clone();
     let mut value = Map::from_iter([
         ("id".into(), Value::String(group.provider)),
         ("name".into(), Value::String(group.display_name)),
@@ -1951,10 +2033,10 @@ fn compat_model_group(group: HostModelGroup) -> Value {
             Value::Bool(group.credential_configured),
         ),
     ]);
-    if let Some(failure) = group.failure {
+    if let Some(failure) = failure {
         value.insert(
             "failure".into(),
-            serde_json::to_value(failure).unwrap_or(Value::Null),
+            compat_route_failure(failure, Some(&display_name)),
         );
     }
     Value::Object(value)
@@ -1976,8 +2058,9 @@ async fn compat_llm_models(state: &ApiState, args: CompatLlmModels) -> Result<Va
     let mut failures = Vec::new();
     for provider in providers {
         for group in state.host.model_groups(&provider) {
+            let display_name = group.display_name.clone();
             if let Some(failure) = group.failure.clone() {
-                failures.push(serde_json::to_value(failure).unwrap_or(Value::Null));
+                failures.push(compat_route_failure(failure, Some(&display_name)));
             }
             groups.push(compat_model_group(group));
         }
@@ -2167,19 +2250,35 @@ fn compat_prompt_blocks(
                 media_type,
                 data,
                 name,
-            } => {
-                compat_require_nonblank("mediaType", &media_type)?;
-                compat_require_nonblank("data", &data)?;
-                let mut attachment = Map::new();
-                attachment.insert("mediaType".into(), Value::String(media_type));
-                attachment.insert("data".into(), Value::String(data));
-                if let Some(name) = name {
-                    attachment.insert("name".into(), Value::String(name));
+                attachment,
+            } => match (attachment, media_type, data) {
+                (Some(attachment), None, None) => {
+                    AttachmentRef::from_value(&attachment)
+                        .map_err(|_| CompatError::invalid("image attachment is invalid"))?;
+                    if name.is_some() {
+                        return Err(CompatError::invalid(
+                            "canonical image must not include inline fields",
+                        ));
+                    }
+                    Ok(crate::protocol::ContentBlock::Image { attachment })
                 }
-                Ok(crate::protocol::ContentBlock::Image {
-                    attachment: Value::Object(attachment),
-                })
-            }
+                (None, Some(media_type), Some(data)) => {
+                    compat_require_nonblank("mediaType", &media_type)?;
+                    compat_require_nonblank("data", &data)?;
+                    let mut attachment = Map::new();
+                    attachment.insert("mediaType".into(), Value::String(media_type));
+                    attachment.insert("data".into(), Value::String(data));
+                    if let Some(name) = name {
+                        attachment.insert("name".into(), Value::String(name));
+                    }
+                    Ok(crate::protocol::ContentBlock::Image {
+                        attachment: Value::Object(attachment),
+                    })
+                }
+                _ => Err(CompatError::invalid(
+                    "image must be exactly inline mediaType/data or canonical attachment",
+                )),
+            },
         })
         .collect()
 }

@@ -284,6 +284,10 @@ async fn boot_host(recorded_replay: Option<String>) -> Result<HostRuntime, Diagn
         config.provider = deployment.provider;
         config.model = deployment.model;
         config = config.with_adapter_factory(Arc::new(FixedAdapterFactory(deployment.adapter)));
+    } else {
+        // Web/SDK start providerless; settings can install the first live route.
+        config.provider = "openai-responses".into();
+        config.model = "unconfigured".into();
     }
     HostRuntime::boot(config)
         .await
