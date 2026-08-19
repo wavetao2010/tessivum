@@ -1,8 +1,9 @@
 # Tessivum 二阶段开发计划
 
-> 状态：已批准的实施指引  
-> 基线日期：2026-08-17  
-> 适用范围：Rust Cordis 内核、DeepSeek Harness Host/Agent Runtime 迁移、现有插件生态兼容
+> 状态：阶段一、阶段二与 Phase 3 已完成；Alpha.6 已批准待实施
+> 基线日期：2026-08-17
+> 当前基线：`v0.1.0-alpha.5`（`6b00190`）
+> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、插件生态兼容与 Web 模型配置面
 
 ## 1. 文档集
 
@@ -10,7 +11,7 @@
 
 - [目标运行时架构](ARCHITECTURE.md)：Context、生命周期、事件、Native/WASM/Legacy Node 三运行时和浏览器边界。
 - [插件生态兼容方案](PLUGIN_COMPATIBILITY.md)：现有 npm 插件兼容级别、Legacy Node Bridge、WASM ABI 和迁移路径。
-- [Phase 3 产品能力开发计划](PHASE3_PRODUCT_PLAN.md)：WASM 权限与真实 Guest、Browser 控制面、多工作区的后续实施指引。
+- [Phase 3 产品能力开发计划](PHASE3_PRODUCT_PLAN.md)：已完成的 Alpha.2 WASM 权限、Alpha.3 Browser 控制面与 Alpha.4 多工作区实施记录。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
@@ -477,15 +478,13 @@ Rust `HostApi` 现在是 HTTP/SSE/WebSocket 与 bounded NDJSON SDK 的共同权�
 - `tests/web_integration.rs` 静态 boot graph、SSE、Host shutdown/reboot、session/workspace listing 与 durable event recovery；
 - `tests/host.rs` admission fence、flush、agent dispose 和重启恢复。
 
-### 2.6 Web 集成（已落地，保留 Browser 边界）
+### 2.6 Web 集成（已落地；Alpha.6 补齐模型配置面）
 
-Rust Host 生成同源、哈希绑定的 `window.__DSH_BOOT__`，扫描 `dsh.client` package 并发布 published client bundle。Browser Cordis 保持现有 connection/remotes、runtime、React UI 与 dynamic client half。直接 roster 见 `tessivum/web/package.json`；未发布的 session-log/workflow-run 包不伪造，当前 browser ESM module sink 与 fail-loud `createRequire` shim 记录在 `web/src/main.ts`。
+Rust Host 生成同源、哈希绑定的 `window.__DSH_BOOT__`，扫描 `dsh.client` package 并发布 Browser Cordis/React client bundle。Remote wire 已保持 `POST /api/<method>` full-form RPC、Host/mux WebSocket、durable SSE、SessionEvent 与 Host-owned recovery。
 
-Remote wire 已保持：`POST /api/<method>` full-form RPC、`/api/events.mux` 与 `/api/events.host` downlink WebSocket、`/events/<session>` durable SSE、SessionEvent、workspace/session baseline 与 Host-owned durable recovery。真实 Chromium smoke 已覆盖 workspace 选择、新会话、实时文本、tool card、reload 恢复和 published UI。
+Alpha.3 已接通 stop、approval、可写 settings/credentials；Alpha.4 已接通持久多工作区、opaque workspace id、工具资源根与重启恢复；Alpha.5 已加入原生 Rust `openai-responses` 适配器，支持 API-key relay、text/reasoning/function tools 与 encrypted reasoning replay。
 
-当前 Host profile 只拥有一个 canonical cwd：`workspace.create` 对其他目录 fail-loud，不创建易失的假 workspace；`session.create` 在响应前先持久化 blank SessionHeader，因此进程重启仍能恢复。
-
-未纳入本轮 Host 能力的审批交互、长任务停止和可写 settings form 仍是独立产品 gate；当前 Web settings surface 明确只读，不能把它们标成已迁移。
+Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到 Host 启动时固定的一组 provider/model，原生适配器只从 `OPENAI_*` 启动环境构造，`llm.providers`、模型发现、动态 route 注册、默认/会话模型选择和图片到 `input_image` 的持久链路尚未形成。Alpha.6 按本文后半部分完成该闭环。
 
 ### 2.7 正式切换与删除旧主干
 
@@ -552,14 +551,14 @@ Remote wire 已保持：`POST /api/<method>` full-form RPC、`/api/events.mux` �
 
 ## 11. 安全要求
 
-- Native Rust 插件与 Legacy Node 插件均视为可信代码；权限由进程和 Harness policy 约束。
-- WASM service call 在 manifest permissions 尚未接线前由 `CapabilityHandler` 默认拒绝；不能宣称 WASM 权限生态已完成。
-- Host Functions 必须检查插件身份、Scope、权限和输入上限；当前未配置 per-plugin permissions 的路径必须 fail closed。
-- Web API 只允许 loopback bind；WebSocket 拒绝跨 Origin，HTTP/SSE/Remote 仍由 schema、大小上限和本地边界约束。
+- Native Rust 插件与 Legacy Node 插件均视为可信代码；权限由进程和 Tessivum policy 约束。
+- WASM service call 必须通过 manifest 中 exact `service@version.method` 权限；未声明方法、未知版本与实例卸载后一律拒绝。
+- Host Functions 必须检查插件身份、Scope、权限和输入上限。
+- Web API 只允许 loopback bind，并对 HTTP、SSE、WebSocket 和静态响应执行 exact Host/Origin authority 校验；配置与凭据写入不得扩展到匿名 LAN 调用方。
 - Session JSONL/SQLite、settings、credentials 与 attachments 文件使用 0600，Host data directory 使用 0700；Legacy Node Bridge 不宣称是安全沙箱。
+- secret 只写不读，不得进入 settings、日志、错误详情、Browser 回包、调试格式或 provider discovery 诊断。
 - 动态插件不得获得真实 Context、Rust 引用、数据库连接或未包装的文件句柄。
-- 跨边界消息必须设置大小、并发、超时和队列上限；历史分页上限仍是后续 hardening gate。
-- 配置表达式不允许在 Rust 主进程执行任意 JavaScript。
+- 跨边界消息必须设置大小、并发、超时和队列上限；配置表达式不允许在 Rust 主进程执行任意 JavaScript。
 
 ## 12. 主要风险与控制
 
@@ -587,6 +586,289 @@ Remote wire 已保持：`POST /api/<method>` full-form RPC、`/api/events.mux` �
 - HMR 是否进入首个稳定版；
 - Rust 主干达到何种资源阈值才切换默认入口。
 
-## 14. 后续工作入口
+## 14. 当前后续工作入口
 
-开始实现时，第一项工作固定为阶段一 `1.1 行为基线与契约夹具`。在该夹具能稳定描述现有 Cordis 行为前，不创建完整框架脚手架，也不先接 Extism。
+阶段一、阶段二与 Phase 3 已关闭；`v0.1.0-alpha.5` 已证明原生 OpenAI Responses text/reasoning/function-tool wire、Headless/Web/SDK 启动与无状态 encrypted reasoning continuation。下一项固定工作是 Alpha.6 的 Web Provider 配置与 Codex 图片输入闭环；在该闭环通过前，不再把环境变量入口描述成完整产品配置体验。
+
+---
+
+# Alpha.6：Web Provider 配置与 Codex 图片输入
+
+> 状态：已批准待实施
+> 开发基线：`v0.1.0-alpha.5`（`6b00190`）
+> 发布目标：`v0.1.0-alpha.6`
+> 主题：OpenAI Responses Provider 配置、write-only 凭据、动态模型目录、持久图片输入
+
+## 15. Alpha.6 目标与完成场景
+
+Alpha.6 不增加新的模型协议；它把 Alpha.5 已验证的原生 `openai-responses` 适配器接入完整产品配置面。完成时，一个没有设置 `OPENAI_*` 环境变量的新用户必须能仅通过 Web 完成：
+
+```text
+打开 Models 页面
+→ 添加 OpenAI Responses 中转站
+→ 填写 Base URL、write-only API Key 与模型
+→ 可选 GET /models 获取候选
+→ 声明模型支持 text/image
+→ 保存并选择为默认模型
+→ 创建会话并发送文本 + 图片
+→ Codex 返回 reasoning/function call
+→ 工具结果回传并继续生成
+→ 重启 Host
+→ Provider、默认模型、会话模型、图片引用与后续对话全部恢复
+```
+
+环境变量入口继续服务 Headless、CI 与受管部署，但不再是 Web 唯一配置方式。
+
+## 16. Alpha.5 基线与真实缺口
+
+已具备：
+
+- `OpenAiResponsesAdapter`：标准 `/responses`、Bearer、SSE、`store: false`、reasoning、function tools、usage、取消与有界错误；
+- encrypted reasoning item 持久 replay，支持 stateless tool continuation；
+- `Settings`、`Credentials`、Browser writable RPC 与 0600 持久文件；
+- `AttachmentStore`：SHA-256 内容寻址、metadata/digest 复验、PNG/JPEG/WebP/GIF 与批次限制；
+- Browser prompt wire 可接收 text/image，Session 协议已有 `ContentBlock::Image`；
+- `LlmRuntime` 可按 provider route 注册 adapter。
+
+尚缺：
+
+- OpenAI adapter 的 Settings namespace/schema 与 per-request 配置解析；
+- 动态 provider directory、模型目录和 `/models` discovery；
+- Web Provider 创建/编辑/删除、两阶段凭据保存与默认模型选择；
+- durable per-session provider/model authority；
+- Browser 图片在提交前进入 `AttachmentStore`，当前兼容层仍把 Base64 对象直接放入消息；
+- adapter 从 `AttachmentRef` 读取并生成 Responses `input_image`；
+- 图片模型能力校验、tool-result 图片、restart/corruption E2E。
+
+## 17. 范围与明确不做
+
+Alpha.6 必须完成：
+
+- 一个原生 Rust `openai-responses` adapter family 下的多个自定义 route；
+- Web 创建、编辑、删除、发现、选择与凭据状态；
+- 文本和图片输入；
+- reasoning/function-tool/image 历史的无状态续接；
+- Settings/Credentials 动态生效与重启恢复；
+- 环境变量兼容迁移。
+
+Alpha.6 明确不做：
+
+- ChatGPT/Codex OAuth 登录、token refresh、account-id header、Codex WebSocket/zstd 私有 transport；
+- `openai-codex-responses`；
+- Anthropic Messages、Chat Completions、Gemini、Bedrock 或完整 pi-ai provider catalog；
+- 远程图片 URL 抓取；
+- 为只有一个协议实现的场景新增 factory-of-factories、通用 SDK 抽象或第三个配置仓库；
+- 把 Browser localStorage 变成 provider、secret、默认模型或附件的权威存储。
+
+用户的 Codex 中转站必须暴露标准 API-key `POST <baseURL>/responses`；若中转站使用额外私有 header，另行以真实契约扩展，不能静默猜测。
+
+## 18. 持久配置与凭据模型
+
+### 18.1 Settings namespace
+
+新增 `llm-openai-responses` namespace，用户层形状固定为：
+
+```yaml
+llm-openai-responses:
+  providers:
+    my-codex-relay:
+      displayName: My Codex Relay
+      baseURL: https://relay.example/v1
+      apiKeyEnv: MY_CODEX_RELAY_API_KEY
+      models:
+        - id: codex-model-name
+          name: Codex
+          contextWindow: 262144
+          maxTokens: 32768
+          input: [text, image]
+```
+
+约束：
+
+- `providers` 是以永久 route id 为键的 dict，重复 id 不可表达；
+- route id 一旦保存不可原地改名，因为 Session、默认模型与凭据引用都持有它；改名必须新建再删除；
+- `baseURL` 必须为无 userinfo、query、fragment 的 HTTP(S) prefix，adapter 只追加 `/responses`；
+- `models` 至少一项，model id 非空且 route 内唯一；
+- `contextWindow`、`maxTokens` 为正安全整数；
+- `input` 只接受 `text`、`image`，默认 `[text]`，Codex 图片模型必须显式声明 `image`；
+- schema 之外的字段、空 route、重复模型、未知 modality 在写入点拒绝；
+- Settings 候选必须完整解析成功后才原子替换当前 route snapshot，失败时保留 last-good generation。
+
+### 18.2 Credentials
+
+API Key 不进入 Settings。Web 为 route 派生 `<ROUTE>_API_KEY` 引用，并分开调用 `credentials.set`；页面只读取 `{configured, writable, source}` descriptor，不读取值。
+
+保存顺序固定为：
+
+```text
+settings.mutate 成功并返回新 revision
+→ UI 更新自身 checkpoint
+→ credentials.set
+```
+
+若第二步失败，卡片保留草稿 key；重试只执行 `credentials.set`，不使用旧 revision 重放已提交的 settings。删除由页面管理的 route 时，只有引用等于页面派生目标且 descriptor 确认 writable 时才先 `credentials.unset`，再 unset profile；自定义、共享、环境或只读凭据保留。
+
+### 18.3 默认与会话模型
+
+新增或接通 `agent-default-model` Settings namespace：
+
+```yaml
+agent-default-model:
+  provider: my-codex-relay
+  model: codex-model-name
+```
+
+- 默认值只影响新会话；
+- Session 创建必须在成功响应前提交所选 provider/model；
+- 当前会话的模型选择通过 durable `session/model-selected` 事件记录，不能只保存在 Browser；
+- cold resume 读取最新有效选择；没有选择事件的旧 Session 才回退当前默认并在首次使用时迁移；
+- provider/model 被删除后，已有 Session 新请求 fail loud，不静默换到默认模型。
+
+## 19. Host 动态 Provider 生命周期
+
+`OpenAiResponsesAdapter` 从固定 endpoint/key 改为每次 `generate()` 开始时解析一个不可变 `ProviderSnapshot`：
+
+```text
+route id + display name
++ base URL
++ credential reference
++ model descriptors/capabilities
++ request defaults
++ generation
+```
+
+一次请求在第一次 await 前捕获完整 snapshot 与 credential；在途请求不观察配置或密钥变化，下一次请求读取新 generation。Settings 更新按一个串行 mutation gate 执行：验证候选 → 构造候选 route set → 原子更新 `LlmRuntime` registrations → 发布 committed notification。删除顺序为拒绝新调用 → 让旧 snapshot 仅供已开始请求持有 → 删除 registration；不取消与该配置无关的其他 provider 请求。
+
+adapter 注册不要求密钥已经存在；缺失引用仍出现在目录并在请求时稳定返回 `MISSING_CREDENTIAL`，使 Web 能显示并修复，而不是让整条 route 消失。
+
+启动环境兼容规则：
+
+- `OPENAI_MODEL` 存在时，launcher 形成 route `openai-responses` 的 composition base；
+- `OPENAI_BASE_URL` 与 `OPENAI_API_KEY` 继续作为该 base 的 endpoint/credential source；
+- Web Settings 可覆盖同 route 的非 secret 字段；reset 回落 composition base；
+- 没有 `OPENAI_MODEL` 且 settings 已有 route 时，Host 直接从 settings 启动，不要求任何环境变量；
+- Headless 显式 `--provider/--model` 保持可用。
+
+## 20. Host 与 Browser API
+
+必须从当前静态兼容值切换为 Host 权威实现：
+
+- `llm.providers`：返回 configurable provider directory，包含 route、display name、settings namespace/path、active/declared；
+- `llm.models`：按 route 返回 model id/name、context、max tokens、input modalities 与逐 route failure；
+- `llm.discoverModels`：使用表单当前 Base URL 与临时 key 查询 `GET <baseURL>/models`，只返回候选，不持久化；
+- `settings.describe/mutate`：发布上述 namespace schema、redacted value、revision 与 live applies；
+- `credentials.describe/set/unset`：维持 write-only；
+- Session create/model-select/prompt：验证 provider/model 存在及能力，并提交 durable selection。
+
+`llm.discoverModels` 只支持 OpenAI-compatible listing：Bearer 或显式无 key、HTTP(S)、无 redirect、独立连接/读取超时、实际接收字节不超过 4 MiB、取消贯穿 DNS/connect/body。401/403 点名 credential，其他错误不得回显 key 或响应中的疑似 secret。由于用户可能使用本机或内网中转站，不禁止 loopback/private IP；安全边界是 exact same-origin 配置面和用户显式操作，而不是伪装成公网 URL 过滤器。
+
+## 21. Web Models 页面
+
+优先复用现有 Browser Cordis settings/models 组件与 published RPC，不创建第二张行为不同的自制表单。页面联合 `llm.providers`、`settings.describe`、`credentials.describe` 为一个 snapshot，并提供：
+
+- 已配置 route 行与 credential 状态点；
+- Add custom provider 卡片；
+- Provider ID、display name、Base URL、API Key；
+- 模型 id/name/context/max tokens 与 text/image capability；
+- Fetch available models 候选选择，不覆盖用户已调优字段；
+- Apply、Retry、Delete；
+- 默认模型与当前会话模型选择；
+- settings revision conflict、credential partial failure、discovery failure 的卡片内错误。
+
+API Key 只存在于输入组件状态，保存成功立即清空；截图、DOM snapshot、日志和错误文案不得包含该值。协议固定显示 `openai-responses`，不为了一个实现提供没有作用的协议下拉框。
+
+## 22. Codex 图片输入链路
+
+Codex 图片支持是 Alpha.6 发布门槛，不是后续项。
+
+### 22.1 Browser admission 与持久化
+
+不能把 20 MiB 图片继续塞进 1 MiB JSON RPC frame。新增同源、受 authority middleware 保护的 bounded attachment upload 路径；Browser 先上传 bytes 获得 `AttachmentRef`，再让 prompt 只携带 opaque ref。兼容的 inline image 输入只能作为受现有 frame 上限约束的入口，并必须在 Session commit 前归一化到同一 store；持久日志禁止保存 Base64、客户端路径或远程 URL。
+
+Host 在接收 prompt 时：
+
+1. 解码/读取上传 bytes；
+2. 使用 `AttachmentStore` 校验 magic、media type、bytes、dimensions、pixels 与 SHA-256；
+3. 以 0600 内容寻址文件持久化；
+4. 将 `ContentBlock::Image.attachment` 规范化为 `AttachmentRef`；
+5. 验证当前模型声明 `image`；
+6. 只在全部图片和模型能力通过后提交 user message。
+
+当前限制继续生效：20 MiB/张、16 张/消息、40 MiB/消息、4000 万像素，媒体类型 PNG/JPEG/WebP/GIF。部分保存后 Session commit 失败产生的未引用 blob 必须由 bounded orphan sweep 回收，不能靠用户手工清理。
+
+### 22.2 Responses serialization
+
+adapter 对每个 `AttachmentRef` 调用 `read_ref()`，再次验证 digest 与 metadata，然后发送：
+
+```json
+{
+  "type": "input_image",
+  "image_url": "data:image/png;base64,...",
+  "detail": "auto"
+}
+```
+
+用户消息中的 text/image 顺序必须保持；tool result 中的 text/image 使用 Responses 接受的 output content 数组。空工具输出仍使用明确文本占位。远程 `image_url`、文件路径和未验证任意 JSON attachment 一律拒绝。
+
+对不声明 `image` 的模型，拒绝必须发生在 durable user-message commit 和网络请求之前，避免一个失败图片永久毒化该 Session。恢复、fork、compaction 和 provider/model switch 必须保留引用而不复制 Base64；切换到 text-only 模型时若活动历史仍含未消费图片，应给出可操作拒绝而非静默删除。
+
+## 23. 实施顺序
+
+1. 冻结 provider/settings/credential/model/attachment DTO、错误码与 redaction fixture；
+2. 将原生 adapter 改为 per-request immutable `ProviderSnapshot` 与 Credentials resolver；
+3. 注册 `llm-openai-responses`、`agent-default-model` namespace 和动态 route lifecycle；
+4. 实现 Host 权威 `llm.providers`、`llm.models` 与 `llm.discoverModels`；
+5. 实现 durable session model selection 与旧 Session fallback migration；
+6. 接入 Browser Provider 行、创建卡片、两阶段保存、删除与模型选择；
+7. 将 `AttachmentStore` 发布到 Host，增加 bounded upload 与 inline normalization；
+8. 实现 `AttachmentRef` → Responses `input_image` 以及 tool-result 图片；
+9. 接通 model input modalities，删除 adapter 的 blanket `UNSUPPORTED_CONTENT` 和 Browser raw-Base64 durable 分支；
+10. 完成环境变量兼容、settings-only cold boot、restart 和 partial-failure recovery；
+11. 运行真实 Chromium、Headless、SDK、mock relay 与用户中转站契约验收；
+12. 更新 README/架构/版本，发布 `v0.1.0-alpha.6`。
+
+不得先做 UI 假表单再保留环境变量为实际权威；每一步只提交能够抵达下一请求或持久恢复的真实链路。
+
+## 24. 验证矩阵
+
+| 场景 | 必须证明 |
+|---|---|
+| Provider CRUD | 创建、编辑、删除、永久 route id、重复/空字段拒绝、revision conflict |
+| Credentials | write-only、managed/env/read-only descriptor、两阶段失败重试、owned delete、无 secret 回显 |
+| Dynamic config | next-request 生效、in-flight snapshot 稳定、invalid candidate 保留 last-good、route unload |
+| Discovery | draft URL/key、`/models`、手工模型 fallback、401/403、timeout、cancel、4 MiB、no redirect |
+| Model selection | 默认只影响新会话、当前会话 durable、restart、旧 Session migration、删除后 fail loud |
+| Text/tool | SSE text/reasoning/function call、encrypted reasoning、tool output、usage、cancel |
+| Image | text+image 顺序、四种媒体、limits、metadata/digest mismatch、text-only precommit 拒绝 |
+| Image durability | upload → Session ref → restart → resend、fork、tool-result image、orphan cleanup |
+| Browser | 无环境变量添加 relay、选模型、发图、工具续接、reload/restart、删除与重加 |
+| Compatibility | `OPENAI_*` launcher base、Headless explicit route、SDK、Legacy/Browser/WASM 回归 |
+| Security | Host/Origin、0600/0700、secret scan、URL validation、bounded bodies、no remote image fetch |
+
+永久测试至少包含一个脚本化 Responses relay：首轮接收 text + `input_image`，返回 encrypted reasoning + function call；第二轮接收原 reasoning item、function call、tool output，返回最终文本。真实 Chromium 必须观察最终回答、图片预览、credential redaction 与重启恢复。用户私有中转站只做最终兼容确认，不把 secret 写入 fixture、CI 或 transcript。
+
+强制 gates：
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+cd web && bun install --frozen-lockfile && bun run build
+```
+
+## 25. Alpha.6 完成定义
+
+同时满足以下条件才可发布：
+
+- fresh clone 无 `OPENAI_*` 环境变量时，Web 能创建并启用一个 Responses relay；
+- API Key 从未离开 write-only Credentials 边界；
+- provider/model/default/session selection 在重启后保持；
+- text、reasoning、function tools、encrypted continuation 和图片在同一真实 Browser 会话中通过；
+- 图片只以验证后的 content-addressed ref 持久化，corrupt/missing/oversized 输入 fail closed；
+- settings 更新下一请求生效，在途请求不漂移；
+- 环境变量 Headless/SDK/Web 兼容入口继续通过；
+- 当前全量回归、Browser build、shutdown/restart 与安全复核全部绿色；
+- 删除所有被替代的静态 compat provider/model、raw durable Base64 与 blanket image rejection 分支；
+- README 明确区分标准 `openai-responses` relay 与未支持的 ChatGPT/Codex OAuth。
+
+发布物仍为 source prerelease；没有预编译二进制、没有直接 OAuth 与没有实际验证的 provider 不得出现在完成声明中。

@@ -1,6 +1,6 @@
 # Tessivum Phase 3 产品能力开发计划
 
-> 状态：后续开发实施指引  
+> 状态：已完成（`v0.1.0-alpha.2` 至 `v0.1.0-alpha.4`）
 > 基线版本：`v0.1.0-alpha.1`  
 > 基线提交：`af1989b`  
 > 适用仓库：`wavetao2010/tessivum` 与其固定依赖 `wavetao2010/tessivum-core`  
