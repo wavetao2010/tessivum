@@ -49,7 +49,7 @@ use crate::{
     frontend::FrontendStatic,
     host::{
         HostApi, HostDescriptor, HostModelGroup, HostModelInfo, HostNotification,
-        HostProviderDirectoryEntry, HostSessionModels,
+        HostProviderDirectoryEntry, HostSessionModels, HostSettingsMutation,
     },
     protocol::{
         AgentCancelCause, InitializeParams, SessionEventNotification, SessionId,
@@ -1195,8 +1195,15 @@ async fn compat_settings_update(
     let Some(settings) = state.host.settings() else {
         return Err(compat_settings_error(&ns, SettingsError::Closed));
     };
-    settings
-        .update(&ns, Value::Object(args.patch), args.expected_revision)
+    state
+        .host
+        .mutate_settings(
+            ns.clone(),
+            HostSettingsMutation::Update {
+                patch: Value::Object(args.patch),
+                expected_revision: args.expected_revision,
+            },
+        )
         .await
         .map_err(|error| compat_settings_error(&ns, error))?;
     settings
@@ -1214,8 +1221,15 @@ async fn compat_settings_replace(
     let Some(settings) = state.host.settings() else {
         return Err(compat_settings_error(&ns, SettingsError::Closed));
     };
-    settings
-        .replace(&ns, Value::Object(args.section), args.expected_revision)
+    state
+        .host
+        .mutate_settings(
+            ns.clone(),
+            HostSettingsMutation::Replace {
+                user: Value::Object(args.section),
+                expected_revision: args.expected_revision,
+            },
+        )
         .await
         .map_err(|error| compat_settings_error(&ns, error))?;
     settings
@@ -1241,8 +1255,15 @@ async fn compat_settings_mutate(
     let Some(settings) = state.host.settings() else {
         return Err(compat_settings_error(&ns, SettingsError::Closed));
     };
-    settings
-        .mutate(&ns, ops, args.expected_revision)
+    state
+        .host
+        .mutate_settings(
+            ns.clone(),
+            HostSettingsMutation::Mutate {
+                ops,
+                expected_revision: args.expected_revision,
+            },
+        )
         .await
         .map_err(|error| compat_settings_error(&ns, error))?;
     settings

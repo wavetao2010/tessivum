@@ -182,7 +182,11 @@ async fn responses_materializes_durable_images_in_order_and_tool_output_arrays()
                     text: "tool text".into(),
                 },
                 ContentBlock::Image {
-                    attachment: serde_json::to_value(&reference).unwrap(),
+                    attachment: json!({
+                        "type": "image",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+                        "mimeType": "image/png",
+                    }),
                 },
             ],
             is_error: Some(false),
@@ -223,6 +227,7 @@ async fn responses_materializes_durable_images_in_order_and_tool_output_arrays()
         second_output["output"][0],
         json!({"type":"input_text","text":"tool text"})
     );
+    assert_eq!(second_output["output"][1]["type"], "input_image");
     assert!(second_output["output"][1]["image_url"]
         .as_str()
         .unwrap()

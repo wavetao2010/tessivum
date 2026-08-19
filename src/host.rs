@@ -55,7 +55,8 @@ use crate::{
     },
     session::{session_service_key, SessionError, SessionPersistence, SessionStore},
     settings::{
-        settings_service_key, Settings, SettingsEvent, SettingsRegistration, YamlSettingsProvider,
+        settings_service_key, Settings, SettingsError, SettingsEvent, SettingsPathOp,
+        SettingsRegistration, SettingsSnapshot, YamlSettingsProvider,
         AGENT_DEFAULT_MODEL_NAMESPACE, LLM_OPENAI_RESPONSES_NAMESPACE,
     },
     subprocess::SubprocessRuntime,
@@ -455,7 +456,22 @@ impl HostError {
     }
 }
 
-/// Facts emitted only after session admission or a status transition.
+/// A settings write routed through the host so live provider routes are updated
+/// before the transport reports success.
+pub enum HostSettingsMutation {
+    Update {
+        patch: Value,
+        expected_revision: Option<u64>,
+    },
+    Replace {
+        user: Value,
+        expected_revision: Option<u64>,
+    },
+    Mutate {
+        ops: Vec<SettingsPathOp>,
+        expected_revision: Option<u64>,
+    },
+}
 #[derive(Clone, Debug)]
 pub enum HostNotification {
     SessionEvent(SessionEventNotification),
@@ -589,6 +605,27 @@ pub trait HostApi: Send + Sync {
         params: SessionPromptParams,
     ) -> Result<SessionPromptParams, TessivumError> {
         Ok(params)
+    }
+    async fn mutate_settings(
+        &self,
+        namespace: String,
+        mutation: HostSettingsMutation,
+    ) -> Result<SettingsSnapshot, SettingsError> {
+        let settings = self.settings().ok_or(SettingsError::Closed)?;
+        match mutation {
+            HostSettingsMutation::Update {
+                patch,
+                expected_revision,
+            } => settings.update(&namespace, patch, expected_revision).await,
+            HostSettingsMutation::Replace {
+                user,
+                expected_revision,
+            } => settings.replace(&namespace, user, expected_revision).await,
+            HostSettingsMutation::Mutate {
+                ops,
+                expected_revision,
+            } => settings.mutate(&namespace, ops, expected_revision).await,
+        }
     }
     fn descriptor(&self) -> HostDescriptor {
         HostDescriptor {
@@ -2038,9 +2075,6 @@ impl HostHandle {
                 tokio::select! {
                     event = settings_events.recv() => match event {
                         Ok(event) => {
-                            if settings_inner.dynamic_routes && event.namespace == LLM_OPENAI_RESPONSES_NAMESPACE {
-                                let _ = apply_route_settings(&settings_inner).await;
-                            }
                             let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -2383,6 +2417,13 @@ impl HostApi for HostHandle {
             .await
             .map_err(HostError::wire)
     }
+    async fn mutate_settings(
+        &self,
+        namespace: String,
+        mutation: HostSettingsMutation,
+    ) -> Result<SettingsSnapshot, SettingsError> {
+        mutate_settings_inner(&self.inner, namespace, mutation).await
+    }
     async fn normalize_prompt(
         &self,
         params: SessionPromptParams,
@@ -2520,6 +2561,13 @@ impl HostApi for HostRuntime {
     ) -> Result<SessionPromptParams, TessivumError> {
         self.handle.normalize_prompt(params).await
     }
+    async fn mutate_settings(
+        &self,
+        namespace: String,
+        mutation: HostSettingsMutation,
+    ) -> Result<SettingsSnapshot, SettingsError> {
+        self.handle.mutate_settings(namespace, mutation).await
+    }
     fn descriptor(&self) -> HostDescriptor {
         self.handle.descriptor()
     }
@@ -2563,8 +2611,62 @@ pub async fn shutdown_signal() -> Result<i32, std::io::Error> {
     }
 }
 
-async fn apply_route_settings(inner: &Arc<HostInner>) -> Result<(), HostError> {
-    let _gate = inner.route_gate.lock().await;
+async fn mutate_settings_inner(
+    inner: &Arc<HostInner>,
+    namespace: String,
+    mutation: HostSettingsMutation,
+) -> Result<SettingsSnapshot, SettingsError> {
+    let routed = inner.dynamic_routes && namespace == LLM_OPENAI_RESPONSES_NAMESPACE;
+    let _route_gate = routed.then(|| inner.route_gate.lock());
+    let previous = if routed {
+        Some(inner.settings.user(&namespace)?)
+    } else {
+        None
+    };
+    let snapshot = match mutation {
+        HostSettingsMutation::Update {
+            patch,
+            expected_revision,
+        } => {
+            inner
+                .settings
+                .update(&namespace, patch, expected_revision)
+                .await?
+        }
+        HostSettingsMutation::Replace {
+            user,
+            expected_revision,
+        } => {
+            inner
+                .settings
+                .replace(&namespace, user, expected_revision)
+                .await?
+        }
+        HostSettingsMutation::Mutate {
+            ops,
+            expected_revision,
+        } => {
+            inner
+                .settings
+                .mutate(&namespace, ops, expected_revision)
+                .await?
+        }
+    };
+    if routed {
+        if let Err(error) = apply_route_settings_locked(inner).await {
+            if let Some(previous) = previous {
+                let _ = inner
+                    .settings
+                    .replace(&namespace, previous, Some(snapshot.revision))
+                    .await;
+            }
+            return Err(SettingsError::Validation(error.wire()));
+        }
+    }
+    Ok(snapshot)
+}
+
+async fn apply_route_settings_locked(inner: &Arc<HostInner>) -> Result<(), HostError> {
     let snapshot = inner
         .settings
         .get(LLM_OPENAI_RESPONSES_NAMESPACE)

@@ -17,6 +17,7 @@ use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, 
 use tokio::{sync::Mutex as AsyncMutex, time};
 
 use crate::{
+    attachments::{decode_inline_image, AttachmentError, AttachmentRef, AttachmentStore},
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolRegistration, ToolRunContext,
         ToolRuntime,
@@ -231,6 +232,7 @@ struct McpInner {
     config: McpClientConfig,
     tools: ToolRuntime,
     connector: Arc<dyn McpConnector>,
+    attachments: Mutex<Option<Arc<AttachmentStore>>>,
     state: Mutex<McpState>,
     lifecycle: AsyncMutex<()>,
     registration_gate: Mutex<()>,
@@ -258,11 +260,30 @@ impl fmt::Debug for McpConnection {
 }
 
 impl McpConnection {
-    /// Connects, synchronizes its first tool snapshot, and starts close supervision.
+    /// Connects and synchronizes its first tool snapshot.
     pub async fn connect(
         config: McpClientConfig,
         tools: ToolRuntime,
         connector: Arc<dyn McpConnector>,
+    ) -> Result<Self, TessivumError> {
+        Self::connect_inner(config, tools, connector, None).await
+    }
+
+    /// Connects with the durable store used to normalize MCP image results.
+    pub async fn connect_with_attachment_store(
+        config: McpClientConfig,
+        tools: ToolRuntime,
+        connector: Arc<dyn McpConnector>,
+        attachments: Arc<AttachmentStore>,
+    ) -> Result<Self, TessivumError> {
+        Self::connect_inner(config, tools, connector, Some(attachments)).await
+    }
+
+    async fn connect_inner(
+        config: McpClientConfig,
+        tools: ToolRuntime,
+        connector: Arc<dyn McpConnector>,
+        attachments: Option<Arc<AttachmentStore>>,
     ) -> Result<Self, TessivumError> {
         config.validate()?;
         let connection = Self {
@@ -270,6 +291,7 @@ impl McpConnection {
                 config,
                 tools,
                 connector,
+                attachments: Mutex::new(attachments),
                 state: Mutex::new(McpState {
                     generation: 0,
                     transport: None,
@@ -287,6 +309,11 @@ impl McpConnection {
         };
         connection.reconnect().await?;
         Ok(connection)
+    }
+
+    /// Installs the store for connections created through the compatibility constructor.
+    pub fn set_attachment_store(&self, attachments: Arc<AttachmentStore>) {
+        *lock(&self.inner.attachments) = Some(attachments);
     }
 
     /// Publishes this connection under the stable MCP service key.
@@ -668,7 +695,8 @@ impl McpConnection {
             "MCP_RESULT_LIMIT",
             "MCP tool result exceeds the configured limit",
         )?;
-        normalize_result(response)
+        let attachments = lock(&self.inner.attachments).clone();
+        normalize_result(response, attachments.as_deref()).await
     }
 }
 
@@ -962,7 +990,10 @@ fn next_generation(generation: u64) -> u64 {
     generation.wrapping_add(1).max(1)
 }
 
-fn normalize_result(value: Value) -> ToolHandlerResult {
+async fn normalize_result(
+    value: Value,
+    attachments: Option<&AttachmentStore>,
+) -> ToolHandlerResult {
     let object = value.as_object();
     if object
         .and_then(|object| object.get("isError"))
@@ -976,7 +1007,13 @@ fn normalize_result(value: Value) -> ToolHandlerResult {
         ));
     }
     let content = match object.and_then(|object| object.get("content")) {
-        Some(Value::Array(content)) => content.iter().map(content_block).collect(),
+        Some(Value::Array(content)) => {
+            let mut blocks = Vec::with_capacity(content.len());
+            for value in content {
+                blocks.push(content_block(value, attachments).await?);
+            }
+            blocks
+        }
         Some(Value::String(text)) => vec![ContentBlock::Text { text: text.clone() }],
         Some(_) => vec![placeholder("malformed content")],
         None => vec![placeholder("no content")],
@@ -984,34 +1021,104 @@ fn normalize_result(value: Value) -> ToolHandlerResult {
     Ok(crate::tools::ToolOutput::new(content, false, Value::Null))
 }
 
-fn content_block(value: &Value) -> ContentBlock {
+async fn content_block(
+    value: &Value,
+    attachments: Option<&AttachmentStore>,
+) -> Result<ContentBlock, TessivumError> {
     let Some(object) = value.as_object() else {
-        return placeholder("malformed content item");
+        return Ok(placeholder("malformed content item"));
     };
     match object.get("type").and_then(Value::as_str) {
-        Some("text") => object
+        Some("text") => Ok(object
             .get("text")
             .and_then(Value::as_str)
             .map(|text| ContentBlock::Text {
                 text: text.to_owned(),
             })
-            .unwrap_or_else(|| placeholder("malformed text content")),
-        Some("image") => ContentBlock::Image {
-            attachment: value.clone(),
-        },
-        Some(kind) => placeholder(&format!("{kind} content omitted")),
-        None => placeholder("untyped content"),
+            .unwrap_or_else(|| placeholder("malformed text content"))),
+        Some("image") => normalize_image(value, attachments).await,
+        Some(kind) => Ok(placeholder(&format!("{kind} content omitted"))),
+        None => Ok(placeholder("untyped content")),
     }
+}
+
+async fn normalize_image(
+    value: &Value,
+    attachments: Option<&AttachmentStore>,
+) -> Result<ContentBlock, TessivumError> {
+    let Some(store) = attachments else {
+        return Err(mcp_error(
+            "MCP_ATTACHMENT_STORE_UNAVAILABLE",
+            "MCP image content requires an attachment store",
+            Value::Null,
+        ));
+    };
+    let reference = match AttachmentRef::from_value(value) {
+        Ok(reference) => {
+            store
+                .read_ref(&reference)
+                .await
+                .map_err(mcp_attachment_error)?;
+            reference
+        }
+        Err(_) => {
+            let input = decode_mcp_image(value).map_err(mcp_attachment_error)?;
+            store.save(input).await.map_err(mcp_attachment_error)?
+        }
+    };
+    Ok(ContentBlock::Image {
+        attachment: serde_json::to_value(reference).expect("attachment reference is serializable"),
+    })
+}
+
+pub(crate) fn decode_mcp_image(
+    value: &Value,
+) -> Result<crate::attachments::AttachmentInput, AttachmentError> {
+    let object = value.as_object().ok_or(AttachmentError::InvalidReference)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type" | "data" | "mimeType" | "mediaType" | "name"
+        )
+    }) {
+        return Err(AttachmentError::InvalidReference);
+    }
+    let media_type = object
+        .get("mediaType")
+        .or_else(|| object.get("mimeType"))
+        .cloned()
+        .ok_or(AttachmentError::InvalidReference)?;
+    let mut inline = serde_json::Map::new();
+    inline.insert("mediaType".into(), media_type);
+    inline.insert(
+        "data".into(),
+        object
+            .get("data")
+            .cloned()
+            .ok_or(AttachmentError::InvalidReference)?,
+    );
+    if let Some(name) = object.get("name") {
+        inline.insert("name".into(), name.clone());
+    }
+    decode_inline_image(&Value::Object(inline))
+}
+
+fn mcp_error(code: impl Into<String>, message: impl Into<String>, details: Value) -> TessivumError {
+    TessivumError::new(code, message, "mcp", details)
+}
+
+fn mcp_attachment_error(error: AttachmentError) -> TessivumError {
+    mcp_error(
+        error.code(),
+        "MCP image content could not be normalized",
+        json!({"error": error.to_string()}),
+    )
 }
 
 fn placeholder(reason: &str) -> ContentBlock {
     ContentBlock::Text {
         text: format!("[MCP {reason}]"),
     }
-}
-
-fn mcp_error(code: impl Into<String>, message: impl Into<String>, details: Value) -> TessivumError {
-    TessivumError::new(code, message, "mcp", details)
 }
 
 fn cancelled_error() -> TessivumError {

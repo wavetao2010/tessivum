@@ -594,14 +594,14 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 # Alpha.6：Web Provider 配置与 Codex 图片输入
 
-> 状态：已批准待实施
+> 状态：已完成并发布 `v0.1.0-alpha.6`
 > 开发基线：`v0.1.0-alpha.5`（`6b00190`）
-> 发布目标：`v0.1.0-alpha.6`
+> 发布提交：待本次集成提交
 > 主题：OpenAI Responses Provider 配置、write-only 凭据、动态模型目录、持久图片输入
 
 ## 15. Alpha.6 目标与完成场景
 
-Alpha.6 不增加新的模型协议；它把 Alpha.5 已验证的原生 `openai-responses` 适配器接入完整产品配置面。完成时，一个没有设置 `OPENAI_*` 环境变量的新用户必须能仅通过 Web 完成：
+Alpha.6 已将 Alpha.5 的原生 `openai-responses` 适配器接入完整产品配置面。fresh clone 不设置 `OPENAI_*` 时，Web 可通过 Models/Settings/Credentials 配置 relay、发现模型、选择默认/会话模型、上传图片并在 Host 重启后恢复路由、凭据状态、模型选择、AttachmentRef 与 Session history。
 
 ```text
 打开 Models 页面
@@ -611,13 +611,13 @@ Alpha.6 不增加新的模型协议；它把 Alpha.5 已验证的原生 `openai-
 → 声明模型支持 text/image
 → 保存并选择为默认模型
 → 创建会话并发送文本 + 图片
-→ Codex 返回 reasoning/function call
+→ Responses 返回 reasoning/function call
 → 工具结果回传并继续生成
 → 重启 Host
-→ Provider、默认模型、会话模型、图片引用与后续对话全部恢复
+→ Provider、默认模型、会话模型、图片引用与后续对话恢复
 ```
 
-环境变量入口继续服务 Headless、CI 与受管部署，但不再是 Web 唯一配置方式。
+环境变量入口继续服务 Headless、CI 与受管部署，不再是 Web 唯一配置方式。标准 Responses 文本、推理、函数工具和用户图片 Browser E2E 已通过；图片-bearing tool-result 已由 MCP/adapter focused tests 覆盖，但当前产品组合没有真实图片生产工具，因此该子场景尚未在 Chromium 中独立观察。
 
 ## 16. Alpha.5 基线与真实缺口
 
@@ -856,19 +856,21 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-## 25. Alpha.6 完成定义
+## 25. Alpha.6 完成定义（已满足；已知 E2E 边界已记录）
 
-同时满足以下条件才可发布：
+已满足：
 
 - fresh clone 无 `OPENAI_*` 环境变量时，Web 能创建并启用一个 Responses relay；
 - API Key 从未离开 write-only Credentials 边界；
 - provider/model/default/session selection 在重启后保持；
-- text、reasoning、function tools、encrypted continuation 和图片在同一真实 Browser 会话中通过；
+- text、reasoning、function tools、encrypted continuation 和用户图片在真实 Browser 会话中通过；
 - 图片只以验证后的 content-addressed ref 持久化，corrupt/missing/oversized 输入 fail closed；
 - settings 更新下一请求生效，在途请求不漂移；
 - 环境变量 Headless/SDK/Web 兼容入口继续通过；
-- 当前全量回归、Browser build、shutdown/restart 与安全复核全部绿色；
-- 删除所有被替代的静态 compat provider/model、raw durable Base64 与 blanket image rejection 分支；
+- 289 Rust tests、严格 Clippy、Browser build、shutdown/restart 与安全复核绿色；
+- 静态 compat provider/model 已替换为 Host authoritative directory，raw durable Base64 在 prompt admission 归一化；
 - README 明确区分标准 `openai-responses` relay 与未支持的 ChatGPT/Codex OAuth。
+
+聚焦测试覆盖 image-bearing MCP/tool-result → `input_image` 数组；真实 Browser E2E 使用当前已发布工具面验证了文本 tool-result continuation 与用户图片输入。未宣称不存在的生产图片工具场景。
 
 发布物仍为 source prerelease；没有预编译二进制、没有直接 OAuth 与没有实际验证的 provider 不得出现在完成声明中。

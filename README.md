@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by the architectu
 
 ## Alpha status
 
-`v0.1.0-alpha.5` is a source release and reproducible baseline, not a production-stable API promise.
+`v0.1.0-alpha.6` is a source release and reproducible baseline, not a production-stable API promise.
 
 Implemented and verified:
 
@@ -22,6 +22,7 @@ Implemented and verified:
 - exact per-plugin WASM service permissions plus a pinned real Rust/Extism Guest;
 - Browser stop/resume, durable approval request/response/reconnect, and writable redacted settings/credentials;
 - one HostRuntime with durable opaque multi-workspace/session authority, restart migration, workspace-scoped Bash, and subagent inheritance.
+- Web-configured OpenAI Responses routes with redacted Settings/Credentials, dynamic model discovery/selection, durable default/session model state, bounded image upload, AttachmentRef persistence, and Responses `input_image` serialization.
 - native OpenAI Responses streaming for API-key relays, including stateless encrypted-reasoning and function-tool continuation.
 
 ## Architecture
@@ -89,7 +90,7 @@ cargo run --release -- \
   "inspect this repository"
 ```
 
-The adapter sends `store: false`, streams text/reasoning/function calls, and persists encrypted reasoning items for stateless tool-call continuation. This is the API-key-based `openai-responses` protocol, not ChatGPT's OAuth-only `openai-codex-responses` transport; a Codex relay must expose the standard `/responses` contract.
+The adapter sends `store: false`, streams text/reasoning/function calls, persists encrypted reasoning items for stateless tool-call continuation, and materializes validated AttachmentRef images as Responses data URLs. This is the API-key-based `openai-responses` protocol, not ChatGPT's OAuth-only `openai-codex-responses` transport; a Codex relay must expose the standard `/responses` contract.
 
 ### Browser shell
 
@@ -101,7 +102,7 @@ cd ..
 cargo run --release -- web
 ```
 
-Open <http://127.0.0.1:3000>. `OPENAI_MODEL` opts the Host into the native Responses adapter; without it, the Browser still boots but model calls fail closed as unconfigured.
+Open <http://127.0.0.1:3000>. Alpha6 can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
 
 ### SDK mode
 
@@ -120,7 +121,7 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-The Alpha cutover baseline passes 284 Rust tests across 39 suites, the Browser typecheck/build, native OpenAI Responses text/reasoning/function-tool relay flows, real Headless and SDK process journeys, real Chromium model/stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, and graceful shutdown checks.
+The Alpha6 baseline passes 289 Rust tests across 39 suites, the Browser typecheck/build, real Web Provider/Credentials/Models/discovery/default-selection/image-upload/restart flows against a local Responses relay, native text/reasoning/function-tool/image serialization tests, real Headless and SDK process journeys, real Chromium model/stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, and graceful shutdown checks.
 
 ## Known Alpha limits
 
@@ -128,7 +129,8 @@ The Alpha cutover baseline passes 284 Rust tests across 39 suites, the Browser t
 - Browser configuration exposes only the published settings namespace allowlist; arbitrary registered namespaces remain Host-internal;
 - WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, and `credentials@1.describe`;
 - several unpublished upstream Browser packages require explicit compatibility overrides;
-- the native Responses adapter currently supports text, reasoning, and function tools; image attachments and direct ChatGPT/Codex OAuth are not wired;
+- the native Responses adapter requires the standard API-key `/responses` contract; direct ChatGPT/Codex OAuth and remote image URLs are not wired;
+- image-bearing MCP/tool-result serialization is covered by focused adapter tests; the real Browser E2E currently exercises text tool continuation plus user image input, because no production-configured image-producing tool is exposed;
 - API listeners are loopback-only and this release does not ship prebuilt binaries.
 
 These are product follow-ups, not work to change or deprecate the official DeepSeek Harness project.

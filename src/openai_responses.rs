@@ -14,6 +14,7 @@ use tessivum_core::CancellationToken;
 use crate::{
     attachments::{AttachmentError, AttachmentRef, AttachmentStore},
     llm::{LlmAdapter, LlmStream},
+    mcp::decode_mcp_image,
     ContentBlock, FinishReason, GenerateRequest, Message, MessageRole, MessageSource, StreamChunk,
     TessivumError, TokenUsage, ToolCallId,
 };
@@ -758,8 +759,6 @@ async fn image_input(
             json!({"modality": RESPONSES_IMAGE_MODALITY, "model": model.id}),
         ));
     }
-    let reference = AttachmentRef::from_value(attachment)
-        .map_err(|error| attachment_error("image attachment must be a durable reference", error))?;
     let store = attachment_store.ok_or_else(|| {
         adapter_error(
             "INVALID_ATTACHMENT_REFERENCE",
@@ -767,6 +766,17 @@ async fn image_input(
             Value::Null,
         )
     })?;
+    let reference = match AttachmentRef::from_value(attachment) {
+        Ok(reference) => reference,
+        Err(_) => {
+            let input = decode_mcp_image(attachment)
+                .map_err(|error| attachment_error("image attachment is invalid", error))?;
+            store
+                .save(input)
+                .await
+                .map_err(|error| attachment_error("could not save image attachment", error))?
+        }
+    };
     let data = store
         .read_ref_bounded(&reference, store.limits().max_image_bytes)
         .await
