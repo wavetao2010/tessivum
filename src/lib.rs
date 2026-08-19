@@ -48,4 +48,8 @@ pub mod workflow;
 pub mod workspace;
 
 pub use error::TessivumError;
+pub use openai_responses::{
+    OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesRoute,
+    ResponsesRouteResolver, RESPONSES_IMAGE_MODALITY, RESPONSES_TEXT_MODALITY,
+};
 pub use protocol::*;

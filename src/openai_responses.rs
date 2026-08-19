@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{header, Client, Response, StatusCode, Url};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tessivum_core::CancellationToken;
 
@@ -19,37 +21,128 @@ const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const REPLAY_TYPE: &str = "openai-responses";
 const REPLAY_VERSION: u64 = 1;
+const DEFAULT_ROUTE_ID: &str = "openai-responses";
 
-/// Native, stateless OpenAI Responses API adapter for OpenAI-compatible relays.
-#[derive(Clone)]
-pub struct OpenAiResponsesAdapter {
-    client: Client,
-    endpoint: Url,
-    authorization: header::HeaderValue,
+/// Input capability declared by a Responses model.
+pub const RESPONSES_TEXT_MODALITY: &str = "text";
+pub const RESPONSES_IMAGE_MODALITY: &str = "image";
+
+/// The smallest model descriptor needed to validate a Responses request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsesModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, alias = "inputModalities")]
+    pub input: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
 }
 
-impl fmt::Debug for OpenAiResponsesAdapter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OpenAiResponsesAdapter")
-            .field("endpoint", &self.endpoint)
-            .finish_non_exhaustive()
+impl ResponsesModel {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            input: vec![RESPONSES_TEXT_MODALITY.into()],
+            context_window: None,
+            max_tokens: None,
+        }
     }
-}
 
-impl OpenAiResponsesAdapter {
-    /// Creates an adapter whose base URL is a prefix such as `https://relay.example/v1`.
-    pub fn new(base_url: &str, api_key: &str) -> Result<Self, TessivumError> {
-        let base_url = base_url.trim();
-        let api_key = api_key.trim();
-        if api_key.is_empty() {
+    pub fn with_input<I, S>(mut self, input: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.input = input.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), TessivumError> {
+        if self.id.trim().is_empty() {
             return Err(adapter_error(
-                "MISSING_CREDENTIAL",
-                "OPENAI_API_KEY must not be empty",
+                "INVALID_OPENAI_MODEL",
+                "OpenAI Responses model ids must not be empty",
                 Value::Null,
             ));
         }
-        let base = Url::parse(base_url).map_err(|error| {
+        for modality in self.input.iter().filter(|value| !value.trim().is_empty()) {
+            if !matches!(
+                modality.as_str(),
+                RESPONSES_TEXT_MODALITY | RESPONSES_IMAGE_MODALITY
+            ) {
+                return Err(adapter_error(
+                    "INVALID_OPENAI_MODALITY",
+                    "OpenAI Responses models support only text and image input",
+                    json!({"modality": modality}),
+                ));
+            }
+        }
+        if self.context_window == Some(0) || self.max_tokens == Some(0) {
+            return Err(adapter_error(
+                "INVALID_OPENAI_MODEL",
+                "OpenAI Responses model limits must be positive when present",
+                Value::Null,
+            ));
+        }
+        Ok(())
+    }
+
+    fn supports(&self, modality: &str) -> bool {
+        let input = if self.input.is_empty() {
+            &[RESPONSES_TEXT_MODALITY.to_owned()][..]
+        } else {
+            &self.input
+        };
+        input.iter().any(|value| value == modality)
+    }
+}
+
+/// A configured provider route. Credentials are referenced, never embedded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsesRoute {
+    pub id: String,
+    pub display_name: String,
+    pub base_url: String,
+    pub credential_ref: String,
+    #[serde(default)]
+    pub models: Vec<ResponsesModel>,
+    #[serde(default)]
+    pub generation: u64,
+}
+
+impl ResponsesRoute {
+    pub fn new(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        base_url: impl Into<String>,
+        credential_ref: impl Into<String>,
+        models: Vec<ResponsesModel>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            display_name: display_name.into(),
+            base_url: base_url.into(),
+            credential_ref: credential_ref.into(),
+            models,
+            generation: 0,
+        }
+    }
+
+    pub fn validate(&self) -> Result<Url, TessivumError> {
+        if self.id.trim().is_empty() || self.display_name.trim().is_empty() {
+            return Err(adapter_error(
+                "INVALID_OPENAI_ROUTE",
+                "OpenAI Responses route id and display name must not be empty",
+                Value::Null,
+            ));
+        }
+        let base = Url::parse(self.base_url.trim()).map_err(|error| {
             adapter_error(
                 "INVALID_OPENAI_BASE_URL",
                 "OPENAI_BASE_URL is not a valid URL",
@@ -58,29 +151,239 @@ impl OpenAiResponsesAdapter {
         })?;
         if !matches!(base.scheme(), "http" | "https")
             || base.cannot_be_a_base()
+            || base.username() != ""
+            || base.password().is_some()
             || base.query().is_some()
             || base.fragment().is_some()
         {
             return Err(adapter_error(
                 "INVALID_OPENAI_BASE_URL",
-                "OPENAI_BASE_URL must be an HTTP(S) URL without a query or fragment",
+                "OPENAI_BASE_URL must be an HTTP(S) URL without userinfo, query, or fragment",
                 Value::Null,
             ));
         }
-        let endpoint = Url::parse(&format!(
+        let mut ids = BTreeSet::new();
+        for model in &self.models {
+            model.validate()?;
+            if !ids.insert(model.id.clone()) {
+                return Err(adapter_error(
+                    "INVALID_OPENAI_MODEL",
+                    "OpenAI Responses routes must not contain duplicate model ids",
+                    json!({"model": model.id}),
+                ));
+            }
+        }
+        Ok(base)
+    }
+}
+
+/// Immutable route/model facts captured for one generation attempt.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshot {
+    pub route: ResponsesRoute,
+    pub model: ResponsesModel,
+    #[serde(skip)]
+    api_key: Option<String>,
+}
+
+impl fmt::Debug for ProviderSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderSnapshot")
+            .field("route", &self.route)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProviderSnapshot {
+    pub fn new(
+        route: ResponsesRoute,
+        model: ResponsesModel,
+        api_key: impl Into<String>,
+    ) -> Result<Self, TessivumError> {
+        Self::with_optional_key(route, model, Some(api_key.into()))
+    }
+
+    pub fn without_key(
+        route: ResponsesRoute,
+        model: ResponsesModel,
+    ) -> Result<Self, TessivumError> {
+        Self::with_optional_key(route, model, None::<String>)
+    }
+
+    fn with_optional_key(
+        route: ResponsesRoute,
+        model: ResponsesModel,
+        api_key: Option<String>,
+    ) -> Result<Self, TessivumError> {
+        route.validate()?;
+        model.validate()?;
+        if !route.models.is_empty()
+            && route
+                .models
+                .iter()
+                .find(|candidate| candidate.id == model.id)
+                != Some(&model)
+        {
+            return Err(adapter_error(
+                "INVALID_OPENAI_MODEL",
+                "the selected model is not the route's declared model descriptor",
+                json!({"model": model.id}),
+            ));
+        }
+        Ok(Self {
+            route,
+            model,
+            api_key: api_key.map(|key| key.trim().to_owned()),
+        })
+    }
+
+    fn endpoint(&self) -> Result<Url, TessivumError> {
+        let base = self.route.validate()?;
+        Url::parse(&format!(
             "{}/responses",
             base.as_str().trim_end_matches('/')
         ))
-        .expect("a validated HTTP base plus a path is a URL");
-        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| {
-                adapter_error(
-                    "INVALID_CREDENTIAL",
-                    "OPENAI_API_KEY contains bytes that cannot be sent in an HTTP header",
-                    Value::Null,
-                )
-            })?;
-        authorization.set_sensitive(true);
+        .map_err(|_| {
+            adapter_error(
+                "INVALID_OPENAI_BASE_URL",
+                "OPENAI_BASE_URL cannot address the Responses endpoint",
+                Value::Null,
+            )
+        })
+    }
+
+    fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref().filter(|key| !key.is_empty())
+    }
+
+    fn validate_request(&self, provider: &str, model: &str) -> Result<(), TessivumError> {
+        if self.route.id != provider {
+            return Err(adapter_error(
+                "INVALID_OPENAI_ROUTE",
+                "the resolved OpenAI Responses route does not match the request provider",
+                json!({"provider": provider}),
+            ));
+        }
+        if self.model.id != model {
+            return Err(adapter_error(
+                "INVALID_OPENAI_MODEL",
+                "the resolved OpenAI Responses model does not match the request model",
+                json!({"model": model}),
+            ));
+        }
+        if !self.route.models.is_empty()
+            && self
+                .route
+                .models
+                .iter()
+                .all(|candidate| candidate.id != model)
+        {
+            return Err(adapter_error(
+                "INVALID_OPENAI_MODEL",
+                "the requested model is not declared by the OpenAI Responses route",
+                json!({"model": model}),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Resolves a fresh immutable route/model snapshot for each generation.
+pub trait ResponsesRouteResolver: Send + Sync {
+    fn resolve(&self, provider: &str, model: &str) -> Result<ProviderSnapshot, TessivumError>;
+}
+
+impl<F> ResponsesRouteResolver for F
+where
+    F: Fn(&str, &str) -> Result<ProviderSnapshot, TessivumError> + Send + Sync,
+{
+    fn resolve(&self, provider: &str, model: &str) -> Result<ProviderSnapshot, TessivumError> {
+        self(provider, model)
+    }
+}
+struct StaticResponsesRouteResolver {
+    route: ResponsesRoute,
+    api_key: String,
+}
+
+impl ResponsesRouteResolver for StaticResponsesRouteResolver {
+    fn resolve(&self, provider: &str, model: &str) -> Result<ProviderSnapshot, TessivumError> {
+        if provider != self.route.id {
+            return Err(adapter_error(
+                "INVALID_OPENAI_ROUTE",
+                "the request provider is not the configured OpenAI Responses route",
+                json!({"provider": provider}),
+            ));
+        }
+        ProviderSnapshot::new(
+            self.route.clone(),
+            ResponsesModel::new(model),
+            self.api_key.clone(),
+        )
+    }
+}
+
+/// Native, stateless OpenAI Responses API adapter for OpenAI-compatible relays.
+#[derive(Clone)]
+pub struct OpenAiResponsesAdapter {
+    client: Client,
+    resolver: Arc<dyn ResponsesRouteResolver>,
+}
+
+impl fmt::Debug for OpenAiResponsesAdapter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiResponsesAdapter")
+            .field("resolver", &"redacted")
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenAiResponsesAdapter {
+    /// Creates an adapter whose base URL is a prefix such as `https://relay.example/v1`.
+    pub fn new(base_url: &str, api_key: &str) -> Result<Self, TessivumError> {
+        if api_key.trim().is_empty() {
+            return Err(adapter_error(
+                "MISSING_CREDENTIAL",
+                "OPENAI_API_KEY must not be empty",
+                Value::Null,
+            ));
+        }
+        let route = ResponsesRoute::new(
+            DEFAULT_ROUTE_ID,
+            DEFAULT_ROUTE_ID,
+            base_url.trim(),
+            "OPENAI_API_KEY",
+            Vec::new(),
+        );
+        route.validate()?;
+        let api_key = api_key.trim().to_owned();
+        Self::with_resolver(StaticResponsesRouteResolver { route, api_key }).build_client()
+    }
+
+    /// Builds an adapter that resolves a fresh route/model snapshot per request.
+    pub fn with_resolver<R>(resolver: R) -> Self
+    where
+        R: ResponsesRouteResolver + 'static,
+    {
+        Self {
+            client: Client::new(),
+            resolver: Arc::new(resolver),
+        }
+    }
+
+    /// Alias for callers that prefer constructor naming over builder naming.
+    pub fn new_with_resolver<R>(resolver: R) -> Self
+    where
+        R: ResponsesRouteResolver + 'static,
+    {
+        Self::with_resolver(resolver)
+    }
+
+    fn build_client(self) -> Result<Self, TessivumError> {
         let client = Client::builder()
             .user_agent(concat!("tessivum/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -91,23 +394,46 @@ impl OpenAiResponsesAdapter {
                     json!({"error": error.to_string()}),
                 )
             })?;
-        Ok(Self {
-            client,
-            endpoint,
-            authorization,
-        })
+        Ok(Self { client, ..self })
+    }
+
+    fn snapshot(&self, request: &GenerateRequest) -> Result<ProviderSnapshot, TessivumError> {
+        let snapshot = self.resolver.resolve(&request.provider, &request.model)?;
+        snapshot.route.validate()?;
+        snapshot.model.validate()?;
+        snapshot.validate_request(&request.provider, &request.model)?;
+        validate_modalities(request, &snapshot.model)?;
+        Ok(snapshot)
     }
 
     async fn send(
         &self,
         request: &GenerateRequest,
+        snapshot: &ProviderSnapshot,
         cancellation: CancellationToken,
     ) -> Result<Response, TessivumError> {
-        let body = request_body(request)?;
+        let api_key = snapshot.api_key().ok_or_else(|| {
+            adapter_error(
+                "MISSING_CREDENTIAL",
+                "the OpenAI Responses route credential is not configured",
+                json!({"route": snapshot.route.id}),
+            )
+        })?;
+        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| {
+                adapter_error(
+                    "INVALID_CREDENTIAL",
+                    "the OpenAI Responses route credential cannot be sent in an HTTP header",
+                    Value::Null,
+                )
+            })?;
+        authorization.set_sensitive(true);
+        let endpoint = snapshot.endpoint()?;
+        let body = request_body(request, snapshot)?;
         let pending = self
             .client
-            .post(self.endpoint.clone())
-            .header(header::AUTHORIZATION, self.authorization.clone())
+            .post(endpoint.clone())
+            .header(header::AUTHORIZATION, authorization)
             .header(header::ACCEPT, "text/event-stream")
             .json(&body)
             .send();
@@ -116,7 +442,7 @@ impl OpenAiResponsesAdapter {
             response = pending => response.map_err(|error| adapter_error(
                 "OPENAI_TRANSPORT",
                 "OpenAI Responses request failed before a response was received",
-                json!({"endpoint": self.endpoint.as_str(), "error": error.to_string()}),
+                json!({"endpoint": endpoint.as_str(), "error": error.to_string()}),
             ))?,
         };
         if response.status().is_success() {
@@ -134,7 +460,8 @@ impl LlmAdapter for OpenAiResponsesAdapter {
         request: GenerateRequest,
         cancellation: CancellationToken,
     ) -> Result<LlmStream, TessivumError> {
-        let response = self.send(&request, cancellation.clone()).await?;
+        let snapshot = self.snapshot(&request)?;
+        let response = self.send(&request, &snapshot, cancellation.clone()).await?;
         let mut bytes = response.bytes_stream();
         Ok(Box::pin(async_stream::try_stream! {
             let mut decoder = SseDecoder::default();
@@ -176,8 +503,10 @@ impl LlmAdapter for OpenAiResponsesAdapter {
         }))
     }
 }
-
-fn request_body(request: &GenerateRequest) -> Result<Value, TessivumError> {
+fn request_body(
+    request: &GenerateRequest,
+    snapshot: &ProviderSnapshot,
+) -> Result<Value, TessivumError> {
     if request.stop.as_ref().is_some_and(|stop| !stop.is_empty()) {
         return Err(adapter_error(
             "UNSUPPORTED_OPTION",
@@ -187,7 +516,10 @@ fn request_body(request: &GenerateRequest) -> Result<Value, TessivumError> {
     }
     let mut body = Map::from_iter([
         ("model".into(), Value::String(request.model.clone())),
-        ("input".into(), Value::Array(response_input(request)?)),
+        (
+            "input".into(),
+            Value::Array(response_input(request, snapshot)?),
+        ),
         ("stream".into(), Value::Bool(true)),
         ("store".into(), Value::Bool(false)),
         ("include".into(), json!(["reasoning.encrypted_content"])),
@@ -233,18 +565,20 @@ fn request_body(request: &GenerateRequest) -> Result<Value, TessivumError> {
     Ok(Value::Object(body))
 }
 
-fn response_input(request: &GenerateRequest) -> Result<Vec<Value>, TessivumError> {
+fn response_input(
+    request: &GenerateRequest,
+    snapshot: &ProviderSnapshot,
+) -> Result<Vec<Value>, TessivumError> {
     let mut input = Vec::new();
     for message in &request.messages {
         if let Some(output) = native_replay_output(message, request) {
             input.extend(output.iter().cloned());
             continue;
         }
-        append_message_input(&mut input, message)?;
+        append_message_input(&mut input, message, &snapshot.model)?;
     }
     Ok(input)
 }
-
 fn native_replay_output<'a>(
     message: &'a Message,
     request: &GenerateRequest,
@@ -287,7 +621,36 @@ fn valid_replay_item(item: &Value) -> bool {
     }
 }
 
-fn append_message_input(input: &mut Vec<Value>, message: &Message) -> Result<(), TessivumError> {
+fn validate_modalities(
+    request: &GenerateRequest,
+    model: &ResponsesModel,
+) -> Result<(), TessivumError> {
+    for message in &request.messages {
+        for block in &message.content {
+            let modality = match block {
+                ContentBlock::Image { .. } => RESPONSES_IMAGE_MODALITY,
+                ContentBlock::Text { .. } => RESPONSES_TEXT_MODALITY,
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::ToolCall { .. }
+                | ContentBlock::ToolResult { .. } => continue,
+            };
+            if !model.supports(modality) {
+                return Err(adapter_error(
+                    "UNSUPPORTED_MODALITY",
+                    "the selected OpenAI Responses model does not support this input modality",
+                    json!({"modality": modality, "model": model.id}),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_message_input(
+    input: &mut Vec<Value>,
+    message: &Message,
+    model: &ResponsesModel,
+) -> Result<(), TessivumError> {
     let role = match message.role {
         MessageRole::System => "developer",
         MessageRole::User => "user",
@@ -301,12 +664,15 @@ fn append_message_input(input: &mut Vec<Value>, message: &Message) -> Result<(),
                 "text": text,
             })),
             ContentBlock::Reasoning { .. } => {}
-            ContentBlock::Image { .. } => {
-                return Err(adapter_error(
-                    "UNSUPPORTED_CONTENT",
-                    "OpenAI Responses image input is not wired to the attachment store",
-                    json!({"type": "image"}),
-                ));
+            ContentBlock::Image { attachment } => {
+                if !model.supports(RESPONSES_IMAGE_MODALITY) {
+                    return Err(adapter_error(
+                        "UNSUPPORTED_MODALITY",
+                        "the selected OpenAI Responses model does not support image input",
+                        json!({"modality": RESPONSES_IMAGE_MODALITY, "model": model.id}),
+                    ));
+                }
+                content.push(json!({"type": "input_image", "image_url": attachment}));
             }
             ContentBlock::ToolCall {
                 id,

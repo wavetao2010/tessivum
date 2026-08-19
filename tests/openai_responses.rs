@@ -12,9 +12,13 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tessivum::{
-    llm::LlmRuntime, openai_responses::OpenAiResponsesAdapter, ContentBlock, FinishReason,
-    GenerateRequest, Message, MessageId, MessageRole, MessageSource, SessionId, ToolCallId,
-    ToolSchema,
+    llm::LlmRuntime,
+    openai_responses::{
+        OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesRoute,
+        ResponsesRouteResolver,
+    },
+    ContentBlock, FinishReason, GenerateRequest, Message, MessageId, MessageRole, MessageSource,
+    SessionId, ToolCallId, ToolSchema,
 };
 use tessivum_core::ContextHandle;
 
@@ -288,4 +292,63 @@ async fn headless_binary_uses_openai_responses_environment() {
         "live relay"
     );
     server.abort();
+}
+
+#[test]
+fn responses_route_rejects_unknown_modalities_and_duplicate_models() {
+    let invalid = ResponsesRoute::new(
+        "relay",
+        "Relay",
+        "https://relay.example/v1",
+        "relay-key",
+        vec![ResponsesModel::new("model").with_input(["audio"])],
+    );
+    let error = ProviderSnapshot::without_key(invalid, ResponsesModel::new("model"))
+        .expect_err("unknown modality must fail closed");
+    assert_eq!(error.code, "INVALID_OPENAI_MODALITY");
+
+    let duplicate = ResponsesRoute::new(
+        "relay",
+        "Relay",
+        "https://relay.example/v1",
+        "relay-key",
+        vec![ResponsesModel::new("model"), ResponsesModel::new("model")],
+    );
+    let error = ProviderSnapshot::without_key(duplicate, ResponsesModel::new("model"))
+        .expect_err("duplicate model ids must fail closed");
+    assert_eq!(error.code, "INVALID_OPENAI_MODEL");
+}
+
+#[test]
+fn provider_snapshot_debug_and_errors_do_not_expose_credentials() {
+    let secret = "super-secret-key";
+    let route = ResponsesRoute::new(
+        "relay",
+        "Relay",
+        "https://relay.example/v1",
+        "relay-key",
+        vec![ResponsesModel::new("model")],
+    );
+    let snapshot = ProviderSnapshot::new(route, ResponsesModel::new("model"), secret).unwrap();
+    assert!(!format!("{snapshot:?}").contains(secret));
+    assert!(!serde_json::to_string(&snapshot).unwrap().contains(secret));
+}
+
+#[test]
+fn resolver_trait_captures_route_and_model_per_call() {
+    let route = ResponsesRoute::new(
+        "relay",
+        "Relay",
+        "https://relay.example/v1",
+        "relay-key",
+        vec![ResponsesModel::new("model")],
+    );
+    let resolver = move |provider: &str, model: &str| {
+        assert_eq!(provider, "relay");
+        assert_eq!(model, "model");
+        ProviderSnapshot::new(route.clone(), ResponsesModel::new(model), "secret")
+    };
+    let snapshot = resolver.resolve("relay", "model").unwrap();
+    assert_eq!(snapshot.route.id, "relay");
+    assert_eq!(snapshot.model.id, "model");
 }

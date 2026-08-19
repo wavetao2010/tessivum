@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::{json, Value};
 use tessivum::{
-    attachments::{AttachmentInput, AttachmentStore},
+    attachments::{AttachmentError, AttachmentInput, AttachmentRef, AttachmentStore},
     credentials::{
         CredentialEnvironment, CredentialError, CredentialRef, Credentials, YamlCredentialFile,
     },
@@ -379,6 +379,38 @@ async fn attachments_validate_batch_atomically_and_verify_reads() {
         .await
         .unwrap();
     assert_eq!(reference.name, None);
+    let value = serde_json::to_value(&reference).unwrap();
+    assert_eq!(AttachmentRef::from_value(&value).unwrap(), reference);
+    assert_eq!(reference.safe_metadata(), value);
+    assert_eq!(reference.media_type_str(), "image/png");
+    let mut unsafe_reference = reference.clone();
+    unsafe_reference.name = Some("../../unsafe.png".into());
+    assert!(AttachmentRef::from_value(&serde_json::to_value(&unsafe_reference).unwrap()).is_err());
+    assert!(unsafe_reference.safe_metadata().get("name").is_none());
+    assert_eq!(reference.data_url_prefix(), "data:image/png;base64,");
+    assert!(AttachmentRef::from_value(&json!({
+        "attachmentId": reference.attachment_id.as_str(),
+        "mediaType": "image/png",
+        "bytes": reference.bytes,
+        "width": reference.width,
+        "height": reference.height,
+        "data": "YmFzZTY0",
+        "url": "https://example.invalid/image.png",
+        "path": "/tmp/unsafe.png"
+    }))
+    .is_err());
+    let bounded = store
+        .read_ref_bounded(&reference, reference.bytes)
+        .await
+        .unwrap();
+    assert_eq!(bounded.reference, reference);
+    assert_eq!(bounded.data, png(2, 3));
+    assert!(matches!(
+        store
+            .read_ref_bounded(&reference, reference.bytes - 1)
+            .await,
+        Err(AttachmentError::ByteLimit)
+    ));
     assert_eq!(store.read_ref(&reference).await.unwrap(), png(2, 3));
     let filename = &reference.attachment_id.as_str()[7..];
     #[cfg(unix)]

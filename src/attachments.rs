@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tessivum_core::ServiceKey;
 use thiserror::Error;
@@ -39,6 +40,15 @@ impl ImageMediaType {
             Self::Jpeg => "image/jpeg",
             Self::Webp => "image/webp",
             Self::Gif => "image/gif",
+        }
+    }
+
+    pub fn data_url_prefix(self) -> &'static str {
+        match self {
+            Self::Png => "data:image/png;base64,",
+            Self::Jpeg => "data:image/jpeg;base64,",
+            Self::Webp => "data:image/webp;base64,",
+            Self::Gif => "data:image/gif;base64,",
         }
     }
 }
@@ -111,6 +121,49 @@ pub struct AttachmentRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
+impl AttachmentRef {
+    /// Decodes only the canonical, metadata-only wire representation.
+    pub fn from_value(value: &Value) -> Result<Self, AttachmentError> {
+        let reference: Self =
+            serde_json::from_value(value.clone()).map_err(|_| AttachmentError::InvalidReference)?;
+        if serde_json::to_value(&reference).map_err(|_| AttachmentError::InvalidReference)?
+            != *value
+        {
+            return Err(AttachmentError::InvalidReference);
+        }
+        if reference
+            .name
+            .as_deref()
+            .is_some_and(|name| sanitize_name(Some(name)).as_deref() != Some(name))
+        {
+            return Err(AttachmentError::InvalidReference);
+        }
+        Ok(reference)
+    }
+
+    /// Returns the safe metadata projection; it never contains bytes, URLs, or paths.
+    pub fn safe_metadata(&self) -> Value {
+        let mut value = serde_json::to_value(self).expect("attachment metadata is serializable");
+        if self
+            .name
+            .as_deref()
+            .is_some_and(|name| sanitize_name(Some(name)).is_none())
+        {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("name");
+            }
+        }
+        value
+    }
+
+    pub fn media_type_str(&self) -> &'static str {
+        self.media_type.as_str()
+    }
+
+    pub fn data_url_prefix(&self) -> &'static str {
+        self.media_type.data_url_prefix()
+    }
+}
 
 pub struct AttachmentInput {
     pub data: Vec<u8>,
@@ -174,6 +227,8 @@ impl Default for AttachmentLimits {
 pub enum AttachmentError {
     #[error("attachment id is invalid")]
     InvalidId,
+    #[error("attachment reference is invalid")]
+    InvalidReference,
     #[error("attachment is not an admitted image type")]
     UnsupportedMediaType,
     #[error("attachment image header is invalid")]
@@ -197,6 +252,7 @@ impl AttachmentError {
     pub fn code(&self) -> &str {
         match self {
             Self::InvalidId => "INVALID_ATTACHMENT_ID",
+            Self::InvalidReference => "INVALID_ATTACHMENT_REFERENCE",
             Self::UnsupportedMediaType => "UNSUPPORTED_ATTACHMENT_MEDIA_TYPE",
             Self::InvalidImage => "INVALID_ATTACHMENT_IMAGE",
             Self::ByteLimit => "ATTACHMENT_BYTE_LIMIT",
@@ -337,6 +393,23 @@ impl AttachmentStore {
             return Err(AttachmentError::MetadataMismatch);
         }
         Ok(read.data)
+    }
+    pub async fn read_ref_bounded(
+        &self,
+        reference: &AttachmentRef,
+        max_bytes: u64,
+    ) -> Result<AttachmentData, AttachmentError> {
+        if reference.bytes > max_bytes {
+            return Err(AttachmentError::ByteLimit);
+        }
+        let data = self.read_ref(reference).await?;
+        if u64::try_from(data.len()).map_err(|_| AttachmentError::ByteLimit)? > max_bytes {
+            return Err(AttachmentError::ByteLimit);
+        }
+        Ok(AttachmentData {
+            reference: reference.clone(),
+            data,
+        })
     }
 
     fn validate_bytes(
