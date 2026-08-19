@@ -29,22 +29,35 @@ use crate::{
         ApprovalResolved, ApprovalService, HostApprovalError, HostApprovalRegistration,
         HostApprovalRegistry,
     },
+    attachments::{
+        attachments_service_key, decode_inline_image, AttachmentError, AttachmentInput,
+        AttachmentLimits, AttachmentRef, AttachmentStore,
+    },
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     code_runtime::{CodeRuntime, ProcessCodeRuntime},
-    credentials::{credentials_service_key, CredentialEvent, Credentials, YamlCredentialFile},
+    credentials::{
+        credentials_service_key, CredentialEvent, CredentialRef, Credentials, YamlCredentialFile,
+    },
     legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream, RecordedLlmAdapter},
+    openai_responses::{
+        OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesRoute,
+        ResponsesRouteResolver, RESPONSES_IMAGE_MODALITY, RESPONSES_TEXT_MODALITY,
+    },
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
-        AgentCancelCause, InitializeParams, InitializeResult, Message, MessageId, MessageRole,
-        MessageSource, SdkServerInfo, SessionEvent, SessionEventNotification, SessionHeader,
-        SessionId, SessionPromptParams, SessionPromptResult, SessionStatus,
-        SessionStatusNotification, SubagentFinishedNotification, SubagentStartedNotification,
-        SESSION_FORMAT_VERSION,
+        AgentCancelCause, ContentBlock, InitializeParams, InitializeResult, Message, MessageId,
+        MessageRole, MessageSource, SdkServerInfo, SessionEvent, SessionEventNotification,
+        SessionHeader, SessionId, SessionModelSelection, SessionPromptParams, SessionPromptResult,
+        SessionStatus, SessionStatusNotification, SubagentFinishedNotification,
+        SubagentStartedNotification, MAX_SAFE_INTEGER, SESSION_FORMAT_VERSION,
     },
     session::{session_service_key, SessionError, SessionPersistence, SessionStore},
-    settings::{settings_service_key, Settings, SettingsEvent, YamlSettingsProvider},
+    settings::{
+        settings_service_key, Settings, SettingsEvent, SettingsRegistration, YamlSettingsProvider,
+        AGENT_DEFAULT_MODEL_NAMESPACE, LLM_OPENAI_RESPONSES_NAMESPACE,
+    },
     subprocess::SubprocessRuntime,
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     telemetry::TelemetryCoordinator,
@@ -52,6 +65,109 @@ use crate::{
     workspace::{SessionResourceResolver, WorkspaceError, WorkspaceId, WorkspaceRegistry},
     TessivumError,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostModelInfo {
+    pub provider: String,
+    pub id: String,
+    pub name: Option<String>,
+    pub input_modalities: Vec<String>,
+    pub context_window: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub routable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostModelGroup {
+    pub provider: String,
+    pub display_name: String,
+    pub models: Vec<HostModelInfo>,
+    pub credential_configured: bool,
+    pub routable: bool,
+    pub failure: Option<HostRouteFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostRouteFailure {
+    pub provider: String,
+    pub model: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostSessionModels {
+    pub current: Option<SessionModelSelection>,
+    pub routable: bool,
+    pub groups: Vec<HostModelGroup>,
+    pub failures: Vec<HostRouteFailure>,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicRouteResolver {
+    routes: Arc<Mutex<Arc<BTreeMap<String, ResponsesRoute>>>>,
+    credentials: Arc<Credentials>,
+}
+
+impl ResponsesRouteResolver for DynamicRouteResolver {
+    fn resolve(&self, provider: &str, model: &str) -> Result<ProviderSnapshot, TessivumError> {
+        let route = lock(&self.routes).get(provider).cloned().ok_or_else(|| {
+            model_error(
+                "LLM_PROVIDER_NOT_FOUND",
+                "provider route is not registered",
+                provider,
+                Some(model),
+            )
+        })?;
+        let model_descriptor = route
+            .models
+            .iter()
+            .find(|candidate| candidate.id == model)
+            .cloned()
+            .ok_or_else(|| {
+                model_error(
+                    "LLM_MODEL_NOT_FOUND",
+                    "model is not declared by provider route",
+                    provider,
+                    Some(model),
+                )
+            })?;
+        let credential_ref = CredentialRef::new(route.credential_ref.clone()).map_err(|error| {
+            TessivumError::new(
+                "INVALID_CREDENTIAL_REF",
+                error.to_string(),
+                "host",
+                Value::Null,
+            )
+        })?;
+        let api_key = resolve_credential_sync(Arc::clone(&self.credentials), credential_ref)?;
+        match api_key {
+            Some(api_key) => ProviderSnapshot::new(route, model_descriptor, api_key),
+            None => ProviderSnapshot::without_key(route, model_descriptor),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RouteState {
+    routes: Arc<BTreeMap<String, ResponsesRoute>>,
+    registrations: BTreeMap<String, LlmProviderRegistration>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostProviderDirectoryEntry {
+    pub route: ResponsesRoute,
+    pub credential_configured: bool,
+    pub namespace: String,
+    pub settings_path: Vec<String>,
+    pub active: bool,
+    pub declared: bool,
+}
 
 const MAX_FRAME_BYTES: usize = 1_048_576;
 const MAX_PROMPT_BLOCKS: usize = 128;
@@ -250,6 +366,9 @@ pub enum HostError {
     Approval(#[from] ApprovalError),
     #[error(transparent)]
     ApprovalRegistry(#[from] HostApprovalError),
+    #[error(transparent)]
+    Attachment(#[from] AttachmentError),
+
     #[error("session {session_id} is durable but ungrouped")]
     SessionUngrouped { session_id: SessionId },
     #[error("failed to attach session {session_id} to workspace {workspace_id}: {source}")]
@@ -264,7 +383,7 @@ pub enum HostError {
 }
 
 impl HostError {
-    fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    fn invalid(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Runtime(TessivumError::new(code, message, "host", Value::Null))
     }
 
@@ -285,7 +404,9 @@ impl HostError {
             Self::Agent(AgentError::Cancelled) => "CANCELLED",
             Self::Agent(_) => "HOST_AGENT_ERROR",
             Self::Core(_) => "HOST_CORE_ERROR",
-            Self::Approval(_) | Self::ApprovalRegistry(_) => "HOST_APPROVAL_ERROR",
+            Self::Approval(_) => "HOST_APPROVAL_ERROR",
+            Self::ApprovalRegistry(_) => "HOST_APPROVAL_REGISTRY_ERROR",
+            Self::Attachment(error) => error.code(),
         }
     }
 
@@ -311,6 +432,18 @@ impl HostError {
             Self::Workspace(error) => TessivumError::new(
                 error.code(),
                 "workspace operation failed",
+                "host",
+                Value::Null,
+            ),
+            Self::Approval(error) => TessivumError::new(
+                "HOST_APPROVAL_ERROR",
+                error.to_string(),
+                "host",
+                Value::Null,
+            ),
+            Self::ApprovalRegistry(error) => TessivumError::new(
+                "HOST_APPROVAL_REGISTRY_ERROR",
+                error.to_string(),
                 "host",
                 Value::Null,
             ),
@@ -405,6 +538,58 @@ pub trait HostApi: Send + Sync {
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         Ok(Vec::new())
     }
+    fn provider_directory(&self) -> Vec<HostProviderDirectoryEntry> {
+        Vec::new()
+    }
+    fn model_groups(&self, _provider: &str) -> Vec<HostModelGroup> {
+        Vec::new()
+    }
+    async fn session_models(
+        &self,
+        _session: SessionId,
+    ) -> Result<HostSessionModels, TessivumError> {
+        Ok(HostSessionModels {
+            current: None,
+            routable: false,
+            groups: Vec::new(),
+            failures: Vec::new(),
+        })
+    }
+    async fn select_model(
+        &self,
+        _session: SessionId,
+        _provider: String,
+        _model: String,
+        _reasoning_effort: Option<String>,
+    ) -> Result<SessionModelSelection, TessivumError> {
+        Err(TessivumError::new(
+            "MODEL_SELECTION_UNSUPPORTED",
+            "this host does not support model selection",
+            "host",
+            Value::Null,
+        ))
+    }
+    fn attachment_limits(&self) -> AttachmentLimits {
+        AttachmentLimits::default()
+    }
+    async fn upload_attachment(
+        &self,
+        _data: Vec<u8>,
+        _name: Option<String>,
+    ) -> Result<AttachmentRef, TessivumError> {
+        Err(TessivumError::new(
+            "ATTACHMENTS_UNSUPPORTED",
+            "this host does not support attachments",
+            "host",
+            Value::Null,
+        ))
+    }
+    async fn normalize_prompt(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptParams, TessivumError> {
+        Ok(params)
+    }
     fn descriptor(&self) -> HostDescriptor {
         HostDescriptor {
             cwd: std::env::current_dir()
@@ -452,6 +637,14 @@ struct HostInner {
     config: HostConfig,
     settings: Arc<Settings>,
     credentials: Arc<Credentials>,
+    llm: LlmRuntime,
+    attachments: Arc<AttachmentStore>,
+    route_adapter: Arc<dyn LlmAdapter>,
+    dynamic_routes: bool,
+    route_resolver: Arc<DynamicRouteResolver>,
+    route_state: Mutex<RouteState>,
+    route_gate: AsyncMutex<()>,
+
     cancellation: tessivum_core::CancellationToken,
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
@@ -484,6 +677,10 @@ struct OwnedAgent {
     _agent: AgentHandle,
 }
 
+enum ImagePlan {
+    Reference(AttachmentRef),
+    Inline(AttachmentRef),
+}
 struct Services {
     root: ContextHandle,
     _sessions: ServiceHandle<SessionStore>,
@@ -494,9 +691,9 @@ struct Services {
     _subprocesses: ServiceHandle<SubprocessRuntime>,
     _settings: ServiceHandle<Arc<Settings>>,
     _credentials: ServiceHandle<Arc<Credentials>>,
+    _attachments: ServiceHandle<Arc<AttachmentStore>>,
     _telemetry: Option<ServiceHandle<TelemetryCoordinator>>,
     _code: Option<ServiceHandle<ProcessCodeRuntime>>,
-    _provider: LlmProviderRegistration,
     _prompt_registration: Option<PromptRegistration>,
     _builtin_tools: BuiltinTools,
     _factory: AgentFactoryRegistration,
@@ -587,6 +784,12 @@ impl HostRuntime {
 
         let root = ContextHandle::root();
         let cancellation = root.scope().cancellation();
+        let attachments = Arc::new(AttachmentStore::new(
+            data_dir.join("attachments"),
+            AttachmentLimits::default(),
+        )?);
+        let attachments_service =
+            root.provide(attachments_service_key(), Arc::clone(&attachments))?;
         let settings = Arc::new(Settings::new(Arc::new(YamlSettingsProvider::new(
             settings_path,
         ))));
@@ -596,21 +799,69 @@ impl HostRuntime {
         ))));
         let credentials_service =
             root.provide(credentials_service_key(), Arc::clone(&credentials))?;
+        let settings_base = profile
+            .get(LLM_OPENAI_RESPONSES_NAMESPACE)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        settings
+            .register(openai_settings_registration(settings_base))
+            .await
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let default_base = profile
+            .get(AGENT_DEFAULT_MODEL_NAMESPACE)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        settings
+            .register(default_model_registration(&config, default_base))
+            .await
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let route_snapshot = settings
+            .get(LLM_OPENAI_RESPONSES_NAMESPACE)
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let initial_routes = parse_routes(&route_snapshot.value, route_snapshot.revision)
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let route_map = Arc::new(initial_routes);
+        let route_resolver = Arc::new(DynamicRouteResolver {
+            routes: Arc::new(Mutex::new(Arc::clone(&route_map))),
+            credentials: Arc::clone(&credentials),
+        });
+        let dynamic_routes = config.adapter_factory.is_none() && config.recorded_replay.is_none();
         let persistence: Arc<dyn SessionPersistence> =
             Arc::new(JsonlSessionPersistence::new(&data_dir));
-        let persisted_sessions = persistence.list(cancellation.clone()).await?;
-        let workspace_registry = WorkspaceRegistry::open(&data_dir, &cwd, persisted_sessions)?;
+        let session_inspections = persistence.list(cancellation.clone()).await?;
+        let workspace_registry = WorkspaceRegistry::open(&data_dir, &cwd, session_inspections)?;
         let default_workspace_id = workspace_registry
             .list()
             .into_iter()
-            .find(|workspace| workspace.path == cwd.to_string_lossy())
+            .find(|workspace| Path::new(&workspace.path) == cwd.as_path())
             .map(|workspace| workspace.workspace_id);
         let resources = Arc::new(SessionResourceResolver::new(workspace_registry.clone()));
         let sessions = SessionStore::new(Arc::clone(&persistence));
         let session_service = root.provide(session_service_key(), sessions.clone())?;
 
         let llm = LlmRuntime::new();
-        let provider = llm.register(config.provider.clone(), adapter_for(&config)?)?;
+        let adapter: Arc<dyn LlmAdapter> = if dynamic_routes {
+            Arc::new(OpenAiResponsesAdapter::with_resolver_and_store(
+                (*route_resolver).clone(),
+                Arc::clone(&attachments),
+            ))
+        } else {
+            adapter_for(&config)?
+        };
+        let mut registrations = BTreeMap::new();
+        if dynamic_routes {
+            for provider in route_map.keys() {
+                registrations.insert(
+                    provider.clone(),
+                    llm.register(provider.clone(), Arc::clone(&adapter))?,
+                );
+            }
+        } else {
+            registrations.insert(
+                config.provider.clone(),
+                llm.register(config.provider.clone(), Arc::clone(&adapter))?,
+            );
+        }
         let llm_service = llm.clone().publish(&root)?;
         let prompt = SystemPrompt::new();
         let prompt_registration = config
@@ -744,6 +995,16 @@ impl HostRuntime {
             config: config.clone(),
             settings,
             credentials,
+            llm,
+            attachments: Arc::clone(&attachments),
+            route_adapter: Arc::clone(&adapter),
+            dynamic_routes,
+            route_resolver,
+            route_state: Mutex::new(RouteState {
+                routes: route_map,
+                registrations,
+            }),
+            route_gate: AsyncMutex::new(()),
             cancellation,
             sessions,
             persistence,
@@ -767,9 +1028,9 @@ impl HostRuntime {
                 _subprocesses: subprocess_service,
                 _settings: settings_service,
                 _credentials: credentials_service,
+                _attachments: attachments_service,
                 _telemetry: telemetry_service,
                 _code: code_service,
-                _provider: provider,
                 _prompt_registration: prompt_registration,
                 _builtin_tools: builtin_tools,
                 _factory: factory,
@@ -817,6 +1078,378 @@ impl HostHandle {
     }
     pub fn is_shutting_down(&self) -> bool {
         lock(&self.inner.admission).closing
+    }
+    pub fn provider_directory(&self) -> Vec<HostProviderDirectoryEntry> {
+        let state = lock(&self.inner.route_state);
+        state
+            .routes
+            .values()
+            .cloned()
+            .map(|route| {
+                let credential_configured = CredentialRef::new(route.credential_ref.clone())
+                    .ok()
+                    .and_then(|reference| {
+                        resolve_credential_sync(Arc::clone(&self.inner.credentials), reference).ok()
+                    })
+                    .flatten()
+                    .is_some();
+                let active = state
+                    .registrations
+                    .get(&route.id)
+                    .is_some_and(LlmProviderRegistration::is_active);
+                HostProviderDirectoryEntry {
+                    route,
+                    credential_configured,
+                    namespace: LLM_OPENAI_RESPONSES_NAMESPACE.into(),
+                    settings_path: vec!["providers".into()],
+                    active,
+                    declared: true,
+                }
+            })
+            .collect()
+    }
+
+    pub fn model_groups(&self, provider: &str) -> Vec<HostModelGroup> {
+        let state = lock(&self.inner.route_state);
+        state
+            .routes
+            .get(provider)
+            .cloned()
+            .map(|route| model_group_for_route(&self.inner.credentials, route))
+            .into_iter()
+            .collect()
+    }
+
+    pub async fn session_models(
+        &self,
+        session_id: SessionId,
+    ) -> Result<HostSessionModels, HostError> {
+        validate_session(&session_id)?;
+        let events = if let Some(session) = self.inner.sessions.get(&session_id) {
+            session.events()
+        } else {
+            self.inner
+                .persistence
+                .read_from(&session_id, 0, self.inner.cancellation.clone())
+                .await?
+        };
+        let current = latest_model_selection(&events)
+            .or_else(|| self.default_selection())
+            .or_else(|| Some(self.config_selection()));
+        let groups = {
+            let state = lock(&self.inner.route_state);
+            state
+                .routes
+                .values()
+                .cloned()
+                .map(|route| model_group_for_route(&self.inner.credentials, route))
+                .collect::<Vec<_>>()
+        };
+        let mut failures = Vec::new();
+        let routable = current
+            .as_ref()
+            .is_some_and(|selection| self.selection_is_routable(selection, &mut failures));
+        Ok(HostSessionModels {
+            current,
+            routable,
+            groups,
+            failures,
+        })
+    }
+
+    pub async fn select_model(
+        &self,
+        session_id: SessionId,
+        provider: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Result<SessionModelSelection, HostError> {
+        let _admission = self.admit()?;
+        validate_session(&session_id)?;
+        let selection = SessionModelSelection {
+            provider,
+            model,
+            reasoning_effort,
+        };
+        selection.validate()?;
+        self.validate_selection(&selection)?;
+        let _setup = self.inner.setup.lock().await;
+        let session = match self.inner.sessions.get(&session_id) {
+            Some(session) => session,
+            None => {
+                self.inner
+                    .sessions
+                    .restore(
+                        &session_id,
+                        crate::session::RestoreMode::Live,
+                        self.inner.cancellation.clone(),
+                    )
+                    .await?
+            }
+        };
+        if let Some(agent) = self.inner.registry.get(&session_id) {
+            if agent.status() == AgentStatus::Running {
+                return Err(HostError::invalid(
+                    "SESSION_BUSY",
+                    "cannot select a model while the session is running",
+                ));
+            }
+            self.inner.approvals.cancel_session(&session_id);
+            let _ = self
+                .inner
+                .registry
+                .cancel(&session_id, AgentCancelCause::Disposed, false);
+            lock(&self.inner.owned_agents).remove(&session_id);
+            let _ = agent.dispose().await;
+        }
+        let event = SessionEvent {
+            event_type: "session/model-selected".into(),
+            seq: session.next_seq()?,
+            time: now(),
+            data: serde_json::to_value(&selection).unwrap_or(Value::Null),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        };
+        session
+            .append(event, self.inner.cancellation.clone())
+            .await?;
+        self.ensure_relay(session);
+        Ok(selection)
+    }
+
+    fn default_selection(&self) -> Option<SessionModelSelection> {
+        self.inner
+            .settings
+            .get(AGENT_DEFAULT_MODEL_NAMESPACE)
+            .ok()
+            .and_then(|snapshot| serde_json::from_value(snapshot.value).ok())
+    }
+
+    fn config_selection(&self) -> SessionModelSelection {
+        SessionModelSelection {
+            provider: self.inner.config.provider.clone(),
+            model: self.inner.config.model.clone(),
+            reasoning_effort: None,
+        }
+    }
+
+    async fn selection_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionModelSelection, HostError> {
+        if !self.inner.dynamic_routes {
+            return Ok(self.config_selection());
+        }
+        let events = if let Some(session) = self.inner.sessions.get(session_id) {
+            session.events()
+        } else {
+            self.inner
+                .persistence
+                .read_from(session_id, 0, self.inner.cancellation.clone())
+                .await?
+        };
+        if let Some(selection) =
+            latest_model_selection(&events).or_else(|| self.default_selection())
+        {
+            self.validate_selection(&selection)?;
+            return Ok(selection);
+        }
+        Ok(self.config_selection())
+    }
+
+    fn selection_is_routable(
+        &self,
+        selection: &SessionModelSelection,
+        failures: &mut Vec<HostRouteFailure>,
+    ) -> bool {
+        let state = lock(&self.inner.route_state);
+        let Some(route) = state.routes.get(&selection.provider) else {
+            if !self.inner.dynamic_routes
+                && selection.provider == self.inner.config.provider
+                && selection.model == self.inner.config.model
+            {
+                return true;
+            }
+            failures.push(route_failure(
+                "LLM_PROVIDER_NOT_FOUND",
+                "provider route is not registered",
+                selection,
+                None,
+            ));
+            return false;
+        };
+        let Some(model) = route
+            .models
+            .iter()
+            .find(|model| model.id == selection.model)
+        else {
+            failures.push(route_failure(
+                "LLM_MODEL_NOT_FOUND",
+                "model is not declared by provider route",
+                selection,
+                None,
+            ));
+            return false;
+        };
+        if CredentialRef::new(route.credential_ref.clone())
+            .ok()
+            .and_then(|reference| {
+                resolve_credential_sync(Arc::clone(&self.inner.credentials), reference).ok()
+            })
+            .flatten()
+            .is_none()
+        {
+            failures.push(route_failure(
+                "MISSING_CREDENTIAL",
+                "provider credential is not configured",
+                selection,
+                Some(model.id.clone()),
+            ));
+            return false;
+        }
+        true
+    }
+
+    fn validate_selection(&self, selection: &SessionModelSelection) -> Result<(), HostError> {
+        let mut failures = Vec::new();
+        if self.selection_is_routable(selection, &mut failures) {
+            Ok(())
+        } else {
+            let failure = failures.into_iter().next().unwrap_or_else(|| {
+                route_failure(
+                    "MODEL_NOT_ROUTABLE",
+                    "model is not routable",
+                    selection,
+                    None,
+                )
+            });
+            Err(HostError::invalid(failure.code, failure.message))
+        }
+    }
+    pub fn attachment_limits(&self) -> AttachmentLimits {
+        self.inner.attachments.limits().clone()
+    }
+
+    async fn upload_attachment_inner(
+        &self,
+        data: Vec<u8>,
+        name: Option<String>,
+    ) -> Result<AttachmentRef, HostError> {
+        let _admission = self.admit()?;
+        Ok(self
+            .inner
+            .attachments
+            .save(AttachmentInput::new(data, name))
+            .await?)
+    }
+
+    async fn normalize_prompt_inner(
+        &self,
+        mut params: SessionPromptParams,
+    ) -> Result<SessionPromptParams, HostError> {
+        validate_session(&params.session_id)?;
+        let mut plans = Vec::new();
+        let mut inputs = Vec::new();
+        collect_image_plans(
+            &params.content_blocks,
+            &self.inner.attachments,
+            &mut plans,
+            &mut inputs,
+        )?;
+        if plans.is_empty() {
+            return Ok(params);
+        }
+
+        let limits = self.inner.attachments.limits();
+        if plans.len() > limits.max_images_per_message {
+            return Err(AttachmentError::BatchCountLimit.into());
+        }
+        let mut total_bytes = 0u64;
+        for plan in &plans {
+            let reference = match plan {
+                ImagePlan::Reference(reference) | ImagePlan::Inline(reference) => reference,
+            };
+            if !limits.media_types.contains(&reference.media_type) {
+                return Err(AttachmentError::UnsupportedMediaType.into());
+            }
+            let pixels = u64::from(reference.width)
+                .checked_mul(u64::from(reference.height))
+                .ok_or(AttachmentError::PixelLimit)?;
+            if reference.bytes > limits.max_image_bytes {
+                return Err(AttachmentError::ByteLimit.into());
+            }
+            if pixels == 0 || pixels > limits.max_image_pixels {
+                return Err(AttachmentError::PixelLimit.into());
+            }
+            total_bytes = total_bytes
+                .checked_add(reference.bytes)
+                .ok_or(AttachmentError::BatchByteLimit)?;
+            if total_bytes > limits.max_message_image_bytes {
+                return Err(AttachmentError::BatchByteLimit.into());
+            }
+        }
+
+        if self.inner.dynamic_routes {
+            let events = if let Some(session) = self.inner.sessions.get(&params.session_id) {
+                session.events()
+            } else {
+                self.inner
+                    .persistence
+                    .read_from(&params.session_id, 0, self.inner.cancellation.clone())
+                    .await?
+            };
+            let selection = latest_model_selection(&events).or_else(|| self.default_selection());
+            let supports_image = selection
+                .as_ref()
+                .and_then(|selection| {
+                    let state = lock(&self.inner.route_state);
+                    state.routes.get(&selection.provider).and_then(|route| {
+                        route
+                            .models
+                            .iter()
+                            .find(|model| model.id == selection.model)
+                            .cloned()
+                    })
+                })
+                .is_some_and(|model| {
+                    let input = if model.input.is_empty() {
+                        &[RESPONSES_TEXT_MODALITY.to_owned()][..]
+                    } else {
+                        &model.input
+                    };
+                    input
+                        .iter()
+                        .any(|modality| modality == RESPONSES_IMAGE_MODALITY)
+                });
+            if !supports_image {
+                return Err(HostError::invalid(
+                    "UNSUPPORTED_MODALITY",
+                    "the selected model does not support image input",
+                ));
+            }
+        }
+
+        for plan in &plans {
+            if let ImagePlan::Reference(reference) = plan {
+                self.inner.attachments.read_ref(reference).await?;
+            }
+        }
+        let inline_refs = if inputs.is_empty() {
+            Vec::new()
+        } else {
+            self.inner.attachments.save_batch(inputs).await?
+        };
+        let mut plan_index = 0;
+        let mut inline_index = 0;
+        replace_image_plans(
+            &mut params.content_blocks,
+            &plans,
+            &mut plan_index,
+            &inline_refs,
+            &mut inline_index,
+        )?;
+        Ok(params)
     }
 
     async fn initialize_inner(
@@ -1047,6 +1680,7 @@ impl HostHandle {
         steer: bool,
     ) -> Result<SessionPromptResult, HostError> {
         let _admission = self.admit()?;
+        let params = self.normalize_prompt_inner(params).await?;
         validate_prompt(&params)?;
         let (agent, session, mut commits, message_id) = {
             let _setup = self.inner.setup.lock().await;
@@ -1309,6 +1943,20 @@ impl HostHandle {
         if let Some(agent) = self.inner.registry.get(session_id) {
             return Ok(agent);
         }
+        let selection = self.selection_for_session(session_id).await?;
+        let max_tokens = self.inner.config.max_tokens.or_else(|| {
+            let state = lock(&self.inner.route_state);
+            state
+                .routes
+                .get(&selection.provider)
+                .and_then(|route| {
+                    route
+                        .models
+                        .iter()
+                        .find(|model| model.id == selection.model)
+                })
+                .and_then(|model| model.max_tokens)
+        });
         if lock(&self.inner.owned_agents).len() >= self.inner.config.max_live_sessions {
             return Err(HostError::SessionCapacity);
         }
@@ -1328,9 +1976,9 @@ impl HostHandle {
                     agent_preset: Some(self.inner.identity.profile.clone()),
                 },
                 AgentOptions {
-                    provider: self.inner.config.provider.clone(),
-                    model: self.inner.config.model.clone(),
-                    max_tokens: self.inner.config.max_tokens,
+                    provider: selection.provider,
+                    model: selection.model,
+                    max_tokens,
                 },
                 self.inner.cancellation.clone(),
             )
@@ -1389,7 +2037,12 @@ impl HostHandle {
                 }
                 tokio::select! {
                     event = settings_events.recv() => match event {
-                        Ok(event) => { let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event)); }
+                        Ok(event) => {
+                            if settings_inner.dynamic_routes && event.namespace == LLM_OPENAI_RESPONSES_NAMESPACE {
+                                let _ = apply_route_settings(&settings_inner).await;
+                            }
+                            let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
+                        }
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
@@ -1533,6 +2186,82 @@ impl HostHandle {
     }
 }
 
+fn collect_image_plans(
+    blocks: &[ContentBlock],
+    store: &AttachmentStore,
+    plans: &mut Vec<ImagePlan>,
+    inputs: &mut Vec<AttachmentInput>,
+) -> Result<(), AttachmentError> {
+    for block in blocks {
+        match block {
+            ContentBlock::Image { attachment } => {
+                if let Ok(reference) = AttachmentRef::from_value(attachment) {
+                    plans.push(ImagePlan::Reference(reference));
+                } else {
+                    let input = decode_inline_image(attachment)?;
+                    let metadata = store.validate(&input)?;
+                    plans.push(ImagePlan::Inline(metadata));
+                    inputs.push(input);
+                }
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                collect_image_plans(content, store, plans, inputs)?;
+            }
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolCall { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn replace_image_plans(
+    blocks: &mut [ContentBlock],
+    plans: &[ImagePlan],
+    plan_index: &mut usize,
+    inline_refs: &[AttachmentRef],
+    inline_index: &mut usize,
+) -> Result<(), HostError> {
+    for block in blocks {
+        match block {
+            ContentBlock::Image { attachment } => {
+                let plan = plans.get(*plan_index).ok_or_else(|| {
+                    HostError::invalid(
+                        "INVALID_IMAGE_BLOCK",
+                        "image normalization plan is incomplete",
+                    )
+                })?;
+                let reference = match plan {
+                    ImagePlan::Reference(reference) => reference.clone(),
+                    ImagePlan::Inline(_) => {
+                        let reference = inline_refs.get(*inline_index).ok_or_else(|| {
+                            HostError::invalid(
+                                "INVALID_IMAGE_BLOCK",
+                                "inline image upload is incomplete",
+                            )
+                        })?;
+                        *inline_index += 1;
+                        reference.clone()
+                    }
+                };
+                *attachment = serde_json::to_value(reference).map_err(|error| {
+                    HostError::InvalidConfiguration(format!(
+                        "serialize attachment reference: {error}"
+                    ))
+                })?;
+                *plan_index += 1;
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                replace_image_plans(content, plans, plan_index, inline_refs, inline_index)?;
+            }
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolCall { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl HostApi for HostHandle {
     async fn initialize(
@@ -1618,6 +2347,48 @@ impl HostApi for HostHandle {
                     .collect()
             })
             .map_err(HostError::from)
+            .map_err(HostError::wire)
+    }
+    fn provider_directory(&self) -> Vec<HostProviderDirectoryEntry> {
+        HostHandle::provider_directory(self)
+    }
+    fn model_groups(&self, provider: &str) -> Vec<HostModelGroup> {
+        HostHandle::model_groups(self, provider)
+    }
+    async fn session_models(&self, session: SessionId) -> Result<HostSessionModels, TessivumError> {
+        HostHandle::session_models(self, session)
+            .await
+            .map_err(HostError::wire)
+    }
+    async fn select_model(
+        &self,
+        session: SessionId,
+        provider: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Result<SessionModelSelection, TessivumError> {
+        HostHandle::select_model(self, session, provider, model, reasoning_effort)
+            .await
+            .map_err(HostError::wire)
+    }
+    fn attachment_limits(&self) -> AttachmentLimits {
+        HostHandle::attachment_limits(self)
+    }
+    async fn upload_attachment(
+        &self,
+        data: Vec<u8>,
+        name: Option<String>,
+    ) -> Result<AttachmentRef, TessivumError> {
+        self.upload_attachment_inner(data, name)
+            .await
+            .map_err(HostError::wire)
+    }
+    async fn normalize_prompt(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptParams, TessivumError> {
+        self.normalize_prompt_inner(params)
+            .await
             .map_err(HostError::wire)
     }
     fn descriptor(&self) -> HostDescriptor {
@@ -1709,6 +2480,46 @@ impl HostApi for HostRuntime {
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         self.handle.list_sessions().await
     }
+    fn provider_directory(&self) -> Vec<HostProviderDirectoryEntry> {
+        self.handle.provider_directory()
+    }
+    fn model_groups(&self, provider: &str) -> Vec<HostModelGroup> {
+        self.handle.model_groups(provider)
+    }
+    async fn session_models(&self, session: SessionId) -> Result<HostSessionModels, TessivumError> {
+        self.handle
+            .session_models(session)
+            .await
+            .map_err(HostError::wire)
+    }
+    async fn select_model(
+        &self,
+        session: SessionId,
+        provider: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Result<SessionModelSelection, TessivumError> {
+        self.handle
+            .select_model(session, provider, model, reasoning_effort)
+            .await
+            .map_err(HostError::wire)
+    }
+    fn attachment_limits(&self) -> AttachmentLimits {
+        self.handle.attachment_limits()
+    }
+    async fn upload_attachment(
+        &self,
+        data: Vec<u8>,
+        name: Option<String>,
+    ) -> Result<AttachmentRef, TessivumError> {
+        self.handle.upload_attachment(data, name).await
+    }
+    async fn normalize_prompt(
+        &self,
+        params: SessionPromptParams,
+    ) -> Result<SessionPromptParams, TessivumError> {
+        self.handle.normalize_prompt(params).await
+    }
     fn descriptor(&self) -> HostDescriptor {
         self.handle.descriptor()
     }
@@ -1750,6 +2561,348 @@ pub async fn shutdown_signal() -> Result<i32, std::io::Error> {
     {
         tokio::signal::ctrl_c().await.map(|()| 130)
     }
+}
+
+async fn apply_route_settings(inner: &Arc<HostInner>) -> Result<(), HostError> {
+    let _gate = inner.route_gate.lock().await;
+    let snapshot = inner
+        .settings
+        .get(LLM_OPENAI_RESPONSES_NAMESPACE)
+        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+    let candidate = Arc::new(
+        parse_routes(&snapshot.value, snapshot.revision)
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+    );
+    let (old_routes, mut old_registrations) = {
+        let mut state = lock(&inner.route_state);
+        (
+            Arc::clone(&state.routes),
+            std::mem::take(&mut state.registrations),
+        )
+    };
+    for registration in old_registrations.values_mut() {
+        registration.unregister();
+    }
+    let mut registrations = BTreeMap::new();
+    for provider in candidate.keys() {
+        match inner
+            .llm
+            .register(provider.clone(), Arc::clone(&inner.route_adapter))
+        {
+            Ok(registration) => {
+                registrations.insert(provider.clone(), registration);
+            }
+            Err(error) => {
+                for registration in registrations.values_mut() {
+                    registration.unregister();
+                }
+                for provider in old_routes.keys() {
+                    if let Ok(registration) = inner
+                        .llm
+                        .register(provider.clone(), Arc::clone(&inner.route_adapter))
+                    {
+                        old_registrations.insert(provider.clone(), registration);
+                    }
+                }
+                let mut state = lock(&inner.route_state);
+                state.routes = old_routes;
+                state.registrations = old_registrations;
+                return Err(error.into());
+            }
+        }
+    }
+    *lock(&inner.route_resolver.routes) = Arc::clone(&candidate);
+    let mut state = lock(&inner.route_state);
+    state.routes = candidate;
+    state.registrations = registrations;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawOpenAiSettings {
+    #[serde(default)]
+    providers: BTreeMap<String, RawOpenAiRoute>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawOpenAiRoute {
+    display_name: String,
+    #[serde(alias = "baseURL")]
+    base_url: String,
+    #[serde(alias = "credentialRef")]
+    api_key_env: String,
+    models: Vec<RawOpenAiModel>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawOpenAiModel {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default = "default_modalities", alias = "inputModalities")]
+    input: Vec<String>,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+fn default_modalities() -> Vec<String> {
+    vec![RESPONSES_TEXT_MODALITY.into()]
+}
+
+fn parse_routes(
+    value: &Value,
+    revision: u64,
+) -> Result<BTreeMap<String, ResponsesRoute>, TessivumError> {
+    let raw: RawOpenAiSettings = serde_json::from_value(value.clone()).map_err(|error| {
+        TessivumError::new(
+            "INVALID_OPENAI_ROUTE_SETTINGS",
+            format!("invalid provider settings: {error}"),
+            "host",
+            Value::Null,
+        )
+    })?;
+    let mut routes = BTreeMap::new();
+    for (id, raw_route) in raw.providers {
+        if id.trim().is_empty() || raw_route.models.is_empty() {
+            return Err(TessivumError::new(
+                "INVALID_OPENAI_ROUTE_SETTINGS",
+                "provider routes require an id and at least one model",
+                "host",
+                Value::Null,
+            ));
+        }
+        let credential = CredentialRef::new(raw_route.api_key_env.clone()).map_err(|error| {
+            TessivumError::new(
+                "INVALID_CREDENTIAL_REF",
+                error.to_string(),
+                "host",
+                Value::Null,
+            )
+        })?;
+        let mut models = Vec::with_capacity(raw_route.models.len());
+        for raw_model in raw_route.models {
+            if raw_model
+                .context_window
+                .is_some_and(|value| value > MAX_SAFE_INTEGER)
+                || raw_model
+                    .max_tokens
+                    .is_some_and(|value| value > MAX_SAFE_INTEGER)
+            {
+                return Err(TessivumError::new(
+                    "INVALID_OPENAI_MODEL",
+                    "model limits must be safe positive integers",
+                    "host",
+                    Value::Null,
+                ));
+            }
+            let mut input = raw_model.input;
+            if input.is_empty() {
+                input.push(RESPONSES_TEXT_MODALITY.into());
+            }
+            let mut seen = BTreeSet::new();
+            if input.iter().any(|modality| !seen.insert(modality.clone())) {
+                return Err(TessivumError::new(
+                    "INVALID_OPENAI_MODALITY",
+                    "model input modalities must be unique",
+                    "host",
+                    Value::Null,
+                ));
+            }
+            let model = ResponsesModel {
+                id: raw_model.id,
+                name: raw_model.name,
+                input,
+                context_window: raw_model.context_window,
+                max_tokens: raw_model.max_tokens,
+            };
+            model.validate()?;
+            models.push(model);
+        }
+        let mut route = ResponsesRoute::new(
+            id.clone(),
+            raw_route.display_name,
+            raw_route.base_url,
+            credential.as_str(),
+            models,
+        );
+        route.generation = revision;
+        route.validate()?;
+        routes.insert(id, route);
+    }
+    Ok(routes)
+}
+
+fn openai_settings_registration(base: Value) -> SettingsRegistration {
+    SettingsRegistration::new(
+        LLM_OPENAI_RESPONSES_NAMESPACE,
+        json!({
+            "type": "object",
+            "properties": {
+                "providers": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "displayName": {"type": "string"},
+                            "baseURL": {"type": "string", "format": "uri"},
+                            "apiKeyEnv": {"type": "string", "role": "credential-ref"},
+                            "models": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["id"],
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "name": {"type": "string"},
+                                        "input": {
+                                            "type": "array",
+                                            "items": {"type": "string", "enum": ["text", "image"]}
+                                        },
+                                        "contextWindow": {"type": "integer", "minimum": 1},
+                                        "maxTokens": {"type": "integer", "minimum": 1}
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        },
+                        "required": ["displayName", "baseURL", "apiKeyEnv", "models"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "additionalProperties": false
+        }),
+        json!({"providers": {}}),
+        base,
+    )
+    .with_validator(Arc::new(|value| parse_routes(value, 0).map(|_| ())))
+}
+
+fn default_model_registration(config: &HostConfig, base: Value) -> SettingsRegistration {
+    SettingsRegistration::new(
+        AGENT_DEFAULT_MODEL_NAMESPACE,
+        json!({"type":"object","required":["provider","model"],"additionalProperties":false}),
+        json!({"provider":config.provider,"model":config.model}),
+        base,
+    )
+    .with_validator(Arc::new(|value| {
+        let selection: SessionModelSelection =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                TessivumError::new(
+                    "INVALID_MODEL_SELECTION",
+                    error.to_string(),
+                    "settings",
+                    Value::Null,
+                )
+            })?;
+        selection.validate()
+    }))
+}
+
+fn latest_model_selection(events: &[SessionEvent]) -> Option<SessionModelSelection> {
+    events.iter().rev().find_map(|event| {
+        (event.event_type == "session/model-selected")
+            .then(|| serde_json::from_value(event.data.clone()).ok())
+            .flatten()
+    })
+}
+
+fn model_group_for_route(credentials: &Arc<Credentials>, route: ResponsesRoute) -> HostModelGroup {
+    let credential_configured = CredentialRef::new(route.credential_ref.clone())
+        .ok()
+        .and_then(|reference| resolve_credential_sync(Arc::clone(credentials), reference).ok())
+        .flatten()
+        .is_some();
+    let routable = credential_configured;
+    HostModelGroup {
+        provider: route.id.clone(),
+        display_name: route.display_name.clone(),
+        models: route
+            .models
+            .into_iter()
+            .map(|model| HostModelInfo {
+                provider: route.id.clone(),
+                id: model.id,
+                name: model.name,
+                input_modalities: if model.input.is_empty() {
+                    default_modalities()
+                } else {
+                    model.input
+                },
+                context_window: model.context_window,
+                max_tokens: model.max_tokens,
+                routable,
+            })
+            .collect(),
+        credential_configured,
+        routable,
+        failure: (!credential_configured).then(|| HostRouteFailure {
+            provider: route.id,
+            model: None,
+            code: "MISSING_CREDENTIAL".into(),
+            message: "provider credential is not configured".into(),
+        }),
+    }
+}
+
+fn route_failure(
+    code: &str,
+    message: &str,
+    selection: &SessionModelSelection,
+    model: Option<String>,
+) -> HostRouteFailure {
+    HostRouteFailure {
+        provider: selection.provider.clone(),
+        model,
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn model_error(code: &str, message: &str, provider: &str, model: Option<&str>) -> TessivumError {
+    TessivumError::new(
+        code,
+        message,
+        "host",
+        json!({"provider": provider, "model": model}),
+    )
+}
+
+fn resolve_credential_sync(
+    credentials: Arc<Credentials>,
+    reference: CredentialRef,
+) -> Result<Option<String>, TessivumError> {
+    let handle = tokio::runtime::Handle::try_current().ok();
+    std::thread::spawn(move || {
+        let result = if let Some(handle) = handle {
+            handle.block_on(credentials.resolve(&reference))
+        } else {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    crate::credentials::CredentialError::Persistence(error.to_string())
+                })
+                .and_then(|runtime| runtime.block_on(credentials.resolve(&reference)))
+        };
+        result.map_err(|error| {
+            TessivumError::new(error.code(), error.to_string(), "credentials", Value::Null)
+        })
+    })
+    .join()
+    .map_err(|_| {
+        TessivumError::new(
+            "CREDENTIALS_RESOLVE_FAILED",
+            "credential resolution thread failed",
+            "credentials",
+            Value::Null,
+        )
+    })?
 }
 
 fn adapter_for(config: &HostConfig) -> Result<Arc<dyn LlmAdapter>, HostError> {

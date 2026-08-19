@@ -28,6 +28,9 @@ pub fn settings_service_key() -> ServiceKey {
     ServiceKey::new("harness.settings", "1")
 }
 
+pub const LLM_OPENAI_RESPONSES_NAMESPACE: &str = "llm-openai-responses";
+pub const AGENT_DEFAULT_MODEL_NAMESPACE: &str = "agent-default-model";
+
 pub type SettingPath = Vec<String>;
 pub type SettingsValidator = Arc<dyn Fn(&Value) -> Result<(), TessivumError> + Send + Sync>;
 

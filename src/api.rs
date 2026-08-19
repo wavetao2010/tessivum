@@ -47,15 +47,20 @@ use crate::{
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
     credentials::{CredentialRef, CredentialSource},
     frontend::FrontendStatic,
-    host::{HostApi, HostDescriptor, HostNotification},
+    host::{
+        HostApi, HostDescriptor, HostModelGroup, HostModelInfo, HostNotification,
+        HostProviderDirectoryEntry, HostSessionModels,
+    },
     protocol::{
         AgentCancelCause, InitializeParams, SessionEventNotification, SessionId,
         SessionPromptParams, MAX_SAFE_INTEGER,
     },
-    settings::{SettingsDescriptor, SettingsError, SettingsPathOp},
+    settings::{SettingsDescriptor, SettingsError, SettingsPathOp, LLM_OPENAI_RESPONSES_NAMESPACE},
     workspace::{WorkspaceError, WorkspaceId},
     TessivumError,
 };
+use reqwest::redirect::Policy;
+use url::Url;
 use uuid::Uuid;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Per-WebSocket outgoing message cap. A slow peer is disconnected instead of
@@ -203,6 +208,10 @@ fn router_with_shutdown(
         .route("/events/{session}", get(sse_events))
         .route("/ws", get(websocket_upgrade))
         .route("/api/events.mux", get(compat_events_mux))
+        .route(
+            "/api/attachments",
+            post(upload_attachment).fallback(method_not_allowed),
+        )
         .route("/api/events.host", get(compat_events_host))
         .route(
             "/api/respond",
@@ -307,6 +316,8 @@ async fn require_bound_authority(
 }
 
 const MAX_COMPAT_FRAME_QUEUE: usize = 32;
+const MAX_DISCOVERY_BYTES: usize = 4 * 1024 * 1024;
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct CompatibilityState {
     cwd: String,
@@ -623,6 +634,44 @@ struct CompatSessionModels {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionSelectModel {
+    session_id: SessionId,
+    provider: String,
+    model: String,
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatDiscoverModels {
+    settings_ns: String,
+    provider: Option<String>,
+    base_url: Option<String>,
+    api: Option<String>,
+    api_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CompatDiscoveryResponse {
+    data: Vec<CompatDiscoveredModel>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompatDiscoveredModel {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, alias = "context_length")]
+    context_window: Option<u64>,
+    #[serde(default, alias = "max_output_tokens")]
+    max_output_tokens: Option<u64>,
+    #[serde(default, alias = "max_tokens")]
+    max_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatLlmModels {
     provider: Option<String>,
 }
@@ -710,6 +759,75 @@ enum CompatPromptContent {
         data: String,
         name: Option<String>,
     },
+}
+
+async fn upload_attachment(State(state): State<ApiState>, request: Request) -> Response {
+    let headers = request.headers();
+    let limits = state.host.attachment_limits();
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or("");
+    if !limits
+        .media_types
+        .iter()
+        .any(|admitted| admitted.as_str().eq_ignore_ascii_case(media_type))
+    {
+        return response_error(
+            None,
+            ApiError::bad_request("Content-Type must be an admitted image media type"),
+        );
+    }
+    let max_bytes = usize::try_from(limits.max_image_bytes).unwrap_or(usize::MAX);
+    if content_length_exceeds(headers, max_bytes) {
+        return response_error(None, ApiError::too_large());
+    }
+    let name = attachment_name(headers);
+    let body = match to_bytes(request.into_body(), max_bytes).await {
+        Ok(body) => body,
+        Err(_) => return response_error(None, ApiError::too_large()),
+    };
+    match state.host.upload_attachment(body.to_vec(), name).await {
+        Ok(reference) => (StatusCode::OK, Json(reference.safe_metadata())).into_response(),
+        Err(error) => response_error(None, attachment_error(error)),
+    }
+}
+
+fn attachment_name(headers: &HeaderMap) -> Option<String> {
+    ["x-attachment-name", "x-attachment-filename", "x-filename"]
+        .into_iter()
+        .find_map(|key| headers.get(key))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 128
+                && !name.starts_with('.')
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        })
+        .map(str::to_owned)
+}
+
+fn attachment_error(error: TessivumError) -> ApiError {
+    let status = match error.code.as_str() {
+        "ATTACHMENT_BYTE_LIMIT" => StatusCode::PAYLOAD_TOO_LARGE,
+        "INVALID_ATTACHMENT_IMAGE"
+        | "INVALID_ATTACHMENT_REFERENCE"
+        | "UNSUPPORTED_ATTACHMENT_MEDIA_TYPE"
+        | "ATTACHMENT_PIXEL_LIMIT"
+        | "ATTACHMENT_BATCH_COUNT_LIMIT"
+        | "ATTACHMENT_BATCH_BYTE_LIMIT" => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    ApiError {
+        status,
+        code: error.code,
+        message: error.message,
+    }
 }
 
 async fn compat_approval_response(State(state): State<ApiState>, request: Request) -> Response {
@@ -903,10 +1021,31 @@ async fn compat_dispatch(
         "session.history" => compat_session_history(state, compat_decode(payload)?).await,
         "session.models" => {
             let args: CompatSessionModels = compat_decode(payload)?;
-            if let Some(session_id) = args.session_id {
-                compat_require_session(&session_id)?;
+            let session_id = args
+                .session_id
+                .ok_or_else(|| CompatError::invalid("sessionId is required"))?;
+            compat_require_session(&session_id)?;
+            compat_session_models(state, session_id).await
+        }
+        "session.selectModel" => {
+            let args: CompatSessionSelectModel = compat_decode(payload)?;
+            compat_require_session(&args.session_id)?;
+            compat_require_nonblank("provider", &args.provider)?;
+            compat_require_nonblank("model", &args.model)?;
+            if let Some(reasoning_effort) = args.reasoning_effort.as_deref() {
+                compat_require_nonblank("reasoningEffort", reasoning_effort)?;
             }
-            Ok(compat_session_models(&state.compat))
+            let selected = state
+                .host
+                .select_model(
+                    args.session_id,
+                    args.provider,
+                    args.model,
+                    args.reasoning_effort,
+                )
+                .await
+                .map_err(compat_host_error)?;
+            Ok(json!({"selected": selected}))
         }
         "session.prompt" => compat_session_prompt(state, compat_decode(payload)?).await,
         "session.cancel" => compat_session_cancel(state, compat_decode(payload)?).await,
@@ -938,18 +1077,17 @@ async fn compat_dispatch(
         }
         "llm.providers" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
-            Ok(json!({"providers": [compat_provider(&state.compat)]}))
+            Ok(json!({
+                "providers": state
+                    .host
+                    .provider_directory()
+                    .into_iter()
+                    .map(compat_provider)
+                    .collect::<Vec<_>>(),
+            }))
         }
-        "llm.models" => {
-            let args: CompatLlmModels = compat_decode(payload)?;
-            if let Some(provider) = args.provider {
-                compat_require_nonblank("provider", &provider)?;
-                if provider != state.compat.provider {
-                    return Err(CompatError::invalid("provider is not available"));
-                }
-            }
-            Ok(compat_llm_models(&state.compat))
-        }
+        "llm.models" => compat_llm_models(state, compat_decode(payload)?).await,
+        "llm.discoverModels" => compat_discover_models(state, compat_decode(payload)?).await,
         "credentials.describe" => compat_credentials_describe(state, compat_decode(payload)?).await,
         "credentials.set" => compat_credentials_set(state, compat_decode(payload)?).await,
         "credentials.unset" => compat_credentials_unset(state, compat_decode(payload)?).await,
@@ -1007,6 +1145,7 @@ fn is_exposed_settings_namespace(ns: &str) -> bool {
     matches!(
         ns,
         "agent-loop"
+            | "agent-default-model"
             | "shell"
             | "locale"
             | "permission"
@@ -1032,6 +1171,7 @@ fn compat_require_ns(ns: &str) -> Result<(), CompatError> {
 }
 
 fn compat_settings_error(ns: &str, error: SettingsError) -> CompatError {
+    let message = error.to_string();
     match error {
         SettingsError::Conflict { expected, actual } => CompatError {
             code: "settings-conflict".into(),
@@ -1040,7 +1180,7 @@ fn compat_settings_error(ns: &str, error: SettingsError) -> CompatError {
         },
         _ => CompatError {
             code: "settings-rejected".into(),
-            message: "settings change was rejected".into(),
+            message,
             details: json!({"ns": ns}),
         },
     }
@@ -1118,7 +1258,6 @@ fn compat_credential_error(reference: &CredentialRef) -> CompatError {
         details: json!({"ref": reference.as_str()}),
     }
 }
-
 async fn compat_credentials_describe(
     state: &ApiState,
     args: CompatCredentialsDescribe,
@@ -1728,38 +1867,271 @@ async fn compat_session_history(
     }))
 }
 
-fn compat_session_models(state: &CompatibilityState) -> Value {
+async fn compat_session_models(
+    state: &ApiState,
+    session_id: SessionId,
+) -> Result<Value, CompatError> {
+    let models: HostSessionModels = state
+        .host
+        .session_models(session_id)
+        .await
+        .map_err(compat_host_error)?;
+    Ok(json!({
+        "current": models.current,
+        "routable": models.routable,
+        "groups": models.groups.into_iter().map(compat_model_group).collect::<Vec<_>>(),
+        "failures": models.failures,
+    }))
+}
+
+fn compat_provider(entry: HostProviderDirectoryEntry) -> Value {
     json!({
-        "current": {"provider": state.provider, "model": state.model},
-        "routable": true,
-        "groups": compat_model_groups(state),
-        "failures": [],
+        "provider": entry.route.id,
+        "displayName": entry.route.display_name,
+        "settingsNs": entry.namespace,
+        "settingsPath": entry.settings_path,
+        "active": entry.active,
+        "declared": entry.declared,
+        "credentialConfigured": entry.credential_configured,
     })
 }
 
-fn compat_provider(state: &CompatibilityState) -> Value {
-    json!({
-        "provider": state.provider,
-        "displayName": state.provider,
-        "settingsNs": "llm",
-        "settingsPath": [],
-        "active": true,
-        "declared": true,
+fn compat_model_info(info: HostModelInfo) -> Value {
+    let mut model = Map::from_iter([
+        ("id".into(), Value::String(info.id.clone())),
+        (
+            "name".into(),
+            Value::String(info.name.unwrap_or_else(|| info.id.clone())),
+        ),
+        ("provider".into(), Value::String(info.provider)),
+        ("inputModalities".into(), json!(info.input_modalities)),
+        ("routable".into(), Value::Bool(info.routable)),
+    ]);
+    if let Some(context_window) = info.context_window {
+        model.insert("contextWindow".into(), Value::from(context_window));
+    }
+    if let Some(max_tokens) = info.max_tokens {
+        model.insert("maxTokens".into(), Value::from(max_tokens));
+    }
+    Value::Object(model)
+}
+
+fn compat_model_group(group: HostModelGroup) -> Value {
+    let mut value = Map::from_iter([
+        ("id".into(), Value::String(group.provider)),
+        ("name".into(), Value::String(group.display_name)),
+        (
+            "models".into(),
+            Value::Array(group.models.into_iter().map(compat_model_info).collect()),
+        ),
+        ("routable".into(), Value::Bool(group.routable)),
+        (
+            "credentialConfigured".into(),
+            Value::Bool(group.credential_configured),
+        ),
+    ]);
+    if let Some(failure) = group.failure {
+        value.insert(
+            "failure".into(),
+            serde_json::to_value(failure).unwrap_or(Value::Null),
+        );
+    }
+    Value::Object(value)
+}
+
+async fn compat_llm_models(state: &ApiState, args: CompatLlmModels) -> Result<Value, CompatError> {
+    let entries = state.host.provider_directory();
+    let provider_filter = args.provider;
+    let providers = if let Some(provider) = provider_filter.clone() {
+        compat_require_nonblank("provider", &provider)?;
+        vec![provider]
+    } else {
+        entries
+            .iter()
+            .map(|entry| entry.route.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut groups = Vec::new();
+    let mut failures = Vec::new();
+    for provider in providers {
+        for group in state.host.model_groups(&provider) {
+            if let Some(failure) = group.failure.clone() {
+                failures.push(serde_json::to_value(failure).unwrap_or(Value::Null));
+            }
+            groups.push(compat_model_group(group));
+        }
+    }
+    if provider_filter.is_some() && groups.is_empty() {
+        return Err(CompatError::invalid("provider is not available"));
+    }
+    Ok(json!({"groups": groups, "failures": failures}))
+}
+fn compat_discovery_error(code: &str, message: &str) -> CompatError {
+    CompatError {
+        code: code.into(),
+        message: message.into(),
+        details: json!({}),
+    }
+}
+
+fn discovery_url(base_url: &str) -> Result<Url, CompatError> {
+    let mut base = Url::parse(base_url.trim())
+        .map_err(|_| compat_discovery_error("bad-request", "baseURL is invalid"))?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.username() != ""
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(compat_discovery_error(
+            "bad-request",
+            "baseURL must be an HTTP(S) URL without userinfo, query, or fragment",
+        ));
+    }
+    let path = format!("{}/models", base.path().trim_end_matches('/'));
+    base.set_path(&path);
+    Ok(base)
+}
+
+fn discovery_value(value: Option<u64>) -> Option<Value> {
+    value
+        .filter(|value| *value > 0 && *value <= MAX_SAFE_INTEGER)
+        .map(Value::from)
+}
+
+async fn compat_discover_models(
+    state: &ApiState,
+    args: CompatDiscoverModels,
+) -> Result<Value, CompatError> {
+    if args.settings_ns != LLM_OPENAI_RESPONSES_NAMESPACE {
+        return Err(compat_discovery_error(
+            "discovery-unsupported",
+            "model discovery is only supported for llm-openai-responses",
+        ));
+    }
+    if let Some(api) = args.api.as_deref() {
+        if api != "openai-responses" {
+            return Err(compat_discovery_error(
+                "discovery-unsupported",
+                "model discovery only supports openai-responses",
+            ));
+        }
+    }
+
+    let entry = args.provider.as_deref().and_then(|provider| {
+        state
+            .host
+            .provider_directory()
+            .into_iter()
+            .find(|entry| entry.route.id == provider)
+    });
+    let base_url = args
+        .base_url
+        .or_else(|| entry.as_ref().map(|entry| entry.route.base_url.clone()))
+        .ok_or_else(|| compat_discovery_error("bad-request", "baseURL is required"))?;
+    let url = discovery_url(&base_url)?;
+
+    // A typed draft key always wins over a stored credential. The value never
+    // enters an error, response, or diagnostic path.
+    let api_key = if let Some(api_key) = args.api_key {
+        if api_key.trim().is_empty() {
+            return Err(compat_discovery_error(
+                "credential-rejected",
+                "apiKey must not be blank",
+            ));
+        }
+        Some(api_key)
+    } else if let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
+        let reference = CredentialRef::new(entry.route.credential_ref.clone()).map_err(|_| {
+            compat_discovery_error("credential-rejected", "credential is unavailable")
+        })?;
+        credentials.resolve(&reference).await.map_err(|_| {
+            compat_discovery_error("credential-rejected", "credential is unavailable")
+        })?
+    } else {
+        None
+    };
+
+    let client = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(DISCOVERY_TIMEOUT)
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .map_err(|_| compat_discovery_error("model-discovery-failed", "provider request failed"))?;
+    let mut request = client.get(url);
+    if let Some(api_key) = api_key {
+        request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+    let response = tokio::time::timeout(DISCOVERY_TIMEOUT, request.send())
+        .await
+        .map_err(|_| {
+            compat_discovery_error("model-discovery-failed", "provider request timed out")
+        })?
+        .map_err(|_| compat_discovery_error("model-discovery-failed", "provider request failed"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(compat_discovery_error(
+            "credential-rejected",
+            "provider rejected the credential",
+        ));
+    }
+    if !status.is_success() {
+        return Err(compat_discovery_error(
+            "model-discovery-failed",
+            "provider returned an unsuccessful response",
+        ));
+    }
+    let body = tokio::time::timeout(DISCOVERY_TIMEOUT, async {
+        let mut stream = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| ())?;
+            if body.len().saturating_add(chunk.len()) > MAX_DISCOVERY_BYTES {
+                return Err(());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok::<_, ()>(body)
     })
+    .await
+    .map_err(|_| compat_discovery_error("model-discovery-failed", "provider response timed out"))?
+    .map_err(|_| {
+        compat_discovery_error("model-discovery-failed", "provider response is too large")
+    })?;
+    let response: CompatDiscoveryResponse = serde_json::from_slice(&body).map_err(|_| {
+        compat_discovery_error(
+            "model-discovery-failed",
+            "provider returned an invalid model list",
+        )
+    })?;
+    let mut seen = BTreeSet::new();
+    let models = response
+        .data
+        .into_iter()
+        .filter_map(|model| {
+            if model.id.trim().is_empty() || !seen.insert(model.id.clone()) {
+                return None;
+            }
+            let context_window = model.context_window;
+            let max_tokens = [model.max_output_tokens, model.max_tokens]
+                .into_iter()
+                .flatten()
+                .find(|value| *value > 0 && *value <= MAX_SAFE_INTEGER);
+            let mut value = Map::from_iter([("id".into(), Value::String(model.id))]);
+            if let Some(name) = model.name.filter(|name| !name.trim().is_empty()) {
+                value.insert("name".into(), Value::String(name));
+            }
+            if let Some(context_window) = discovery_value(context_window) {
+                value.insert("contextWindow".into(), context_window);
+            }
+            if let Some(max_tokens) = discovery_value(max_tokens) {
+                value.insert("maxTokens".into(), max_tokens);
+            }
+            Some(Value::Object(value))
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({"models": models}))
 }
-
-fn compat_model_groups(state: &CompatibilityState) -> Value {
-    json!([{
-        "id": state.provider,
-        "name": state.provider,
-        "models": [{"id": state.model, "name": state.model}],
-    }])
-}
-
-fn compat_llm_models(state: &CompatibilityState) -> Value {
-    json!({"groups": compat_model_groups(state), "failures": []})
-}
-
 fn compat_prompt_blocks(
     content: Vec<CompatPromptContent>,
 ) -> Result<Vec<crate::protocol::ContentBlock>, CompatError> {

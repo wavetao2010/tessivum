@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use tessivum_core::CancellationToken;
 
 use crate::{
+    attachments::{AttachmentError, AttachmentRef, AttachmentStore},
     llm::{LlmAdapter, LlmStream},
     ContentBlock, FinishReason, GenerateRequest, Message, MessageRole, MessageSource, StreamChunk,
     TessivumError, TokenUsage, ToolCallId,
@@ -331,6 +332,7 @@ impl ResponsesRouteResolver for StaticResponsesRouteResolver {
 pub struct OpenAiResponsesAdapter {
     client: Client,
     resolver: Arc<dyn ResponsesRouteResolver>,
+    attachment_store: Option<Arc<AttachmentStore>>,
 }
 
 impl fmt::Debug for OpenAiResponsesAdapter {
@@ -338,6 +340,10 @@ impl fmt::Debug for OpenAiResponsesAdapter {
         formatter
             .debug_struct("OpenAiResponsesAdapter")
             .field("resolver", &"redacted")
+            .field(
+                "attachment_store",
+                &self.attachment_store.as_ref().map(|_| "configured"),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -372,7 +378,30 @@ impl OpenAiResponsesAdapter {
         Self {
             client: Client::new(),
             resolver: Arc::new(resolver),
+            attachment_store: None,
         }
+    }
+
+    /// Attaches the durable image store used to materialize `AttachmentRef`s.
+    pub fn with_attachment_store(mut self, store: Arc<AttachmentStore>) -> Self {
+        self.attachment_store = Some(store);
+        self
+    }
+
+    /// Builds a resolver-backed adapter with durable image support.
+    pub fn with_resolver_and_store<R>(resolver: R, store: Arc<AttachmentStore>) -> Self
+    where
+        R: ResponsesRouteResolver + 'static,
+    {
+        Self::with_resolver(resolver).with_attachment_store(store)
+    }
+
+    /// Alias spelling for callers that name the attachment dependency explicitly.
+    pub fn with_resolver_and_attachment_store<R>(resolver: R, store: Arc<AttachmentStore>) -> Self
+    where
+        R: ResponsesRouteResolver + 'static,
+    {
+        Self::with_resolver_and_store(resolver, store)
     }
 
     /// Alias for callers that prefer constructor naming over builder naming.
@@ -429,7 +458,7 @@ impl OpenAiResponsesAdapter {
             })?;
         authorization.set_sensitive(true);
         let endpoint = snapshot.endpoint()?;
-        let body = request_body(request, snapshot)?;
+        let body = request_body(request, snapshot, self.attachment_store.as_deref()).await?;
         let pending = self
             .client
             .post(endpoint.clone())
@@ -503,9 +532,10 @@ impl LlmAdapter for OpenAiResponsesAdapter {
         }))
     }
 }
-fn request_body(
+async fn request_body(
     request: &GenerateRequest,
     snapshot: &ProviderSnapshot,
+    attachment_store: Option<&AttachmentStore>,
 ) -> Result<Value, TessivumError> {
     if request.stop.as_ref().is_some_and(|stop| !stop.is_empty()) {
         return Err(adapter_error(
@@ -518,7 +548,7 @@ fn request_body(
         ("model".into(), Value::String(request.model.clone())),
         (
             "input".into(),
-            Value::Array(response_input(request, snapshot)?),
+            Value::Array(response_input(request, snapshot, attachment_store).await?),
         ),
         ("stream".into(), Value::Bool(true)),
         ("store".into(), Value::Bool(false)),
@@ -565,9 +595,10 @@ fn request_body(
     Ok(Value::Object(body))
 }
 
-fn response_input(
+async fn response_input(
     request: &GenerateRequest,
     snapshot: &ProviderSnapshot,
+    attachment_store: Option<&AttachmentStore>,
 ) -> Result<Vec<Value>, TessivumError> {
     let mut input = Vec::new();
     for message in &request.messages {
@@ -575,7 +606,7 @@ fn response_input(
             input.extend(output.iter().cloned());
             continue;
         }
-        append_message_input(&mut input, message, &snapshot.model)?;
+        append_message_input(&mut input, message, &snapshot.model, attachment_store).await?;
     }
     Ok(input)
 }
@@ -625,31 +656,47 @@ fn validate_modalities(
     request: &GenerateRequest,
     model: &ResponsesModel,
 ) -> Result<(), TessivumError> {
+    fn validate_block(block: &ContentBlock, model: &ResponsesModel) -> Result<(), TessivumError> {
+        match block {
+            ContentBlock::Image { .. } => {
+                if !model.supports(RESPONSES_IMAGE_MODALITY) {
+                    return Err(adapter_error(
+                        "UNSUPPORTED_MODALITY",
+                        "the selected OpenAI Responses model does not support this input modality",
+                        json!({"modality": RESPONSES_IMAGE_MODALITY, "model": model.id}),
+                    ));
+                }
+            }
+            ContentBlock::Text { .. } => {
+                if !model.supports(RESPONSES_TEXT_MODALITY) {
+                    return Err(adapter_error(
+                        "UNSUPPORTED_MODALITY",
+                        "the selected OpenAI Responses model does not support this input modality",
+                        json!({"modality": RESPONSES_TEXT_MODALITY, "model": model.id}),
+                    ));
+                }
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                for block in content {
+                    validate_block(block, model)?;
+                }
+            }
+            ContentBlock::Reasoning { .. } | ContentBlock::ToolCall { .. } => {}
+        }
+        Ok(())
+    }
     for message in &request.messages {
         for block in &message.content {
-            let modality = match block {
-                ContentBlock::Image { .. } => RESPONSES_IMAGE_MODALITY,
-                ContentBlock::Text { .. } => RESPONSES_TEXT_MODALITY,
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolCall { .. }
-                | ContentBlock::ToolResult { .. } => continue,
-            };
-            if !model.supports(modality) {
-                return Err(adapter_error(
-                    "UNSUPPORTED_MODALITY",
-                    "the selected OpenAI Responses model does not support this input modality",
-                    json!({"modality": modality, "model": model.id}),
-                ));
-            }
+            validate_block(block, model)?;
         }
     }
     Ok(())
 }
-
-fn append_message_input(
+async fn append_message_input(
     input: &mut Vec<Value>,
     message: &Message,
     model: &ResponsesModel,
+    attachment_store: Option<&AttachmentStore>,
 ) -> Result<(), TessivumError> {
     let role = match message.role {
         MessageRole::System => "developer",
@@ -665,14 +712,7 @@ fn append_message_input(
             })),
             ContentBlock::Reasoning { .. } => {}
             ContentBlock::Image { attachment } => {
-                if !model.supports(RESPONSES_IMAGE_MODALITY) {
-                    return Err(adapter_error(
-                        "UNSUPPORTED_MODALITY",
-                        "the selected OpenAI Responses model does not support image input",
-                        json!({"modality": RESPONSES_IMAGE_MODALITY, "model": model.id}),
-                    ));
-                }
-                content.push(json!({"type": "input_image", "image_url": attachment}));
+                content.push(image_input(attachment, model, attachment_store).await?);
             }
             ContentBlock::ToolCall {
                 id,
@@ -693,16 +733,104 @@ fn append_message_input(
                 ..
             } => {
                 flush_message_content(input, role, &mut content);
+                let output = tool_output_content(output, model, attachment_store).await?;
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": tool_call_id,
-                    "output": tool_output_text(output),
+                    "output": output,
                 }));
             }
         }
     }
     flush_message_content(input, role, &mut content);
     Ok(())
+}
+
+async fn image_input(
+    attachment: &Value,
+    model: &ResponsesModel,
+    attachment_store: Option<&AttachmentStore>,
+) -> Result<Value, TessivumError> {
+    if !model.supports(RESPONSES_IMAGE_MODALITY) {
+        return Err(adapter_error(
+            "UNSUPPORTED_MODALITY",
+            "the selected OpenAI Responses model does not support image input",
+            json!({"modality": RESPONSES_IMAGE_MODALITY, "model": model.id}),
+        ));
+    }
+    let reference = AttachmentRef::from_value(attachment)
+        .map_err(|error| attachment_error("image attachment must be a durable reference", error))?;
+    let store = attachment_store.ok_or_else(|| {
+        adapter_error(
+            "INVALID_ATTACHMENT_REFERENCE",
+            "durable image input requires an attachment store",
+            Value::Null,
+        )
+    })?;
+    let data = store
+        .read_ref_bounded(&reference, store.limits().max_image_bytes)
+        .await
+        .map_err(|error| attachment_error("could not read image attachment", error))?;
+    Ok(json!({
+        "type": "input_image",
+        "image_url": format!("{}{}", reference.data_url_prefix(), base64_encode(&data.data)),
+        "detail": "auto",
+    }))
+}
+
+async fn tool_output_content(
+    blocks: &[ContentBlock],
+    model: &ResponsesModel,
+    attachment_store: Option<&AttachmentStore>,
+) -> Result<Value, TessivumError> {
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+    {
+        return Ok(Value::String(tool_output_text(blocks)));
+    }
+    let mut content = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => {
+                content.push(json!({"type": "input_text", "text": text}));
+            }
+            ContentBlock::Image { attachment } => {
+                content.push(image_input(attachment, model, attachment_store).await?);
+            }
+            _ => {}
+        }
+    }
+    Ok(Value::Array(content))
+}
+
+fn attachment_error(message: &str, error: AttachmentError) -> TessivumError {
+    adapter_error(error.code(), message, json!({"error": error.to_string()}))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        output.push(TABLE[(first >> 2) as usize] as char);
+        let second = chunk.get(1).copied();
+        output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
+        if let Some(second) = second {
+            output.push(
+                TABLE[((second & 0x0f) << 2 | chunk.get(2).copied().unwrap_or(0) >> 6) as usize]
+                    as char,
+            );
+        } else {
+            output.push('=');
+        }
+        if let Some(third) = chunk.get(2).copied() {
+            output.push(TABLE[(third & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
 }
 
 fn flush_message_content(input: &mut Vec<Value>, role: &str, content: &mut Vec<Value>) {

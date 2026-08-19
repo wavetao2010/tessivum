@@ -165,6 +165,96 @@ impl AttachmentRef {
     }
 }
 
+/// Decodes the legacy inline image shape without making it durable.
+///
+/// Callers must immediately pass the returned bytes through `AttachmentStore`.
+/// Remote URLs, paths, and arbitrary attachment metadata are intentionally not
+/// accepted here.
+pub fn decode_inline_image(value: &Value) -> Result<AttachmentInput, AttachmentError> {
+    let object = value.as_object().ok_or(AttachmentError::InvalidReference)?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "mediaType" | "data" | "name"))
+    {
+        return Err(AttachmentError::InvalidReference);
+    }
+    let media_type: ImageMediaType = serde_json::from_value(
+        object
+            .get("mediaType")
+            .cloned()
+            .ok_or(AttachmentError::InvalidReference)?,
+    )
+    .map_err(|_| AttachmentError::UnsupportedMediaType)?;
+    let encoded = object
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or(AttachmentError::InvalidReference)?;
+    let encoded = if let Some((prefix, data)) = encoded.split_once(',') {
+        if prefix
+            != format!(
+                "{};base64",
+                media_type.data_url_prefix().trim_end_matches(',')
+            )
+        {
+            return Err(AttachmentError::InvalidReference);
+        }
+        data
+    } else {
+        encoded
+    };
+    let data = decode_base64(encoded).ok_or(AttachmentError::InvalidImage)?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(AttachmentInput::new(data, name))
+}
+
+fn decode_base64(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut output = Vec::with_capacity(encoded.len() / 4 * 3);
+    let bytes = encoded.as_bytes();
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let last = index + 1 == bytes.len() / 4;
+        let mut values = [0u8; 4];
+        let mut padding = 0;
+        for (slot, byte) in chunk.iter().copied().enumerate() {
+            if byte == b'=' {
+                if !last || slot < 2 {
+                    return None;
+                }
+                padding += 1;
+                values[slot] = 0;
+            } else {
+                if padding != 0 {
+                    return None;
+                }
+                values[slot] = match byte {
+                    b'A'..=b'Z' => byte - b'A',
+                    b'a'..=b'z' => byte - b'a' + 26,
+                    b'0'..=b'9' => byte - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    _ => return None,
+                };
+            }
+        }
+        if padding > 2 || (padding == 1 && chunk[3] != b'=') || (padding == 2 && chunk[2] != b'=') {
+            return None;
+        }
+        output.push((values[0] << 2) | (values[1] >> 4));
+        if padding < 2 {
+            output.push((values[1] << 4) | (values[2] >> 2));
+        }
+        if padding == 0 {
+            output.push((values[2] << 6) | values[3]);
+        }
+    }
+    Some(output)
+}
+
 pub struct AttachmentInput {
     pub data: Vec<u8>,
     pub name: Option<String>,

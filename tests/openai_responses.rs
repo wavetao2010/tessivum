@@ -12,6 +12,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tessivum::{
+    attachments::{AttachmentInput, AttachmentStore},
     llm::LlmRuntime,
     openai_responses::{
         OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesRoute,
@@ -103,7 +104,131 @@ fn user(text: &str) -> Message {
         source: MessageSource::User,
     }
 }
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes
+}
 
+#[tokio::test]
+async fn responses_materializes_durable_images_in_order_and_tool_output_arrays() {
+    let state = Arc::new(RelayState::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(Arc::clone(&state));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let data = TempDir::new();
+    let store = Arc::new(AttachmentStore::new(&data.0, Default::default()).unwrap());
+    let reference = store
+        .save(AttachmentInput::new(png(1, 1), Some("one.png".into())))
+        .await
+        .unwrap();
+    let model = ResponsesModel::new("relay-codex").with_input(["text", "image"]);
+    let route = ResponsesRoute::new(
+        "openai-responses",
+        "Relay",
+        format!("http://{address}/v1/"),
+        "relay-key",
+        vec![model.clone()],
+    );
+    let resolver = move |provider: &str, model_id: &str| {
+        assert_eq!(provider, "openai-responses");
+        assert_eq!(model_id, "relay-codex");
+        ProviderSnapshot::new(route.clone(), model.clone(), "relay-key")
+    };
+    let adapter = Arc::new(OpenAiResponsesAdapter::with_resolver_and_store(
+        resolver, store,
+    ));
+    let runtime = LlmRuntime::new();
+    let _registration = runtime.register("openai-responses", adapter).unwrap();
+    let cancellation = ContextHandle::root().scope().cancellation();
+    let first_user = Message {
+        id: MessageId::random(),
+        role: MessageRole::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "before".into(),
+            },
+            ContentBlock::Image {
+                attachment: serde_json::to_value(&reference).unwrap(),
+            },
+            ContentBlock::Text {
+                text: "after".into(),
+            },
+        ],
+        source: MessageSource::User,
+    };
+    let first = runtime
+        .complete(
+            request(vec![first_user.clone()], None),
+            cancellation.clone(),
+        )
+        .await
+        .unwrap();
+    let tool_result = Message {
+        id: MessageId::random(),
+        role: MessageRole::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: ToolCallId::from("call_1"),
+            content: vec![
+                ContentBlock::Text {
+                    text: "tool text".into(),
+                },
+                ContentBlock::Image {
+                    attachment: serde_json::to_value(&reference).unwrap(),
+                },
+            ],
+            is_error: Some(false),
+        }],
+        source: MessageSource::Tool {
+            call_id: ToolCallId::from("call_1"),
+        },
+    };
+    runtime
+        .complete(
+            request(vec![first_user, first.message, tool_result], None),
+            cancellation,
+        )
+        .await
+        .unwrap();
+    let requests = state.requests.lock().unwrap();
+    let first_content = requests[0]["input"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        first_content[0],
+        json!({"type":"input_text","text":"before"})
+    );
+    assert_eq!(
+        first_content[2],
+        json!({"type":"input_text","text":"after"})
+    );
+    assert!(first_content[1]["image_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/png;base64,"));
+    let second_output = requests[1]["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert!(second_output["output"].is_array());
+    assert_eq!(
+        second_output["output"][0],
+        json!({"type":"input_text","text":"tool text"})
+    );
+    assert!(second_output["output"][1]["image_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/png;base64,"));
+    server.abort();
+}
 #[tokio::test]
 async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_relay() {
     let state = Arc::new(RelayState::default());

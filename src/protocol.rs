@@ -111,6 +111,39 @@ pub struct SessionHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_preset: Option<String>,
 }
+/// Provider/model authority captured for a session or the durable host default.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModelSelection {
+    pub provider: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl SessionModelSelection {
+    pub fn validate(&self) -> Result<(), TessivumError> {
+        if self.provider.trim().is_empty() || self.model.trim().is_empty() {
+            return Err(invalid(
+                "INVALID_MODEL_SELECTION",
+                "provider and model must not be blank",
+                Value::Null,
+            ));
+        }
+        if self
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(invalid(
+                "INVALID_MODEL_SELECTION",
+                "reasoningEffort must not be blank when present",
+                Value::Null,
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Durable classification for sessions created by delegation.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1028,6 +1061,7 @@ fn is_known_event_type(event_type: &str) -> bool {
             | "workflow/run-end"
             | "request/header"
             | "request/context"
+            | "session/model-selected"
             | "session/end-seed"
     )
 }

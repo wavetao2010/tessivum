@@ -16,12 +16,17 @@ use serde_json::{json, Value};
 use tessivum::{
     api::{ApiServer, MAX_FRAME_BYTES},
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
-    host::{HostApi, HostConfig, HostLlmAdapterFactory, HostNotification, HostRuntime},
+    host::{
+        HostApi, HostConfig, HostLlmAdapterFactory, HostModelGroup, HostModelInfo,
+        HostNotification, HostProviderDirectoryEntry, HostRuntime, HostSessionModels,
+    },
     llm::{LlmAdapter, LlmStream},
+    openai_responses::{ResponsesModel, ResponsesRoute},
     protocol::{
         AgentCancelCause, ContentBlock, FinishReason, GenerateRequest, InitializeParams,
         InitializeResult, MessageId, SdkServerInfo, SessionEvent, SessionEventNotification,
-        SessionId, SessionPromptParams, SessionPromptResult, SessionStatus, StreamChunk,
+        SessionId, SessionModelSelection, SessionPromptParams, SessionPromptResult, SessionStatus,
+        StreamChunk,
     },
     settings::SettingsRegistration,
     TessivumError,
@@ -163,6 +168,74 @@ impl HostApi for FakeHost {
             .expect("status lock")
             .get(&session)
             .copied())
+    }
+    fn provider_directory(&self) -> Vec<HostProviderDirectoryEntry> {
+        vec![HostProviderDirectoryEntry {
+            route: ResponsesRoute::new(
+                "fake-provider",
+                "Fake Provider",
+                "http://127.0.0.1:1/v1",
+                "FAKE_API_KEY",
+                vec![ResponsesModel::new("fake-model")],
+            ),
+            credential_configured: true,
+            namespace: "llm-openai-responses".into(),
+            settings_path: vec!["providers".into()],
+            active: true,
+            declared: true,
+        }]
+    }
+
+    fn model_groups(&self, provider: &str) -> Vec<HostModelGroup> {
+        if provider != "fake-provider" {
+            return Vec::new();
+        }
+        vec![HostModelGroup {
+            provider: provider.into(),
+            display_name: "Fake Provider".into(),
+            models: vec![HostModelInfo {
+                provider: provider.into(),
+                id: "fake-model".into(),
+                name: Some("Fake Model".into()),
+                input_modalities: vec!["text".into(), "image".into()],
+                context_window: Some(4096),
+                max_tokens: Some(512),
+                routable: true,
+            }],
+            credential_configured: true,
+            routable: true,
+            failure: None,
+        }]
+    }
+
+    async fn session_models(
+        &self,
+        _session: SessionId,
+    ) -> Result<HostSessionModels, TessivumError> {
+        Ok(HostSessionModels {
+            current: Some(SessionModelSelection {
+                provider: "fake-provider".into(),
+                model: "fake-model".into(),
+                reasoning_effort: None,
+            }),
+            routable: true,
+            groups: self.model_groups("fake-provider"),
+            failures: Vec::new(),
+        })
+    }
+
+    async fn select_model(
+        &self,
+        _session: SessionId,
+        provider: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Result<SessionModelSelection, TessivumError> {
+        Ok(SessionModelSelection {
+            provider,
+            model,
+            reasoning_effort,
+        })
     }
 
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
@@ -642,6 +715,70 @@ async fn browser_rpc_creates_a_session_and_maps_prompt_content() {
 }
 
 #[tokio::test]
+async fn browser_model_rpcs_use_host_dtos_and_published_selection_wire() {
+    let (mut server, _host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let providers = browser_call(&client, &base, "providers", "llm.providers", json!({})).await;
+    assert_eq!(
+        providers["result"]["value"]["providers"][0]["provider"],
+        "fake-provider"
+    );
+    assert_eq!(
+        providers["result"]["value"]["providers"][0]["settingsNs"],
+        "llm-openai-responses"
+    );
+
+    let models = browser_call(&client, &base, "models", "llm.models", json!({})).await;
+    assert_eq!(
+        models["result"]["value"]["groups"][0]["id"],
+        "fake-provider"
+    );
+    assert_eq!(
+        models["result"]["value"]["groups"][0]["models"][0]["contextWindow"],
+        4096
+    );
+    assert_eq!(
+        models["result"]["value"]["groups"][0]["models"][0]["inputModalities"],
+        json!(["text", "image"])
+    );
+
+    let session = browser_call(
+        &client,
+        &base,
+        "session-models",
+        "session.models",
+        json!({"sessionId": "browser-session"}),
+    )
+    .await;
+    assert_eq!(session["result"]["value"]["current"]["model"], "fake-model");
+
+    let selected = browser_call(
+        &client,
+        &base,
+        "select-model",
+        "session.selectModel",
+        json!({
+            "sessionId": "browser-session",
+            "provider": "fake-provider",
+            "model": "fake-model",
+            "reasoningEffort": "high"
+        }),
+    )
+    .await;
+    assert_eq!(
+        selected["result"]["value"]["selected"],
+        json!({
+            "provider": "fake-provider",
+            "model": "fake-model",
+            "reasoningEffort": "high"
+        })
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
 async fn browser_rpc_rejects_a_body_method_that_differs_from_its_url() {
     let (mut server, _host, base) = start().await;
     let response = reqwest::Client::new()
@@ -928,18 +1065,21 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     let value = &described["result"]["value"];
     assert_eq!(value["writable"], true);
     assert_eq!(value["hasDocument"], false);
+    let namespaces = value["namespaces"].as_array().unwrap();
+    let namespace_view = namespaces
+        .iter()
+        .find(|view| view["ns"].as_str() == Some(namespace.as_str()))
+        .expect("published namespace is described");
+    assert!(namespaces
+        .iter()
+        .all(|view| view["ns"].as_str() != Some(internal_namespace.as_str())));
+    assert_eq!(namespace_view["applies"], "live");
     assert_eq!(
-        value["namespaces"][0]["ns"].as_str(),
-        Some(namespace.as_str())
-    );
-    assert_eq!(value["namespaces"].as_array().unwrap().len(), 1);
-    assert_eq!(value["namespaces"][0]["applies"], "live");
-    assert_eq!(
-        value["namespaces"][0]["secrets"],
+        namespace_view["secrets"],
         json!([{"path": ["secret"], "set": true}])
     );
-    assert_eq!(value["namespaces"][0]["base"], json!({"base": true}));
-    assert!(value["namespaces"][0].get("user").is_none());
+    assert_eq!(namespace_view["base"], json!({"base": true}));
+    assert!(namespace_view.get("user").is_none());
     assert!(!described.to_string().contains("default-secret"));
     let hidden = browser_call(
         &client,
