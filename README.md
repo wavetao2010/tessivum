@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by the architectu
 
 ## Alpha status
 
-`v0.1.0-alpha.4` is a source release and reproducible baseline, not a production-stable API promise.
+`v0.1.0-alpha.5` is a source release and reproducible baseline, not a production-stable API promise.
 
 Implemented and verified:
 
@@ -22,6 +22,7 @@ Implemented and verified:
 - exact per-plugin WASM service permissions plus a pinned real Rust/Extism Guest;
 - Browser stop/resume, durable approval request/response/reconnect, and writable redacted settings/credentials;
 - one HostRuntime with durable opaque multi-workspace/session authority, restart migration, workspace-scoped Bash, and subagent inheritance.
+- native OpenAI Responses streaming for API-key relays, including stateless encrypted-reasoning and function-tool continuation.
 
 ## Architecture
 
@@ -69,6 +70,27 @@ CLI tool round trip complete: CLI_TOOL_ROUND_TRIP
 
 `--trusted-bash` grants the process native shell permissions. Do not enable it for untrusted prompts.
 
+### OpenAI Responses relay
+
+The native adapter targets the standard Responses protocol with bearer authentication. `OPENAI_BASE_URL` is a prefix; Tessivum appends `/responses`.
+
+```bash
+export OPENAI_API_KEY='relay-key'
+export OPENAI_BASE_URL='https://relay.example/v1'
+export OPENAI_MODEL='codex-model-name'
+
+# Browser or SDK
+cargo run --release -- web
+
+# Headless
+cargo run --release -- \
+  --provider openai-responses \
+  --model "$OPENAI_MODEL" \
+  "inspect this repository"
+```
+
+The adapter sends `store: false`, streams text/reasoning/function calls, and persists encrypted reasoning items for stateless tool-call continuation. This is the API-key-based `openai-responses` protocol, not ChatGPT's OAuth-only `openai-codex-responses` transport; a Codex relay must expose the standard `/responses` contract.
+
 ### Browser shell
 
 ```bash
@@ -79,7 +101,7 @@ cd ..
 cargo run --release -- web
 ```
 
-Open <http://127.0.0.1:3000>. The Alpha baseline boots with an unconfigured model adapter unless the embedding application supplies one; the recorded integration tests exercise complete model and tool flows.
+Open <http://127.0.0.1:3000>. `OPENAI_MODEL` opts the Host into the native Responses adapter; without it, the Browser still boots but model calls fail closed as unconfigured.
 
 ### SDK mode
 
@@ -98,7 +120,7 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-The Alpha cutover baseline passes 280 Rust tests across 38 suites, the Browser typecheck/build, real Headless and SDK process journeys, real Chromium stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, and graceful shutdown checks.
+The Alpha cutover baseline passes 284 Rust tests across 39 suites, the Browser typecheck/build, native OpenAI Responses text/reasoning/function-tool relay flows, real Headless and SDK process journeys, real Chromium model/stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, and graceful shutdown checks.
 
 ## Known Alpha limits
 
@@ -106,6 +128,7 @@ The Alpha cutover baseline passes 280 Rust tests across 38 suites, the Browser t
 - Browser configuration exposes only the published settings namespace allowlist; arbitrary registered namespaces remain Host-internal;
 - WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, and `credentials@1.describe`;
 - several unpublished upstream Browser packages require explicit compatibility overrides;
+- the native Responses adapter currently supports text, reasoning, and function tools; image attachments and direct ChatGPT/Codex OAuth are not wired;
 - API listeners are loopback-only and this release does not ship prebuilt binaries.
 
 These are product follow-ups, not work to change or deprecate the official DeepSeek Harness project.

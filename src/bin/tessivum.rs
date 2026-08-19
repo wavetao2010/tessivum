@@ -9,9 +9,11 @@ use std::{
 use clap::error::ErrorKind;
 use tessivum::{
     cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand},
-    headless::{run_headless, HeadlessConfig},
-    host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
-    SessionId,
+    headless::{run_headless, run_headless_with_adapter, HeadlessConfig},
+    host::{shutdown_signal, HostApi, HostConfig, HostLlmAdapterFactory, HostRuntime},
+    llm::LlmAdapter,
+    openai_responses::OpenAiResponsesAdapter,
+    SessionId, TessivumError,
 };
 
 #[tokio::main]
@@ -56,8 +58,19 @@ async fn run() -> Result<(), Diagnostic> {
 
 async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic> {
     let (config, task) = config(command).await?;
+    let adapter = config
+        .replay_jsonl
+        .is_empty()
+        .then(|| live_adapter(&config.provider))
+        .transpose()?;
+    let execution = async move {
+        match adapter {
+            Some(adapter) => run_headless_with_adapter(config, task, adapter).await,
+            None => run_headless(config, task).await,
+        }
+    };
     let result = tokio::select! {
-        result = run_headless(config, task) => result.map_err(|error| {
+        result = execution => result.map_err(|error| {
             if error.code() == "CANCELLED" {
                 Diagnostic::cancelled(error.to_string())
             } else {
@@ -264,13 +277,80 @@ async fn run_sdk() -> Result<(), Diagnostic> {
 async fn boot_host(recorded_replay: Option<String>) -> Result<HostRuntime, Diagnostic> {
     let cwd =
         env::current_dir().map_err(|error| Diagnostic::runtime("CWD_RESOLUTION_FAILED", error))?;
-    let config = HostConfig::new(cwd.clone(), cwd.join(".tessivum"));
-    HostRuntime::boot(match recorded_replay {
-        Some(replay) => config.with_recorded_replay(replay),
-        None => config,
-    })
-    .await
-    .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))
+    let mut config = HostConfig::new(cwd.clone(), cwd.join(".tessivum"));
+    if let Some(replay) = recorded_replay {
+        config = config.with_recorded_replay(replay);
+    } else if let Some(deployment) = deployment_from_env()? {
+        config.provider = deployment.provider;
+        config.model = deployment.model;
+        config = config.with_adapter_factory(Arc::new(FixedAdapterFactory(deployment.adapter)));
+    }
+    HostRuntime::boot(config)
+        .await
+        .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))
+}
+
+struct Deployment {
+    provider: String,
+    model: String,
+    adapter: Arc<dyn LlmAdapter>,
+}
+
+struct FixedAdapterFactory(Arc<dyn LlmAdapter>);
+
+impl HostLlmAdapterFactory for FixedAdapterFactory {
+    fn create(&self, _provider: &str, _model: &str) -> Result<Arc<dyn LlmAdapter>, TessivumError> {
+        Ok(Arc::clone(&self.0))
+    }
+}
+
+fn deployment_from_env() -> Result<Option<Deployment>, Diagnostic> {
+    let Some(model) = environment("OPENAI_MODEL")? else {
+        return Ok(None);
+    };
+    if model.trim().is_empty() {
+        return Err(Diagnostic::usage("OPENAI_MODEL must not be empty"));
+    }
+    let provider =
+        environment("TESSIVUM_LLM_PROVIDER")?.unwrap_or_else(|| "openai-responses".into());
+    if provider.trim().is_empty() {
+        return Err(Diagnostic::usage("TESSIVUM_LLM_PROVIDER must not be empty"));
+    }
+    Ok(Some(Deployment {
+        provider,
+        model,
+        adapter: openai_adapter_from_env()?,
+    }))
+}
+
+fn live_adapter(provider: &str) -> Result<Arc<dyn LlmAdapter>, Diagnostic> {
+    if provider != "openai-responses" {
+        return Err(Diagnostic::usage(format!(
+            "live provider {provider:?} is not installed; use openai-responses"
+        )));
+    }
+    openai_adapter_from_env()
+}
+
+fn openai_adapter_from_env() -> Result<Arc<dyn LlmAdapter>, Diagnostic> {
+    let api_key = environment("OPENAI_API_KEY")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| Diagnostic::usage("OPENAI_API_KEY is required"))?;
+    let base_url =
+        environment("OPENAI_BASE_URL")?.unwrap_or_else(|| "https://api.openai.com/v1".into());
+    OpenAiResponsesAdapter::new(&base_url, &api_key)
+        .map(|adapter| Arc::new(adapter) as Arc<dyn LlmAdapter>)
+        .map_err(|error| Diagnostic::usage(error.to_string()))
+}
+
+fn environment(name: &str) -> Result<Option<String>, Diagnostic> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(Diagnostic::usage(format!("{name} must be valid Unicode")))
+        }
+    }
 }
 
 async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Diagnostic> {

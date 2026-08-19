@@ -7,7 +7,7 @@ use crate::{
     agent::{AgentError, AgentFactoryRegistration, AgentHandle, AgentOptions, AgentRegistry},
     agent_loop::AgentLoopFactory,
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
-    llm::{LlmProviderRegistration, LlmRuntime, RecordedLlmAdapter},
+    llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, RecordedLlmAdapter},
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
         ContentBlock, Message, MessageId, MessageRole, MessageSource, SessionEvent, SessionHeader,
@@ -124,19 +124,43 @@ impl HeadlessError {
     }
 }
 
-/// Runs one durable, recorded-model session in a fresh root context.
+/// Runs one durable recorded-model session in a fresh root context.
 pub async fn run_headless(
     config: HeadlessConfig,
     task: String,
 ) -> Result<HeadlessResult, HeadlessError> {
-    let cwd = validate(&config, &task)?;
+    let cwd = validate(&config, &task, true)?;
+    let adapter = Arc::new(RecordedLlmAdapter::from_jsonl_with_route(
+        &config.replay_jsonl,
+        Some(config.session_id.clone()),
+        config.provider.clone(),
+        config.model.clone(),
+    )?);
+    run_headless_validated(config, task, cwd, adapter).await
+}
+
+/// Runs one durable live-model session with a caller-owned adapter.
+pub async fn run_headless_with_adapter(
+    config: HeadlessConfig,
+    task: String,
+    adapter: Arc<dyn LlmAdapter>,
+) -> Result<HeadlessResult, HeadlessError> {
+    let cwd = validate(&config, &task, false)?;
+    run_headless_validated(config, task, cwd, adapter).await
+}
+
+async fn run_headless_validated(
+    config: HeadlessConfig,
+    task: String,
+    cwd: PathBuf,
+    adapter: Arc<dyn LlmAdapter>,
+) -> Result<HeadlessResult, HeadlessError> {
     tokio::fs::create_dir_all(&config.data_dir)
         .await
         .map_err(|source| HeadlessError::CreateDataDir {
             path: config.data_dir.clone(),
             source,
         })?;
-
     let mut scope = HeadlessScope::new();
     let mut agent = None;
     let operation = async {
@@ -148,14 +172,7 @@ pub async fn run_headless(
         );
 
         let llm = LlmRuntime::new();
-        let adapter = RecordedLlmAdapter::from_jsonl_with_route(
-            &config.replay_jsonl,
-            Some(config.session_id.clone()),
-            config.provider.clone(),
-            config.model.clone(),
-        )?;
-        scope.provider_registration =
-            Some(llm.register(config.provider.clone(), Arc::new(adapter))?);
+        scope.provider_registration = Some(llm.register(config.provider.clone(), adapter)?);
         scope.llm_service = Some(llm.clone().publish(&scope.root)?);
 
         let prompt = SystemPrompt::new();
@@ -241,7 +258,11 @@ pub async fn run_headless(
     }
 }
 
-fn validate(config: &HeadlessConfig, task: &str) -> Result<PathBuf, HeadlessError> {
+fn validate(
+    config: &HeadlessConfig,
+    task: &str,
+    require_replay: bool,
+) -> Result<PathBuf, HeadlessError> {
     if task.trim().is_empty() {
         return Err(HeadlessError::InvalidTask);
     }
@@ -257,7 +278,7 @@ fn validate(config: &HeadlessConfig, task: &str) -> Result<PathBuf, HeadlessErro
     if config.max_tokens == Some(0) {
         return Err(HeadlessError::InvalidMaxTokens);
     }
-    if config.replay_jsonl.trim().is_empty() {
+    if require_replay && config.replay_jsonl.trim().is_empty() {
         return Err(HeadlessError::InvalidReplay);
     }
     let cwd = config

@@ -1,6 +1,6 @@
 [package]
 name = "tessivum"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 edition = "2021"
 description = "Independent Rust-native agent harness inspired by DeepSeek Harness and Cordis"
 repository = "https://github.com/wavetao2010/tessivum"

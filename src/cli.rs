@@ -162,8 +162,12 @@ fn headless_command(raw: RawHeadlessCommand) -> Result<HeadlessCommand, Error> {
     if raw.resume && raw.session.is_none() {
         return Err(usage_error("--resume requires --session"));
     }
-    if raw.provider.as_deref().unwrap_or("recorded") == "recorded" && raw.replay.is_none() {
+    let provider = raw.provider.clone().unwrap_or_else(|| "recorded".into());
+    if provider == "recorded" && raw.replay.is_none() {
         return Err(usage_error("--provider recorded requires --replay <FILE>"));
+    }
+    if raw.replay.is_none() && raw.model.is_none() {
+        return Err(usage_error("a live --provider requires --model <MODEL>"));
     }
 
     let task = raw.task.join(" ");
@@ -179,7 +183,7 @@ fn headless_command(raw: RawHeadlessCommand) -> Result<HeadlessCommand, Error> {
         session: raw.session,
         resume: raw.resume,
         replay: raw.replay,
-        provider: raw.provider.unwrap_or_else(|| "recorded".into()),
+        provider,
         model: raw.model.unwrap_or_else(|| "recorded".into()),
         max_tokens: raw.max_tokens,
         trusted_bash: raw.trusted_bash,

@@ -77,6 +77,26 @@ fn repeated_patches_keep_order_and_defaults_select_recorded() {
 }
 
 #[test]
+fn live_provider_requires_an_explicit_model() {
+    let error = parse_cli(["tessivum", "--provider", "openai-responses", "task"])
+        .expect_err("live routes need a wire model");
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("--model"));
+
+    let command = headless(&[
+        "tessivum",
+        "--provider",
+        "openai-responses",
+        "--model",
+        "relay-codex",
+        "task",
+    ]);
+    assert!(command.replay.is_none());
+    assert_eq!(command.provider, "openai-responses");
+    assert_eq!(command.model, "relay-codex");
+}
+
+#[test]
 fn direct_web_and_profile_web_are_the_same_future_command() {
     for args in [
         ["tessivum", "web"].as_slice(),

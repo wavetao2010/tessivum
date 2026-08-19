@@ -23,6 +23,7 @@ pub mod legacy;
 pub mod llm;
 pub mod lsp;
 pub mod mcp;
+pub mod openai_responses;
 pub mod oracle;
 pub mod persistence_jsonl;
 pub mod persistence_sqlite;
