@@ -596,7 +596,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 > 状态：已完成并发布 `v0.1.0-alpha.6`
 > 开发基线：`v0.1.0-alpha.5`（`6b00190`）
-> 发布提交：待本次集成提交
+> 发布提交：`fc81ab6`
 > 主题：OpenAI Responses Provider 配置、write-only 凭据、动态模型目录、持久图片输入
 
 ## 15. Alpha.6 目标与完成场景
@@ -867,7 +867,7 @@ cd web && bun install --frozen-lockfile && bun run build
 - 图片只以验证后的 content-addressed ref 持久化，corrupt/missing/oversized 输入 fail closed；
 - settings 更新下一请求生效，在途请求不漂移；
 - 环境变量 Headless/SDK/Web 兼容入口继续通过；
-- 289 Rust tests、严格 Clippy、Browser build、shutdown/restart 与安全复核绿色；
+- 290 Rust tests、严格 Clippy、Browser build、shutdown/restart 与安全复核绿色；
 - 静态 compat provider/model 已替换为 Host authoritative directory，raw durable Base64 在 prompt admission 归一化；
 - README 明确区分标准 `openai-responses` relay 与未支持的 ChatGPT/Codex OAuth。
 

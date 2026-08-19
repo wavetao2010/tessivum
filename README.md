@@ -121,7 +121,7 @@ cargo test --all-targets
 cd web && bun install --frozen-lockfile && bun run build
 ```
 
-The Alpha6 baseline passes 289 Rust tests across 39 suites, the Browser typecheck/build, real Web Provider/Credentials/Models/discovery/default-selection/image-upload/restart flows against a local Responses relay, native text/reasoning/function-tool/image serialization tests, real Headless and SDK process journeys, real Chromium model/stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, and graceful shutdown checks.
+The Alpha6 baseline passes 290 Rust tests across 39 suites, the Browser typecheck/build, real Web Provider/Credentials/Models/discovery/default-selection/image-upload/restart flows against a local Responses relay, native text/reasoning/function-tool/image serialization tests, real Headless and SDK process journeys, real Chromium model/stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, workspace-authorized session attachment reads, and graceful shutdown checks.
 
 ## Known Alpha limits
 
