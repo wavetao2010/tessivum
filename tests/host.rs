@@ -1089,3 +1089,60 @@ async fn dynamic_route_notification_follows_committed_registration() {
     );
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn dynamic_route_rejects_shared_credentials_before_publication() {
+    let root = TempDir::new();
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.provider = "first".into();
+    config.model = "alpha".into();
+    config.profile_patch = json!({
+        "llm-openai-responses": {
+            "providers": {
+                "first": {
+                    "displayName": "First",
+                    "baseURL": "http://127.0.0.1:1/v1",
+                    "apiKeyEnv": "SHARED_SECRET_ENV",
+                    "models": [{"id": "alpha", "input": ["text"]}]
+                },
+                "second": {
+                    "displayName": "Second",
+                    "baseURL": "http://127.0.0.1:2/v1",
+                    "apiKeyEnv": "SHARED_SECRET_ENV",
+                    "models": [{"id": "beta", "input": ["text"]}]
+                }
+            }
+        }
+    });
+    let error = match HostRuntime::boot(config).await {
+        Ok(_) => panic!("shared credential routes must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "INVALID_OPENAI_ROUTE_SETTINGS");
+    assert!(!error.to_string().contains("SHARED_SECRET_ENV"));
+}
+
+#[tokio::test]
+async fn dynamic_route_rejects_invalid_provider_ids() {
+    let root = TempDir::new();
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.provider = "Uppercase".into();
+    config.model = "alpha".into();
+    config.profile_patch = json!({
+        "llm-openai-responses": {
+            "providers": {
+                "Uppercase": {
+                    "displayName": "Invalid",
+                    "baseURL": "http://127.0.0.1:1/v1",
+                    "apiKeyEnv": "VALID_SECRET_ENV",
+                    "models": [{"id": "alpha", "input": ["text"]}]
+                }
+            }
+        }
+    });
+    let error = match HostRuntime::boot(config).await {
+        Ok(_) => panic!("invalid provider ids must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "INVALID_OPENAI_ROUTE_SETTINGS");
+}

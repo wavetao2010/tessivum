@@ -3029,23 +3029,38 @@ fn parse_routes(
         )
     })?;
     let mut routes = BTreeMap::new();
+    let mut credential_owners = BTreeMap::<CredentialRef, ()>::new();
     for (id, raw_route) in raw.providers {
-        if id.trim().is_empty() || raw_route.models.is_empty() {
+        if id.is_empty()
+            || !id.bytes().enumerate().all(|(index, byte)| {
+                (index == 0 && byte.is_ascii_lowercase())
+                    || (index > 0 && (byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
+            })
+            || raw_route.models.is_empty()
+        {
             return Err(TessivumError::new(
                 "INVALID_OPENAI_ROUTE_SETTINGS",
-                "provider routes require an id and at least one model",
+                "provider routes require a valid id and at least one model",
                 "host",
                 Value::Null,
             ));
         }
-        let credential = CredentialRef::new(raw_route.api_key_env.clone()).map_err(|error| {
+        let credential = CredentialRef::new(raw_route.api_key_env.clone()).map_err(|_error| {
             TessivumError::new(
                 "INVALID_CREDENTIAL_REF",
-                error.to_string(),
+                "provider route contains an invalid credential reference",
                 "host",
                 Value::Null,
             )
         })?;
+        if credential_owners.insert(credential.clone(), ()).is_some() {
+            return Err(TessivumError::new(
+                "INVALID_OPENAI_ROUTE_SETTINGS",
+                "provider routes must not share credential references",
+                "host",
+                Value::Null,
+            ));
+        }
         let mut models = Vec::with_capacity(raw_route.models.len());
         for raw_model in raw_route.models {
             if raw_model
