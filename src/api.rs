@@ -917,8 +917,9 @@ async fn compat_unary(
             CompatError::invalid("URL method must match body method"),
         );
     }
+    let response_limit = compat_response_limit(&state, &method);
     match compat_dispatch(&state, &method, envelope.payload).await {
-        Ok(value) => compat_response_ok(rpc_id, value),
+        Ok(value) => compat_response_ok(rpc_id, value, response_limit),
         Err(error) => compat_response_error(rpc_id, error),
     }
 }
@@ -927,8 +928,8 @@ fn compat_api_error(error: ApiError) -> CompatError {
     CompatError::internal(error.message)
 }
 
-fn compat_response_ok(rpc_id: Value, value: Value) -> Response {
-    compat_response(rpc_id, json!({"ok": true, "value": value}))
+fn compat_response_ok(rpc_id: Value, value: Value, response_limit: usize) -> Response {
+    compat_response(rpc_id, json!({"ok": true, "value": value}), response_limit)
 }
 
 fn compat_response_error(rpc_id: Value, error: CompatError) -> Response {
@@ -942,29 +943,47 @@ fn compat_response_error(rpc_id: Value, error: CompatError) -> Response {
                 "details": error.details,
             }
         }),
+        MAX_FRAME_BYTES,
     )
 }
 fn prompt_body_limit(state: &ApiState) -> usize {
-    let limits = state.host.attachment_limits();
-    let encoded = limits
-        .max_message_image_bytes
-        .saturating_add(2)
-        .checked_div(3)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(4);
+    let encoded = base64_encoded_len(state.host.attachment_limits().max_message_image_bytes);
     usize::try_from(encoded.saturating_add(MAX_FRAME_BYTES as u64))
         .unwrap_or(MAX_PROMPT_FRAME_BYTES)
         .clamp(MAX_FRAME_BYTES, MAX_PROMPT_FRAME_BYTES)
 }
 
-fn compat_response(rpc_id: Value, result: Value) -> Response {
+fn compat_response_limit(state: &ApiState, method: &str) -> usize {
+    if method == "session.attachment" {
+        compat_attachment_response_limit(state.host.attachment_limits().max_image_bytes)
+    } else {
+        MAX_FRAME_BYTES
+    }
+}
+
+fn compat_attachment_response_limit(max_image_bytes: u64) -> usize {
+    let encoded = base64_encoded_len(max_image_bytes);
+    usize::try_from(encoded.saturating_add(MAX_FRAME_BYTES as u64))
+        .unwrap_or(MAX_PROMPT_FRAME_BYTES)
+        .clamp(MAX_FRAME_BYTES, MAX_PROMPT_FRAME_BYTES)
+}
+
+fn base64_encoded_len(bytes: u64) -> u64 {
+    bytes
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(4)
+}
+
+fn compat_response(rpc_id: Value, result: Value, response_limit: usize) -> Response {
     let response_rpc_id = rpc_id.clone();
     let body = json!({
         "type": "server-response",
         "rpcId": rpc_id,
         "result": result,
     });
-    if serde_json::to_vec(&body).is_ok_and(|body| body.len() <= MAX_FRAME_BYTES) {
+    if serde_json::to_vec(&body).is_ok_and(|body| body.len() <= response_limit) {
         return (StatusCode::OK, Json(body)).into_response();
     }
     (
@@ -2496,6 +2515,11 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
             rpc_id: None,
             payload: json!({"type": "host/credentials-changed", "ref": event.reference}),
         }),
+        HostNotification::ModelsChanged => Some(CompatFrame {
+            stream: CompatStream::Host,
+            rpc_id: None,
+            payload: json!({"type": "host/models-changed"}),
+        }),
         HostNotification::SubagentStarted(_) | HostNotification::SubagentFinished(_) => None,
     }
 }
@@ -3183,6 +3207,7 @@ fn ws_notification(notification: &HostNotification) -> Result<WsMessage, ApiErro
         HostNotification::CredentialsChanged(value) => {
             json!({"kind": "credentials-changed", "payload": value})
         }
+        HostNotification::ModelsChanged => json!({"kind": "models-changed", "payload": {}}),
     };
     ws_json(json!({"type": "notification", "notification": notification}))
 }
@@ -3220,4 +3245,32 @@ fn ws_json(value: impl Serialize) -> Result<WsMessage, ApiError> {
         return Err(ApiError::too_large());
     }
     Ok(WsMessage::Text(payload.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attachment_response_limit_handles_two_byte_base64_and_large_limits() {
+        assert_eq!(base64_encode(&[0, 1]), "AAE=");
+        assert_eq!(compat_attachment_response_limit(2), MAX_FRAME_BYTES + 4);
+        let limit = compat_attachment_response_limit(MAX_FRAME_BYTES as u64);
+        assert!(limit > MAX_FRAME_BYTES);
+        assert_eq!(
+            compat_attachment_response_limit(u64::MAX),
+            MAX_PROMPT_FRAME_BYTES
+        );
+
+        let response = compat_response(
+            json!("attachment"),
+            json!({"ok": true, "value": {"data": "A".repeat(MAX_FRAME_BYTES)}}),
+            limit,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), limit)
+            .await
+            .expect("bounded response body");
+        assert!(body.len() > MAX_FRAME_BYTES);
+    }
 }

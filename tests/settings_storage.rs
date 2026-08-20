@@ -425,6 +425,13 @@ async fn attachments_validate_batch_atomically_and_verify_reads() {
             0o600
         );
     }
+    let mut oversized = png(2, 3);
+    oversized.push(0);
+    fs::write(root.join("v1").join(filename), oversized).unwrap();
+    assert!(matches!(
+        store.read_ref_bounded(&reference, reference.bytes).await,
+        Err(AttachmentError::ByteLimit)
+    ));
     fs::write(root.join("v1").join(filename), png(4, 5)).unwrap();
     assert!(store.read(&reference.attachment_id).await.is_err());
     fs::remove_dir_all(root).unwrap();

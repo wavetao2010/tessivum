@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -14,7 +15,8 @@ use tessivum::{
     host::{HostApi, HostConfig, HostRuntime},
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
     process::{Child, Command},
     time::{sleep, timeout},
 };
@@ -123,6 +125,62 @@ async fn browser_rpc(
         .json()
         .await
         .expect("browser API response is JSON")
+}
+
+async fn host_events(address: SocketAddr) -> BufReader<TcpStream> {
+    let stream = TcpStream::connect(address)
+        .await
+        .expect("host events connect");
+    let mut stream = BufReader::new(stream);
+    let authority = address.to_string();
+    let request = format!(
+        "GET /api/events.host HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    );
+    stream
+        .get_mut()
+        .write_all(request.as_bytes())
+        .await
+        .expect("host event handshake writes");
+    stream
+        .get_mut()
+        .flush()
+        .await
+        .expect("host event handshake flushes");
+    let mut status = String::new();
+    stream
+        .read_line(&mut status)
+        .await
+        .expect("host event status reads");
+    assert!(status.contains(" 101 "), "host events upgrade: {status}");
+    loop {
+        let mut header = Vec::new();
+        stream
+            .read_until(b'\n', &mut header)
+            .await
+            .expect("host event header reads");
+        if header == b"\r\n" {
+            return stream;
+        }
+    }
+}
+
+async fn websocket_text(stream: &mut BufReader<TcpStream>) -> String {
+    let opcode = stream.read_u8().await.expect("host event opcode") & 0x0f;
+    let length = stream.read_u8().await.expect("host event length");
+    assert_eq!(length & 0x80, 0, "server frames are unmasked");
+    let length = match length & 0x7f {
+        value @ 0..=125 => value as usize,
+        126 => stream.read_u16().await.expect("host event extended length") as usize,
+        127 => stream.read_u64().await.expect("host event long length") as usize,
+        _ => unreachable!(),
+    };
+    let mut payload = vec![0; length];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("host event payload reads");
+    assert_eq!(opcode, 0x1, "host event is text");
+    String::from_utf8(payload).expect("host event is UTF-8")
 }
 
 async fn replay_events(client: &reqwest::Client, base: &str, session: &str) -> Value {
@@ -305,6 +363,149 @@ async fn web_command_explicit_packages_override_discovery_and_log_the_bound_url(
     let replay = replay_events(&client, &base, "web-replay").await;
     assert!(replay["output"].to_string().contains(REPLAY_FACT));
     idle_status(&client, &base, "web-replay").await;
+
+    #[cfg(unix)]
+    unsafe {
+        assert_eq!(
+            libc::kill(
+                child
+                    .0
+                    .as_ref()
+                    .expect("child exists")
+                    .id()
+                    .expect("child has PID") as i32,
+                libc::SIGTERM,
+            ),
+            0,
+            "SIGTERM is delivered"
+        );
+    }
+    #[cfg(not(unix))]
+    child
+        .0
+        .as_mut()
+        .expect("child exists")
+        .start_kill()
+        .expect("web command stops");
+    let status = timeout(
+        Duration::from_secs(5),
+        child.0.as_mut().expect("child exists").wait(),
+    )
+    .await
+    .expect("web command stops")
+    .expect("web command waits");
+    #[cfg(unix)]
+    assert!(status.success(), "SIGTERM is graceful");
+    #[cfg(not(unix))]
+    assert!(
+        !status.success(),
+        "forced process termination reports failure"
+    );
+}
+
+#[tokio::test]
+async fn web_environment_route_remains_dynamic_after_settings_mutation() {
+    let fixture = Fixture::new("environment-route");
+    let (dist, packages) = install_web_half(&fixture);
+    let package_paths = std::env::join_paths([packages]).expect("package path list encodes");
+    let mut child = ChildCleanup(Some(
+        Command::new(env!("CARGO_BIN_EXE_tessivum"))
+            .current_dir(fixture.path())
+            .env("TESSIVUM_WEB_DIST", dist)
+            .env("TESSIVUM_CLIENT_PACKAGES", package_paths)
+            .env("TESSIVUM_WEB_ADDR", "127.0.0.1:0")
+            .env("OPENAI_MODEL", "environment-model")
+            .env("OPENAI_BASE_URL", "http://127.0.0.1:1/v1")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("TESSIVUM_REPLAY")
+            .env_remove("TESSIVUM_LLM_PROVIDER")
+            .arg("web")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("web command starts"),
+    ));
+    let stderr = child
+        .0
+        .as_mut()
+        .expect("child exists")
+        .stderr
+        .take()
+        .expect("stderr is piped");
+    let mut lines = BufReader::new(stderr).lines();
+    let listen = timeout(Duration::from_secs(5), async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .expect("web stderr reads")
+                .expect("web command stays alive");
+            if line.starts_with("Tessivum web listening at http://") {
+                return line;
+            }
+        }
+    })
+    .await
+    .expect("web command logs its bound URL");
+    let base = listen
+        .strip_prefix("Tessivum web listening at ")
+        .expect("bound URL prefix")
+        .to_owned();
+    drop(lines);
+
+    let client = reqwest::Client::new();
+    let providers = browser_rpc(&client, &base, "llm.providers", "providers", json!({})).await;
+    assert_eq!(
+        providers["result"]["value"]["providers"][0]["provider"],
+        "openai-responses"
+    );
+    let address = base
+        .strip_prefix("http://")
+        .expect("bound URL is HTTP")
+        .parse()
+        .expect("bound address parses");
+    let mut events = host_events(address).await;
+    let updated = browser_rpc(
+        &client,
+        &base,
+        "settings.update",
+        "settings-update",
+        json!({
+            "ns": "llm-openai-responses",
+            "patch": {
+                "providers": {
+                    "openai-responses": {
+                        "displayName": "Updated environment route",
+                        "baseURL": "http://127.0.0.1:2/v1",
+                        "apiKeyEnv": "TESSIVUM_UPDATED_ROUTE_KEY",
+                        "models": [{"id": "updated-model", "input": ["text", "image"]}]
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(updated["result"]["ok"], true);
+    let models = browser_rpc(&client, &base, "llm.models", "models", json!({})).await;
+    assert_eq!(
+        models["result"]["value"]["groups"][0]["models"][0]["id"],
+        "updated-model"
+    );
+
+    let models_changed = timeout(Duration::from_secs(1), async {
+        loop {
+            let frame: Value = serde_json::from_str(&websocket_text(&mut events).await)
+                .expect("host event is JSON");
+            if frame["payload"]["type"] == "host/models-changed" {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("committed route invalidation arrives");
+    assert_eq!(
+        models_changed["payload"],
+        json!({"type": "host/models-changed"})
+    );
 
     #[cfg(unix)]
     unsafe {

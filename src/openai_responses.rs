@@ -72,7 +72,7 @@ impl ResponsesModel {
                 Value::Null,
             ));
         }
-        for modality in self.input.iter().filter(|value| !value.trim().is_empty()) {
+        for modality in &self.input {
             if !matches!(
                 modality.as_str(),
                 RESPONSES_TEXT_MODALITY | RESPONSES_IMAGE_MODALITY

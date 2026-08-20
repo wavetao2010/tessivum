@@ -7,14 +7,17 @@ use std::{
 use serde_json::json;
 use tessivum::{
     credentials::{CredentialError, CredentialRef},
-    host::{HostApi, HostConfig, HostNotification, HostRuntime},
+    host::{HostApi, HostConfig, HostNotification, HostRuntime, HostSettingsMutation},
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
-        AgentCancelCause, ContentBlock, SessionHeader, SessionPromptParams, SessionStatus,
-        ToolCallId, SESSION_FORMAT_VERSION,
+        AgentCancelCause, ContentBlock, SessionHeader, SessionModelSelection, SessionPromptParams,
+        SessionStatus, ToolCallId, SESSION_FORMAT_VERSION,
     },
     session::SessionPersistence,
-    settings::{SettingsError, SettingsEventKind, SettingsRegistration},
+    settings::{
+        SettingsError, SettingsEventKind, SettingsRegistration, AGENT_DEFAULT_MODEL_NAMESPACE,
+        LLM_OPENAI_RESPONSES_NAMESPACE,
+    },
     SessionId,
 };
 use tessivum_core::ContextHandle;
@@ -65,6 +68,45 @@ fn config(root: &TempDir) -> HostConfig {
     config.model = "cli-mock".into();
     config.enable_trusted_bash = true;
     config
+}
+
+fn dynamic_config(root: &TempDir) -> HostConfig {
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.provider = "openai-responses".into();
+    config.model = "alpha".into();
+    config.profile_patch = json!({
+        "llm-openai-responses": {
+            "providers": {
+                "openai-responses": {
+                    "displayName": "Test relay",
+                    "baseURL": "http://127.0.0.1:1/v1",
+                    "apiKeyEnv": "TESSIVUM_DYNAMIC_TEST_KEY",
+                    "models": [
+                        {"id": "alpha", "input": ["text"]},
+                        {"id": "beta", "input": ["text", "image"]}
+                    ]
+                }
+            }
+        }
+    });
+    config
+}
+
+async fn wait_for_models_changed(
+    notifications: &mut tokio::sync::broadcast::Receiver<HostNotification>,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                notifications.recv().await.unwrap(),
+                HostNotification::ModelsChanged
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("models change notification arrives");
 }
 
 fn prompt(session: &str) -> SessionPromptParams {
@@ -701,9 +743,16 @@ async fn host_reads_only_durable_session_attachments_without_resuming() {
     assert_eq!(live.data, png(1, 1));
 
     let unreferenced = runtime.upload_attachment(png(2, 2), None).await.unwrap();
+    let unreferenced_path = root.path().join("data/attachments/v1").join(
+        unreferenced
+            .attachment_id
+            .as_str()
+            .strip_prefix("sha256:")
+            .unwrap(),
+    );
     assert_eq!(
         runtime
-            .read_attachment(session.clone(), unreferenced.attachment_id)
+            .read_attachment(session.clone(), unreferenced.attachment_id.clone())
             .await
             .unwrap_err()
             .code,
@@ -719,6 +768,10 @@ async fn host_reads_only_durable_session_attachments_without_resuming() {
     );
 
     runtime.shutdown().await.unwrap();
+    assert!(
+        !unreferenced_path.exists(),
+        "shutdown removes unattached blobs"
+    );
     drop(runtime);
 
     let restarted = HostRuntime::boot(config(&root)).await.unwrap();
@@ -918,5 +971,121 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
         (Ok(_), Err(error)) | (Err(error), Ok(_)) => assert_eq!(error.code, "SESSION_CONFLICT"),
         result => panic!("expected one successful create and one conflict, got {result:?}"),
     }
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_models_report_defaults_without_eager_legacy_migration() {
+    let root = TempDir::new();
+    let persistence = JsonlSessionPersistence::new(root.path().join("data"));
+    let context = ContextHandle::root();
+    persistence
+        .create(
+            &SessionHeader {
+                version: SESSION_FORMAT_VERSION,
+                id: SessionId::from("legacy-model"),
+                created_at: 1,
+                cwd: Some(
+                    root.path()
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                parent_session: None,
+                seed_length: None,
+                origin: None,
+                delegation_depth: Some(0),
+                agent_preset: None,
+            },
+            context.scope().cancellation(),
+        )
+        .await
+        .unwrap();
+
+    let runtime = HostRuntime::boot(dynamic_config(&root)).await.unwrap();
+    let handle = runtime.handle();
+    assert_eq!(
+        handle
+            .session_models(SessionId::from("legacy-model"))
+            .await
+            .unwrap()
+            .current,
+        Some(SessionModelSelection {
+            provider: "openai-responses".into(),
+            model: "alpha".into(),
+            reasoning_effort: None,
+        })
+    );
+    assert!(handle
+        .events(SessionId::from("legacy-model"), 0)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let mut notifications = handle.subscribe();
+    handle
+        .mutate_settings(
+            AGENT_DEFAULT_MODEL_NAMESPACE.into(),
+            HostSettingsMutation::Update {
+                patch: json!({"provider": "openai-responses", "model": "beta"}),
+                expected_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_models_changed(&mut notifications).await;
+    assert_eq!(
+        handle
+            .session_models(SessionId::from("legacy-model"))
+            .await
+            .unwrap()
+            .current
+            .unwrap()
+            .model,
+        "beta"
+    );
+    assert!(
+        handle
+            .events(SessionId::from("legacy-model"), 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "catalog reads do not migrate legacy sessions"
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_route_notification_follows_committed_registration() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(dynamic_config(&root)).await.unwrap();
+    let handle = runtime.handle();
+    let mut notifications = handle.subscribe();
+    handle
+        .mutate_settings(
+            LLM_OPENAI_RESPONSES_NAMESPACE.into(),
+            HostSettingsMutation::Update {
+                patch: json!({
+                    "providers": {
+                        "openai-responses": {
+                            "displayName": "Updated relay",
+                            "baseURL": "http://127.0.0.1:2/v1",
+                            "apiKeyEnv": "TESSIVUM_UPDATED_TEST_KEY",
+                            "models": [{"id": "beta", "input": ["text", "image"]}]
+                        }
+                    }
+                }),
+                expected_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_models_changed(&mut notifications).await;
+    assert!(handle.provider_directory()[0].active);
+    assert_eq!(
+        handle.model_groups("openai-responses")[0].models[0].id,
+        "beta"
+    );
     runtime.shutdown().await.unwrap();
 }

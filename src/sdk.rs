@@ -684,6 +684,11 @@ async fn send_notification(
             "method": "credentials.changed",
             "params": payload,
         }),
+        HostNotification::ModelsChanged => json!({
+            "jsonrpc": "2.0",
+            "method": "models.changed",
+            "params": {},
+        }),
         HostNotification::SubagentStarted(payload) => json!({
             "jsonrpc": "2.0",
             "method": "subagent.started",

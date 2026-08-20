@@ -15,6 +15,7 @@ use tessivum_core::{ContextHandle, CoreError, EntryTree, Loader, PackageResolver
 use tessivum_extism::{Capability, CapabilityHandler, CapabilityRegistry, ResourceLimits};
 use thiserror::Error;
 use tokio::{
+    fs,
     sync::{broadcast, Mutex as AsyncMutex, Notify},
     task::JoinHandle,
 };
@@ -175,6 +176,8 @@ const MAX_PROMPT_BLOCKS: usize = 128;
 const MAX_PROFILE_BYTES: usize = 128;
 const MAX_NOTIFICATIONS: usize = 4_096;
 const MAX_LIVE_SESSIONS: usize = 1_024;
+const MAX_ORPHAN_SWEEP_SESSIONS: usize = 1_024;
+const MAX_ORPHAN_SWEEP_ENTRIES: usize = 1_024;
 
 /// Deployment adapter construction for the one configured provider/model route.
 /// A factory is called once at boot and must never retry durable work.
@@ -482,6 +485,7 @@ pub enum HostNotification {
     ApprovalResolved(ApprovalResolved),
     SettingsChanged(SettingsEvent),
     CredentialsChanged(CredentialEvent),
+    ModelsChanged,
 }
 
 /// Durable session metadata needed by reconnecting transports without replaying logs.
@@ -1188,7 +1192,8 @@ impl HostHandle {
                 .await?
         };
         let current = latest_model_selection(&events)
-            .or_else(|| (!self.inner.dynamic_routes).then(|| self.config_selection()));
+            .or_else(|| self.default_selection())
+            .or_else(|| Some(self.config_selection()));
         let groups = {
             let state = lock(&self.inner.route_state);
             state
@@ -1971,6 +1976,9 @@ impl HostHandle {
                 failures.push(format!("session {}: {error}", session.id()));
             }
         }
+        if let Err(error) = self.sweep_orphaned_attachments().await {
+            failures.push(format!("attachments: {error}"));
+        }
         self.stop_relays().await;
         if let Some(telemetry) = &self.inner.telemetry {
             telemetry
@@ -2174,23 +2182,19 @@ impl HostHandle {
             loop {
                 if settings_inner.relays_closed.load(Ordering::Acquire) {
                     while let Ok(event) = settings_events.try_recv() {
-                        let _ = settings_inner
-                            .notices
-                            .send(HostNotification::SettingsChanged(event));
+                        relay_settings_notification(&settings_inner, event);
                     }
                     break;
                 }
                 tokio::select! {
                     event = settings_events.recv() => match event {
-                        Ok(event) => {
-                            let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
-                        }
+                        Ok(event) => relay_settings_notification(&settings_inner, event),
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
                     _ = settings_inner.relay_stop.notified() => {
                         while let Ok(event) = settings_events.try_recv() {
-                            let _ = settings_inner.notices.send(HostNotification::SettingsChanged(event));
+                            relay_settings_notification(&settings_inner, event);
                         }
                         break;
                     },
@@ -2326,6 +2330,69 @@ impl HostHandle {
             let _ = relay.await;
         }
     }
+
+    async fn sweep_orphaned_attachments(&self) -> Result<(), HostError> {
+        let sessions = self
+            .inner
+            .persistence
+            .list(self.inner.cancellation.clone())
+            .await?;
+        // ponytail: skip rather than risk deleting a referenced blob when durable history exceeds one bounded sweep.
+        if sessions.len() > MAX_ORPHAN_SWEEP_SESSIONS {
+            return Ok(());
+        }
+        let mut referenced = BTreeSet::new();
+        for session in sessions {
+            for event in self
+                .inner
+                .persistence
+                .read_from(&session.header.id, 0, self.inner.cancellation.clone())
+                .await?
+            {
+                collect_attachment_refs(&event.data, &mut referenced);
+            }
+        }
+        let directory = self.inner.attachments.root().join("v1");
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(
+                    AttachmentError::Storage(format!("list attachment directory: {error}")).into(),
+                )
+            }
+        };
+        for _ in 0..MAX_ORPHAN_SWEEP_ENTRIES {
+            let Some(entry) = entries.next_entry().await.map_err(|error| {
+                AttachmentError::Storage(format!("read attachment directory: {error}"))
+            })?
+            else {
+                break;
+            };
+            if !entry
+                .file_type()
+                .await
+                .map_err(|error| {
+                    AttachmentError::Storage(format!("inspect attachment file: {error}"))
+                })?
+                .is_file()
+            {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(attachment_id) = AttachmentId::try_from(format!("sha256:{name}")) else {
+                continue;
+            };
+            if !referenced.contains(&attachment_id) {
+                fs::remove_file(entry.path()).await.map_err(|error| {
+                    AttachmentError::Storage(format!("remove orphan attachment: {error}"))
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn find_attachment_ref(value: &Value, attachment_id: &AttachmentId) -> Option<AttachmentRef> {
@@ -2342,6 +2409,34 @@ fn find_attachment_ref(value: &Value, attachment_id: &AttachmentId) -> Option<At
             .values()
             .find_map(|value| find_attachment_ref(value, attachment_id)),
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+fn collect_attachment_refs(value: &Value, references: &mut BTreeSet<AttachmentId>) {
+    if let Ok(reference) = AttachmentRef::from_value(value) {
+        references.insert(reference.attachment_id);
+        return;
+    }
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_attachment_refs(value, references);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_attachment_refs(value, references);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn relay_settings_notification(inner: &HostInner, event: SettingsEvent) {
+    let default_model_changed = event.namespace == AGENT_DEFAULT_MODEL_NAMESPACE;
+    let _ = inner.notices.send(HostNotification::SettingsChanged(event));
+    if default_model_changed {
+        let _ = inner.notices.send(HostNotification::ModelsChanged);
     }
 }
 
@@ -2801,14 +2896,22 @@ async fn mutate_settings_inner(
     };
     if routed {
         if let Err(error) = apply_route_settings_locked(inner).await {
-            if let Some(previous) = previous {
-                let _ = inner
-                    .settings
-                    .replace(&namespace, previous, Some(snapshot.revision))
-                    .await;
+            if let Err(rollback) = inner
+                .settings
+                .replace(
+                    &namespace,
+                    previous.expect("routed settings retain the previous user document"),
+                    Some(snapshot.revision),
+                )
+                .await
+            {
+                return Err(SettingsError::Persistence(format!(
+                    "live route apply failed: {error}; rollback failed: {rollback}"
+                )));
             }
             return Err(SettingsError::Validation(error.wire()));
         }
+        let _ = inner.notices.send(HostNotification::ModelsChanged);
     }
     Ok(snapshot)
 }
@@ -2845,18 +2948,28 @@ async fn apply_route_settings_locked(inner: &Arc<HostInner>) -> Result<(), HostE
                 for registration in registrations.values_mut() {
                     registration.unregister();
                 }
-                for provider in old_routes.keys() {
-                    if let Ok(registration) = inner
-                        .llm
-                        .register(provider.clone(), Arc::clone(&inner.route_adapter))
-                    {
-                        old_registrations.insert(provider.clone(), registration);
+                let restored = old_routes
+                    .keys()
+                    .map(|provider| {
+                        inner
+                            .llm
+                            .register(provider.clone(), Arc::clone(&inner.route_adapter))
+                            .map(|registration| (provider.clone(), registration))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>();
+                match restored {
+                    Ok(registrations) => {
+                        let mut state = lock(&inner.route_state);
+                        state.routes = old_routes;
+                        state.registrations = registrations;
+                        return Err(error.into());
+                    }
+                    Err(restore) => {
+                        return Err(HostError::InvalidConfiguration(format!(
+                            "route update failed: {error}; failed to restore previous registrations: {restore}"
+                        )));
                     }
                 }
-                let mut state = lock(&inner.route_state);
-                state.routes = old_routes;
-                state.registrations = old_registrations;
-                return Err(error.into());
             }
         }
     }

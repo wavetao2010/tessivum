@@ -13,7 +13,7 @@ use tessivum_core::ServiceKey;
 use thiserror::Error;
 use tokio::{
     fs::{self, OpenOptions},
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
 };
 use uuid::Uuid;
 
@@ -492,9 +492,47 @@ impl AttachmentStore {
         if reference.bytes > max_bytes {
             return Err(AttachmentError::ByteLimit);
         }
-        let data = self.read_ref(reference).await?;
+        let directory = self.directory().await?;
+        let digest = reference.attachment_id.digest_hex()?;
+        let target = directory.join(digest);
+        let canonical = fs::canonicalize(&target)
+            .await
+            .map_err(|error| AttachmentError::Storage(format!("open attachment: {error}")))?;
+        if !canonical.starts_with(&directory) {
+            return Err(AttachmentError::Storage(
+                "attachment path escapes configured root".into(),
+            ));
+        }
+        if fs::metadata(&canonical)
+            .await
+            .map_err(|error| AttachmentError::Storage(format!("inspect attachment: {error}")))?
+            .len()
+            > max_bytes
+        {
+            return Err(AttachmentError::ByteLimit);
+        }
+        let file = fs::File::open(&canonical)
+            .await
+            .map_err(|error| AttachmentError::Storage(format!("read attachment: {error}")))?;
+        let mut data = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut data)
+            .await
+            .map_err(|error| AttachmentError::Storage(format!("read attachment: {error}")))?;
         if u64::try_from(data.len()).map_err(|_| AttachmentError::ByteLimit)? > max_bytes {
             return Err(AttachmentError::ByteLimit);
+        }
+        let image = self.validate_bytes(&data, None)?;
+        if image.id != reference.attachment_id {
+            return Err(AttachmentError::DigestMismatch);
+        }
+        let actual = image.reference();
+        if actual.media_type != reference.media_type
+            || actual.bytes != reference.bytes
+            || actual.width != reference.width
+            || actual.height != reference.height
+        {
+            return Err(AttachmentError::MetadataMismatch);
         }
         Ok(AttachmentData {
             reference: reference.clone(),

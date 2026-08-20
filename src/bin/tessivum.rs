@@ -10,10 +10,10 @@ use clap::error::ErrorKind;
 use tessivum::{
     cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand},
     headless::{run_headless, run_headless_with_adapter, HeadlessConfig},
-    host::{shutdown_signal, HostApi, HostConfig, HostLlmAdapterFactory, HostRuntime},
+    host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
     llm::LlmAdapter,
     openai_responses::OpenAiResponsesAdapter,
-    SessionId, TessivumError,
+    SessionId,
 };
 
 #[tokio::main]
@@ -281,9 +281,20 @@ async fn boot_host(recorded_replay: Option<String>) -> Result<HostRuntime, Diagn
     if let Some(replay) = recorded_replay {
         config = config.with_recorded_replay(replay);
     } else if let Some(deployment) = deployment_from_env()? {
-        config.provider = deployment.provider;
-        config.model = deployment.model;
-        config = config.with_adapter_factory(Arc::new(FixedAdapterFactory(deployment.adapter)));
+        config.provider = deployment.provider.clone();
+        config.model = deployment.model.clone();
+        config.profile_patch = serde_json::json!({
+            "llm-openai-responses": {
+                "providers": {
+                    deployment.provider: {
+                        "displayName": "OpenAI Responses",
+                        "baseURL": deployment.base_url,
+                        "apiKeyEnv": "OPENAI_API_KEY",
+                        "models": [{"id": deployment.model, "input": ["text"]}]
+                    }
+                }
+            }
+        });
     } else {
         // Web/SDK start providerless; settings can install the first live route.
         config.provider = "openai-responses".into();
@@ -297,15 +308,7 @@ async fn boot_host(recorded_replay: Option<String>) -> Result<HostRuntime, Diagn
 struct Deployment {
     provider: String,
     model: String,
-    adapter: Arc<dyn LlmAdapter>,
-}
-
-struct FixedAdapterFactory(Arc<dyn LlmAdapter>);
-
-impl HostLlmAdapterFactory for FixedAdapterFactory {
-    fn create(&self, _provider: &str, _model: &str) -> Result<Arc<dyn LlmAdapter>, TessivumError> {
-        Ok(Arc::clone(&self.0))
-    }
+    base_url: String,
 }
 
 fn deployment_from_env() -> Result<Option<Deployment>, Diagnostic> {
@@ -323,7 +326,8 @@ fn deployment_from_env() -> Result<Option<Deployment>, Diagnostic> {
     Ok(Some(Deployment {
         provider,
         model,
-        adapter: openai_adapter_from_env()?,
+        base_url: environment("OPENAI_BASE_URL")?
+            .unwrap_or_else(|| "https://api.openai.com/v1".into()),
     }))
 }
 

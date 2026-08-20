@@ -425,7 +425,22 @@ async fn headless_binary_uses_openai_responses_environment() {
 }
 
 #[test]
-fn responses_route_rejects_unknown_modalities_and_duplicate_models() {
+fn responses_route_rejects_unknown_or_blank_modalities_and_duplicate_models() {
+    for modality in ["", " ", "\t"] {
+        let error = ResponsesModel::new("model")
+            .with_input([modality])
+            .validate()
+            .expect_err("empty and whitespace modalities must fail closed");
+        assert_eq!(error.code, "INVALID_OPENAI_MODALITY");
+    }
+
+    for modalities in [vec!["text"], vec!["image"], Vec::<&str>::new()] {
+        ResponsesModel::new("model")
+            .with_input(modalities)
+            .validate()
+            .expect("exact modalities and an empty input list are valid");
+    }
+
     let invalid = ResponsesRoute::new(
         "relay",
         "Relay",
