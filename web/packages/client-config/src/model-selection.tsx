@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
-import type { IApiClient } from '@deepseek-ai/dsh-client-connection/client';
+import type { IApiClient, SessionId } from '@deepseek-ai/dsh-client-connection/client';
 import type {} from '@deepseek-ai/dsh-client-runtime/client';
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
 
@@ -14,12 +14,14 @@ export interface CatalogSelection {
 export interface CatalogModel {
   id: string;
   name: string;
+  routable?: boolean;
   reasoning?: { defaultEffort?: string };
 }
 
 export interface CatalogProvider {
   id: string;
   name: string;
+  routable?: boolean;
   models: readonly CatalogModel[];
 }
 
@@ -72,7 +74,7 @@ export function groupModelCatalog(catalog: ModelCatalog): CatalogGroup[] {
         label: model.name,
         selection,
         current: sameRoute(catalog.current, selection),
-        routable: true,
+        routable: provider.routable === true && model.routable === true,
       };
     }),
   }));
@@ -83,7 +85,7 @@ export function groupModelCatalog(catalog: ModelCatalog): CatalogGroup[] {
       label: `${catalog.current.model} (current)`,
       selection: catalog.current,
       current: true,
-      routable: catalog.routable,
+      routable: false,
     };
     const providerIndex = groups.findIndex((group) => group.provider === catalog.current.provider);
     if (providerIndex === -1) {
@@ -98,7 +100,8 @@ export function groupModelCatalog(catalog: ModelCatalog): CatalogGroup[] {
 }
 
 export function hasRoutableModels(catalog: ModelCatalog): boolean {
-  return catalog.routable || catalog.groups.some((provider) => provider.models.length > 0);
+  return catalog.groups.some((provider) =>
+    provider.routable === true && provider.models.some((model) => model.routable === true));
 }
 
 export function currentModelLabel(catalog: ModelCatalog): string {
@@ -167,7 +170,7 @@ const selectorStyles = `
 interface ModelSelectorProps {
   api: IApiClient;
   ctx: Context;
-  sessionId: string;
+  sessionId: SessionId;
   locked: boolean;
 }
 
