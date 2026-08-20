@@ -7,7 +7,6 @@ type BuildResult = {
 type BunApi = {
   build(options: Record<string, unknown>): Promise<BuildResult>;
   file(path: string): { text(): Promise<string> };
-  mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
   write(path: string, content: string): Promise<number>;
 };
 
@@ -17,7 +16,6 @@ const root = new URL('../', import.meta.url);
 const pkg = new URL('packages/client-config/', root);
 const outdir = new URL('lib/', pkg).pathname;
 const packageSource = new URL('src/client.ts', pkg).pathname;
-await Bun.mkdir(outdir, { recursive: true });
 
 const result = await Bun.build({
   entrypoints: [packageSource],
