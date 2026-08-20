@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -992,13 +992,21 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
                 "workspace lock must be an effective-user-owned regular 0600 file".into(),
             ));
         }
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = io::Error::last_os_error();
-            if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
-            {
-                return Err(WorkspaceError::Locked);
+        let mut locked = false;
+        for _ in 0..200 {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                locked = true;
+                break;
             }
-            return Err(io_error("lock workspace registry", error));
+            let error = io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+            {
+                return Err(io_error("lock workspace registry", error));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !locked {
+            return Err(WorkspaceError::Locked);
         }
     }
     Ok(file)
