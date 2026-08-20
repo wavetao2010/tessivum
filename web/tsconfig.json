@@ -15,5 +15,5 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src", "packages/client-config/src", "packages/client-config/tests", "scripts"]
 }

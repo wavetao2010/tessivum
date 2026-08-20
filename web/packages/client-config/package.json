@@ -1,0 +1,15 @@
+{
+  "name": "@tessivum/client-config",
+  "version": "0.0.0-local",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./client": "./lib/client.js"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": ["connection", "runtime", "settings", "conversation"]
+    }
+  }
+}

@@ -4,10 +4,12 @@
   "version": "0.1.0-alpha.6",
   "type": "module",
   "scripts": {
-    "build": "bun run typecheck && bun -e \"import { build } from 'vite'; import { resolve } from 'node:path'; const main = resolve('src/main.ts'); await build({ resolve: { alias: { 'node:module': main, '@deepseek-ai/dsh-client-modules/client': main } }, define: { 'process.versions.node': JSON.stringify('0.0.0'), 'process.execArgv': '[]', 'process.env.CORDIS_SHARED': 'undefined' } });\"",
+    "build": "bun run typecheck && bun run build:client-plugin && bun -e \"import { build } from 'vite'; import { resolve } from 'node:path'; const main = resolve('src/main.ts'); await build({ resolve: { alias: { 'node:module': main, '@deepseek-ai/dsh-client-modules/client': main } }, define: { 'process.versions.node': JSON.stringify('0.0.0'), 'process.execArgv': '[]', 'process.env.CORDIS_SHARED': 'undefined' } });\"",
+    "build:client-plugin": "bun scripts/build-client-plugin.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@tessivum/client-config": "file:./packages/client-config",
     "@deepseek-ai/cordis": "4.0.1-rc.1",
     "@deepseek-ai/cordis-plugin-loader": "1.0.1-rc.1",
     "@deepseek-ai/dsh-api-gateway": "0.0.1-rc.1",
