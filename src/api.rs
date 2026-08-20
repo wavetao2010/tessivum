@@ -654,6 +654,7 @@ struct CompatSessionSelectModel {
 struct CompatDiscoverModels {
     settings_ns: String,
     provider: Option<String>,
+    #[serde(rename = "baseURL")]
     base_url: Option<String>,
     api: Option<String>,
     api_key: Option<String>,

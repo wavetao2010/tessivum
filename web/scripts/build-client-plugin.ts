@@ -14,7 +14,7 @@ declare const Bun: BunApi;
 
 const root = new URL('../', import.meta.url);
 const pkg = new URL('packages/client-config/', root);
-const outdir = new URL('lib/', pkg).pathname;
+const outdir = new URL('node_modules/@tessivum/client-config/lib/', root).pathname;
 const packageSource = new URL('src/client.ts', pkg).pathname;
 
 const result = await Bun.build({
@@ -23,6 +23,8 @@ const result = await Bun.build({
   naming: 'client.js',
   format: 'cjs',
   target: 'browser',
+  jsx: { runtime: 'classic', factory: 'React.createElement', fragment: 'React.Fragment' },
+  define: { 'process.env.NODE_ENV': '"production"' },
   minify: true,
   external: [
     'react',

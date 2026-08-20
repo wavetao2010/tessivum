@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import type { IApiClient } from '@deepseek-ai/dsh-client-connection/client';

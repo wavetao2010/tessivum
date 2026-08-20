@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
