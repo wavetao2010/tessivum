@@ -1,9 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  decideDefaultAfterProviderDelete,
   deriveCredentialRef,
+  discoveryFingerprint,
+  hasDraftConflict,
+  isCurrentDiscoveryResult,
   normalizeCatalogReadiness,
   validateApiKey,
   validateProviderDraft,
+  validateProviderIdentity,
   type ProviderDraft,
 } from './provider-settings';
 
@@ -195,5 +200,85 @@ describe('validateProviderDraft', () => {
       'Base URL is required.',
       'Add at least one model.',
     ]);
+  });
+});
+
+
+describe('provider identity guards', () => {
+  test('rejects duplicate saved IDs before a new route can overwrite one', () => {
+    const errors = validateProviderIdentity(
+      { id: 'custom-relay', apiKeyEnv: deriveCredentialRef('custom-relay') },
+      { 'custom-relay': { apiKeyEnv: 'CUSTOM_RELAY_API_KEY' } },
+      { isNew: true },
+    );
+
+    expect(errors).toContain('A provider with this ID already exists.');
+  });
+
+  test('rejects a new ID whose derived credential reference belongs to another route', () => {
+    const errors = validateProviderIdentity(
+      { id: 'foo-bar', apiKeyEnv: deriveCredentialRef('foo-bar') },
+      { legacy: { apiKeyEnv: 'FOO_BAR_API_KEY' } },
+      { isNew: true },
+    );
+
+    expect(errors).toContain('This provider ID would reuse a credential reference owned by another provider.');
+  });
+
+  test('preserves a saved explicit credential reference but rejects changing it', () => {
+    expect(validateProviderIdentity(
+      { id: 'legacy', apiKeyEnv: 'SHARED_KEY' },
+      { legacy: { apiKeyEnv: 'SHARED_KEY' } },
+      { isNew: false, originalId: 'legacy', persistedCredentialRef: 'SHARED_KEY' },
+    )).toEqual([]);
+    expect(validateProviderIdentity(
+      { id: 'legacy', apiKeyEnv: 'LEGACY_API_KEY' },
+      { legacy: { apiKeyEnv: 'SHARED_KEY' } },
+      { isNew: false, originalId: 'legacy', persistedCredentialRef: 'SHARED_KEY' },
+    )).toContain('The saved provider credential reference cannot be changed.');
+  });
+});
+
+describe('draft conflict and discovery guards', () => {
+  test('only marks a dirty draft conflicted when remote revision or data changes', () => {
+    expect(hasDraftConflict({
+      dirty: false,
+      observedRevision: 1,
+      remoteRevision: 2,
+      observedFingerprint: 'a',
+      remoteFingerprint: 'b',
+    })).toBe(false);
+    expect(hasDraftConflict({
+      dirty: true,
+      observedRevision: 1,
+      remoteRevision: 1,
+      observedFingerprint: 'a',
+      remoteFingerprint: 'b',
+    })).toBe(true);
+    expect(hasDraftConflict({
+      dirty: true,
+      observedRevision: 1,
+      remoteRevision: 1,
+      observedFingerprint: 'a',
+      remoteFingerprint: 'a',
+    })).toBe(false);
+  });
+
+  test('changes discovery identity when endpoint or key changes and rejects stale generations', () => {
+    const draft = validDraft();
+    const first = discoveryFingerprint(draft, 'first-secret');
+    expect(discoveryFingerprint({ ...draft, baseURL: `${draft.baseURL}/other` }, 'first-secret')).not.toBe(first);
+    expect(discoveryFingerprint(draft, 'second-secret')).not.toBe(first);
+    expect(isCurrentDiscoveryResult(first, first, 3, 3)).toBe(true);
+    expect(isCurrentDiscoveryResult(first, first, 3, 4)).toBe(false);
+    expect(isCurrentDiscoveryResult(first, discoveryFingerprint(draft, 'second-secret'), 3, 3)).toBe(false);
+  });
+});
+
+describe('provider delete default decision', () => {
+  test('clears a default that points at the deleted provider and keeps other defaults', () => {
+    expect(decideDefaultAfterProviderDelete('custom-relay', { provider: 'custom-relay', model: 'vision-model' })).toBe('clear');
+    expect(decideDefaultAfterProviderDelete('custom-relay', { provider: 'other-relay', model: 'text-model' })).toBe('keep');
+    expect(decideDefaultAfterProviderDelete('custom-relay', undefined)).toBe('keep');
   });
 });

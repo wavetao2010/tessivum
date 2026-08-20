@@ -96,10 +96,24 @@ interface DiscoveredModel {
   maxTokens?: number;
 }
 
-interface DefaultSelection {
+export interface DefaultSelection {
   provider: string;
   model: string;
 }
+
+export interface ProviderCredentialProfile {
+  apiKeyEnv: string;
+}
+
+export interface DraftConflictInput {
+  dirty: boolean;
+  observedRevision: number;
+  remoteRevision: number;
+  observedFingerprint: string;
+  remoteFingerprint: string;
+}
+
+export type ProviderDeleteDefaultDecision = 'keep' | 'clear';
 
 interface ProviderSettingsSnapshot {
   writable: boolean;
@@ -120,6 +134,74 @@ type RpcResponse<T> = {
 
 export function deriveCredentialRef(providerId: string): string {
   return `${providerId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
+}
+
+const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
+
+export function hasDraftConflict(input: DraftConflictInput): boolean {
+  return input.dirty && (
+    input.observedRevision !== input.remoteRevision
+    || input.observedFingerprint !== input.remoteFingerprint
+  );
+}
+
+export function discoveryFingerprint(
+  draft: Pick<ProviderDraft, 'id' | 'baseURL'>,
+  apiKey: string,
+): string {
+  return JSON.stringify([draft.id.trim(), draft.baseURL.trim(), apiKey]);
+}
+
+export function isCurrentDiscoveryResult(
+  expectedFingerprint: string,
+  currentFingerprint: string,
+  expectedGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return expectedGeneration === currentGeneration && expectedFingerprint === currentFingerprint;
+}
+
+export function decideDefaultAfterProviderDelete(
+  providerId: string,
+  selection: DefaultSelection | undefined,
+): ProviderDeleteDefaultDecision {
+  return selection?.provider === providerId ? 'clear' : 'keep';
+}
+
+export function validateProviderIdentity(
+  draft: Pick<ProviderDraft, 'id' | 'apiKeyEnv'>,
+  profiles: Readonly<Record<string, ProviderCredentialProfile>>,
+  options: {
+    isNew: boolean;
+    originalId?: string;
+    persistedCredentialRef?: string;
+  },
+): string[] {
+  const id = draft.id.trim();
+  const errors: string[] = [];
+  if (id && !PROVIDER_ID_PATTERN.test(id)) {
+    errors.push('Provider ID must start with a lowercase letter and contain only lowercase letters, digits, and hyphens.');
+  }
+  if (options.originalId !== undefined && id !== options.originalId) {
+    errors.push('A saved provider ID cannot be changed.');
+  }
+  if (options.persistedCredentialRef !== undefined && draft.apiKeyEnv !== options.persistedCredentialRef) {
+    errors.push('The saved provider credential reference cannot be changed.');
+  }
+  const duplicate = id && Object.keys(profiles).some((savedId) => savedId === id && savedId !== options.originalId);
+  if (duplicate) errors.push('A provider with this ID already exists.');
+
+  if (options.isNew && id) {
+    const derived = deriveCredentialRef(id);
+    if (draft.apiKeyEnv !== derived) {
+      errors.push('New provider credential references must match the provider ID.');
+    }
+    const alias = Object.entries(profiles).some(([savedId, profile]) => (
+      savedId !== options.originalId && profile.apiKeyEnv === derived
+    ));
+    if (alias) errors.push('This provider ID would reuse a credential reference owned by another provider.');
+  }
+  return errors;
 }
 
 export function validateApiKey(value: string): string | undefined {
@@ -167,6 +249,9 @@ export function validateProviderDraft(draft: ProviderDraft): string[] {
   const errors: string[] = [];
   const providerId = draft.id.trim();
   if (!providerId) errors.push('Provider ID is required.');
+  else if (!PROVIDER_ID_PATTERN.test(providerId)) {
+    errors.push('Provider ID must start with a lowercase letter and contain only lowercase letters, digits, and hyphens.');
+  }
   if (providerId && !/^[A-Z_][A-Z0-9_]*$/.test(draft.apiKeyEnv)) {
     errors.push('Provider ID must derive a valid credential reference (begin with a letter or underscore).');
   }
@@ -492,6 +577,8 @@ function ProviderEditor({
   group,
   failure,
   credential,
+  profiles,
+  defaultSettings,
   isNew,
   onRefresh,
   onNewCommitted,
@@ -508,6 +595,8 @@ function ProviderEditor({
   group?: CatalogGroup;
   failure?: CatalogFailure;
   credential?: CredentialDescriptor;
+  profiles: Readonly<Record<string, ProviderCredentialProfile>>;
+  defaultSettings: SettingsView;
   isNew: boolean;
   onRefresh: () => Promise<void>;
   onNewCommitted?: (id: string) => void;
@@ -516,12 +605,22 @@ function ProviderEditor({
   onNotice: (message: string) => void;
 }) {
   const initialDraft = useMemo(() => profileToDraft(providerId, profile), [profile, providerId]);
+  const remoteFingerprint = settingsFingerprint(initialDraft);
   const [draft, setDraft] = useState(initialDraft);
   const draftRef = useRef(draft);
   const [committedFingerprint, setCommittedFingerprint] = useState(() => settingsFingerprint(initialDraft));
   const committedRef = useRef(committedFingerprint);
   const [draftIsNew, setDraftIsNew] = useState(isNew);
   const apiKeyInput = useRef<HTMLInputElement>(null);
+  const [apiKeyDirty, setApiKeyDirty] = useState(false);
+  const apiKeyDirtyRef = useRef(false);
+  const [conflict, setConflict] = useState(false);
+  const observedRevisionRef = useRef(revision);
+  const observedRemoteFingerprintRef = useRef(remoteFingerprint);
+  const pendingSavedFingerprintRef = useRef<string>();
+  const discoveryGenerationRef = useRef(0);
+  const discoveryCandidateFingerprintRef = useRef('');
+  const discoveryCandidateGenerationRef = useRef(0);
   const [errors, setErrors] = useState<string[]>([]);
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
@@ -531,24 +630,86 @@ function ProviderEditor({
   const [candidates, setCandidates] = useState<DiscoveredModel[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const validationId = useId();
-  const remoteFingerprint = settingsFingerprint(initialDraft);
+
+  const currentDiscoveryFingerprint = () => discoveryFingerprint(
+    draftRef.current,
+    apiKeyInput.current?.value ?? '',
+  );
+  const invalidateDiscovery = () => {
+    discoveryGenerationRef.current += 1;
+    discoveryCandidateFingerprintRef.current = '';
+    discoveryCandidateGenerationRef.current = 0;
+    setCandidates([]);
+    setDiscovering(false);
+  };
 
   useEffect(() => {
-    const current = draftRef.current;
-    if (settingsFingerprint(current) !== committedRef.current) return;
-    const adopted = { ...initialDraft };
+    const observedRevision = observedRevisionRef.current;
+    const observedFingerprint = observedRemoteFingerprintRef.current;
+    const remoteChanged = revision !== observedRevision || remoteFingerprint !== observedFingerprint;
+    if (!remoteChanged) return;
+    let ownRefresh = false;
+    let pendingMismatch = false;
+    if (pendingSavedFingerprintRef.current) {
+      if (remoteFingerprint === pendingSavedFingerprintRef.current) {
+        pendingSavedFingerprintRef.current = undefined;
+        ownRefresh = true;
+      } else {
+        pendingSavedFingerprintRef.current = undefined;
+        pendingMismatch = true;
+      }
+    }
+    const localDirty = settingsFingerprint(draftRef.current) !== committedRef.current || apiKeyDirtyRef.current;
+    if (pendingMismatch || (!ownRefresh && hasDraftConflict({
+      dirty: localDirty,
+      observedRevision,
+      remoteRevision: revision,
+      observedFingerprint,
+      remoteFingerprint,
+    }))) {
+      observedRevisionRef.current = revision;
+      observedRemoteFingerprintRef.current = remoteFingerprint;
+      setConflict(true);
+      return;
+    }
+    observedRevisionRef.current = revision;
+    observedRemoteFingerprintRef.current = remoteFingerprint;
+    const adopted = profileToDraft(providerId, profile);
     draftRef.current = adopted;
     committedRef.current = remoteFingerprint;
     setDraft(adopted);
     setCommittedFingerprint(remoteFingerprint);
-  }, [initialDraft, remoteFingerprint]);
+    setConflict(false);
+    invalidateDiscovery();
+  }, [initialDraft, profile, providerId, remoteFingerprint, revision]);
+
+  const reloadRemote = () => {
+    const adopted = profileToDraft(providerId, profile);
+    draftRef.current = adopted;
+    committedRef.current = remoteFingerprint;
+    observedRevisionRef.current = revision;
+    observedRemoteFingerprintRef.current = remoteFingerprint;
+    pendingSavedFingerprintRef.current = undefined;
+    apiKeyDirtyRef.current = false;
+    setApiKeyDirty(false);
+    if (apiKeyInput.current) apiKeyInput.current.value = '';
+    setDraft(adopted);
+    setCommittedFingerprint(remoteFingerprint);
+    setConflict(false);
+    setErrors([]);
+    setError(undefined);
+    setSuccess(undefined);
+    invalidateDiscovery();
+  };
 
   const changeDraft = (update: (current: ProviderDraft) => ProviderDraft) => {
-    setDraft((current) => {
-      const next = update(current);
-      draftRef.current = next;
-      return next;
-    });
+    const current = draftRef.current;
+    const next = update(current);
+    if (discoveryFingerprint(current, apiKeyInput.current?.value ?? '') !== discoveryFingerprint(next, apiKeyInput.current?.value ?? '')) {
+      invalidateDiscovery();
+    }
+    draftRef.current = next;
+    setDraft(next);
     setErrors([]);
     setError(undefined);
     setSuccess(undefined);
@@ -562,6 +723,12 @@ function ProviderEditor({
   };
 
   const adoptCandidate = (candidate: DiscoveredModel) => {
+    if (!isCurrentDiscoveryResult(
+      discoveryCandidateFingerprintRef.current,
+      currentDiscoveryFingerprint(),
+      discoveryCandidateGenerationRef.current,
+      discoveryGenerationRef.current,
+    )) return;
     if (draft.models.some((model) => model.id === candidate.id)) return;
     const adopted: ProviderModelDraft = {
       id: candidate.id,
@@ -591,6 +758,11 @@ function ProviderEditor({
       setSuccess(undefined);
       return;
     }
+    const fingerprint = discoveryFingerprint(draft, typedKey);
+    const generation = ++discoveryGenerationRef.current;
+    discoveryCandidateFingerprintRef.current = '';
+    discoveryCandidateGenerationRef.current = 0;
+    setCandidates([]);
     setDiscovering(true);
     setError(undefined);
     setSuccess(undefined);
@@ -603,28 +775,63 @@ function ProviderEditor({
         apiKey: typedKey.trim() ? typedKey : undefined,
       });
       const value = unwrap(response as RpcResponse<{ models: DiscoveredModel[] }>);
+      if (!isCurrentDiscoveryResult(
+        fingerprint,
+        currentDiscoveryFingerprint(),
+        generation,
+        discoveryGenerationRef.current,
+      )) return;
+      discoveryCandidateFingerprintRef.current = fingerprint;
+      discoveryCandidateGenerationRef.current = generation;
       setCandidates(value.models);
       setSuccess(value.models.length
         ? `Found ${value.models.length} model${value.models.length === 1 ? '' : 's'}. Choose which to adopt.`
         : 'The provider returned no models. You can still add one manually.');
     } catch (caught) {
-      setError(publicError(caught, [typedKey]));
+      if (isCurrentDiscoveryResult(
+        fingerprint,
+        currentDiscoveryFingerprint(),
+        generation,
+        discoveryGenerationRef.current,
+      )) setError(publicError(caught, [typedKey]));
     } finally {
-      setDiscovering(false);
+      if (generation === discoveryGenerationRef.current) setDiscovering(false);
     }
   };
 
   const apply = async () => {
-    const validation = validateProviderDraft(draft);
+    const localDirty = settingsFingerprint(draft) !== committedRef.current || apiKeyDirty;
+    const remoteConflict = hasDraftConflict({
+      dirty: localDirty,
+      observedRevision: observedRevisionRef.current,
+      remoteRevision: revision,
+      observedFingerprint: observedRemoteFingerprintRef.current,
+      remoteFingerprint,
+    });
+    if (conflict || remoteConflict) {
+      setConflict(true);
+      setErrors([]);
+      setError('Remote provider changes were detected. Reload the draft before applying it.');
+      setSuccess(undefined);
+      return;
+    }
+    const validation = [
+      ...validateProviderDraft(draft),
+      ...validateProviderIdentity(draft, profiles, {
+        isNew: draftIsNew,
+        originalId: draftIsNew ? undefined : providerId,
+        persistedCredentialRef: draftIsNew ? undefined : profile.apiKeyEnv,
+      }),
+    ];
     if (validation.length) {
-      setErrors(validation);
+      setErrors([...new Set(validation)]);
       setError(undefined);
       setSuccess(undefined);
       return;
     }
     const id = draft.id.trim();
     const profileValue = profileFromDraft(draft);
-    const settingsDirty = settingsFingerprint(draft) !== committedFingerprint;
+    const settingsDirty = settingsFingerprint(draft) !== committedRef.current;
     const typedKey = apiKeyInput.current?.value ?? '';
     const keyError = validateApiKey(typedKey);
     if (keyError) {
@@ -654,10 +861,12 @@ function ProviderEditor({
         settingsWritten = true;
         const savedDraft = profileToDraft(id, profileValue);
         const savedFingerprint = settingsFingerprint(savedDraft);
+        pendingSavedFingerprintRef.current = savedFingerprint;
         draftRef.current = savedDraft;
         committedRef.current = savedFingerprint;
         setDraft(savedDraft);
         setCommittedFingerprint(savedFingerprint);
+        setConflict(false);
         if (wasNew) {
           setDraftIsNew(false);
           onNewCommitted?.(id);
@@ -666,6 +875,8 @@ function ProviderEditor({
       if (keyDirty) {
         credentialAttempted = true;
         unwrap(await api.credentials.set({ ref: profileValue.apiKeyEnv, value: typedKey }) as RpcResponse<{}>);
+        apiKeyDirtyRef.current = false;
+        setApiKeyDirty(false);
         setRetryCredential(false);
         if (apiKeyInput.current) apiKeyInput.current.value = '';
       }
@@ -690,27 +901,66 @@ function ProviderEditor({
   };
 
   const remove = async () => {
+    const localDirty = settingsFingerprint(draft) !== committedRef.current || apiKeyDirty;
+    const remoteConflict = hasDraftConflict({
+      dirty: localDirty,
+      observedRevision: observedRevisionRef.current,
+      remoteRevision: revision,
+      observedFingerprint: observedRemoteFingerprintRef.current,
+      remoteFingerprint,
+    });
+    if (conflict || remoteConflict) {
+      setConflict(true);
+      setError('Remote provider changes were detected. Reload the draft before deleting it.');
+      return;
+    }
     setSaving(true);
     setError(undefined);
     setSuccess(undefined);
     const ref = draft.apiKeyEnv;
-    let credentialRemoved = false;
+    const defaultDecision = decideDefaultAfterProviderDelete(
+      draft.id.trim(),
+      readDefaultSelection(defaultSettings.value),
+    );
+    let defaultCleared = false;
+    let providerRemoved = false;
+    let credentialAttempted = false;
     try {
-      if (ref === deriveCredentialRef(draft.id) && credential?.writable) {
-        unwrap(await api.credentials.unset({ ref }) as RpcResponse<{}>);
-        credentialRemoved = true;
+      // Clear the default first so a successful route removal can never leave an orphaned selection.
+      if (defaultDecision === 'clear') {
+        unwrap(await api.settings.mutate({
+          ns: DEFAULT_MODEL_SETTINGS_NS,
+          ops: [{ op: 'unset', path: [] }],
+          expectedRevision: defaultSettings.revision,
+        }) as RpcResponse<SettingsView>);
+        defaultCleared = true;
       }
       unwrap(await api.settings.mutate({
         ns: PROVIDER_SETTINGS_NS,
         ops: [{ op: 'unset', path: ['providers', draft.id] }],
         expectedRevision: revision,
       }) as RpcResponse<SettingsView>);
-      onNotice(`Provider “${draft.displayName}” deleted.`);
+      providerRemoved = true;
+      if (ref === deriveCredentialRef(draft.id.trim()) && credential?.writable) {
+        credentialAttempted = true;
+        unwrap(await api.credentials.unset({ ref }) as RpcResponse<{}>);
+      }
+      onNotice(defaultCleared
+        ? `Provider “${draft.displayName}” deleted. The default was cleared; choose a new model for future sessions.`
+        : `Provider “${draft.displayName}” deleted.`);
     } catch (caught) {
       const detail = publicError(caught);
-      setError(credentialRemoved
-        ? `The writable credential was removed, but the provider was not deleted. ${detail}`
-        : detail);
+      if (providerRemoved && credentialAttempted) {
+        const warning = `The provider was deleted, but its writable credential could not be removed. ${detail}`;
+        setError(warning);
+        onNotice(warning);
+      } else if (defaultCleared && !providerRemoved) {
+        const warning = `The default model was cleared, but the provider was not deleted. ${detail}`;
+        setError(warning);
+        onNotice(warning);
+      } else {
+        setError(detail);
+      }
     } finally {
       await onRefresh();
       setSaving(false);
@@ -718,7 +968,15 @@ function ProviderEditor({
     }
   };
 
-  const disabled = !writable || saving;
+  const draftDirty = settingsFingerprint(draft) !== committedRef.current || apiKeyDirty;
+  const remoteConflictNow = !pendingSavedFingerprintRef.current && hasDraftConflict({
+    dirty: draftDirty,
+    observedRevision: observedRevisionRef.current,
+    remoteRevision: revision,
+    observedFingerprint: observedRemoteFingerprintRef.current,
+    remoteFingerprint,
+  });
+  const disabled = !writable || saving || conflict || remoteConflictNow;
   const effectiveCredential = draftIsNew ? deriveCredentialRef(draft.id.trim()) : draft.apiKeyEnv;
   const title = draft.displayName.trim() || (draftIsNew ? 'New custom provider' : draft.id);
   return (
@@ -735,6 +993,15 @@ function ProviderEditor({
           </button>
         )}
       </div>
+
+      {(conflict || remoteConflictNow) && (
+        <div className="tc-message tc-error" role="alert">
+          <p>Remote provider settings changed while this draft was being edited. Reload before applying or deleting it.</p>
+          <button className="tc-button" disabled={saving} onClick={onCancelNew && draftIsNew ? onCancelNew : reloadRemote} type="button">
+            {onCancelNew && draftIsNew ? 'Cancel draft' : 'Reload remote'}
+          </button>
+        </div>
+      )}
 
       <div className="tc-grid">
         <label className="tc-field">
@@ -772,7 +1039,11 @@ function ProviderEditor({
             autoComplete="off"
             className="tc-input"
             disabled={disabled || credential?.writable === false}
-            onChange={() => {
+            onChange={(event) => {
+              const dirty = event.currentTarget.value.length > 0;
+              apiKeyDirtyRef.current = dirty;
+              setApiKeyDirty(dirty);
+              invalidateDiscovery();
               setError(undefined);
               setSuccess(undefined);
             }}
@@ -894,15 +1165,47 @@ function DefaultModelEditor({
   const remoteKey = selectionKey(remote);
   const [selection, setSelection] = useState<DefaultSelection | undefined>(remote);
   const [baseline, setBaseline] = useState(remoteKey);
+  const [conflict, setConflict] = useState(false);
+  const observedRevisionRef = useRef(settings.revision);
+  const observedRemoteKeyRef = useRef(remoteKey);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
 
   useEffect(() => {
-    if (selectionKey(selection) !== baseline) return;
+    const observedRevision = observedRevisionRef.current;
+    const observedKey = observedRemoteKeyRef.current;
+    const remoteChanged = settings.revision !== observedRevision || remoteKey !== observedKey;
+    if (!remoteChanged) return;
+    const dirty = selectionKey(selection) !== baseline;
+    if (hasDraftConflict({
+      dirty,
+      observedRevision,
+      remoteRevision: settings.revision,
+      observedFingerprint: observedKey,
+      remoteFingerprint: remoteKey,
+    })) {
+      observedRevisionRef.current = settings.revision;
+      observedRemoteKeyRef.current = remoteKey;
+      setConflict(true);
+      return;
+    }
+    observedRevisionRef.current = settings.revision;
+    observedRemoteKeyRef.current = remoteKey;
     setSelection(remote);
     setBaseline(remoteKey);
-  }, [remoteKey]);
+    setConflict(false);
+  }, [remoteKey, settings.revision]);
+
+  const reloadRemote = () => {
+    observedRevisionRef.current = settings.revision;
+    observedRemoteKeyRef.current = remoteKey;
+    setSelection(remote);
+    setBaseline(remoteKey);
+    setConflict(false);
+    setError(undefined);
+    setSuccess(undefined);
+  };
 
   const routableGroups = groups.flatMap((group) => {
     const models = group.routable === true
@@ -917,8 +1220,21 @@ function DefaultModelEditor({
   })));
   const currentValue = selectionKey(selection);
   const currentAvailable = options.some((option) => option.value === currentValue);
+  const remoteConflictNow = hasDraftConflict({
+    dirty: currentValue !== baseline,
+    observedRevision: observedRevisionRef.current,
+    remoteRevision: settings.revision,
+    observedFingerprint: observedRemoteKeyRef.current,
+    remoteFingerprint: remoteKey,
+  });
 
   const save = async () => {
+    if (conflict || remoteConflictNow) {
+      setConflict(true);
+      setError('Remote default model changes were detected. Reload the draft before saving it.');
+      setSuccess(undefined);
+      return;
+    }
     if (!selection) {
       setError('Choose a default model.');
       return;
@@ -941,6 +1257,7 @@ function DefaultModelEditor({
         expectedRevision: settings.revision,
       }) as RpcResponse<SettingsView>);
       setBaseline(currentValue);
+      setConflict(false);
       setSuccess('Default model saved for new sessions.');
     } catch (caught) {
       setError(publicError(caught));
@@ -958,12 +1275,18 @@ function DefaultModelEditor({
           <p className="tc-subtle">Used when a new session is created. Existing sessions keep their selection.</p>
         </div>
       </div>
+      {conflict || remoteConflictNow ? (
+        <div className="tc-message tc-error" role="alert">
+          <p>Remote default model settings changed while this draft was being edited. Reload before saving it.</p>
+          <button className="tc-button" disabled={saving} onClick={reloadRemote} type="button">Reload remote</button>
+        </div>
+      ) : null}
       <div className="tc-default-grid">
         <label className="tc-field">
           <span className="tc-label">Provider and model</span>
           <select
             className="tc-select"
-            disabled={!writable || saving || options.length === 0}
+            disabled={!writable || saving || conflict || remoteConflictNow || options.length === 0}
             onChange={(event) => {
               setSelection(JSON.parse(event.target.value) as DefaultSelection);
               setError(undefined);
@@ -982,7 +1305,7 @@ function DefaultModelEditor({
             ))}
           </select>
         </label>
-        <button className="tc-button tc-button-primary" disabled={!writable || saving || options.length === 0} onClick={() => void save()} type="button">
+        <button className="tc-button tc-button-primary" disabled={!writable || saving || conflict || remoteConflictNow || options.length === 0} onClick={() => void save()} type="button">
           {saving ? 'Saving…' : 'Save default'}
         </button>
       </div>
@@ -1048,12 +1371,13 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
   const profiles = Object.entries(snapshot.profiles)
     .filter(([id]) => id !== pendingNewId)
     .sort((left, right) => left[1].displayName.localeCompare(right[1].displayName));
+  const pendingProfile = pendingNewId ? snapshot.profiles[pendingNewId] : undefined;
   const newDirectory = pendingNewId
     ? snapshot.providers.find((provider) => provider.provider === pendingNewId)
     : undefined;
   const newGroup = pendingNewId ? snapshot.groups.find((group) => group.id === pendingNewId) : undefined;
   const newFailure = pendingNewId ? snapshot.failures.find((failure) => failure.id === pendingNewId) : undefined;
-  const newCredential = pendingNewId ? snapshot.credentials[deriveCredentialRef(pendingNewId)] : undefined;
+  const newCredential = pendingProfile ? snapshot.credentials[pendingProfile.apiKeyEnv] : undefined;
 
   return (
     <div className="tc-page">
@@ -1090,10 +1414,12 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
           <ProviderEditor
             api={api}
             credential={newCredential}
+            defaultSettings={snapshot.defaultSettings}
             directory={newDirectory}
             failure={newFailure}
             group={newGroup}
             isNew={!pendingNewId}
+            profiles={snapshot.profiles}
             onCancelNew={() => {
               setShowNew(false);
               setPendingNewId(undefined);
@@ -1105,8 +1431,8 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
             onNewCommitted={setPendingNewId}
             onNotice={setNotice}
             onRefresh={refresh}
-            profile={NEW_PROVIDER_PROFILE}
-            providerId=""
+            profile={pendingProfile ?? NEW_PROVIDER_PROFILE}
+            providerId={pendingNewId ?? ''}
             revision={snapshot.providerSettings.revision}
             writable={snapshot.writable}
           />
@@ -1116,6 +1442,7 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
           <ProviderEditor
             api={api}
             credential={snapshot.credentials[profile.apiKeyEnv]}
+            defaultSettings={snapshot.defaultSettings}
             directory={snapshot.providers.find((provider) => provider.provider === id)}
             failure={snapshot.failures.find((failure) => failure.id === id)}
             group={snapshot.groups.find((group) => group.id === id)}
@@ -1124,6 +1451,7 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
             onNotice={setNotice}
             onRefresh={refresh}
             profile={profile}
+            profiles={snapshot.profiles}
             providerId={id}
             revision={snapshot.providerSettings.revision}
             writable={snapshot.writable}
