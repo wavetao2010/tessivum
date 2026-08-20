@@ -310,6 +310,7 @@ function ModelSelector({ api, ctx, sessionId, locked }: ModelSelectorProps) {
     alive.current = true;
     const disposeModels = ctx.on('models/changed', () => void refresh());
     const disposeSettings = ctx.on('settings/changed', () => void refresh());
+    const disposeCredentials = ctx.on('credentials/changed', () => void refresh());
     const disposeConnection = ctx.on('connection/reset', () => void refresh());
     void refresh();
     return () => {
@@ -318,6 +319,7 @@ function ModelSelector({ api, ctx, sessionId, locked }: ModelSelectorProps) {
       loadAbort.current = null;
       ++loadGeneration.current;
       disposeConnection();
+      disposeCredentials();
       disposeSettings();
       disposeModels();
     };
