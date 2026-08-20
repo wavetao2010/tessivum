@@ -2149,11 +2149,15 @@ async fn compat_discover_models(
             .into_iter()
             .find(|entry| entry.route.id == provider)
     });
+    let base_override = args.base_url.is_some();
     let base_url = args
         .base_url
         .or_else(|| entry.as_ref().map(|entry| entry.route.base_url.clone()))
         .ok_or_else(|| compat_discovery_error("bad-request", "baseURL is required"))?;
     let url = discovery_url(&base_url)?;
+    let route_matches = entry.as_ref().is_some_and(|entry| {
+        discovery_url(&entry.route.base_url).is_ok_and(|registered| registered == url)
+    });
 
     // A typed draft key always wins over a stored credential. The value never
     // enters an error, response, or diagnostic path.
@@ -2165,7 +2169,8 @@ async fn compat_discover_models(
             ));
         }
         Some(api_key)
-    } else if let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
+    } else if (!base_override || route_matches)
+        && let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
         let reference = CredentialRef::new(entry.route.credential_ref.clone()).map_err(|_| {
             compat_discovery_error("credential-rejected", "credential is unavailable")
         })?;
