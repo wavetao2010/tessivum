@@ -58,7 +58,7 @@ use crate::{
     settings::{
         settings_service_key, Settings, SettingsError, SettingsEvent, SettingsPathOp,
         SettingsRegistration, SettingsSnapshot, YamlSettingsProvider,
-        AGENT_DEFAULT_MODEL_NAMESPACE, LLM_OPENAI_RESPONSES_NAMESPACE,
+        AGENT_DEFAULT_MODEL_NAMESPACE, LLM_PI_AI_NAMESPACE,
     },
     subprocess::SubprocessRuntime,
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
@@ -853,7 +853,7 @@ impl HostRuntime {
         let credentials_service =
             root.provide(credentials_service_key(), Arc::clone(&credentials))?;
         let settings_base = profile
-            .get(LLM_OPENAI_RESPONSES_NAMESPACE)
+            .get(LLM_PI_AI_NAMESPACE)
             .cloned()
             .unwrap_or_else(|| json!({}));
         settings
@@ -868,8 +868,21 @@ impl HostRuntime {
             .register(default_model_registration(&config, default_base))
             .await
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let onboarding_base = profile
+            .get("ui-onboarding")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        settings
+            .register(SettingsRegistration::new(
+                "ui-onboarding",
+                json!({"type": "object", "properties": {"welcomeNoticeVersion": {"type": "string"}}}),
+                json!({"welcomeNoticeVersion": "2026-08-11.1"}),
+                onboarding_base,
+            ))
+            .await
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let route_snapshot = settings
-            .get(LLM_OPENAI_RESPONSES_NAMESPACE)
+            .get(LLM_PI_AI_NAMESPACE)
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let initial_routes = parse_routes(&route_snapshot.value, route_snapshot.revision)
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
@@ -1158,7 +1171,7 @@ impl HostHandle {
                 HostProviderDirectoryEntry {
                     route,
                     credential_configured,
-                    namespace: LLM_OPENAI_RESPONSES_NAMESPACE.into(),
+                    namespace: LLM_PI_AI_NAMESPACE.into(),
                     settings_path: vec!["providers".into(), route_id],
                     active,
                     declared: true,
@@ -1191,9 +1204,7 @@ impl HostHandle {
                 .read_from(&session_id, 0, self.inner.cancellation.clone())
                 .await?
         };
-        let current = latest_model_selection(&events)
-            .or_else(|| self.default_selection())
-            .or_else(|| Some(self.config_selection()));
+        let current = latest_model_selection(&events).or_else(|| Some(self.initial_selection()));
         let groups = {
             let state = lock(&self.inner.route_state);
             state
@@ -1292,6 +1303,31 @@ impl HostHandle {
         }
     }
 
+    fn initial_selection(&self) -> SessionModelSelection {
+        let default = self.default_selection();
+        let state = lock(&self.inner.route_state);
+        if let Some(selection) = default {
+            let declared = state
+                .routes
+                .get(&selection.provider)
+                .is_some_and(|route| route.models.iter().any(|model| model.id == selection.model));
+            if declared {
+                return selection;
+            }
+        }
+        state
+            .routes
+            .values()
+            .find_map(|route| {
+                route.models.first().map(|model| SessionModelSelection {
+                    provider: route.id.clone(),
+                    model: model.id.clone(),
+                    reasoning_effort: None,
+                })
+            })
+            .unwrap_or_else(|| self.config_selection())
+    }
+
     async fn append_model_selection(
         &self,
         session: &Arc<crate::session::Session>,
@@ -1340,9 +1376,7 @@ impl HostHandle {
                     .await?
                     .is_none()
             {
-                let selection = self
-                    .default_selection()
-                    .unwrap_or_else(|| self.config_selection());
+                let selection = self.initial_selection();
                 self.validate_selection(&selection)?;
                 return Ok(selection);
             }
@@ -1359,9 +1393,7 @@ impl HostHandle {
             self.validate_selection(&selection)?;
             return Ok(selection);
         }
-        let selection = self
-            .default_selection()
-            .unwrap_or_else(|| self.config_selection());
+        let selection = self.initial_selection();
         self.validate_selection(&selection)?;
         self.append_model_selection(&session, &selection).await?;
         Ok(selection)
@@ -1539,7 +1571,8 @@ impl HostHandle {
                     .read_from(&params.session_id, 0, self.inner.cancellation.clone())
                     .await?
             };
-            let selection = latest_model_selection(&events).or_else(|| self.default_selection());
+            let selection =
+                latest_model_selection(&events).or_else(|| Some(self.initial_selection()));
             let supports_image = selection
                 .as_ref()
                 .and_then(|selection| {
@@ -1710,8 +1743,7 @@ impl HostHandle {
         let created_at = now();
         let cwd = root.to_string_lossy().into_owned();
         let selection = if self.inner.dynamic_routes {
-            self.default_selection()
-                .unwrap_or_else(|| self.config_selection())
+            self.initial_selection()
         } else {
             self.config_selection()
         };
@@ -2854,7 +2886,7 @@ async fn mutate_settings_inner(
     namespace: String,
     mutation: HostSettingsMutation,
 ) -> Result<SettingsSnapshot, SettingsError> {
-    let routed = inner.dynamic_routes && namespace == LLM_OPENAI_RESPONSES_NAMESPACE;
+    let routed = inner.dynamic_routes && namespace == LLM_PI_AI_NAMESPACE;
     let _route_gate = if routed {
         Some(inner.route_gate.lock().await)
     } else {
@@ -2919,7 +2951,7 @@ async fn mutate_settings_inner(
 async fn apply_route_settings_locked(inner: &Arc<HostInner>) -> Result<(), HostError> {
     let snapshot = inner
         .settings
-        .get(LLM_OPENAI_RESPONSES_NAMESPACE)
+        .get(LLM_PI_AI_NAMESPACE)
         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
     let candidate = Arc::new(
         parse_routes(&snapshot.value, snapshot.revision)
@@ -2991,11 +3023,17 @@ struct RawOpenAiSettings {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawOpenAiRoute {
     display_name: String,
+    #[serde(default = "default_openai_responses_api")]
+    api: String,
     #[serde(alias = "baseURL")]
     base_url: String,
     #[serde(alias = "credentialRef")]
     api_key_env: String,
     models: Vec<RawOpenAiModel>,
+}
+
+fn default_openai_responses_api() -> String {
+    "openai-responses".into()
 }
 
 #[derive(serde::Deserialize)]
@@ -3042,6 +3080,14 @@ fn parse_routes(
             return Err(TessivumError::new(
                 "INVALID_OPENAI_ROUTE_SETTINGS",
                 "provider routes require a valid id and at least one model",
+                "host",
+                Value::Null,
+            ));
+        }
+        if raw_route.api != "openai-responses" {
+            return Err(TessivumError::new(
+                "INVALID_OPENAI_ROUTE_SETTINGS",
+                "provider routes only support the openai-responses protocol",
                 "host",
                 Value::Null,
             ));
@@ -3117,43 +3163,63 @@ fn parse_routes(
 
 fn openai_settings_registration(base: Value) -> SettingsRegistration {
     SettingsRegistration::new(
-        LLM_OPENAI_RESPONSES_NAMESPACE,
+        LLM_PI_AI_NAMESPACE,
         json!({
-            "type": "object",
-            "properties": {
-                "providers": {
+            "uid": 28,
+            "refs": {
+                "1": {"type": "string", "meta": {"required": true}},
+                "2": {"type": "string", "meta": {}},
+                "3": {"type": "union", "meta": {}, "list": [5, 7]},
+                "5": {"type": "const", "meta": {"required": true}, "value": "text"},
+                "7": {"type": "const", "meta": {"required": true}, "value": "image"},
+                "8": {"type": "array", "meta": {"default": []}, "inner": 3},
+                "11": {"type": "number", "meta": {"step": 1, "min": 1}},
+                "14": {"type": "number", "meta": {"step": 1, "min": 1}},
+                "15": {
                     "type": "object",
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "displayName": {"type": "string"},
-                            "baseURL": {"type": "string", "format": "uri"},
-                            "apiKeyEnv": {"type": "string", "role": "credential-ref"},
-                            "models": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "required": ["id"],
-                                    "properties": {
-                                        "id": {"type": "string"},
-                                        "name": {"type": "string"},
-                                        "input": {
-                                            "type": "array",
-                                            "items": {"type": "string", "enum": ["text", "image"]}
-                                        },
-                                        "contextWindow": {"type": "integer", "minimum": 1},
-                                        "maxTokens": {"type": "integer", "minimum": 1}
-                                    },
-                                    "additionalProperties": false
-                                }
-                            }
-                        },
-                        "required": ["displayName", "baseURL", "apiKeyEnv", "models"],
-                        "additionalProperties": false
+                    "meta": {"default": {}},
+                    "dict": {
+                        "id": 1,
+                        "name": 2,
+                        "input": 8,
+                        "contextWindow": 11,
+                        "maxTokens": 14
                     }
+                },
+                "17": {"type": "string", "meta": {"role": "credential-ref"}},
+                "18": {"type": "string", "meta": {}},
+                "19": {"type": "union", "meta": {}, "list": [21]},
+                "21": {
+                    "type": "const",
+                    "meta": {"required": true},
+                    "value": "openai-responses"
+                },
+                "22": {"type": "string", "meta": {}},
+                "23": {"type": "array", "meta": {"default": []}, "inner": 15},
+                "24": {
+                    "type": "object",
+                    "meta": {"default": {}},
+                    "dict": {
+                        "apiKeyEnv": 17,
+                        "displayName": 18,
+                        "api": 19,
+                        "baseURL": 22,
+                        "models": 23
+                    }
+                },
+                "26": {"type": "string", "meta": {}},
+                "27": {
+                    "type": "dict",
+                    "meta": {"default": {}},
+                    "inner": 24,
+                    "sKey": 26
+                },
+                "28": {
+                    "type": "object",
+                    "meta": {"default": {}},
+                    "dict": {"providers": 27}
                 }
-            },
-            "additionalProperties": false
+            }
         }),
         json!({"providers": {}}),
         base,

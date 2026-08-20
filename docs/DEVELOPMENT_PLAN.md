@@ -666,13 +666,14 @@ Alpha.6 明确不做：
 
 ### 18.1 Settings namespace
 
-新增 `llm-openai-responses` namespace，用户层形状固定为：
+新增与 DeepSeek Harness 原版 Models UI 兼容的 `llm-pi-ai` namespace，当前 Rust adapter 只接受 `openai-responses` 协议；用户层形状固定为：
 
 ```yaml
-llm-openai-responses:
+llm-pi-ai:
   providers:
     my-codex-relay:
       displayName: My Codex Relay
+      api: openai-responses
       baseURL: https://relay.example/v1
       apiKeyEnv: MY_CODEX_RELAY_API_KEY
       models:
@@ -816,7 +817,7 @@ adapter 对每个 `AttachmentRef` 调用 `read_ref()`，再次验证 digest 与 
 
 1. 冻结 provider/settings/credential/model/attachment DTO、错误码与 redaction fixture；
 2. 将原生 adapter 改为 per-request immutable `ProviderSnapshot` 与 Credentials resolver；
-3. 注册 `llm-openai-responses`、`agent-default-model` namespace 和动态 route lifecycle；
+3. 注册 `llm-pi-ai`、`agent-default-model` namespace 和动态 route lifecycle；
 4. 实现 Host 权威 `llm.providers`、`llm.models` 与 `llm.discoverModels`；
 5. 实现 durable session model selection 与旧 Session fallback migration；
 6. 接入 Browser Provider 行、创建卡片、两阶段保存、删除与模型选择；

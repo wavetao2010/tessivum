@@ -179,7 +179,7 @@ impl HostApi for FakeHost {
                 vec![ResponsesModel::new("fake-model")],
             ),
             credential_configured: true,
-            namespace: "llm-openai-responses".into(),
+            namespace: "llm-pi-ai".into(),
             settings_path: vec!["providers".into()],
             active: true,
             declared: true,
@@ -616,6 +616,56 @@ async fn browser_call(
     response.json().await.expect("browser RPC JSON")
 }
 
+#[tokio::test]
+async fn browser_directory_rpc_lists_and_creates_directories() {
+    let root = BrowserStopFixture::new();
+    fs::create_dir(root.0.join("visible")).unwrap();
+    fs::create_dir(root.0.join(".hidden")).unwrap();
+    fs::write(root.0.join("file.txt"), b"not a directory").unwrap();
+    let canonical = fs::canonicalize(&root.0).unwrap();
+    let (mut server, _host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let listed = browser_call(
+        &client,
+        &base,
+        "directory-list",
+        "host.listDirectory",
+        json!({"path": root.0.to_string_lossy()}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["value"]["path"],
+        canonical.to_string_lossy().as_ref()
+    );
+    assert_eq!(listed["result"]["value"]["truncated"], false);
+    assert_eq!(
+        listed["result"]["value"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(listed["result"]["value"]["entries"][0]["name"], ".hidden");
+    assert_eq!(listed["result"]["value"]["entries"][0]["hidden"], true);
+    assert_eq!(listed["result"]["value"]["entries"][1]["name"], "visible");
+
+    let created = browser_call(
+        &client,
+        &base,
+        "directory-create",
+        "host.createDirectory",
+        json!({"path": root.0.to_string_lossy(), "name": "created"}),
+    )
+    .await;
+    assert_eq!(
+        created["result"]["value"]["path"],
+        canonical.join("created").to_string_lossy().as_ref()
+    );
+    assert!(root.0.join("created").is_dir());
+    server.shutdown().await.expect("server shuts down");
+}
+
 async fn wait_host_running(socket: &mut RawWebSocket, session: &str, running: bool) -> Value {
     timeout(Duration::from_secs(2), async {
         loop {
@@ -642,6 +692,7 @@ async fn browser_rpc_creates_a_session_and_maps_prompt_content() {
     assert_eq!(described["type"], "server-response");
     assert_eq!(described["rpcId"], "describe");
     assert_eq!(described["result"]["ok"], true);
+    assert_eq!(described["result"]["value"]["canOpenPath"], false);
     let cwd = described["result"]["value"]["cwd"]
         .as_str()
         .expect("canonical cwd")
@@ -672,6 +723,7 @@ async fn browser_rpc_creates_a_session_and_maps_prompt_content() {
         json!({
             "sessionId": "browser-session",
             "mode": "queue",
+            "clientTimeZone": "Asia/Shanghai",
             "content": [
                 {"type": "text", "text": "hello"},
                 {
@@ -726,7 +778,7 @@ async fn browser_model_rpcs_use_host_dtos_and_published_selection_wire() {
     );
     assert_eq!(
         providers["result"]["value"]["providers"][0]["settingsNs"],
-        "llm-openai-responses"
+        "llm-pi-ai"
     );
 
     let models = browser_call(&client, &base, "models", "llm.models", json!({})).await;

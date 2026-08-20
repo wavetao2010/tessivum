@@ -56,7 +56,7 @@ use crate::{
         AgentCancelCause, InitializeParams, SessionEventNotification, SessionId,
         SessionPromptParams, MAX_SAFE_INTEGER,
     },
-    settings::{SettingsDescriptor, SettingsError, SettingsPathOp, LLM_OPENAI_RESPONSES_NAMESPACE},
+    settings::{SettingsDescriptor, SettingsError, SettingsPathOp, LLM_PI_AI_NAMESPACE},
     workspace::{WorkspaceError, WorkspaceId},
     TessivumError,
 };
@@ -320,6 +320,7 @@ async fn require_bound_authority(
 const MAX_COMPAT_FRAME_QUEUE: usize = 32;
 const MAX_DISCOVERY_BYTES: usize = 4 * 1024 * 1024;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_DIRECTORY_ENTRIES: usize = 1_000;
 
 struct CompatibilityState {
     cwd: String,
@@ -574,6 +575,19 @@ struct CompatApprovalValue {
 struct CompatEmptyPayload {}
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatListDirectory {
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatCreateDirectory {
+    path: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatWorkspaceCreate {
     path: String,
@@ -743,6 +757,8 @@ struct CompatPrompt {
     session_id: SessionId,
     mode: CompatPromptMode,
     content: Vec<CompatPromptContent>,
+    #[serde(default, rename = "clientTimeZone")]
+    _client_time_zone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1035,6 +1051,7 @@ async fn compat_dispatch(
                 "provider": state.compat.provider,
                 "model": state.compat.model,
                 "attachedSessions": attached_sessions,
+                "canOpenPath": false,
             }))
         }
         "settings.describe" => {
@@ -1044,6 +1061,8 @@ async fn compat_dispatch(
         "settings.update" => compat_settings_update(state, compat_decode(payload)?).await,
         "settings.replace" => compat_settings_replace(state, compat_decode(payload)?).await,
         "settings.mutate" => compat_settings_mutate(state, compat_decode(payload)?).await,
+        "host.listDirectory" => compat_list_directory(compat_decode(payload)?),
+        "host.createDirectory" => compat_create_directory(compat_decode(payload)?),
         "workspace.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
             let snapshot = compat_registry(state)?.snapshot();
@@ -1425,6 +1444,85 @@ fn compat_canonical_directory(path: &str) -> Result<String, CompatError> {
         return Err(compat_workspace_invalid_path(path));
     }
     Ok(canonical.to_string_lossy().into_owned())
+}
+
+fn compat_directory_error(message: &'static str) -> CompatError {
+    CompatError {
+        code: "directory-invalid-path".into(),
+        message: message.into(),
+        details: json!({}),
+    }
+}
+
+fn compat_list_directory(args: CompatListDirectory) -> Result<Value, CompatError> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| compat_directory_error("home directory is unavailable"))?;
+    let home = fs::canonicalize(home)
+        .map_err(|_| compat_directory_error("home directory is unavailable"))?;
+    let requested = args
+        .path
+        .unwrap_or_else(|| home.to_string_lossy().into_owned());
+    let path = fs::canonicalize(&requested)
+        .map_err(|_| compat_directory_error("directory does not exist"))?;
+    if !path.is_dir() {
+        return Err(compat_directory_error("path is not a directory"));
+    }
+
+    let mut entries = fs::read_dir(&path)
+        .map_err(|_| compat_directory_error("directory is not readable"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            Some(json!({
+                "hidden": name.starts_with('.'),
+                "name": name,
+                "path": entry.path().to_string_lossy(),
+            }))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    let truncated = entries.len() > MAX_DIRECTORY_ENTRIES;
+    entries.truncate(MAX_DIRECTORY_ENTRIES);
+
+    let mut crumbs = path
+        .ancestors()
+        .map(|ancestor| {
+            let name = ancestor
+                .file_name()
+                .unwrap_or(ancestor.as_os_str())
+                .to_string_lossy();
+            json!({"hidden": false, "name": name, "path": ancestor.to_string_lossy()})
+        })
+        .collect::<Vec<_>>();
+    crumbs.reverse();
+
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "home": home.to_string_lossy(),
+        "crumbs": crumbs,
+        "entries": entries,
+        "truncated": truncated,
+    }))
+}
+
+fn compat_create_directory(args: CompatCreateDirectory) -> Result<Value, CompatError> {
+    let name = args.name.trim();
+    if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
+        return Err(CompatError::invalid(
+            "directory name must be one non-blank path segment",
+        ));
+    }
+    let parent = fs::canonicalize(&args.path)
+        .map_err(|_| compat_directory_error("parent directory does not exist"))?;
+    if !parent.is_dir() {
+        return Err(compat_directory_error("parent path is not a directory"));
+    }
+    let path = parent.join(name);
+    fs::create_dir(&path).map_err(|_| compat_directory_error("directory could not be created"))?;
+    let path = fs::canonicalize(path)
+        .map_err(|_| compat_directory_error("created directory is unavailable"))?;
+    Ok(json!({"path": path.to_string_lossy()}))
 }
 
 fn compat_registry(state: &ApiState) -> Result<crate::workspace::WorkspaceRegistry, CompatError> {
@@ -2127,10 +2225,10 @@ async fn compat_discover_models(
     state: &ApiState,
     args: CompatDiscoverModels,
 ) -> Result<Value, CompatError> {
-    if args.settings_ns != LLM_OPENAI_RESPONSES_NAMESPACE {
+    if args.settings_ns != LLM_PI_AI_NAMESPACE {
         return Err(compat_discovery_error(
             "discovery-unsupported",
-            "model discovery is only supported for llm-openai-responses",
+            "model discovery is only supported for llm-pi-ai",
         ));
     }
     if let Some(api) = args.api.as_deref() {
@@ -2317,6 +2415,7 @@ async fn compat_session_prompt(state: &ApiState, args: CompatPrompt) -> Result<V
         session_id,
         mode,
         content,
+        _client_time_zone: _,
     } = args;
     compat_require_session(&session_id)?;
     let params = SessionPromptParams {

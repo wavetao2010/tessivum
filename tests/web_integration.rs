@@ -470,7 +470,7 @@ async fn web_environment_route_remains_dynamic_after_settings_mutation() {
         "settings.update",
         "settings-update",
         json!({
-            "ns": "llm-openai-responses",
+            "ns": "llm-pi-ai",
             "patch": {
                 "providers": {
                     "openai-responses": {

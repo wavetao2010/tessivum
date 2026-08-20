@@ -16,7 +16,7 @@ use tessivum::{
     session::SessionPersistence,
     settings::{
         SettingsError, SettingsEventKind, SettingsRegistration, AGENT_DEFAULT_MODEL_NAMESPACE,
-        LLM_OPENAI_RESPONSES_NAMESPACE,
+        LLM_PI_AI_NAMESPACE,
     },
     SessionId,
 };
@@ -75,7 +75,7 @@ fn dynamic_config(root: &TempDir) -> HostConfig {
     config.provider = "openai-responses".into();
     config.model = "alpha".into();
     config.profile_patch = json!({
-        "llm-openai-responses": {
+        "llm-pi-ai": {
             "providers": {
                 "openai-responses": {
                     "displayName": "Test relay",
@@ -1057,6 +1057,42 @@ async fn dynamic_models_report_defaults_without_eager_legacy_migration() {
 }
 
 #[tokio::test]
+async fn providerless_web_uses_first_configured_route_for_new_sessions() {
+    let root = TempDir::new();
+    let mut config = dynamic_config(&root);
+    config.provider = "openai-responses".into();
+    config.model = "unconfigured".into();
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    runtime
+        .handle()
+        .credentials()
+        .unwrap()
+        .set(
+            CredentialRef::new("TESSIVUM_DYNAMIC_TEST_KEY").unwrap(),
+            "test-key".into(),
+        )
+        .await
+        .unwrap();
+    let session_id = SessionId::from("providerless-route");
+
+    runtime.create_session(session_id.clone()).await.unwrap();
+    assert_eq!(
+        runtime
+            .handle()
+            .session_models(session_id)
+            .await
+            .unwrap()
+            .current,
+        Some(SessionModelSelection {
+            provider: "openai-responses".into(),
+            model: "alpha".into(),
+            reasoning_effort: None,
+        })
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn dynamic_route_notification_follows_committed_registration() {
     let root = TempDir::new();
     let runtime = HostRuntime::boot(dynamic_config(&root)).await.unwrap();
@@ -1064,7 +1100,7 @@ async fn dynamic_route_notification_follows_committed_registration() {
     let mut notifications = handle.subscribe();
     handle
         .mutate_settings(
-            LLM_OPENAI_RESPONSES_NAMESPACE.into(),
+            LLM_PI_AI_NAMESPACE.into(),
             HostSettingsMutation::Update {
                 patch: json!({
                     "providers": {
@@ -1097,7 +1133,7 @@ async fn dynamic_route_rejects_shared_credentials_before_publication() {
     config.provider = "first".into();
     config.model = "alpha".into();
     config.profile_patch = json!({
-        "llm-openai-responses": {
+        "llm-pi-ai": {
             "providers": {
                 "first": {
                     "displayName": "First",
@@ -1129,7 +1165,7 @@ async fn dynamic_route_rejects_invalid_provider_ids() {
     config.provider = "Uppercase".into();
     config.model = "alpha".into();
     config.profile_patch = json!({
-        "llm-openai-responses": {
+        "llm-pi-ai": {
             "providers": {
                 "Uppercase": {
                     "displayName": "Invalid",

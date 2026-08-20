@@ -1,3 +1,4 @@
+import './base.css';
 import type { AppWebEntry as AppWebEntryClass } from '@deepseek-ai/dsh-client-web';
 
 declare global {

@@ -284,10 +284,11 @@ async fn boot_host(recorded_replay: Option<String>) -> Result<HostRuntime, Diagn
         config.provider = deployment.provider.clone();
         config.model = deployment.model.clone();
         config.profile_patch = serde_json::json!({
-            "llm-openai-responses": {
+            "llm-pi-ai": {
                 "providers": {
                     deployment.provider: {
                         "displayName": "OpenAI Responses",
+                        "api": "openai-responses",
                         "baseURL": deployment.base_url,
                         "apiKeyEnv": "OPENAI_API_KEY",
                         "models": [{"id": deployment.model, "input": ["text"]}]
