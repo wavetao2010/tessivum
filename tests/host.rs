@@ -1118,7 +1118,7 @@ async fn dynamic_route_rejects_shared_credentials_before_publication() {
         Ok(_) => panic!("shared credential routes must be rejected"),
         Err(error) => error,
     };
-    assert_eq!(error.code(), "INVALID_OPENAI_ROUTE_SETTINGS");
+    assert_eq!(error.code(), "INVALID_HOST_CONFIG");
     assert!(!error.to_string().contains("SHARED_SECRET_ENV"));
 }
 
@@ -1144,5 +1144,5 @@ async fn dynamic_route_rejects_invalid_provider_ids() {
         Ok(_) => panic!("invalid provider ids must be rejected"),
         Err(error) => error,
     };
-    assert_eq!(error.code(), "INVALID_OPENAI_ROUTE_SETTINGS");
+    assert_eq!(error.code(), "INVALID_HOST_CONFIG");
 }

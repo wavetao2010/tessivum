@@ -3034,7 +3034,8 @@ fn parse_routes(
         if id.is_empty()
             || !id.bytes().enumerate().all(|(index, byte)| {
                 (index == 0 && byte.is_ascii_lowercase())
-                    || (index > 0 && (byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
+                    || (index > 0
+                        && (byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
             })
             || raw_route.models.is_empty()
         {
