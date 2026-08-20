@@ -276,9 +276,64 @@ describe('draft conflict and discovery guards', () => {
 });
 
 describe('provider delete default decision', () => {
-  test('clears a default that points at the deleted provider and keeps other defaults', () => {
-    expect(decideDefaultAfterProviderDelete('custom-relay', { provider: 'custom-relay', model: 'vision-model' })).toBe('clear');
-    expect(decideDefaultAfterProviderDelete('custom-relay', { provider: 'other-relay', model: 'text-model' })).toBe('keep');
-    expect(decideDefaultAfterProviderDelete('custom-relay', undefined)).toBe('keep');
+  const groups = [
+    {
+      id: 'custom-relay',
+      name: 'Custom relay',
+      routable: true,
+      models: [{ id: 'current-model', name: 'Current model', routable: true }],
+    },
+    {
+      id: 'disabled-relay',
+      name: 'Disabled relay',
+      routable: false,
+      models: [{ id: 'advertised-model', name: 'Advertised model', routable: true }],
+    },
+    {
+      id: 'unknown-relay',
+      name: 'Unknown relay',
+      models: [{ id: 'unknown-model', name: 'Unknown model', routable: true }],
+    },
+    {
+      id: 'other-relay',
+      name: 'Other relay',
+      routable: true,
+      models: [
+        { id: 'disabled-model', name: 'Disabled model', routable: false },
+        { id: 'text-model', name: 'Text model', routable: true },
+      ],
+    },
+  ];
+
+  test('keeps a default that belongs elsewhere or is not configured', () => {
+    expect(decideDefaultAfterProviderDelete(
+      'custom-relay',
+      { provider: 'other-relay', model: 'text-model' },
+      [],
+    )).toEqual({ kind: 'keep' });
+    expect(decideDefaultAfterProviderDelete('custom-relay', undefined, [])).toEqual({ kind: 'keep' });
+  });
+
+  test('replaces the deleted default with the first explicitly routable remaining route', () => {
+    expect(decideDefaultAfterProviderDelete(
+      'custom-relay',
+      { provider: 'custom-relay', model: 'current-model' },
+      groups,
+    )).toEqual({
+      kind: 'replace',
+      selection: { provider: 'other-relay', model: 'text-model' },
+      notice: 'The default was changed to “Text model” from “Other relay”.',
+    });
+  });
+
+  test('blocks with actionable notice when no other route is explicitly routable', () => {
+    expect(decideDefaultAfterProviderDelete(
+      'custom-relay',
+      { provider: 'custom-relay', model: 'current-model' },
+      groups.slice(0, 3),
+    )).toEqual({
+      kind: 'block',
+      notice: 'This provider is the current default, and no other routable model is available. Configure another routable provider and model, then try again.',
+    });
   });
 });

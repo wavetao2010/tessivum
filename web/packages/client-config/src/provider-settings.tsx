@@ -113,7 +113,10 @@ export interface DraftConflictInput {
   remoteFingerprint: string;
 }
 
-export type ProviderDeleteDefaultDecision = 'keep' | 'clear';
+export type ProviderDeleteDefaultDecision =
+  | { kind: 'keep' }
+  | { kind: 'replace'; selection: DefaultSelection; notice: string }
+  | { kind: 'block'; notice: string };
 
 interface ProviderSettingsSnapshot {
   writable: boolean;
@@ -164,8 +167,26 @@ export function isCurrentDiscoveryResult(
 export function decideDefaultAfterProviderDelete(
   providerId: string,
   selection: DefaultSelection | undefined,
+  groups: readonly CatalogGroup[],
 ): ProviderDeleteDefaultDecision {
-  return selection?.provider === providerId ? 'clear' : 'keep';
+  if (selection?.provider !== providerId) return { kind: 'keep' };
+  const group = groups.find((candidate) => (
+    candidate.id !== providerId
+    && candidate.routable === true
+    && candidate.models.some((model) => model.routable === true)
+  ));
+  const model = group?.models.find((candidate) => candidate.routable === true);
+  if (group && model) {
+    return {
+      kind: 'replace',
+      selection: { provider: group.id, model: model.id },
+      notice: `The default was changed to “${model.name || model.id}” from “${group.name || group.id}”.`,
+    };
+  }
+  return {
+    kind: 'block',
+    notice: 'This provider is the current default, and no other routable model is available. Configure another routable provider and model, then try again.',
+  };
 }
 
 export function validateProviderIdentity(
@@ -575,6 +596,7 @@ function ProviderEditor({
   writable,
   directory,
   group,
+  groups,
   failure,
   credential,
   profiles,
@@ -593,6 +615,7 @@ function ProviderEditor({
   writable: boolean;
   directory?: ProviderDirectoryEntry;
   group?: CatalogGroup;
+  groups: readonly CatalogGroup[];
   failure?: CatalogFailure;
   credential?: CredentialDescriptor;
   profiles: Readonly<Record<string, ProviderCredentialProfile>>;
@@ -914,26 +937,33 @@ function ProviderEditor({
       setError('Remote provider changes were detected. Reload the draft before deleting it.');
       return;
     }
+    const defaultDecision = decideDefaultAfterProviderDelete(
+      draft.id.trim(),
+      readDefaultSelection(defaultSettings.value),
+      groups,
+    );
+    if (defaultDecision.kind === 'block') {
+      setError(defaultDecision.notice);
+      setSuccess(undefined);
+      setConfirmDelete(false);
+      return;
+    }
     setSaving(true);
     setError(undefined);
     setSuccess(undefined);
     const ref = draft.apiKeyEnv;
-    const defaultDecision = decideDefaultAfterProviderDelete(
-      draft.id.trim(),
-      readDefaultSelection(defaultSettings.value),
-    );
-    let defaultCleared = false;
+    let defaultReplaced = false;
     let providerRemoved = false;
     let credentialAttempted = false;
     try {
-      // Clear the default first so a successful route removal can never leave an orphaned selection.
-      if (defaultDecision === 'clear') {
+      // Replace the default first so a successful route removal can never leave an orphaned selection.
+      if (defaultDecision.kind === 'replace') {
         unwrap(await api.settings.mutate({
           ns: DEFAULT_MODEL_SETTINGS_NS,
-          ops: [{ op: 'unset', path: [] }],
+          ops: [{ op: 'set', path: [], value: defaultDecision.selection }],
           expectedRevision: defaultSettings.revision,
         }) as RpcResponse<SettingsView>);
-        defaultCleared = true;
+        defaultReplaced = true;
       }
       unwrap(await api.settings.mutate({
         ns: PROVIDER_SETTINGS_NS,
@@ -945,17 +975,15 @@ function ProviderEditor({
         credentialAttempted = true;
         unwrap(await api.credentials.unset({ ref }) as RpcResponse<{}>);
       }
-      onNotice(defaultCleared
-        ? `Provider “${draft.displayName}” deleted. The default was cleared; choose a new model for future sessions.`
-        : `Provider “${draft.displayName}” deleted.`);
+      onNotice(`Provider “${draft.displayName}” deleted.${defaultDecision.kind === 'replace' ? ` ${defaultDecision.notice}` : ''}`);
     } catch (caught) {
       const detail = publicError(caught);
       if (providerRemoved && credentialAttempted) {
         const warning = `The provider was deleted, but its writable credential could not be removed. ${detail}`;
         setError(warning);
         onNotice(warning);
-      } else if (defaultCleared && !providerRemoved) {
-        const warning = `The default model was cleared, but the provider was not deleted. ${detail}`;
+      } else if (defaultDecision.kind === 'replace' && defaultReplaced && !providerRemoved) {
+        const warning = `${defaultDecision.notice} The provider was not deleted. ${detail}`;
         setError(warning);
         onNotice(warning);
       } else {
@@ -1418,6 +1446,7 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
             directory={newDirectory}
             failure={newFailure}
             group={newGroup}
+            groups={snapshot.groups}
             isNew={!pendingNewId}
             profiles={snapshot.profiles}
             onCancelNew={() => {
@@ -1446,6 +1475,7 @@ function ProviderSettingsPage({ ctx, api }: { ctx: Context; api: IApiClient }) {
             directory={snapshot.providers.find((provider) => provider.provider === id)}
             failure={snapshot.failures.find((failure) => failure.id === id)}
             group={snapshot.groups.find((group) => group.id === id)}
+            groups={snapshot.groups}
             isNew={false}
             key={id}
             onNotice={setNotice}
