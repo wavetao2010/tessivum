@@ -13,7 +13,9 @@
     "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "jsx": "react-jsx",
     "noEmit": true
   },
-  "include": ["src", "packages/client-config/src", "packages/client-config/tests", "scripts"]
+  "include": ["src", "packages/client-config/src", "scripts"],
+  "exclude": ["**/*.test.ts"]
 }
