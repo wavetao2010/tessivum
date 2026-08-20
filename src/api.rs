@@ -2169,14 +2169,18 @@ async fn compat_discover_models(
             ));
         }
         Some(api_key)
-    } else if (!base_override || route_matches)
-        && let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
-        let reference = CredentialRef::new(entry.route.credential_ref.clone()).map_err(|_| {
-            compat_discovery_error("credential-rejected", "credential is unavailable")
-        })?;
-        credentials.resolve(&reference).await.map_err(|_| {
-            compat_discovery_error("credential-rejected", "credential is unavailable")
-        })?
+    } else if !base_override || route_matches {
+        if let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
+            let reference =
+                CredentialRef::new(entry.route.credential_ref.clone()).map_err(|_| {
+                    compat_discovery_error("credential-rejected", "credential is unavailable")
+                })?;
+            credentials.resolve(&reference).await.map_err(|_| {
+                compat_discovery_error("credential-rejected", "credential is unavailable")
+            })?
+        } else {
+            None
+        }
     } else {
         None
     };
