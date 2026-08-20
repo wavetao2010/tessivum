@@ -32,6 +32,91 @@ export interface ModelCatalog {
   groups: readonly CatalogProvider[];
 }
 
+function isCatalogSelection(value: unknown): value is CatalogSelection {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && 'provider' in value && typeof value.provider === 'string'
+    && 'model' in value && typeof value.model === 'string'
+    && (!('reasoningEffort' in value)
+      || value.reasoningEffort === undefined
+      || typeof value.reasoningEffort === 'string');
+}
+
+function isCatalogModel(value: unknown): value is CatalogModel {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && 'id' in value && typeof value.id === 'string'
+    && 'name' in value && typeof value.name === 'string'
+    && 'routable' in value && typeof value.routable === 'boolean';
+}
+
+function isCatalogProvider(value: unknown): value is CatalogProvider {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && 'id' in value && typeof value.id === 'string'
+    && 'name' in value && typeof value.name === 'string'
+    && 'routable' in value && typeof value.routable === 'boolean'
+    && 'models' in value && Array.isArray(value.models)
+    && value.models.every(isCatalogModel);
+}
+
+function isModelCatalog(value: unknown): value is ModelCatalog {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && 'current' in value && isCatalogSelection(value.current)
+    && 'routable' in value && typeof value.routable === 'boolean'
+    && 'groups' in value && Array.isArray(value.groups)
+    && value.groups.every(isCatalogProvider);
+}
+
+export function parseSessionModelsResponse(envelope: unknown, rpcId: string): ModelCatalog {
+  if (
+    typeof envelope !== 'object'
+    || envelope === null
+    || Array.isArray(envelope)
+    || !('type' in envelope)
+    || envelope.type !== 'server-response'
+    || !('rpcId' in envelope)
+    || envelope.rpcId !== rpcId
+    || !('result' in envelope)
+  ) {
+    throw new Error('Invalid session models response.');
+  }
+  const result = envelope.result;
+  if (typeof result !== 'object' || result === null || Array.isArray(result) || !('ok' in result)) {
+    throw new Error('Invalid session models response.');
+  }
+  if (result.ok === false) {
+    const error = 'error' in result ? result.error : undefined;
+    const message = typeof error === 'object'
+      && error !== null
+      && !Array.isArray(error)
+      && 'message' in error
+      && typeof error.message === 'string'
+      && error.message
+      ? error.message
+      : 'Unable to load models';
+    throw new Error(message);
+  }
+  if (result.ok !== true || !('value' in result) || !isModelCatalog(result.value)) {
+    throw new Error('Invalid session models response.');
+  }
+  return result.value;
+}
+
+async function loadSessionModels(sessionId: SessionId, signal?: AbortSignal): Promise<ModelCatalog> {
+  const rpcId = crypto.randomUUID();
+  const response = await fetch('/api/session.models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId,
+      method: 'session.models',
+      payload: { sessionId },
+    }),
+    signal,
+  });
+  if (!response.ok) throw new Error(`Unable to load models (HTTP ${response.status})`);
+  return parseSessionModelsResponse(await response.json(), rpcId);
+}
+
 export interface CatalogOption {
   value: string;
   label: string;
@@ -183,6 +268,7 @@ function ModelSelector({ api, ctx, sessionId, locked }: ModelSelectorProps) {
   const [error, setError] = useState<string | null>(null);
   const catalogRef = useRef<ModelCatalog | null>(null);
   const loadGeneration = useRef(0);
+  const loadAbort = useRef<AbortController | null>(null);
   const alive = useRef(true);
   const selectingRef = useRef(false);
   const refreshQueued = useRef(false);
@@ -200,24 +286,25 @@ function ModelSelector({ api, ctx, sessionId, locked }: ModelSelectorProps) {
     }
 
     const generation = ++loadGeneration.current;
+    loadAbort.current?.abort();
+    const controller = new AbortController();
+    loadAbort.current = controller;
     setRefreshing(true);
     try {
-      const { result } = await api.sessions.models({ sessionId });
+      const next = await loadSessionModels(sessionId, controller.signal);
       if (!alive.current || generation !== loadGeneration.current) return;
-      if (result.ok) {
-        publishCatalog(result.value);
-        setError(null);
-      } else {
-        setError(result.error.message);
-      }
+      publishCatalog(next);
+      setError(null);
     } catch (cause) {
+      if (controller.signal.aborted) return;
       if (alive.current && generation === loadGeneration.current) {
         setError(cause instanceof Error && cause.message ? cause.message : 'Unable to load models');
       }
     } finally {
+      if (loadAbort.current === controller) loadAbort.current = null;
       if (alive.current && generation === loadGeneration.current) setRefreshing(false);
     }
-  }, [api, publishCatalog, sessionId]);
+  }, [publishCatalog, sessionId]);
 
   useEffect(() => {
     alive.current = true;
@@ -227,6 +314,8 @@ function ModelSelector({ api, ctx, sessionId, locked }: ModelSelectorProps) {
     void refresh();
     return () => {
       alive.current = false;
+      loadAbort.current?.abort();
+      loadAbort.current = null;
       ++loadGeneration.current;
       disposeConnection();
       disposeSettings();
@@ -246,6 +335,9 @@ function ModelSelector({ api, ctx, sessionId, locked }: ModelSelectorProps) {
     if (current === null || selection === undefined || sameRoute(current.current, selection)) return;
 
     ++loadGeneration.current;
+    loadAbort.current?.abort();
+    loadAbort.current = null;
+    setRefreshing(false);
     selectingRef.current = true;
     setSelecting(true);
     setError(null);
