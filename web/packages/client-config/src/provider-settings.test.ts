@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   deriveCredentialRef,
+  normalizeCatalogReadiness,
   validateApiKey,
   validateProviderDraft,
   type ProviderDraft,
@@ -18,6 +19,94 @@ const validDraft = (): ProviderDraft => ({
     contextWindow: '131072',
     maxTokens: '16384',
   }],
+});
+
+const catalogGroup = {
+  id: 'custom-relay',
+  name: 'Custom relay',
+  models: [
+    { id: 'text-model', name: 'Text model' },
+    { id: 'vision-model', name: 'Vision model' },
+  ],
+  failure: {
+    id: 'custom-relay',
+    name: 'Custom relay',
+    message: 'provider credential is not configured',
+  },
+};
+
+const providerProfile = {
+  displayName: 'Custom relay',
+  baseURL: 'https://relay.example/v1',
+  apiKeyEnv: 'CUSTOM_RELAY_API_KEY',
+  models: [],
+};
+
+const providerDirectory = {
+  provider: 'custom-relay',
+  displayName: 'Custom relay',
+  settingsNs: 'llm-openai-responses',
+  settingsPath: ['providers', 'custom-relay'],
+  active: true,
+};
+
+const credentialDescriptors = (configured: boolean) => ({
+  CUSTOM_RELAY_API_KEY: { configured, writable: true },
+});
+
+describe('normalizeCatalogReadiness', () => {
+  test('marks configured active providers and all of their models routable', () => {
+    expect(normalizeCatalogReadiness(
+      [catalogGroup],
+      { 'custom-relay': providerProfile },
+      [providerDirectory],
+      credentialDescriptors(true),
+    )).toEqual([{
+      ...catalogGroup,
+      credentialConfigured: true,
+      routable: true,
+      models: catalogGroup.models.map((model) => ({ ...model, routable: true })),
+    }]);
+  });
+
+  test('preserves diagnostic groups while disabling unconfigured providers and models', () => {
+    expect(normalizeCatalogReadiness(
+      [catalogGroup],
+      { 'custom-relay': providerProfile },
+      [providerDirectory],
+      credentialDescriptors(false),
+    )).toEqual([{
+      ...catalogGroup,
+      credentialConfigured: false,
+      routable: false,
+      models: catalogGroup.models.map((model) => ({ ...model, routable: false })),
+    }]);
+  });
+
+  test('does not infer readiness when the catalog group has no saved profile', () => {
+    const [group] = normalizeCatalogReadiness(
+      [catalogGroup],
+      {},
+      [providerDirectory],
+      credentialDescriptors(true),
+    );
+
+    expect(group?.routable).toBe(false);
+    expect(group?.models.map((model) => model.routable)).toEqual([false, false]);
+  });
+
+  test('keeps configured providers unavailable when their directory route is inactive', () => {
+    const [group] = normalizeCatalogReadiness(
+      [catalogGroup],
+      { 'custom-relay': providerProfile },
+      [{ ...providerDirectory, active: false }],
+      credentialDescriptors(true),
+    );
+
+    expect(group?.credentialConfigured).toBe(true);
+    expect(group?.routable).toBe(false);
+    expect(group?.models.map((model) => model.routable)).toEqual([false, false]);
+  });
 });
 
 describe('deriveCredentialRef', () => {

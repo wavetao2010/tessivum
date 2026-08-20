@@ -302,6 +302,26 @@ function selectionKey(selection: DefaultSelection | undefined): string {
   return selection ? JSON.stringify(selection) : '';
 }
 
+export function normalizeCatalogReadiness(
+  groups: readonly CatalogGroup[],
+  profiles: Readonly<Record<string, ProviderProfile>>,
+  providers: readonly ProviderDirectoryEntry[],
+  credentials: Readonly<Record<string, CredentialDescriptor>>,
+): CatalogGroup[] {
+  return groups.map((group) => {
+    const profile = profiles[group.id];
+    const configured = profile !== undefined && credentials[profile.apiKeyEnv]?.configured === true;
+    const routable = configured
+      && providers.some((provider) => provider.provider === group.id && provider.active === true);
+    return {
+      ...group,
+      credentialConfigured: configured,
+      routable,
+      models: group.models.map((model) => ({ ...model, routable })),
+    };
+  });
+}
+
 async function loadSnapshot(api: IApiClient): Promise<ProviderSettingsSnapshot> {
   const [settingsResponse, providersResponse, modelsResponse] = await Promise.all([
     api.settings.describe({}),
@@ -343,7 +363,7 @@ async function loadSnapshot(api: IApiClient): Promise<ProviderSettingsSnapshot> 
     defaultSettings,
     profiles,
     providers: providerData.providers,
-    groups: modelData.groups,
+    groups: normalizeCatalogReadiness(modelData.groups, profiles, providerData.providers, credentials),
     failures: modelData.failures,
     credentials,
   };
