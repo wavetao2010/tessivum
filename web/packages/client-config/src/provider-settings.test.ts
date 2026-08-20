@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   deriveCredentialRef,
+  validateApiKey,
   validateProviderDraft,
   type ProviderDraft,
 } from './provider-settings';
@@ -24,6 +25,46 @@ describe('deriveCredentialRef', () => {
     expect(deriveCredentialRef('openai-responses')).toBe('OPENAI_RESPONSES_API_KEY');
     expect(deriveCredentialRef('relay.eu/v2')).toBe('RELAY_EU_V2_API_KEY');
     expect(deriveCredentialRef('a--b')).toBe('A__B_API_KEY');
+  });
+});
+
+describe('validateApiKey', () => {
+  test('accepts blank values and printable ASCII keys', () => {
+    expect(validateApiKey('')).toBeUndefined();
+    expect(validateApiKey(' \t ')).toBeUndefined();
+    expect(validateApiKey('sk-live_123-./+=!~')).toBeUndefined();
+  });
+
+  test('rejects leading and trailing whitespace without echoing the key', () => {
+    for (const key of [' sk-secret', 'sk-secret\t']) {
+      const error = validateApiKey(key);
+      expect(error).toBe('API key cannot contain leading or trailing whitespace.');
+      expect(error).not.toContain(key);
+    }
+  });
+
+  test('rejects bytes outside printable ASCII without echoing the key', () => {
+    for (const key of ['sk secret', 'sk-\x7f', 'sk-é']) {
+      const error = validateApiKey(key);
+      expect(error).toBe('API key must contain printable ASCII characters only.');
+      expect(error).not.toContain(key);
+    }
+  });
+
+  test('rejects whole environment assignments without echoing the key', () => {
+    for (const key of ['OPENAI_API_KEY=sk-secret', 'api_key=sk-secret']) {
+      const error = validateApiKey(key);
+      expect(error).toBe('Paste only the API key, without a NAME= prefix.');
+      expect(error).not.toContain(key);
+    }
+  });
+
+  test('rejects paired surrounding quotes without echoing the key', () => {
+    for (const key of ['"sk-secret"', "'sk-secret'"]) {
+      const error = validateApiKey(key);
+      expect(error).toBe('Paste the API key without surrounding quotes.');
+      expect(error).not.toContain(key);
+    }
   });
 });
 

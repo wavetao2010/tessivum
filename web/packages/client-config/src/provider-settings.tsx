@@ -121,6 +121,18 @@ export function deriveCredentialRef(providerId: string): string {
   return `${providerId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
 }
 
+export function validateApiKey(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (value !== trimmed) return 'API key cannot contain leading or trailing whitespace.';
+  if (!/^[\x21-\x7E]+$/.test(value)) return 'API key must contain printable ASCII characters only.';
+  if (/^[A-Za-z_][A-Za-z0-9_]*=.*$/.test(value)) return 'Paste only the API key, without a NAME= prefix.';
+  const quote = value[0];
+  return (quote === '"' || quote === "'") && value.at(-1) === quote
+    ? 'Paste the API key without surrounding quotes.'
+    : undefined;
+}
+
 function baseUrlError(value: string): string | undefined {
   const source = value.trim();
   if (!source) return 'Base URL is required.';
@@ -551,10 +563,16 @@ function ProviderEditor({
       setError(urlError);
       return;
     }
+    const typedKey = apiKeyInput.current?.value ?? '';
+    const keyError = validateApiKey(typedKey);
+    if (keyError) {
+      setError(keyError);
+      setSuccess(undefined);
+      return;
+    }
     setDiscovering(true);
     setError(undefined);
     setSuccess(undefined);
-    const typedKey = apiKeyInput.current?.value ?? '';
     try {
       const response = await api.llm.discoverModels({
         settingsNs: PROVIDER_SETTINGS_NS,
@@ -587,6 +605,12 @@ function ProviderEditor({
     const profileValue = profileFromDraft(draft);
     const settingsDirty = settingsFingerprint(draft) !== committedFingerprint;
     const typedKey = apiKeyInput.current?.value ?? '';
+    const keyError = validateApiKey(typedKey);
+    if (keyError) {
+      setError(keyError);
+      setSuccess(undefined);
+      return;
+    }
     const keyDirty = Boolean(typedKey.trim());
     if (!settingsDirty && !keyDirty) {
       setSuccess('No changes to apply.');
@@ -859,7 +883,13 @@ function DefaultModelEditor({
     setBaseline(remoteKey);
   }, [remoteKey]);
 
-  const options = groups.flatMap((group) => group.models.map((model) => ({
+  const routableGroups = groups.flatMap((group) => {
+    const models = group.routable === true
+      ? group.models.filter((model) => model.routable === true)
+      : [];
+    return models.length ? [{ ...group, models }] : [];
+  });
+  const options = routableGroups.flatMap((group) => group.models.map((model) => ({
     group,
     model,
     value: selectionKey({ provider: group.id, model: model.id }),
@@ -874,6 +904,10 @@ function DefaultModelEditor({
     }
     if (currentValue === baseline) {
       setSuccess('No changes to apply.');
+      return;
+    }
+    if (!currentAvailable) {
+      setError('Choose a routable default model.');
       return;
     }
     setSaving(true);
@@ -917,9 +951,9 @@ function DefaultModelEditor({
             value={currentValue}
           >
             {!selection && <option value="">Choose a model</option>}
-            {selection && !currentAvailable && <option value={currentValue}>Unavailable: {selection.provider} / {selection.model}</option>}
-            {groups.map((group) => (
-              <optgroup key={group.id} label={`${group.name}${group.routable === false ? ' — not routable' : ''}`}>
+            {selection && !currentAvailable && <option disabled value={currentValue}>Unavailable: {selection.provider} / {selection.model}</option>}
+            {routableGroups.map((group) => (
+              <optgroup key={group.id} label={group.name}>
                 {group.models.map((model) => (
                   <option key={model.id} value={selectionKey({ provider: group.id, model: model.id })}>{model.name || model.id}</option>
                 ))}
@@ -931,7 +965,7 @@ function DefaultModelEditor({
           {saving ? 'Saving…' : 'Save default'}
         </button>
       </div>
-      {options.length === 0 && <p className="tc-message tc-error" role="status">Add a provider and model before choosing a default.</p>}
+      {options.length === 0 && <p className="tc-message tc-error" role="status">Configure a routable provider and model before choosing a default.</p>}
       {error && <p className="tc-message tc-error" role="alert">{error}</p>}
       {success && <p className="tc-message tc-success" role="status">{success}</p>}
     </section>
