@@ -1,12 +1,11 @@
 import { readFile, readdir } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, openSessionByMarker, RustWebHarness, waitUntil } from './support'
+import { captureStableAria, openSessionByMarker, RustWebHarness, UPSTREAM_ROOT, waitUntil } from './support'
 
 const SESSION_ID = 'bash-abort-row-web-e2e'
 const PROMPT = 'Run two shell commands: wait for cancellation, then write skipped.txt.'
-const FIXTURE = fileURLToPath(new URL('../../../upstream/deepseek-harness/examples/acp-agent/tests/snapshots/cancel-tool-calls/session.jsonl', import.meta.url))
+const FIXTURE = join(UPSTREAM_ROOT, 'examples/acp-agent/tests/snapshots/cancel-tool-calls/session.jsonl')
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/bash-abort-row')
 const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 

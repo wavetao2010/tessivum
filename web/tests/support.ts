@@ -8,9 +8,9 @@ import { chromium, type Browser, type Page } from 'playwright-core'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const CRATE_ROOT = join(HERE, '../..')
-export const UPSTREAM_ROOT = join(CRATE_ROOT, '../upstream/deepseek-harness')
+export const UPSTREAM_ROOT = process.env.TESSIVUM_DEEPSEEK_SOURCE ?? join(CRATE_ROOT, '../upstream/deepseek-harness')
 const SHIPPED_PRESETS = join(UPSTREAM_ROOT, 'apps/cli/config/agent-presets')
-export const UPSTREAM_TESTS = join(CRATE_ROOT, '../upstream/deepseek-harness/apps/web/tests')
+export const UPSTREAM_TESTS = join(UPSTREAM_ROOT, 'apps/web/tests')
 const CARGO = process.env.CARGO_BIN ?? 'cargo'
 let build: Promise<void> | undefined
 

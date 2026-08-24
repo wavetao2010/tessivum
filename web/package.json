@@ -10,7 +10,7 @@
     "dev": "vite",
     "test": "bun run test:source-client && bun run test:e2e",
     "test:e2e": "bun run build && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 120000",
-    "test:source-client": "../../upstream/deepseek-harness/node_modules/.bin/vitest run --root ../../upstream/deepseek-harness packages/client",
+    "test:source-client": "bun run scripts/test-source-client.mjs",
     "typecheck": "bun run scripts/typecheck.mjs"
   },
   "dependencies": {

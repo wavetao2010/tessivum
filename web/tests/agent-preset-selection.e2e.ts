@@ -7,7 +7,7 @@ import { chromium, type Browser, type Locator, type Page } from 'playwright-core
 
 const HERE = dirname(import.meta.path)
 const CRATE_ROOT = join(HERE, '../..')
-const SHIPPED_PRESETS = join(CRATE_ROOT, '../upstream/deepseek-harness/apps/cli/config/agent-presets')
+const SHIPPED_PRESETS = join(process.env.TESSIVUM_DEEPSEEK_SOURCE ?? join(CRATE_ROOT, '../upstream/deepseek-harness'), 'apps/cli/config/agent-presets')
 const SNAPSHOT_DIR = join(HERE, 'snapshots/agent-preset-selection')
 const CARGO = process.env.CARGO_BIN ?? 'cargo'
 const SEED_ID = 'agent-preset-selection-web-e2e'

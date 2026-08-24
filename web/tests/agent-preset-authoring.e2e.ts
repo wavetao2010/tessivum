@@ -9,7 +9,7 @@ import { chromium, type Browser, type Locator, type Page } from 'playwright-core
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CRATE_ROOT = join(HERE, '../..')
-const SHIPPED_PRESETS = join(CRATE_ROOT, '../upstream/deepseek-harness/apps/cli/config/agent-presets')
+const SHIPPED_PRESETS = join(process.env.TESSIVUM_DEEPSEEK_SOURCE ?? join(CRATE_ROOT, '../upstream/deepseek-harness'), 'apps/cli/config/agent-presets')
 const SNAPSHOTS = join(HERE, 'snapshots/agent-preset-authoring')
 const CARGO = process.env.CARGO_BIN ?? 'cargo'
 

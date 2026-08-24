@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { acknowledgeReloadConnectionLoss, captureStableAria, CRATE_ROOT, RustWebHarness, waitUntil } from './support'
+import { acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, UPSTREAM_ROOT, waitUntil } from './support'
 
-const FIXTURE = join(CRATE_ROOT, '../upstream/deepseek-harness/examples/acp-agent/tests/snapshots/workflow-run/session.jsonl')
+const FIXTURE = join(UPSTREAM_ROOT, 'examples/acp-agent/tests/snapshots/workflow-run/session.jsonl')
 const UI_EXPECTED = `${import.meta.dir}/snapshots/workflow-run/ui.expected.md`
 const CHILD_PROMPT = 'Reply with exactly the word WF_CHILD_OK and nothing else.'
 const PROMPT = `Use the workflow tool exactly once, with args omitted, meta set to { "name": "snapshot-flow", "description": "one child for the snapshot" }, and this EXACT script body (copy it verbatim):
