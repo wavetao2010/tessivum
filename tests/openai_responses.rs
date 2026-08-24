@@ -51,13 +51,13 @@ async fn responses(
             json!({"type":"response.reasoning_summary_part.done","output_index":0}),
             json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"next"}),
             json!({"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"plan"},{"type":"summary_text","text":"next"}],"encrypted_content":"encrypted-reasoning"}}),
-            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"bash","arguments":""}}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"jobs_list","arguments":""}}),
             json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"command\":\"pwd\"}"}),
             json!({"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\"command\":\"pwd\"}"}),
-            json!({"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"bash","arguments":"{\"command\":\"pwd\"}"}}),
+            json!({"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"jobs_list","arguments":"{\"command\":\"pwd\"}"}}),
             json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[
                 {"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"plan"},{"type":"summary_text","text":"next"}]},
-                {"id":"fc_1","type":"function_call","call_id":"call_1","name":"bash","arguments":"{\"command\":\"pwd\"}"}
+                {"id":"fc_1","type":"function_call","call_id":"call_1","name":"jobs_list","arguments":"{\"command\":\"pwd\"}"}
             ],"usage":{"input_tokens":10,"output_tokens":5,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":3}}}}),
         ]
     } else {
@@ -279,7 +279,7 @@ async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_rel
     let cancellation = ContextHandle::root().scope().cancellation();
     let user = user("inspect the repository");
     let tools = vec![ToolSchema {
-        name: "bash".into(),
+        name: "jobs.list".into(),
         description: "run a command".into(),
         parameters: json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
     }];
@@ -300,7 +300,7 @@ async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_rel
             },
             ContentBlock::ToolCall {
                 id: ToolCallId::from("call_1"),
-                name: "bash".into(),
+                name: "jobs.list".into(),
                 arguments: "{\"command\":\"pwd\"}".into(),
             },
         ]
@@ -350,13 +350,16 @@ async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_rel
         requests[0]["include"],
         json!(["reasoning.encrypted_content"])
     );
+    assert_eq!(requests[0]["tools"][0]["name"], json!("jobs_list"));
     let second_input = requests[1]["input"].as_array().unwrap();
     assert!(second_input.iter().any(|item| {
         item["type"] == "reasoning" && item["encrypted_content"] == "encrypted-reasoning"
     }));
-    assert!(second_input
-        .iter()
-        .any(|item| { item["type"] == "function_call" && item["call_id"] == "call_1" }));
+    assert!(second_input.iter().any(|item| {
+        item["type"] == "function_call"
+            && item["call_id"] == "call_1"
+            && item["name"] == "jobs_list"
+    }));
     assert!(second_input.iter().any(|item| {
         item["type"] == "function_call_output"
             && item["call_id"] == "call_1"

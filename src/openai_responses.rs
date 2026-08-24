@@ -473,6 +473,7 @@ impl OpenAiResponsesAdapter {
         &self,
         request: &GenerateRequest,
         snapshot: &ProviderSnapshot,
+        tool_names: &ToolNames,
         cancellation: CancellationToken,
     ) -> Result<Response, TessivumError> {
         let api_key = snapshot.api_key().ok_or_else(|| {
@@ -492,7 +493,13 @@ impl OpenAiResponsesAdapter {
             })?;
         authorization.set_sensitive(true);
         let endpoint = snapshot.endpoint()?;
-        let body = request_body(request, snapshot, self.attachment_store.as_deref()).await?;
+        let body = request_body(
+            request,
+            snapshot,
+            tool_names,
+            self.attachment_store.as_deref(),
+        )
+        .await?;
         let pending = self
             .client
             .post(endpoint.clone())
@@ -524,11 +531,14 @@ impl LlmAdapter for OpenAiResponsesAdapter {
         cancellation: CancellationToken,
     ) -> Result<LlmStream, TessivumError> {
         let snapshot = self.snapshot(&request)?;
-        let response = self.send(&request, &snapshot, cancellation.clone()).await?;
+        let tool_names = ToolNames::from_request(&request)?;
+        let response = self
+            .send(&request, &snapshot, &tool_names, cancellation.clone())
+            .await?;
         let mut bytes = response.bytes_stream();
         Ok(Box::pin(async_stream::try_stream! {
             let mut decoder = SseDecoder::default();
-            let mut state = ResponseState::default();
+            let mut state = ResponseState { tool_names, ..ResponseState::default() };
             loop {
                 let next = tokio::select! {
                     _ = cancellation.cancelled() => Err(cancelled_error()),
@@ -566,9 +576,78 @@ impl LlmAdapter for OpenAiResponsesAdapter {
         }))
     }
 }
+#[derive(Default)]
+struct ToolNames {
+    wire_by_logical: BTreeMap<String, String>,
+    logical_by_wire: BTreeMap<String, String>,
+}
+
+impl ToolNames {
+    fn from_request(request: &GenerateRequest) -> Result<Self, TessivumError> {
+        let mut names = Self::default();
+        if let Some(tools) = &request.tools {
+            for tool in tools {
+                names.insert(&tool.name)?;
+            }
+        }
+        for message in &request.messages {
+            if native_replay_output(message, request).is_some() {
+                continue;
+            }
+            for block in &message.content {
+                if let ContentBlock::ToolCall { name, .. } = block {
+                    names.insert(name)?;
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    fn insert(&mut self, logical: &str) -> Result<(), TessivumError> {
+        if self.wire_by_logical.contains_key(logical) {
+            return Ok(());
+        }
+        let wire: String = logical
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if let Some(existing) = self.logical_by_wire.get(&wire) {
+            return Err(adapter_error(
+                "OPENAI_TOOL_NAME_COLLISION",
+                "distinct tool names map to the same OpenAI Responses name",
+                json!({"first": existing, "second": logical, "wire": wire}),
+            ));
+        }
+        self.wire_by_logical.insert(logical.into(), wire.clone());
+        self.logical_by_wire.insert(wire, logical.into());
+        Ok(())
+    }
+
+    fn wire<'a>(&'a self, logical: &'a str) -> &'a str {
+        self.wire_by_logical
+            .get(logical)
+            .map(String::as_str)
+            .unwrap_or(logical)
+    }
+
+    fn logical<'a>(&'a self, wire: &'a str) -> &'a str {
+        self.logical_by_wire
+            .get(wire)
+            .map(String::as_str)
+            .unwrap_or(wire)
+    }
+}
+
 async fn request_body(
     request: &GenerateRequest,
     snapshot: &ProviderSnapshot,
+    tool_names: &ToolNames,
     attachment_store: Option<&AttachmentStore>,
 ) -> Result<Value, TessivumError> {
     if request.stop.as_ref().is_some_and(|stop| !stop.is_empty()) {
@@ -582,7 +661,7 @@ async fn request_body(
         ("model".into(), Value::String(request.model.clone())),
         (
             "input".into(),
-            Value::Array(response_input(request, snapshot, attachment_store).await?),
+            Value::Array(response_input(request, snapshot, tool_names, attachment_store).await?),
         ),
         ("stream".into(), Value::Bool(true)),
         ("store".into(), Value::Bool(false)),
@@ -600,7 +679,7 @@ async fn request_body(
                     .map(|tool| {
                         json!({
                             "type": "function",
-                            "name": tool.name,
+                            "name": tool_names.wire(&tool.name),
                             "description": tool.description,
                             "parameters": tool.parameters,
                             "strict": false,
@@ -646,6 +725,7 @@ async fn request_body(
 async fn response_input(
     request: &GenerateRequest,
     snapshot: &ProviderSnapshot,
+    tool_names: &ToolNames,
     attachment_store: Option<&AttachmentStore>,
 ) -> Result<Vec<Value>, TessivumError> {
     let mut input = Vec::new();
@@ -654,7 +734,14 @@ async fn response_input(
             input.extend(output.iter().cloned());
             continue;
         }
-        append_message_input(&mut input, message, &snapshot.model, attachment_store).await?;
+        append_message_input(
+            &mut input,
+            message,
+            &snapshot.model,
+            tool_names,
+            attachment_store,
+        )
+        .await?;
     }
     Ok(input)
 }
@@ -744,6 +831,7 @@ async fn append_message_input(
     input: &mut Vec<Value>,
     message: &Message,
     model: &ResponsesModel,
+    tool_names: &ToolNames,
     attachment_store: Option<&AttachmentStore>,
 ) -> Result<(), TessivumError> {
     let role = match message.role {
@@ -771,7 +859,7 @@ async fn append_message_input(
                 input.push(json!({
                     "type": "function_call",
                     "call_id": id,
-                    "name": name,
+                    "name": tool_names.wire(name),
                     "arguments": arguments,
                 }));
             }
@@ -1001,6 +1089,7 @@ struct ResponseState {
     tool_calls: bool,
     items: BTreeMap<u64, Value>,
     terminal: bool,
+    tool_names: ToolNames,
 }
 
 struct OpenBlock {
@@ -1103,7 +1192,8 @@ impl ResponseState {
             ),
             "function_call" => {
                 let id = required_string(item, "call_id")?;
-                let name = required_string(item, "name")?;
+                let wire_name = required_string(item, "name")?;
+                let name = self.tool_names.logical(&wire_name).to_owned();
                 self.tool_calls = true;
                 (
                     "tool-call",
