@@ -46,6 +46,7 @@ export interface RustWebOptions {
   beforeStart?: (harness: RustWebHarness) => Promise<void>
   beforePage?: (harness: RustWebHarness) => Promise<void>
   viewport?: { width: number; height: number }
+  browser?: Browser
 }
 
 async function buildBinary(): Promise<void> {
@@ -94,6 +95,7 @@ export class RustWebHarness {
   browser!: Browser
   page!: Page
   private server!: Bun.Subprocess
+  private ownsBrowser = true
 
   private constructor(root: string, workspace: string, port: number) {
     this.root = root
@@ -157,9 +159,14 @@ export class RustWebHarness {
         if (!credential.ok) throw new Error(`credentials.set failed: ${JSON.stringify(credential.error)}`)
       }
       await options.beforePage?.(harness)
-      harness.browser = await chromium.launch(process.env.TESSIVUM_CHROMIUM === undefined
-        ? { channel: 'chrome' }
-        : { executablePath: process.env.TESSIVUM_CHROMIUM })
+      if (options.browser === undefined) {
+        harness.browser = await chromium.launch(process.env.TESSIVUM_CHROMIUM === undefined
+          ? { channel: 'chrome' }
+          : { executablePath: process.env.TESSIVUM_CHROMIUM })
+      } else {
+        harness.browser = options.browser
+        harness.ownsBrowser = false
+      }
       harness.page = await harness.browser.newPage({
         viewport: options.viewport ?? { width: 1680, height: 1000 },
         locale: options.locale ?? 'en-US',
@@ -272,10 +279,12 @@ export class RustWebHarness {
     expect(this.httpErrors).toEqual([])
   }
 
-
   async close(): Promise<void> {
     if (this.browser !== undefined) {
-      await Promise.race([this.browser.close().catch(() => {}), Bun.sleep(5_000)])
+      const close = this.ownsBrowser
+        ? this.browser.close()
+        : this.page === undefined ? undefined : this.page.close()
+      if (close !== undefined) await Promise.race([close.catch(() => {}), Bun.sleep(5_000)])
     }
     if (this.server !== undefined) {
       this.server.kill('SIGINT')

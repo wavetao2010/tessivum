@@ -1,6 +1,7 @@
 import { access, writeFile } from 'node:fs/promises'
-import { expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { longChatFixture, openSessionByMarker, RustWebHarness, waitUntil } from './support'
+import { chromium, type Browser } from 'playwright-core'
 
 const HISTORY_ID = 'chat-scroll-history-e2e'
 const TOOL_ID = 'chat-scroll-tool-e2e'
@@ -17,6 +18,18 @@ const HISTORY = longChatFixture({ markerPrefix: 'HISTORY', title: 'CHAT_SCROLL_H
 const TOOL = longChatFixture({ markerPrefix: 'TOOL', title: 'CHAT_SCROLL_TOOL live tool session' })
 const RESTORE_A = longChatFixture({ markerPrefix: 'RESTORE_A', title: 'CHAT_SCROLL_RESTORE_A long session' })
 const RESTORE_B = longChatFixture({ markerPrefix: 'RESTORE_B', title: 'CHAT_SCROLL_RESTORE_B comparison session', turns: 32 })
+
+let browser: Browser
+
+beforeAll(async () => {
+  browser = await chromium.launch(process.env.TESSIVUM_CHROMIUM === undefined
+    ? { channel: 'chrome' }
+    : { executablePath: process.env.TESSIVUM_CHROMIUM })
+})
+
+afterAll(async () => {
+  await browser.close()
+})
 const INPUTS = longChatFixture({ markerPrefix: 'INPUTS', title: 'CHAT_SCROLL_INPUTS reader input session' })
 
 function textChunks(first: string, done: string, count: number): unknown[] {
@@ -206,6 +219,7 @@ test('chat-scroll-contract preserves a reader anchor across concurrent history a
   const first = 'CHAT_SCROLL_LIVE_FIRST'
   const done = 'CHAT_SCROLL_LIVE_DONE'
   const harness = await RustWebHarness.launch({
+    browser,
     name: 'chat-scroll-history-web-e2e',
     viewport: { width: 1680, height: 900 },
     replayRecording: replayRecording(textChunks(first, done, 120)),
@@ -273,6 +287,7 @@ test('chat-scroll-contract keeps running tool disclosure and bottom ownership ac
   const first = 'CHAT_SCROLL_TOOL_STREAM_FIRST'
   const done = 'CHAT_SCROLL_TOOL_STREAM_DONE'
   const harness = await RustWebHarness.launch({
+    browser,
     name: 'chat-scroll-tool-web-e2e',
     viewport: { width: 1680, height: 900 },
     replayRecording: replayRecording(toolChunks(), textChunks(first, done, 84)),
@@ -343,6 +358,7 @@ test('chat-scroll-contract keeps running tool disclosure and bottom ownership ac
 
 test('chat-scroll-contract restores session position and keeps composer resize on the column scroll owner', async () => {
   const harness = await RustWebHarness.launch({
+    browser,
     name: 'chat-scroll-restore-web-e2e', viewport: { width: 1680, height: 900 },
     beforeStart: async candidate => {
       await candidate.seedSession(RESTORE_A_ID, RESTORE_A.log)
@@ -410,6 +426,7 @@ test('chat-scroll-contract restores session position and keeps composer resize o
 
 test('chat-scroll-contract keyboard PageUp and End own bottom follow', async () => {
   const harness = await RustWebHarness.launch({
+    browser,
     name: 'chat-scroll-keyboard-web-e2e', viewport: { width: 1680, height: 900 },
     beforeStart: candidate => candidate.seedSession(INPUTS_ID, INPUTS.log),
   })
@@ -441,6 +458,7 @@ test('chat-scroll-contract synthetic fling releases and reacquires streaming bot
   const first = 'CHAT_SCROLL_FLING_STREAM_FIRST'
   const done = 'CHAT_SCROLL_FLING_STREAM_DONE'
   const harness = await RustWebHarness.launch({
+    browser,
     name: 'chat-scroll-fling-web-e2e',
     viewport: { width: 1680, height: 900 },
     replayRecording: replayRecording(toolChunks(), textChunks(first, done, 240)),
