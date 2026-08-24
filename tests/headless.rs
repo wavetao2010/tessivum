@@ -79,7 +79,9 @@ async fn recorded_bash_round_trip_is_balanced_and_root_is_quiescent() {
             "turn/start",
             "step/start",
             "user/message",
+            "user/message",
             "request/header",
+            "request/context",
             "assistant/chunk",
             "assistant/chunk",
             "assistant/chunk",
@@ -238,6 +240,11 @@ fn overlapping_semantics(trace: &Value) -> Vec<Value> {
             object.remove("seq");
             object.remove("time");
             object.remove("sourceEventSeqs");
+            if object.get("type").and_then(Value::as_str) == Some("tool/result") {
+                if let Some(data) = object.get_mut("data").and_then(Value::as_object_mut) {
+                    data.remove("meta");
+                }
+            }
             event
         })
         .collect()

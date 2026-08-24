@@ -526,7 +526,10 @@ async fn compaction_rejects_a_surface_changed_during_summary() {
             "compaction/end",
         ]
     );
-    assert_eq!(events[5].data["failure"]["code"], "STALE_SESSION_SURFACE");
+    assert_eq!(
+        events[5].data["error"],
+        "surface changed before conditional append"
+    );
     assert_eq!(
         session
             .surface()
@@ -556,7 +559,10 @@ async fn summary_failure_records_failed_end_without_changing_surface() {
     let events = session.events();
     assert_eq!(events[2].event_type, "compaction/start");
     assert_eq!(events[3].event_type, "compaction/end");
-    assert_eq!(events[3].data["outcome"], "failed");
+    assert_eq!(
+        events[3].data["error"],
+        "LLM summarization failed: SUMMARY_DOWN: summary provider failed"
+    );
 }
 
 #[tokio::test]
@@ -590,7 +596,7 @@ async fn cancellation_records_cancelled_end_without_changing_surface() {
     let events = session.events();
     assert_eq!(events[2].event_type, "compaction/start");
     assert_eq!(events[3].event_type, "compaction/end");
-    assert_eq!(events[3].data["outcome"], "cancelled");
+    assert_eq!(events[3].data["error"], "compaction was cancelled");
 }
 
 #[tokio::test]
@@ -644,8 +650,7 @@ async fn cancellation_during_summary_append_records_a_cancelled_end() {
             "compaction/end"
         ]
     );
-    assert_eq!(events[3].data["outcome"], "cancelled");
-    assert_eq!(events[3].data["failure"]["code"], "CANCELLED");
+    assert_eq!(events[3].data["error"], "compaction was cancelled");
 }
 
 #[tokio::test]
@@ -700,8 +705,7 @@ async fn cancellation_during_replacement_append_records_a_cancelled_end() {
             "compaction/end",
         ]
     );
-    assert_eq!(events[4].data["outcome"], "cancelled");
-    assert_eq!(events[4].data["failure"]["code"], "CANCELLED");
+    assert_eq!(events[4].data["error"], "compaction was cancelled");
 }
 
 #[tokio::test]

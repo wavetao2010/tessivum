@@ -20,7 +20,7 @@ function parseEvent(value: unknown): Event {
 }
 
 async function fixturePrompts(): Promise<string[]> {
-  return (await readFile(FIXTURE, 'utf8')).trim().split('\n').flatMap((line) => {
+  return (await readFile(FIXTURE, 'utf8')).trim().split('\n').slice(1).flatMap((line) => {
     const event = parseEvent(JSON.parse(line))
     const source = record(event.data.source) ? event.data.source : undefined
     const content = Array.isArray(event.data.content) ? event.data.content : []
@@ -52,6 +52,11 @@ test('replay-round-trip drives native bash, persists the transcript, and reconst
     await harness.page.getByText('DONE', { exact: true }).last().waitFor({ timeout: 15_000 })
 
     const events = await durableEvents(harness, sessionId)
+    const header = events.find(event => event.type === 'request/header')
+    const request = header !== undefined && record(header.data.header) ? header.data.header : undefined
+    if (request === undefined || typeof request.system !== 'string') throw new Error('replayed turn has no durable request system prompt')
+    expect(request.system).toContain(`Tessivum Web GUI at ${harness.baseUrl}`)
+    expect(request.system).toContain('format them as Markdown inline code')
     const bash = events.find(event => event.type === 'tool/call' && event.data.name === 'bash')
     if (bash === undefined) throw new Error('replayed turn did not durably call bash')
     const result = events.find(event => event.type === 'tool/result' && JSON.stringify(event.data).includes('WEB_E2E_OK'))

@@ -25,6 +25,14 @@ use tokio::{
     time::{sleep_until, Instant},
 };
 
+use crate::{
+    tools::{
+        ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
+        ToolRunContext, ToolRuntime,
+    },
+    ContentBlock, TessivumError, ToolCallId,
+};
+
 pub fn code_runtime_service_key() -> ServiceKey {
     ServiceKey::new("harness.code-runtime", "1")
 }
@@ -451,6 +459,7 @@ impl CodeRuntime for ProcessCodeRuntime {
         lock(&self.inner.live).remove(&id);
         Ok(result)
     }
+
     async fn dispose(&self) -> Result<(), CodeRuntimeError> {
         let _gate = self.inner.dispose_gate.lock().await;
         self.inner.disposed.store(true, Ordering::Release);
@@ -462,6 +471,207 @@ impl CodeRuntime for ProcessCodeRuntime {
         }
         Ok(())
     }
+}
+/// Registers the sole model-facing code-mode tool. The handler dispatches
+/// `tools.*` calls back through the ordinary runtime, preserving restrictions,
+/// cancellation, observers, and handler error semantics.
+pub fn register_code_tool(
+    tools: &ToolRuntime,
+    dispatch_tools: ToolRuntime,
+    runtime: ProcessCodeRuntime,
+) -> Result<ToolRegistration, TessivumError> {
+    tools.register(ToolDefinition::new(
+        "run_code",
+        "Runs one JavaScript program. Use the global tools object for nested tool calls and return a lossless JSON value.",
+        json!({
+            "type": "object",
+            "properties": {
+                "description": {"type": "string"},
+                "code": {"type": "string"}
+            },
+            "required": ["description", "code"],
+            "additionalProperties": false
+        }),
+        RunCode {
+            runtime,
+            tools: dispatch_tools,
+        },
+    ))
+}
+
+struct RunCode {
+    runtime: ProcessCodeRuntime,
+    tools: ToolRuntime,
+}
+
+#[derive(Clone)]
+struct DispatchBinding {
+    tools: ToolRuntime,
+    context: ToolRunContext,
+    name: String,
+    parent_call_id: String,
+    next: Arc<AtomicU64>,
+    events: Arc<Mutex<Vec<Value>>>,
+}
+
+#[async_trait]
+impl CodeBinding for DispatchBinding {
+    async fn call(&self, arguments: Value) -> Result<Value, String> {
+        let index = self.next.fetch_add(1, Ordering::AcqRel);
+        let sub_call_id = format!("{}:code:{index}", self.parent_call_id);
+        let logged_arguments = arguments.clone();
+        lock(&self.events).push(json!({
+            "type": "tool/code-dispatch-start",
+            "data": {
+                "rootCallId": self.parent_call_id,
+                "parentCallId": self.parent_call_id,
+                "subCallId": sub_call_id,
+                "name": self.name,
+                "arguments": logged_arguments,
+            }
+        }));
+        let output = self
+            .tools
+            .execute(
+                ToolRunContext {
+                    session: self.context.session.clone(),
+                    call: ToolCallId::from(sub_call_id.clone()),
+                    cancellation: self.context.cancellation.clone(),
+                },
+                &self.name,
+                arguments,
+            )
+            .await;
+        lock(&self.events).push(json!({
+            "type": "tool/code-dispatch",
+            "data": {
+                "rootCallId": self.parent_call_id,
+                "parentCallId": self.parent_call_id,
+                "subCallId": sub_call_id,
+                "name": self.name,
+                "arguments": logged_arguments,
+                "isError": output.is_error,
+                "content": output.content,
+            }
+        }));
+        if output.is_error {
+            Err(tool_text(&output))
+        } else {
+            Ok(binding_value(&self.name, &output))
+        }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for RunCode {
+    async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
+        let program = arguments
+            .get("code")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                TessivumError::new(
+                    "INVALID_TOOL_ARGUMENTS",
+                    "code must be a string",
+                    "tools",
+                    json!({"path": "$.code"}),
+                )
+            })?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let next = Arc::new(AtomicU64::new(1));
+        let parent_call_id = context.call.as_str().to_owned();
+        let mut namespace = CodeBindingNamespace::new("tools").error_class(CodeBindingErrorClass {
+            name: "ToolError".into(),
+            member_name_property: "toolName".into(),
+        });
+        for schema in self
+            .tools
+            .schemas()
+            .into_iter()
+            .filter(|schema| schema.name != "run_code")
+        {
+            let name = schema.name;
+            namespace = namespace.function(
+                name.clone(),
+                DispatchBinding {
+                    tools: self.tools.clone(),
+                    context: context.clone(),
+                    name,
+                    parent_call_id: parent_call_id.clone(),
+                    next: next.clone(),
+                    events: events.clone(),
+                },
+            );
+        }
+        let result = self
+            .runtime
+            .run(
+                CodeRunRequest::new(program, vec![namespace])
+                    .cancelled_by(context.cancellation.clone()),
+            )
+            .await
+            .map_err(|error| {
+                TessivumError::new(
+                    "CODE_RUNTIME_FAILED",
+                    error.to_string(),
+                    "tools",
+                    Value::Null,
+                )
+            })?;
+        let dispatches = lock(&events).clone();
+        let metadata = json!({
+            "codeDispatches": dispatches,
+            "logs": result.logs,
+            "failure": result.error,
+        });
+        if let Some(error) = result.error {
+            return Ok(ToolOutput::new(
+                vec![ContentBlock::Text {
+                    text: error.message,
+                }],
+                true,
+                metadata,
+            ));
+        }
+        let value = result.value.unwrap_or(Value::Null);
+        Ok(ToolOutput::new(
+            vec![ContentBlock::Text {
+                text: serde_json::to_string_pretty(&value).expect("JSON values serialize"),
+            }],
+            false,
+            metadata,
+        ))
+    }
+}
+
+fn tool_text(output: &ToolOutput) -> String {
+    let text = output
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        "tool call failed".into()
+    } else {
+        text
+    }
+}
+
+fn binding_value(name: &str, output: &ToolOutput) -> Value {
+    let text = tool_text(output);
+    let mut fields = output.meta.as_object().cloned().unwrap_or_default();
+    fields.insert(
+        "content".into(),
+        serde_json::to_value(&output.content).expect("content blocks serialize"),
+    );
+    fields.insert("text".into(), Value::String(text.clone()));
+    if name == "bash" {
+        fields.insert("stdout".into(), json!({"text": text}));
+    }
+    Value::Object(fields)
 }
 
 #[derive(Clone)]

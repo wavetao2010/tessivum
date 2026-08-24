@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness } from './support'
+import { captureStableAria, RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/models-settings')
 const EMPTY_EXPECTED = join(SNAPSHOT_DIR, 'empty.expected.md')
@@ -34,13 +34,18 @@ test('models settings configures a dormant provider through the native host', as
   try {
     const dialog = await settingsDialog(harness)
     await dialog.getByText('填入各提供方的 API 密钥即可使用其模型。').waitFor({ timeout: 10_000 })
+    const firstRunKey = dialog.getByPlaceholder('输入 API 密钥', { exact: true })
+    if (await firstRunKey.count() !== 0) {
+      await dialog.getByRole('button', { name: '取消', exact: true }).first().click()
+      await waitUntil(() => firstRunKey.count(), count => count === 0, 10_000)
+    }
     const add = dialog.getByRole('button', { name: '添加提供方' })
     await add.waitFor({ timeout: 10_000 })
-    await expect.poll(() => add.isEnabled(), { timeout: 10_000 }).toBe(true)
+    await waitUntil(() => add.isEnabled(), enabled => enabled, 10_000)
     await add.click()
     const pick = dialog.getByLabel('提供方')
     await pick.waitFor({ timeout: 10_000 })
-    await expect.poll(() => pick.locator('option').count(), { timeout: 10_000 }).toBeGreaterThan(30)
+    await waitUntil(() => pick.locator('option').count(), count => count > 30, 10_000)
     const options = await pick.locator('option').allTextContents()
     expect(options).toContain('anthropic')
     expect(options).toContain('minimax-cn')
@@ -48,20 +53,21 @@ test('models settings configures a dormant provider through the native host', as
     await dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).waitFor({ timeout: 10_000 })
     await expectGolden(harness, EMPTY_EXPECTED)
 
-    const key = dialog.getByLabel('API 密钥')
+    const key = dialog.getByRole('textbox', { name: 'API 密钥', exact: true })
     const save = dialog.getByRole('button', { name: '保存', exact: true })
     await key.fill('sk-😀minimax')
     await dialog.getByText('该 API 密钥格式错误，请检查。').waitFor({ timeout: 10_000 })
-    await expect.poll(() => save.isEnabled(), { timeout: 10_000 }).toBe(false)
+    await waitUntil(() => save.isEnabled(), enabled => !enabled, 10_000)
     await key.fill('')
-    await expect.poll(() => save.isEnabled(), { timeout: 10_000 }).toBe(true)
+    await waitUntil(() => save.isEnabled(), enabled => enabled, 10_000)
     expect(await dialog.getByText('该 API 密钥格式错误，请检查。').count()).toBe(0)
 
     await save.click()
     await dialog.getByText('minimax-cn', { exact: true }).first().waitFor({ timeout: 10_000 })
     await dialog.getByText('已保存 minimax-cn。', { exact: true }).waitFor({ timeout: 10_000 })
-    expect(await dialog.getByRole('img', { name: 'API 密钥已配置' }).count()).toBe(0)
-    expect(await dialog.getByRole('img', { name: 'API 密钥缺失' }).count()).toBe(0)
+    const rowCard = (name: string) => dialog.locator('li').filter({ hasText: name }).first()
+    expect(await rowCard('minimax-cn').getByRole('img', { name: 'API 密钥已配置' }).count()).toBe(0)
+    expect(await rowCard('minimax-cn').getByRole('img', { name: 'API 密钥缺失' }).count()).toBe(0)
     let document = await readFile(join(harness.dataDir, 'settings.yaml'), 'utf8')
     expect(document).toContain('minimax-cn: {}')
     expect(document).not.toContain('MINIMAX_CN_API_KEY')
@@ -75,20 +81,22 @@ test('models settings configures a dormant provider through the native host', as
     await dialog.getByRole('button', { name: '编辑 minimax-cn' }).click()
     await dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).fill('sk-e2e-minimax')
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
-    await expect.poll(
+    await waitUntil(
       () => dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).count(),
-      { timeout: 10_000 },
-    ).toBe(0)
+      count => count === 0,
+      10_000,
+    )
     await dialog.getByRole('img', { name: 'API 密钥已配置' }).waitFor({ timeout: 10_000 })
     await dialog.getByText('已保存 minimax-cn。', { exact: true }).waitFor({ timeout: 10_000 })
     document = await readFile(join(harness.dataDir, 'settings.yaml'), 'utf8')
     expect(document).toContain('minimax-cn:')
     expect(document).toContain('apiKeyEnv: MINIMAX_CN_API_KEY')
     expect(document).not.toContain('sk-e2e-minimax')
-    await expect.poll(
+    await waitUntil(
       () => readFile(join(harness.dataDir, 'credentials.yaml'), 'utf8').catch(() => ''),
-      { timeout: 10_000 },
-    ).toContain('MINIMAX_CN_API_KEY: sk-e2e-minimax')
+      document => document.includes('MINIMAX_CN_API_KEY: sk-e2e-minimax'),
+      10_000,
+    )
     expect(await harness.page.content()).not.toContain('sk-e2e-minimax')
 
     await dialog.getByRole('button', { name: '编辑 minimax-cn' }).click()
@@ -97,7 +105,7 @@ test('models settings configures a dormant provider through the native host', as
     await url.waitFor({ timeout: 10_000 })
     await url.fill('https://gateway.minimax.example/v1')
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
-    await expect.poll(() => dialog.getByLabel('API 地址').count(), { timeout: 10_000 }).toBe(0)
+    await waitUntil(() => dialog.getByLabel('API 地址').count(), count => count === 0, 10_000)
     await dialog.getByText('已保存 minimax-cn。', { exact: true }).waitFor({ timeout: 10_000 })
     document = await readFile(join(harness.dataDir, 'settings.yaml'), 'utf8')
     expect(document).toContain('baseURL: https://gateway.minimax.example/v1')
@@ -105,7 +113,7 @@ test('models settings configures a dormant provider through the native host', as
     await expectGolden(harness, CONFIGURED_EXPECTED)
 
     const declare = dialog.getByRole('button', { name: '添加自定义提供方' })
-    await expect.poll(() => declare.isEnabled(), { timeout: 10_000 }).toBe(true)
+    await waitUntil(() => declare.isEnabled(), enabled => enabled, 10_000)
     await declare.click()
     await dialog.getByLabel('Provider ID').fill('acme-gateway')
     await dialog.getByLabel('显示名称').fill('Acme Gateway')
@@ -117,8 +125,7 @@ test('models settings configures a dormant provider through the native host', as
     await dialog.getByText('Acme Gateway', { exact: true }).first().waitFor({ timeout: 10_000 })
     document = await readFile(join(harness.dataDir, 'settings.yaml'), 'utf8')
     expect(document).toContain('acme-gateway:')
-    const rowCard = (name: string) => dialog.locator('li').filter({ hasText: name }).first()
-    await expect.poll(() => rowCard('Acme Gateway').getByText('自定义').count(), { timeout: 10_000 }).toBe(1)
+    await waitUntil(() => rowCard('Acme Gateway').getByText('自定义').count(), count => count === 1, 10_000)
     expect(await rowCard('minimax-cn').getByText('自定义').count()).toBe(0)
     await expectGolden(harness, DECLARED_EXPECTED)
 
@@ -133,7 +140,7 @@ test('models settings configures a dormant provider through the native host', as
     await protocol.selectOption('anthropic-messages')
     await name.fill('Acme 网关')
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
-    await expect.poll(() => dialog.getByLabel('API 协议').count(), { timeout: 10_000 }).toBe(0)
+    await waitUntil(() => dialog.getByLabel('API 协议').count(), count => count === 0, 10_000)
     await dialog.getByText('Acme 网关', { exact: true }).first().waitFor({ timeout: 10_000 })
     await dialog.getByText('已保存 Acme 网关 (acme-gateway)。', { exact: true }).waitFor({ timeout: 10_000 })
     document = await readFile(join(harness.dataDir, 'settings.yaml'), 'utf8')
@@ -149,12 +156,13 @@ test('models settings configures a dormant provider through the native host', as
     await dialog.getByRole('button', { name: '删除 minimax-cn', exact: true }).click()
     await harness.page.getByRole('dialog', { name: '删除 minimax-cn？' })
       .getByRole('button', { name: '删除 minimax-cn', exact: true }).click()
-    await expect.poll(
+    await waitUntil(
       () => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'),
-      { timeout: 10_000 },
-    ).not.toContain('minimax-cn:')
+      document => !document.includes('minimax-cn:'),
+      10_000,
+    )
     expect(await readFile(join(harness.dataDir, 'credentials.yaml'), 'utf8')).not.toContain('MINIMAX_CN_API_KEY')
-    await expect.poll(() => harness?.page.getByRole('dialog', { name: '删除 minimax-cn？' }).count() ?? 0, { timeout: 10_000 }).toBe(0)
+    await waitUntil(() => harness?.page.getByRole('dialog', { name: '删除 minimax-cn？' }).count() ?? 0, count => count === 0, 10_000)
     await harness.page.keyboard.press('Escape')
     harness.assertClean()
   } finally {

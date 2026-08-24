@@ -1,0 +1,201 @@
+diff --git a/packages/client/runtime/src/client/sessions/steering-history.ts b/packages/client/runtime/src/client/sessions/steering-history.ts
+index a28c337..c1f838e 100644
+--- a/packages/client/runtime/src/client/sessions/steering-history.ts
++++ b/packages/client/runtime/src/client/sessions/steering-history.ts
+@@ -15,6 +15,9 @@ interface InboxSplice {
+   readonly removedCount?: number
+   readonly inserted: readonly PendingIdentity[]
+   readonly outcome?: 'canceled'
++  readonly itemId?: string
++  readonly action?: 'steer'
++  readonly message?: PendingIdentity
+ }
+ 
+ /**
+@@ -55,7 +58,15 @@ export class SteeringHistory {
+   }
+ 
+   /** Replay one host-validated inbox splice. */
+-  private applySplice({ target, start, removedCount = 0, inserted, outcome }: InboxSplice): void {
++  private applySplice(splice: InboxSplice): void {
++    if (splice.action === 'steer' && splice.itemId !== undefined && splice.message !== undefined) {
++      const source = this.inbox['next-turn'].findIndex(item => item.id === splice.itemId)
++      if (source >= 0) this.inbox['next-turn'].splice(source, 1)
++      this.inbox['next-step'].push(splice.message)
++      this.claimedNextStep.delete(splice.message.id)
++      return
++    }
++    const { target, start, removedCount = 0, inserted, outcome } = splice
+     const removed = this.inbox[target].splice(start, removedCount, ...inserted)
+     for (const identity of inserted) this.claimedNextStep.delete(identity.id)
+     if (target !== 'next-step' || outcome === 'canceled') return
+diff --git a/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts b/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts
+index 4d8fb6d..692435d 100644
+--- a/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts
++++ b/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts
+@@ -14,6 +14,9 @@ interface InboxSplice {
+   readonly removedCount?: number
+   readonly inserted: readonly InboxIdentity[]
+   readonly outcome?: 'canceled'
++  readonly itemId?: string
++  readonly action?: 'steer'
++  readonly message?: InboxIdentity
+ }
+ 
+ /** Cumulative state after one durable inbox splice. */
+@@ -25,9 +28,20 @@ export interface InboxState {
+ function applySplice(
+   previous: ConversationPreviousContext<InboxState> | undefined,
+   splice: InboxSplice,
++  target: InboxTarget,
+ ): InboxState {
+   const pending = [...(previous?.state.pending ?? [])]
+   const claimed = new Set(previous?.state.claimed ?? [])
++  if (splice.action === 'steer' && splice.itemId !== undefined && splice.message !== undefined) {
++    if (target === 'next-turn') {
++      const source = pending.findIndex(item => item.id === splice.itemId)
++      if (source >= 0) pending.splice(source, 1)
++    } else {
++      pending.push(splice.message)
++      claimed.delete(splice.message.id)
++    }
++    return { pending, claimed }
++  }
+   const removed = pending.splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
+   for (const identity of splice.inserted) claimed.delete(identity.id)
+   if (splice.target === 'next-step' && splice.outcome !== 'canceled') {
+@@ -41,12 +55,12 @@ function inboxDefinition(target: InboxTarget): ConversationNodeDefinition<InboxS
+   return {
+     kind,
+     match: event => event.type === 'agent/inbox/spliced'
+-      && event.data.target === target
++      && (event.data.target === target || (event.data.action === 'steer' && target === 'next-turn'))
+       ? { id: String(event.seq), role: 'start' }
+       : null,
+     start: (_context, match, reader) => {
+       if (match.event.type !== 'agent/inbox/spliced') throw new Error(`${kind} start requires agent/inbox/spliced`)
+-      return applySplice(reader.previous<InboxState>(kind), match.event.data)
++      return applySplice(reader.previous<InboxState>(kind), match.event.data, target)
+     },
+     update: context => context.state,
+     publication: () => 'none',
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx
+index d576aa1..9724c93 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx
+@@ -73,6 +73,7 @@ export function ConversationSessionHeader({
+ 
+   return (
+     <header
++      role="banner"
+       className={clsx(css.header, hideChrome && css.headerHidden)}
+       aria-hidden={hideChrome || undefined}
+     >
+diff --git a/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts b/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
+index 4139a31..7832766 100644
+--- a/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
++++ b/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
+@@ -21,6 +21,9 @@ interface InboxSplice {
+   readonly removedCount?: number
+   readonly inserted: readonly InboxIdentity[]
+   readonly outcome?: 'canceled'
++  readonly itemId?: string
++  readonly action?: 'steer'
++  readonly message?: InboxIdentity
+ }
+ 
+ interface InboxState {
+@@ -36,6 +39,11 @@ function applySplice(
+ ): InboxState {
+   const pending = [...(previous?.state.pending ?? [])]
+   const claimed = new Set(previous?.state.claimed ?? [])
++  if (splice.action === 'steer' && splice.message !== undefined) {
++    pending.push(splice.message)
++    claimed.delete(splice.message.id)
++    return { pending, claimed }
++  }
+   const removed = pending.splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
+   for (const identity of splice.inserted) claimed.delete(identity.id)
+   if (splice.outcome !== 'canceled') {
+diff --git a/packages/client/web-react/src/scoped-slots.tsx b/packages/client/web-react/src/scoped-slots.tsx
+index dea0511..f8d380c 100644
+--- a/packages/client/web-react/src/scoped-slots.tsx
++++ b/packages/client/web-react/src/scoped-slots.tsx
+@@ -544,6 +544,12 @@ function SessionMaybeEntryBody({ entry, ownerProps, info, slotKey, slotInjected,
+  * that must SURVIVE a switch belongs in session-bound sources (machine,
+  * store, hooks) — the existing layering rule, now load-bearing.
+  */
++function blankSession(info: SessionMaybeProvideInfo): boolean {
++  const snapshot = info.hooks.session?.getSnapshot()
++  return typeof snapshot === 'object' && snapshot !== null
++    && 'blank' in snapshot && snapshot.blank === true
++}
++
+ function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext }: {
+   entry: StoredEntry
+   ownerProps: object
+@@ -560,21 +566,28 @@ function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookConte
+   // of the same component re-renders once before children mount, and the
+   // guard conditions make it convergent — StrictMode-safe).
+   const [state, setState] = useState<MaybeIncarnation>(FIRST_INCARNATION)
+-  let { adopted, epoch } = state
++  let { adopted, blank, epoch } = state
++  const nextBlank = blankSession(info)
+   if (info.sessionId !== undefined && adopted === undefined) {
+     // Adoption: same epoch — no remount.
+     adopted = info.sessionId
+-    setState({ adopted, epoch })
++    blank = nextBlank
++    setState({ adopted, blank, epoch })
+   } else if (adopted !== undefined && info.sessionId !== undefined && info.sessionId !== adopted) {
+-    // Post-adoption session switch: next incarnation, born already adopted.
++    // Blank-to-blank workspace selection preserves the resident Hero/composer;
++    // any switch involving conversation history starts a fresh incarnation.
++    if (!blank || !nextBlank) epoch += 1
+     adopted = info.sessionId
+-    epoch += 1
+-    setState({ adopted, epoch })
++    blank = nextBlank
++    setState({ adopted, blank, epoch })
++  } else if (adopted === info.sessionId && blank !== nextBlank) {
++    blank = nextBlank
++    setState({ adopted, blank, epoch })
+   } else if (adopted !== undefined && info.sessionId === undefined) {
+-    // Back to no-session: next incarnation, born blank (adopts anew later).
+     adopted = undefined
++    blank = false
+     epoch += 1
+-    setState({ adopted, epoch })
++    setState({ adopted, blank, epoch })
+   }
+   return (
+     <SessionMaybeEntryBody
+@@ -594,11 +607,13 @@ function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookConte
+ interface MaybeIncarnation {
+   /** Session this incarnation adopted; undefined while born blank and unadopted. */
+   readonly adopted: string | undefined
++  /** Whether the adopted Session is still blank. */
++  readonly blank: boolean
+   /** Incarnation counter — the child key; bumps exactly when an incarnation dies. */
+   readonly epoch: number
+ }
+ 
+-const FIRST_INCARNATION: MaybeIncarnation = { adopted: undefined, epoch: 0 }
++const FIRST_INCARNATION: MaybeIncarnation = { adopted: undefined, blank: false, epoch: 0 }
+ 
+ function RootEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext }: {
+   entry: StoredEntry
+diff --git a/packages/core/agent/src/types.ts b/packages/core/agent/src/types.ts
+index b54e56e..51b3517 100644
+--- a/packages/core/agent/src/types.ts
++++ b/packages/core/agent/src/types.ts
+@@ -22,6 +22,9 @@ declare module '@deepseek-ai/dsh-session/types' {
+       removedCount?: number
+       inserted: UserMessage[]
+       outcome?: 'canceled'
++      itemId?: UserMessage['id']
++      action?: 'steer'
++      message?: UserMessage
+     }
+   }
+ }

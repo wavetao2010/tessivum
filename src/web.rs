@@ -1,8 +1,8 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, Mutex, Weak},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -13,7 +13,20 @@ use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, 
 use tokio::time;
 use url::Url;
 
-use crate::TessivumError;
+use crate::{
+    credentials::{CredentialRef, Credentials},
+    protocol::{SessionEvent, SessionId},
+    session::SessionStore,
+    TessivumError,
+};
+
+tokio::task_local! {
+    static SEARCH_SESSION: SessionId;
+}
+
+pub(crate) fn current_search_session() -> Option<SessionId> {
+    SEARCH_SESSION.try_with(Clone::clone).ok()
+}
 
 /// Stable capability key for provider-neutral web search and fetch.
 pub fn web_service_key() -> ServiceKey {
@@ -77,6 +90,8 @@ pub struct WebSearchSource {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 /// A bounded provider-neutral search response.
@@ -282,6 +297,19 @@ impl WebRuntime {
             result.truncated = true;
         }
         Ok(result)
+    }
+
+    /// Executes a search in the durable session that initiated the tool call.
+    /// Providers can record request facts without adding session identity to their public seam.
+    pub(crate) async fn search_for_session(
+        &self,
+        request: WebSearchRequest,
+        session: SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<WebSearchResult, TessivumError> {
+        SEARCH_SESSION
+            .scope(session, self.search(request, cancellation))
+            .await
     }
 
     /// Selects then calls a fetch provider. HTTP safety checks precede provider selection.
@@ -546,6 +574,345 @@ impl WebFetchProvider for HttpFetchProvider {
         }
         unreachable!("redirect loop returns or fetches")
     }
+}
+pub const DEEPSEEK_SEARCH_PROVIDER: &str = "deepseek-official";
+const DEEPSEEK_SEARCH_BASE_URL: &str = "https://api.deepseek.com/anthropic/v1";
+
+/// DeepSeek's Anthropic-compatible native web-search provider.
+pub struct DeepSeekSearchProvider {
+    client: reqwest::Client,
+    credentials: Arc<Credentials>,
+    sessions: SessionStore,
+    endpoint: Url,
+    api_key_env: CredentialRef,
+    model: String,
+    api_version: String,
+    max_tokens: usize,
+    max_uses: usize,
+}
+
+impl DeepSeekSearchProvider {
+    pub fn new(
+        credentials: Arc<Credentials>,
+        sessions: SessionStore,
+    ) -> Result<Self, TessivumError> {
+        let endpoint = deepseek_search_endpoint()?;
+        let api_key_env = std::env::var("DEEPSEEK_SEARCH_API_KEY_ENV")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "DEEPSEEK_API_KEY".into());
+        let api_key_env = CredentialRef::new(api_key_env).map_err(|error| {
+            web_error(
+                "INVALID_DEEPSEEK_SEARCH_CONFIG",
+                "DeepSeek search API-key reference is invalid",
+                json!({"error": error.to_string()}),
+            )
+        })?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|error| {
+                web_error(
+                    "WEB_PROVIDER_ERROR",
+                    "could not construct DeepSeek search HTTP client",
+                    json!({"error": error.to_string()}),
+                )
+            })?;
+        Ok(Self {
+            client,
+            credentials,
+            sessions,
+            endpoint,
+            api_key_env,
+            model: env_provider("DEEPSEEK_SEARCH_MODEL")
+                .unwrap_or_else(|| "deepseek-v4-flash".into()),
+            api_version: env_provider("DEEPSEEK_SEARCH_API_VERSION")
+                .unwrap_or_else(|| "2023-06-01".into()),
+            max_tokens: positive_env("DEEPSEEK_SEARCH_MAX_TOKENS", 4_096)?,
+            max_uses: positive_env("DEEPSEEK_SEARCH_MAX_USES", 5)?,
+        })
+    }
+
+    fn request_body(&self, query: &str) -> Value {
+        json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": format!("Perform a web search for the query: {query}")}]}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": self.max_uses}],
+        })
+    }
+
+    async fn api_key(&self, cancellation: &CancellationToken) -> Result<String, TessivumError> {
+        let key = tokio::select! {
+            _ = cancellation.cancelled() => return Err(aborted_error()),
+            key = self.credentials.resolve(&self.api_key_env) => key.map_err(|error| web_error(
+                "WEB_PROVIDER_ERROR",
+                "DeepSeek search credential resolution failed",
+                json!({"error": error.to_string()}),
+            ))?,
+        };
+        key.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+            web_error(
+                "WEB_PROVIDER_CREDENTIAL_MISSING",
+                "DeepSeek search has no configured API key",
+                json!({"credential": self.api_key_env.as_str()}),
+            )
+        })
+    }
+
+    async fn record_request(
+        &self,
+        body: Value,
+        cancellation: CancellationToken,
+    ) -> Result<(), TessivumError> {
+        let Some(session_id) = current_search_session() else {
+            return Ok(());
+        };
+        let session = self.sessions.get(&session_id).ok_or_else(|| {
+            web_error(
+                "WEB_SESSION_NOT_FOUND",
+                "searching session is no longer available",
+                json!({"sessionId": session_id}),
+            )
+        })?;
+        let data = json!({
+            "endpoint": self.endpoint.as_str(),
+            "apiVersion": self.api_version,
+            "body": body,
+        });
+        session
+            .append_next(
+                move |seq| SessionEvent {
+                    event_type: "web/deepseek-search-llm-request".into(),
+                    seq,
+                    time: now_millis(),
+                    data,
+                    ignorable: None,
+                    source_event_seqs: None,
+                    surface_op: None,
+                },
+                cancellation,
+            )
+            .await
+            .map_err(|error| {
+                web_error(
+                    "WEB_EVENT_PERSISTENCE_FAILED",
+                    "could not persist DeepSeek search request",
+                    json!({"error": error.to_string()}),
+                )
+            })?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl WebSearchProvider for DeepSeekSearchProvider {
+    fn available(&self) -> Result<bool, TessivumError> {
+        Ok(true)
+    }
+
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<WebSearchResult, TessivumError> {
+        let api_key = self.api_key(&cancellation).await?;
+        if cancellation.is_cancelled() {
+            return Err(aborted_error());
+        }
+        let body = self.request_body(&request.query);
+        self.record_request(body.clone(), cancellation.clone())
+            .await?;
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Err(aborted_error()),
+            response = self.client.post(self.endpoint.clone())
+                .header("x-api-key", &api_key)
+                .header("authorization", format!("Bearer {api_key}"))
+                .header("anthropic-version", &self.api_version)
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .header("user-agent", "deepseek-harness/0.0.1")
+                .json(&body)
+                .send() => response.map_err(|error| web_error(
+                    "WEB_PROVIDER_ERROR",
+                    "DeepSeek search request failed",
+                    json!({"error": error.to_string()}),
+                ))?,
+        };
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let error_body = tokio::select! {
+                _ = cancellation.cancelled() => return Err(aborted_error()),
+                body = response.json::<Value>() => body.ok(),
+            };
+            let message = error_body
+                .as_ref()
+                .and_then(|value| {
+                    value
+                        .pointer("/error/message")
+                        .or_else(|| value.get("message"))
+                })
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("DeepSeek search request was rejected");
+            return Err(web_error(
+                "WEB_PROVIDER_ERROR",
+                message,
+                json!({"status": status}),
+            ));
+        }
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Err(aborted_error()),
+            response = response.json::<Value>() => response.map_err(|error| web_error(
+                "WEB_PROVIDER_ERROR",
+                "DeepSeek returned an unprocessable search response",
+                json!({"error": error.to_string()}),
+            ))?,
+        };
+        map_deepseek_search_response(&response)
+    }
+}
+
+fn deepseek_search_endpoint() -> Result<Url, TessivumError> {
+    let base =
+        env_provider("DEEPSEEK_SEARCH_BASE_URL").unwrap_or_else(|| DEEPSEEK_SEARCH_BASE_URL.into());
+    let mut base = Url::parse(&base).map_err(|error| {
+        web_error(
+            "INVALID_DEEPSEEK_SEARCH_CONFIG",
+            "DeepSeek search base URL is invalid",
+            json!({"error": error.to_string()}),
+        )
+    })?;
+    if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
+        return Err(web_error(
+            "INVALID_DEEPSEEK_SEARCH_CONFIG",
+            "DeepSeek search base URL must be absolute HTTP(S)",
+            json!({"baseURL": base.as_str()}),
+        ));
+    }
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    base.join("messages").map_err(|error| {
+        web_error(
+            "INVALID_DEEPSEEK_SEARCH_CONFIG",
+            "DeepSeek search endpoint is invalid",
+            json!({"error": error.to_string()}),
+        )
+    })
+}
+
+fn positive_env(name: &str, default: usize) -> Result<usize, TessivumError> {
+    let Some(value) = env_provider(name) else {
+        return Ok(default);
+    };
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            web_error(
+                "INVALID_DEEPSEEK_SEARCH_CONFIG",
+                "DeepSeek search numeric settings must be positive integers",
+                json!({"name": name}),
+            )
+        })
+}
+
+fn map_deepseek_search_response(response: &Value) -> Result<WebSearchResult, TessivumError> {
+    let blocks = response
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            web_error(
+                "WEB_PROVIDER_ERROR",
+                "DeepSeek search response has no content blocks",
+                Value::Null,
+            )
+        })?;
+    let mut snippets = BTreeMap::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        for citation in block
+            .get("citations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let (Some(url), Some(snippet)) = (
+                citation.get("url").and_then(Value::as_str),
+                citation.get("cited_text").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            if !url.is_empty() && !snippet.is_empty() {
+                snippets
+                    .entry(url.to_owned())
+                    .or_insert_with(|| snippet.to_owned());
+            }
+        }
+    }
+    let mut found_result = false;
+    let mut seen = BTreeSet::new();
+    let mut sources = Vec::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("web_search_tool_result") {
+            continue;
+        }
+        found_result = true;
+        for item in block
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(url) = item.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            if item.get("type").and_then(Value::as_str) != Some("web_search_result")
+                || url.is_empty()
+                || !seen.insert(url.to_owned())
+            {
+                continue;
+            }
+            sources.push(WebSearchSource {
+                title: item
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                url: url.to_owned(),
+                snippet: snippets.get(url).cloned(),
+                published_at: item
+                    .get("page_age")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            });
+        }
+    }
+    if !found_result {
+        return Err(web_error(
+            "WEB_PROVIDER_ERROR",
+            "DeepSeek returned no web_search_tool_result blocks",
+            Value::Null,
+        ));
+    }
+    Ok(WebSearchResult {
+        sources,
+        truncated: false,
+    })
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().try_into().unwrap_or(u64::MAX)
+        })
 }
 
 fn select_provider<T: ?Sized, R>(

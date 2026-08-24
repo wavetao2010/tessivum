@@ -4,21 +4,32 @@
 //! is a literal match over semantic message text after Unicode case and whitespace
 //! normalization.
 
-use std::{collections::BTreeMap, sync::Arc};
-
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tessivum_core::CancellationToken;
 use thiserror::Error;
 
 use crate::{
-    protocol::{Message, SessionEvent, SessionHeader, SessionId, SurfaceOp},
+    protocol::{
+        ContentBlock, Message, MessageRole, SessionEvent, SessionHeader, SessionId, SurfaceOp,
+    },
     session::{SessionError, SessionPersistence, SessionStore},
 };
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 1_000;
+
+/// Maximum UTF-16 code units accepted by the browser search contract.
+pub const SESSION_SEARCH_QUERY_MAX_CHARS: usize = 500;
+/// Maximum browser-visible search results.
+pub const SESSION_SEARCH_RESULT_LIMIT: usize = 20;
+/// Maximum Unicode code points in a browser-visible snippet.
+pub const SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS: usize = 240;
 
 /// Inclusive numeric range used by session and event filters.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,8 +107,20 @@ pub struct SessionQueryPage<T> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSurfaceEntry {
     pub event_seq: u64,
+    pub event_type: String,
     pub message: Message,
     pub source_event_seqs: Option<Vec<u64>>,
+}
+
+/// One best semantic match for a visible session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSearchMatch {
+    pub session_id: SessionId,
+    pub seq: u64,
+    pub time: u64,
+    pub snippet: String,
+    match_count: usize,
+    document_length: usize,
 }
 
 /// Provenance around a selected log event.
@@ -297,6 +320,84 @@ impl SessionQuery {
             }
         }
         Ok(surface)
+    }
+
+    /// Searches the live-or-cold model-visible message surface for visible sessions.
+    pub async fn search_visible(
+        &self,
+        query: &str,
+        visible: &BTreeSet<SessionId>,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<SessionSearchMatch>, SessionQueryError> {
+        let query = normalize_search_query(query)?;
+        let query = query.chars().collect::<Vec<_>>();
+        let mut matches = Vec::new();
+        for record in self.all_records(cancellation.clone()).await? {
+            check_cancellation(&cancellation)?;
+            if !visible.contains(&record.header.id) {
+                continue;
+            }
+            let times = record
+                .events
+                .iter()
+                .map(|event| (event.seq, event.time))
+                .collect::<BTreeMap<_, _>>();
+            let mut best = None;
+            let mut surface = Vec::new();
+            for event in &record.events {
+                check_cancellation(&cancellation)?;
+                let Some(entry) = surface_entry(event)? else {
+                    continue;
+                };
+                match event.surface_op.as_ref() {
+                    Some(SurfaceOp::Append) => surface.push(entry),
+                    Some(SurfaceOp::Replace { start, end })
+                        if start <= end && *end <= surface.len() as u64 =>
+                    {
+                        surface.splice(*start as usize..*end as usize, std::iter::once(entry));
+                    }
+                    _ => return Err(SessionQueryError::InvalidSurface),
+                }
+            }
+            for entry in surface {
+                if !matches!(
+                    entry.event_type.as_str(),
+                    "user/message" | "assistant/message"
+                ) {
+                    continue;
+                }
+                if !matches!(
+                    entry.message.role,
+                    MessageRole::User | MessageRole::Assistant
+                ) {
+                    continue;
+                }
+                let document = SearchDocument::new(&message_text(&entry.message));
+                let Some((match_count, start, end)) = document.find(&query) else {
+                    continue;
+                };
+                let candidate = SessionSearchMatch {
+                    session_id: record.header.id.clone(),
+                    seq: entry.event_seq,
+                    time: *times
+                        .get(&entry.event_seq)
+                        .unwrap_or(&record.header.created_at),
+                    snippet: document.snippet(start, end),
+                    match_count,
+                    document_length: document.display.len(),
+                };
+                if best.as_ref().is_none_or(|current: &SessionSearchMatch| {
+                    search_order(&candidate, current).is_lt()
+                }) {
+                    best = Some(candidate);
+                }
+            }
+            if let Some(best) = best {
+                matches.push(best);
+            }
+        }
+        matches.sort_by(search_order);
+        Ok(matches)
     }
 
     /// Returns direct source and reverse replacement links around one event.
@@ -608,6 +709,133 @@ fn normalize_value(value: &str) -> String {
     output.trim_end().to_owned()
 }
 
+fn normalize_search_query(value: &str) -> Result<String, SessionQueryError> {
+    if value.contains('\0') {
+        return Err(SessionQueryError::InvalidRequest(
+            "search query must not contain NUL".into(),
+        ));
+    }
+    if value.encode_utf16().count() > SESSION_SEARCH_QUERY_MAX_CHARS {
+        return Err(SessionQueryError::InvalidRequest(format!(
+            "search query exceeds {SESSION_SEARCH_QUERY_MAX_CHARS} UTF-16 code units"
+        )));
+    }
+    normalize_text(value)
+}
+
+fn message_text(message: &Message) -> String {
+    let mut parts = Vec::new();
+    for block in &message.content {
+        content_text(block, &mut parts);
+    }
+    parts
+        .into_iter()
+        .map(|part| part.trim().to_owned())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn content_text(block: &ContentBlock, parts: &mut Vec<String>) {
+    match block {
+        ContentBlock::Text { text } => parts.push(text.clone()),
+        ContentBlock::ToolCall {
+            name, arguments, ..
+        } => {
+            parts.push(name.clone());
+            parts.push(arguments.clone());
+        }
+        ContentBlock::ToolResult { content, .. } => {
+            for block in content {
+                content_text(block, parts);
+            }
+        }
+        ContentBlock::Reasoning { .. } | ContentBlock::Image { .. } => {}
+    }
+}
+
+struct SearchDocument {
+    display: Vec<char>,
+    folded: Vec<char>,
+    folded_to_display: Vec<usize>,
+}
+
+impl SearchDocument {
+    fn new(value: &str) -> Self {
+        let mut result = Self {
+            display: Vec::new(),
+            folded: Vec::new(),
+            folded_to_display: Vec::new(),
+        };
+        for character in value.chars() {
+            if character.is_whitespace() {
+                if result.display.last().is_none_or(|last| *last != ' ') {
+                    let position = result.display.len();
+                    result.display.push(' ');
+                    result.folded.push(' ');
+                    result.folded_to_display.push(position);
+                }
+                continue;
+            }
+            let position = result.display.len();
+            result.display.push(character);
+            for folded in character.to_lowercase() {
+                result.folded.push(folded);
+                result.folded_to_display.push(position);
+            }
+        }
+        if result.display.last() == Some(&' ') {
+            result.display.pop();
+            result.folded.pop();
+            result.folded_to_display.pop();
+        }
+        result
+    }
+
+    fn find(&self, query: &[char]) -> Option<(usize, usize, usize)> {
+        if query.len() > self.folded.len() {
+            return None;
+        }
+        let mut count = 0;
+        let mut first = None;
+        for start in 0..=self.folded.len() - query.len() {
+            if self.folded[start..start + query.len()] == *query {
+                count += 1;
+                first.get_or_insert(start);
+            }
+        }
+        let start = first?;
+        Some((
+            count,
+            self.folded_to_display[start],
+            self.folded_to_display[start + query.len() - 1] + 1,
+        ))
+    }
+
+    fn snippet(&self, start: usize, end: usize) -> String {
+        if self.display.len() <= SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS {
+            return self.display.iter().collect();
+        }
+        let midpoint = start + (end - start) / 2;
+        let begin = midpoint
+            .saturating_sub(SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS / 2)
+            .min(self.display.len() - SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS);
+        self.display[begin..begin + SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS]
+            .iter()
+            .collect()
+    }
+}
+
+fn search_order(left: &SessionSearchMatch, right: &SessionSearchMatch) -> std::cmp::Ordering {
+    right
+        .match_count
+        .cmp(&left.match_count)
+        .then_with(|| left.document_length.cmp(&right.document_length))
+        .then_with(|| right.time.cmp(&left.time))
+        .then_with(|| left.session_id.as_str().cmp(right.session_id.as_str()))
+        .then_with(|| right.seq.cmp(&left.seq))
+}
+
 fn surface_entry(event: &SessionEvent) -> Result<Option<SessionSurfaceEntry>, SessionQueryError> {
     let data = match event.event_type.as_str() {
         "user/message" => Some(event.data.clone()),
@@ -620,6 +848,7 @@ fn surface_entry(event: &SessionEvent) -> Result<Option<SessionSurfaceEntry>, Se
     let message = serde_json::from_value(data).map_err(|_| SessionQueryError::InvalidSurface)?;
     Ok(Some(SessionSurfaceEntry {
         event_seq: event.seq,
+        event_type: event.event_type.clone(),
         message,
         source_event_seqs: event.source_event_seqs.clone(),
     }))

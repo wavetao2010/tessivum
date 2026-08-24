@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, openSeededSession, RustWebHarness, stableAria, waitUntil } from './support'
+import { captureStableAria, materializeRecording, openSeededSession, RustWebHarness, stableAria, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/stats-paged-history')
 const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
@@ -44,6 +44,7 @@ function buildSeed(turns: number): string {
 async function captureStatsAria(harness: RustWebHarness): Promise<string> {
   const base = harness.workspace.split('/').at(-1) ?? harness.workspace
   return stableAria(await captureStableAria(harness.page, '[class*="centerCol"]'))
+    .replaceAll('{{clock}}', '7/25 {{clock}}')
     .split(harness.workspace).join('{{cwd}}')
     .split(base).join('{{workspace}}')
 }
@@ -52,7 +53,7 @@ test('stats-paged-history keeps whole-session counts while native history prepen
   const harness = await RustWebHarness.launch({
     name: 'stats-paged-history-web-e2e',
     locale: 'en-US',
-    beforeStart: candidate => candidate.seedSession(SEED_ID, buildSeed(TURNS)),
+    beforeStart: candidate => candidate.seedSession(SEED_ID, materializeRecording(buildSeed(TURNS))),
   })
   try {
     await openSeededSession(harness, `r${TURNS}`)

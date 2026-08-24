@@ -10,9 +10,10 @@ const REQUIRED_DURABLE_EVENTS: &[&str] = &[
     "job/done",
     "subagent/contained-start",
     "subagent/contained-end",
-    "workflow/run",
-    "workflow/member",
-    "workflow/run-end",
+    "tool-workflow/run-start",
+    "tool-workflow/agent-start",
+    "tool-workflow/agent-end",
+    "tool-workflow/run-end",
 ];
 
 const COMPACTION_LOG_EVENTS: &[&str] =
@@ -26,11 +27,27 @@ fn wire_event(event_type: &str, seq: u64, data: Value) -> Value {
         "data": data,
     })
 }
+fn required_event_data(event_type: &str) -> Value {
+    match event_type {
+        "tool-workflow/run-start" => json!({"runId": "run-1", "name": "workflow"}),
+        "tool-workflow/agent-start" => json!({
+            "runId": "run-1",
+            "seq": 1,
+            "label": "worker",
+            "childId": "child-1",
+        }),
+        "tool-workflow/agent-end" => {
+            json!({"runId": "run-1", "seq": 1, "outcome": "completed"})
+        }
+        "tool-workflow/run-end" => json!({"runId": "run-1", "stopReason": "completed"}),
+        _ => json!({"event": event_type}),
+    }
+}
 
 #[test]
 fn durable_capability_events_validate_without_ignorable_and_round_trip() {
     for (seq, event_type) in REQUIRED_DURABLE_EVENTS.iter().enumerate() {
-        let wire = wire_event(event_type, seq as u64, json!({"event": event_type}));
+        let wire = wire_event(event_type, seq as u64, required_event_data(event_type));
         let event: SessionEvent =
             serde_json::from_value(wire.clone()).expect("durable event envelope deserializes");
 
@@ -143,7 +160,11 @@ fn durable_capability_prefix_round_trips_with_contiguous_sequences() {
         .iter()
         .enumerate()
         .map(|(offset, event_type)| {
-            wire_event(event_type, 100 + offset as u64, json!({"kind": event_type}))
+            wire_event(
+                event_type,
+                100 + offset as u64,
+                required_event_data(event_type),
+            )
         })
         .collect();
     let events: Vec<SessionEvent> = prefix

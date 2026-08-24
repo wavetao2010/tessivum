@@ -75,10 +75,13 @@ impl ToolOutput {
             phase,
             details,
         } = error;
+        let text = if message.starts_with("Error: ") {
+            message.clone()
+        } else {
+            format!("Error: {message}")
+        };
         Self {
-            content: vec![ContentBlock::Text {
-                text: message.clone(),
-            }],
+            content: vec![ContentBlock::Text { text }],
             is_error: true,
             meta: json!({"code": code, "phase": phase, "details": details}),
         }

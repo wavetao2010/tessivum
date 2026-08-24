@@ -1,0 +1,203 @@
+[
+  {
+    "endpoint": "/api/messageFeedback/put",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol",
+          "messageId": "11111111-1111-4111-8111-111111111111",
+          "rating": "invalid-rating",
+          "ifVersion": null
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "error": {
+          "code": "internal",
+          "details": {},
+          "message": "feedback rating must be positive or negative"
+        },
+        "ok": false
+      },
+      "rpcId": "feedback-invalid",
+      "type": "server-response"
+    }
+  },
+  {
+    "endpoint": "/api/messageFeedback/list",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "ok": true,
+        "value": {
+          "ok": true,
+          "value": {
+            "items": []
+          }
+        }
+      },
+      "rpcId": "feedback-list-empty",
+      "type": "server-response"
+    }
+  },
+  {
+    "endpoint": "/api/messageFeedback/put",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol",
+          "messageId": "11111111-1111-4111-8111-111111111111",
+          "rating": "positive",
+          "note": "Useful answer",
+          "ifVersion": null
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "ok": true,
+        "value": {
+          "ok": true,
+          "value": {
+            "createdAt": "{{timestamp}}",
+            "messageId": "11111111-1111-4111-8111-111111111111",
+            "note": "Useful answer",
+            "rating": "positive",
+            "updatedAt": "{{timestamp}}",
+            "version": "{{version}}"
+          }
+        }
+      },
+      "rpcId": "feedback-put",
+      "type": "server-response"
+    }
+  },
+  {
+    "endpoint": "/api/messageFeedback/list",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "ok": true,
+        "value": {
+          "ok": true,
+          "value": {
+            "items": [
+              {
+                "createdAt": "{{timestamp}}",
+                "messageId": "11111111-1111-4111-8111-111111111111",
+                "note": "Useful answer",
+                "rating": "positive",
+                "updatedAt": "{{timestamp}}",
+                "version": "{{version}}"
+              }
+            ]
+          }
+        }
+      },
+      "rpcId": "feedback-list-created",
+      "type": "server-response"
+    }
+  },
+  {
+    "endpoint": "/api/messageFeedback/put",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol",
+          "messageId": "11111111-1111-4111-8111-111111111111",
+          "rating": "negative",
+          "ifVersion": null
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "ok": true,
+        "value": {
+          "error": {
+            "code": "version-conflict",
+            "current": {
+              "createdAt": "{{timestamp}}",
+              "messageId": "11111111-1111-4111-8111-111111111111",
+              "note": "Useful answer",
+              "rating": "positive",
+              "updatedAt": "{{timestamp}}",
+              "version": "{{version}}"
+            }
+          },
+          "ok": false
+        }
+      },
+      "rpcId": "feedback-conflict",
+      "type": "server-response"
+    }
+  },
+  {
+    "endpoint": "/api/messageFeedback/delete",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol",
+          "messageId": "11111111-1111-4111-8111-111111111111",
+          "ifVersion": "{{version}}"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "ok": true,
+        "value": {
+          "ok": true,
+          "value": {
+            "absent": true
+          }
+        }
+      },
+      "rpcId": "feedback-delete",
+      "type": "server-response"
+    }
+  },
+  {
+    "endpoint": "/api/messageFeedback/list",
+    "request": {
+      "args": {
+        "request": {
+          "sessionId": "message-feedback-protocol"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "result": {
+        "ok": true,
+        "value": {
+          "ok": true,
+          "value": {
+            "items": []
+          }
+        }
+      },
+      "rpcId": "feedback-list-deleted",
+      "type": "server-response"
+    }
+  }
+]

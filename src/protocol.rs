@@ -90,6 +90,10 @@ opaque_string_id!(
     /// Opaque provider-issued request identity retained for diagnostics.
     ProviderRequestId
 );
+opaque_string_id!(
+    /// Opaque workflow-run identity preserved verbatim on the wire.
+    WorkflowRunId
+);
 
 /// Durable metadata kept outside a session's append-only event log.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -174,7 +178,7 @@ impl SessionHeader {
 
 /// Serializable provider or transport failure facts.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LlmFailure {
     pub message: String,
     pub code: String,
@@ -188,7 +192,7 @@ pub struct LlmFailure {
 
 impl LlmFailure {
     pub fn validate(&self) -> Result<(), TessivumError> {
-        if self.message.is_empty() || self.code.is_empty() {
+        if self.message.trim().is_empty() || self.code.trim().is_empty() {
             return Err(invalid(
                 "INVALID_LLM_FAILURE",
                 "LLM failure message and code must be non-empty",
@@ -204,8 +208,9 @@ impl LlmFailure {
                 ));
             }
         }
-        if let Some(retry_after_ms) = self.provider_retry_after_ms {
-            check_safe_integer("providerRetryAfterMs", retry_after_ms)?;
+        validate_positive_optional("providerRetryAfterMs", self.provider_retry_after_ms)?;
+        if let Some(request_id) = &self.request_id {
+            validate_nonempty("INVALID_LLM_REQUEST_ID", "requestId", request_id.as_str())?;
         }
         Ok(())
     }
@@ -216,7 +221,8 @@ impl LlmFailure {
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum ContentBlock {
     Text {
@@ -244,7 +250,16 @@ pub enum ContentBlock {
 impl ContentBlock {
     pub fn validate(&self) -> Result<(), TessivumError> {
         match self {
-            Self::ToolResult { content, .. } => {
+            Self::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
+                validate_nonempty(
+                    "INVALID_TOOL_CALL_ID",
+                    "tool-result toolCallId",
+                    tool_call_id.as_str(),
+                )?;
                 for block in content {
                     block.validate()?;
                 }
@@ -256,10 +271,21 @@ impl ContentBlock {
         }
         Ok(())
     }
+
+    pub(crate) fn type_tag(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Reasoning { .. } => "reasoning",
+            Self::Image { .. } => "image",
+            Self::ToolCall { .. } => "tool-call",
+            Self::ToolResult { .. } => "tool-result",
+        }
+    }
 }
 
 /// One named contribution to a snapshot-form plugin message.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextSnapshotSection {
     pub name: String,
     pub text: String,
@@ -282,18 +308,33 @@ pub enum ContextForm {
 #[serde(
     tag = "kind",
     rename_all = "kebab-case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum MessageSource {
-    User,
+    Goal {
+        goal_id: String,
+        revision: u64,
+        round: u64,
+    },
+    User {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_time_zone: Option<String>,
+    },
     Plugin {
         plugin: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compaction_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         form: Option<ContextForm>,
         #[serde(skip_serializing_if = "Option::is_none")]
         sections: Option<Vec<ContextSnapshotSection>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+    },
+    SkillInvocation {
+        name: String,
+        form: ContextForm,
     },
     Model {
         provider: String,
@@ -308,40 +349,105 @@ pub enum MessageSource {
 
 impl MessageSource {
     pub fn validate(&self) -> Result<(), TessivumError> {
-        if let Self::Plugin {
-            form,
-            sections,
-            summary,
-            ..
-        } = self
-        {
-            match form {
-                Some(ContextForm::Snapshot) if sections.is_none() => {
+        match self {
+            Self::Plugin {
+                plugin,
+                compaction_id,
+                form,
+                sections,
+                summary,
+            } => {
+                validate_nonempty("INVALID_MESSAGE_SOURCE", "plugin", plugin)?;
+                if let Some(compaction_id) = compaction_id {
+                    validate_nonempty("INVALID_MESSAGE_SOURCE", "compactionId", compaction_id)?;
+                }
+                match form {
+                    Some(ContextForm::Snapshot) if sections.is_none() => {
+                        return Err(invalid(
+                            "INVALID_MESSAGE_SOURCE",
+                            "snapshot plugin sources require sections",
+                            Value::Null,
+                        ));
+                    }
+                    Some(ContextForm::Notice) if summary.is_none() => {
+                        return Err(invalid(
+                            "INVALID_MESSAGE_SOURCE",
+                            "notice plugin sources require a summary",
+                            Value::Null,
+                        ));
+                    }
+                    Some(ContextForm::Snapshot | ContextForm::Notice)
+                    | Some(
+                        ContextForm::Instructions
+                        | ContextForm::Catalog
+                        | ContextForm::Relay
+                        | ContextForm::Recall,
+                    )
+                    | None => {}
+                }
+            }
+            Self::SkillInvocation { name, form } => {
+                validate_nonempty("INVALID_MESSAGE_SOURCE", "name", name)?;
+                if *form != ContextForm::Instructions {
                     return Err(invalid(
                         "INVALID_MESSAGE_SOURCE",
-                        "snapshot plugin sources require sections",
+                        "skill invocation sources require instructions form",
                         Value::Null,
                     ));
                 }
-                Some(ContextForm::Notice) if summary.is_none() => {
-                    return Err(invalid(
-                        "INVALID_MESSAGE_SOURCE",
-                        "notice plugin sources require a summary",
+            }
+            Self::Model {
+                provider, model, ..
+            } => validate_route(provider, model)?,
+            Self::Tool { call_id } => {
+                validate_nonempty("INVALID_TOOL_CALL_ID", "callId", call_id.as_str())?;
+            }
+            Self::User { client_time_zone } => {
+                if let Some(value) = client_time_zone {
+                    validate_client_time_zone(value)?;
+                }
+            }
+            Self::Goal {
+                goal_id,
+                revision,
+                round,
+            } => {
+                validate_nonempty("INVALID_GOAL_SOURCE", "goalId", goal_id)?;
+                if *revision == 0 || *round == 0 {
+                    return Err(TessivumError::new(
+                        "INVALID_GOAL_SOURCE",
+                        "goal message source revision and round must be positive",
+                        "protocol",
                         Value::Null,
                     ));
                 }
-                Some(ContextForm::Snapshot | ContextForm::Notice)
-                | Some(
-                    ContextForm::Instructions
-                    | ContextForm::Catalog
-                    | ContextForm::Relay
-                    | ContextForm::Recall,
-                )
-                | None => {}
             }
         }
         Ok(())
     }
+}
+
+fn validate_client_time_zone(value: &str) -> Result<(), TessivumError> {
+    if value == "UTC" {
+        return Ok(());
+    }
+    (!value.is_empty()
+        && value.len() <= 64
+        && value.trim() == value
+        && value.contains('/')
+        && !value.contains("..")
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'.' | b'-' | b'/')
+        }))
+    .then_some(())
+    .ok_or_else(|| {
+        TessivumError::new(
+            "INVALID_CLIENT_TIME_ZONE",
+            "clientTimeZone must be UTC or a valid IANA Area/Location name",
+            "protocol",
+            Value::Null,
+        )
+    })
 }
 
 /// Provider-neutral conversation role.
@@ -355,6 +461,7 @@ pub enum MessageRole {
 
 /// One immutable message shared by delivery, durable history, and model requests.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Message {
     pub id: MessageId,
     pub role: MessageRole,
@@ -374,7 +481,7 @@ impl Message {
 
 /// Token accounting for one model call. Cached input is reported separately.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -412,7 +519,8 @@ impl TokenUsage {
 #[serde(
     tag = "kind",
     rename_all = "kebab-case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum FinishReason {
     Stop,
@@ -436,7 +544,8 @@ impl FinishReason {
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum StreamChunk {
     BlockStart {
@@ -475,16 +584,22 @@ pub enum StreamChunk {
 impl StreamChunk {
     pub fn validate(&self) -> Result<(), TessivumError> {
         match self {
-            Self::BlockStart { index, .. }
-            | Self::TextDelta { index, .. }
-            | Self::ReasoningDelta { index, .. }
-            | Self::ToolCallDelta { index, .. }
-            | Self::BlockEnd { index, .. } => check_safe_integer("index", *index),
-            Self::Usage { usage } => usage.validate(),
-            Self::Finish { reason, .. } => reason.validate(),
-        }?;
-        if let Self::BlockEnd { block, .. } = self {
-            block.validate()?;
+            Self::BlockStart { index, block_type } => {
+                check_safe_integer("index", *index)?;
+                validate_block_type(block_type)?;
+            }
+            Self::TextDelta { index, .. } | Self::ReasoningDelta { index, .. } => {
+                check_safe_integer("index", *index)?;
+            }
+            Self::ToolCallDelta { index, .. } => {
+                check_safe_integer("index", *index)?;
+            }
+            Self::BlockEnd { index, block } => {
+                check_safe_integer("index", *index)?;
+                block.validate()?;
+            }
+            Self::Usage { usage } => usage.validate()?,
+            Self::Finish { reason, .. } => reason.validate()?,
         }
         Ok(())
     }
@@ -492,6 +607,7 @@ impl StreamChunk {
 
 /// JSON-schema description of one model-callable tool.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
@@ -500,6 +616,7 @@ pub struct ToolSchema {
 
 impl ToolSchema {
     pub fn validate(&self) -> Result<(), TessivumError> {
+        validate_nonempty("INVALID_TOOL_SCHEMA", "tool schema name", &self.name)?;
         if !self.parameters.is_object() {
             return Err(invalid(
                 "INVALID_TOOL_SCHEMA",
@@ -513,7 +630,7 @@ impl ToolSchema {
 
 /// Provider, model, and sampling values materialized into a request header.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LlmCallConfig {
     pub provider: String,
     pub model: String,
@@ -529,14 +646,23 @@ pub struct LlmCallConfig {
 
 impl LlmCallConfig {
     pub fn validate(&self) -> Result<(), TessivumError> {
+        validate_route(&self.provider, &self.model)?;
+        if let Some(reasoning_effort) = &self.reasoning_effort {
+            validate_nonempty(
+                "INVALID_REASONING_EFFORT",
+                "reasoningEffort",
+                reasoning_effort,
+            )?;
+        }
         validate_temperature(self.temperature)?;
-        validate_positive_optional("maxTokens", self.max_tokens)
+        validate_positive_optional("maxTokens", self.max_tokens)?;
+        validate_stop(self.stop.as_deref())
     }
 }
 
 /// Adapter values that were materialized into a request header.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LlmCallConfigAdapterDefaults {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<bool>,
@@ -553,13 +679,20 @@ impl LlmCallConfigAdapterDefaults {
                 Value::Null,
             ));
         }
+        if self.reasoning_effort.is_none() && self.max_tokens.is_none() {
+            return Err(invalid(
+                "INVALID_ADAPTER_DEFAULTS",
+                "empty adapter default markers must be omitted",
+                Value::Null,
+            ));
+        }
         Ok(())
     }
 }
 
 /// Fully assembled model request. Cancellation is deliberately out of band.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GenerateRequest {
     pub provider: String,
     pub model: String,
@@ -592,15 +725,22 @@ pub enum GeneratePurpose {
 
 impl GenerateRequest {
     pub fn validate(&self) -> Result<(), TessivumError> {
+        validate_route(&self.provider, &self.model)?;
+        if let Some(reasoning_effort) = &self.reasoning_effort {
+            validate_nonempty(
+                "INVALID_REASONING_EFFORT",
+                "reasoningEffort",
+                reasoning_effort,
+            )?;
+        }
         validate_temperature(self.temperature)?;
         validate_positive_optional("maxTokens", self.max_tokens)?;
+        validate_stop(self.stop.as_deref())?;
         for message in &self.messages {
             message.validate()?;
         }
         if let Some(tools) = &self.tools {
-            for tool in tools {
-                tool.validate()?;
-            }
+            validate_tools(tools)?;
         }
         Ok(())
     }
@@ -740,6 +880,60 @@ impl<'de> Deserialize<'de> for SurfaceOp {
         }
     }
 }
+/// Canonical terminal outcome for one durable workflow member.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowAgentOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// Canonical terminal reason for one durable workflow run.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowStopReason {
+    Completed,
+    Cancelled,
+    Error,
+}
+
+/// Opens one durable top-level workflow run record.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolWorkflowRunStartData {
+    pub run_id: WorkflowRunId,
+    pub name: String,
+}
+
+/// Records one workflow member after its child session is published.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolWorkflowAgentStartData {
+    pub run_id: WorkflowRunId,
+    pub seq: u64,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub child_id: SessionId,
+}
+
+/// Settles one previously started workflow member.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolWorkflowAgentEndData {
+    pub run_id: WorkflowRunId,
+    pub seq: u64,
+    pub outcome: WorkflowAgentOutcome,
+}
+
+/// Settles one workflow run after its live resources reach quiescence.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolWorkflowRunEndData {
+    pub run_id: WorkflowRunId,
+    pub stop_reason: WorkflowStopReason,
+}
 
 /// A JSON-lossless append-only session event envelope.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -779,6 +973,7 @@ impl SessionEvent {
                 json!({"type": self.event_type}),
             ));
         }
+        validate_tool_workflow_event(&self.event_type, &self.data)?;
 
         if is_surface_event_type(&self.event_type) {
             let surface_op = self.surface_op.as_ref().ok_or_else(|| {
@@ -859,7 +1054,7 @@ impl TodoItem {
 
 /// Full state required to reconstruct the next model request.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EpochHeader {
     pub config: LlmCallConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -876,10 +1071,18 @@ impl EpochHeader {
         if let Some(adapter_defaults) = &self.adapter_defaults {
             adapter_defaults.validate()?;
         }
+        if let Some(system) = &self.system {
+            validate_nonempty("INVALID_EPOCH_HEADER", "system", system)?;
+        }
         if let Some(tools) = &self.tools {
-            for tool in tools {
-                tool.validate()?;
+            if tools.is_empty() {
+                return Err(invalid(
+                    "INVALID_EPOCH_HEADER",
+                    "empty tool snapshots must be omitted",
+                    Value::Null,
+                ));
             }
+            validate_tools(tools)?;
         }
         Ok(())
     }
@@ -887,7 +1090,7 @@ impl EpochHeader {
 
 /// Registration-bound model route metadata for the next request.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RequestContext {
     pub provider: String,
     pub model: String,
@@ -897,6 +1100,7 @@ pub struct RequestContext {
 
 impl RequestContext {
     pub fn validate(&self) -> Result<(), TessivumError> {
+        validate_route(&self.provider, &self.model)?;
         validate_positive_optional("contextWindow", self.context_window)
     }
 }
@@ -938,12 +1142,17 @@ pub struct InitializeResult {
 pub struct SessionPromptParams {
     pub session_id: SessionId,
     pub content_blocks: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_time_zone: Option<String>,
 }
 
 impl SessionPromptParams {
     pub fn validate(&self) -> Result<(), TessivumError> {
         for block in &self.content_blocks {
             block.validate()?;
+        }
+        if let Some(value) = &self.client_time_zone {
+            validate_client_time_zone(value)?;
         }
         Ok(())
     }
@@ -1045,25 +1254,115 @@ fn is_known_event_type(event_type: &str) -> bool {
             | "user/message"
             | "assistant/chunk"
             | "assistant/message"
+            | "agent/inbox/enqueued"
+            | "agent/inbox/spliced"
             | "tool/call"
             | "tool/result"
+            | "tool/code-dispatch-start"
+            | "tool/code-dispatch"
             | "todo/write"
+            | "cordis/dynamic"
+            | "schedule/change"
             | "goal/change"
             | "plan/change"
+            | "plan/mode"
+            | "command/run"
+            | "command/done"
+            | "feedback/record"
+            | "permission/preset"
+            | "sandbox/mode"
             | "approval/policy"
             | "approval/asked"
             | "approval/decided"
+            | "question/asked"
+            | "question/resolved"
             | "job/done"
             | "subagent/contained-start"
             | "subagent/contained-end"
-            | "workflow/run"
-            | "workflow/member"
-            | "workflow/run-end"
+            | "tool-workflow/run-start"
+            | "tool-workflow/agent-start"
+            | "tool-workflow/agent-end"
+            | "tool-workflow/run-end"
             | "request/header"
             | "request/context"
+            | "llm/retry"
+            | "llm/retry-started"
             | "session/model-selected"
+            | "session/title"
+            | "web/deepseek-search-llm-request"
             | "session/end-seed"
     )
+}
+fn validate_tool_workflow_event(event_type: &str, data: &Value) -> Result<(), TessivumError> {
+    match event_type {
+        "tool-workflow/run-start" => {
+            let data: ToolWorkflowRunStartData = workflow_event_data(event_type, data)?;
+            workflow_nonempty("runId", data.run_id.as_str())?;
+            workflow_nonempty("name", &data.name)
+        }
+        "tool-workflow/agent-start" => {
+            if data.get("phase").is_some_and(Value::is_null) {
+                return Err(invalid(
+                    "INVALID_TOOL_WORKFLOW_EVENT",
+                    "tool-workflow agent phase must be omitted or a string",
+                    json!({"type": event_type}),
+                ));
+            }
+            let data: ToolWorkflowAgentStartData = workflow_event_data(event_type, data)?;
+            workflow_nonempty("runId", data.run_id.as_str())?;
+            check_safe_integer("tool-workflow.agent-start.seq", data.seq)?;
+            if data.seq == 0 {
+                return Err(invalid(
+                    "INVALID_TOOL_WORKFLOW_EVENT",
+                    "tool-workflow agent sequence must be positive",
+                    json!({"type": event_type, "seq": data.seq}),
+                ));
+            }
+            workflow_nonempty("childId", data.child_id.as_str())
+        }
+        "tool-workflow/agent-end" => {
+            let data: ToolWorkflowAgentEndData = workflow_event_data(event_type, data)?;
+            workflow_nonempty("runId", data.run_id.as_str())?;
+            check_safe_integer("tool-workflow.agent-end.seq", data.seq)?;
+            if data.seq == 0 {
+                return Err(invalid(
+                    "INVALID_TOOL_WORKFLOW_EVENT",
+                    "tool-workflow agent sequence must be positive",
+                    json!({"type": event_type, "seq": data.seq}),
+                ));
+            }
+            Ok(())
+        }
+        "tool-workflow/run-end" => {
+            let data: ToolWorkflowRunEndData = workflow_event_data(event_type, data)?;
+            workflow_nonempty("runId", data.run_id.as_str())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn workflow_event_data<'a, T>(event_type: &str, data: &'a Value) -> Result<T, TessivumError>
+where
+    T: Deserialize<'a>,
+{
+    T::deserialize(data).map_err(|error| {
+        invalid(
+            "INVALID_TOOL_WORKFLOW_EVENT",
+            "tool-workflow event data does not match its canonical schema",
+            json!({"type": event_type, "error": error.to_string()}),
+        )
+    })
+}
+
+fn workflow_nonempty(field: &str, value: &str) -> Result<(), TessivumError> {
+    if value.is_empty() {
+        return Err(invalid(
+            "INVALID_TOOL_WORKFLOW_EVENT",
+            "tool-workflow identity fields must not be empty",
+            json!({"field": field}),
+        ));
+    }
+    Ok(())
 }
 
 fn is_surface_event_type(event_type: &str) -> bool {
@@ -1093,8 +1392,8 @@ fn validate_positive_optional(name: &str, value: Option<u64>) -> Result<(), Tess
         check_safe_integer(name, value)?;
         if value == 0 {
             return Err(invalid(
-                "INVALID_NUMERIC_VALUE",
-                "optional numeric limits must be positive when present",
+                "INVALID_POSITIVE_VALUE",
+                "optional numeric protocol fields must be positive when present",
                 json!({"field": name, "value": value}),
             ));
         }
@@ -1109,6 +1408,73 @@ fn validate_temperature(temperature: Option<f64>) -> Result<(), TessivumError> {
                 "INVALID_TEMPERATURE",
                 "temperature must be finite",
                 Value::Null,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_route(provider: &str, model: &str) -> Result<(), TessivumError> {
+    if provider.trim().is_empty() || model.trim().is_empty() {
+        return Err(invalid(
+            "INVALID_LLM_ROUTE",
+            "provider and model must be non-empty",
+            Value::Null,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_nonempty(code: &str, field: &str, value: &str) -> Result<(), TessivumError> {
+    if value.trim().is_empty() {
+        return Err(invalid(
+            code,
+            "required protocol fields must be non-empty",
+            json!({"field": field}),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_block_type(block_type: &str) -> Result<(), TessivumError> {
+    if matches!(
+        block_type,
+        "text" | "reasoning" | "image" | "tool-call" | "tool-result"
+    ) {
+        Ok(())
+    } else {
+        Err(invalid(
+            "INVALID_STREAM_BLOCK_TYPE",
+            "blockType must name a known content block type",
+            json!({"blockType": block_type}),
+        ))
+    }
+}
+
+fn validate_stop(stop: Option<&[String]>) -> Result<(), TessivumError> {
+    if let Some(stop) = stop {
+        if stop.is_empty() {
+            return Err(invalid(
+                "INVALID_STOP_SEQUENCES",
+                "empty stop sequences must be omitted",
+                Value::Null,
+            ));
+        }
+        for sequence in stop {
+            validate_nonempty("INVALID_STOP_SEQUENCES", "stop", sequence)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_tools(tools: &[ToolSchema]) -> Result<(), TessivumError> {
+    for (index, tool) in tools.iter().enumerate() {
+        tool.validate()?;
+        if tools[..index].iter().any(|prior| prior.name == tool.name) {
+            return Err(invalid(
+                "DUPLICATE_TOOL_SCHEMA",
+                "tool schema names must be unique within a request snapshot",
+                json!({"name": tool.name}),
             ));
         }
     }

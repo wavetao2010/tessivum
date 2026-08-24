@@ -19,6 +19,7 @@ const SERVICE_CATALOG: &[(&str, &[&str])] = &[
     ("credentials@1", &["describe"]),
     ("logger@1", &["log"]),
     ("settings@1", &["describe"]),
+    ("systemPrompt@1", &["assemble"]),
     ("tools@1", &["schemas"]),
 ];
 

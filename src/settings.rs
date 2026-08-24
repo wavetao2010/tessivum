@@ -32,6 +32,14 @@ pub const LLM_PI_AI_NAMESPACE: &str = "llm-pi-ai";
 pub const AGENT_DEFAULT_MODEL_NAMESPACE: &str = "agent-default-model";
 
 pub type SettingPath = Vec<String>;
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingsApplies {
+    #[default]
+    Live,
+    Restart,
+}
+
 pub type SettingsValidator = Arc<dyn Fn(&Value) -> Result<(), TessivumError> + Send + Sync>;
 
 #[async_trait]
@@ -41,6 +49,12 @@ pub trait SettingsProvider: Send + Sync {
     fn writable(&self) -> bool {
         true
     }
+    fn document_path(&self) -> Option<PathBuf> {
+        None
+    }
+    async fn prepare_document(&self) -> Result<Option<PathBuf>, SettingsError> {
+        Ok(self.document_path())
+    }
 }
 
 pub struct SettingsRegistration {
@@ -48,6 +62,7 @@ pub struct SettingsRegistration {
     pub schema: Value,
     pub defaults: Value,
     pub base: Value,
+    pub applies: SettingsApplies,
     pub secret_paths: Vec<SettingPath>,
     pub validator: Option<SettingsValidator>,
 }
@@ -57,6 +72,7 @@ impl fmt::Debug for SettingsRegistration {
         f.debug_struct("SettingsRegistration")
             .field("namespace", &self.namespace)
             .field("secret_path_count", &self.secret_paths.len())
+            .field("applies", &self.applies)
             .field("has_validator", &self.validator.is_some())
             .finish()
     }
@@ -69,6 +85,7 @@ impl SettingsRegistration {
             schema,
             defaults,
             base,
+            applies: SettingsApplies::Live,
             secret_paths: Vec::new(),
             validator: None,
         }
@@ -79,6 +96,10 @@ impl SettingsRegistration {
     }
     pub fn with_secret_paths(mut self, secret_paths: Vec<SettingPath>) -> Self {
         self.secret_paths = secret_paths;
+        self
+    }
+    pub fn with_applies(mut self, applies: SettingsApplies) -> Self {
+        self.applies = applies;
         self
     }
 }
@@ -106,6 +127,7 @@ pub struct SettingsDescriptor {
     pub defaults: Value,
     pub base: Value,
     pub user: Value,
+    pub applies: SettingsApplies,
     pub resolved: Value,
     pub secret_paths: Vec<SettingPath>,
     #[serde(skip)]
@@ -299,6 +321,13 @@ impl Settings {
             .map(|namespace| self.describe(&namespace))
             .collect()
     }
+    pub fn document_path(&self) -> Option<PathBuf> {
+        self.provider.document_path()
+    }
+
+    pub async fn prepare_document(&self) -> Result<Option<PathBuf>, SettingsError> {
+        self.provider.prepare_document().await
+    }
     pub fn user(&self, namespace: &str) -> Result<Value, SettingsError> {
         Ok(lock(&self.state(namespace)?.data).user.clone())
     }
@@ -313,6 +342,7 @@ impl Settings {
             defaults: redact(&state.registration.defaults, &secret_paths),
             base: redact(&state.registration.base, &secret_paths),
             user: redact(&data.user, &secret_paths),
+            applies: state.registration.applies,
             resolved: redact(&data.resolved, &secret_paths),
             secret_set: secret_paths
                 .iter()
@@ -684,6 +714,34 @@ impl YamlSettingsProvider {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    pub fn document_path(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
+    }
+
+    pub async fn prepare_document(&self) -> Result<Option<PathBuf>, SettingsError> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).await.map_err(|error| {
+            SettingsError::Persistence(format!("create settings directory: {error}"))
+        })?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        match options.open(&self.path).await {
+            Ok(file) => file.sync_all().await.map_err(|error| {
+                SettingsError::Persistence(format!("sync settings document: {error}"))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(SettingsError::Persistence(format!(
+                    "create settings document: {error}"
+                )))
+            }
+        }
+        Ok(Some(self.path.clone()))
+    }
     async fn read_document(&self) -> Result<BTreeMap<String, Value>, SettingsError> {
         let text = match fs::read_to_string(&self.path).await {
             Ok(text) => text,
@@ -778,15 +836,38 @@ impl SettingsProvider for YamlSettingsProvider {
     fn writable(&self) -> bool {
         self.writable
     }
+    fn document_path(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
+    }
+    async fn prepare_document(&self) -> Result<Option<PathBuf>, SettingsError> {
+        YamlSettingsProvider::prepare_document(self).await
+    }
 }
 
 fn ensure_namespace(namespace: &str) -> Result<(), SettingsError> {
-    let mut bytes = namespace.bytes();
-    let Some(first) = bytes.next() else {
+    if let Some(scoped) = namespace.strip_prefix('@') {
+        let Some((scope, name)) = scoped.split_once('/') else {
+            return Err(SettingsError::InvalidNamespace(namespace.to_owned()));
+        };
+        if valid_namespace_segment(scope) && valid_namespace_segment(name) {
+            return Ok(());
+        }
         return Err(SettingsError::InvalidNamespace(namespace.to_owned()));
+    }
+    if valid_namespace_segment(namespace) {
+        Ok(())
+    } else {
+        Err(SettingsError::InvalidNamespace(namespace.to_owned()))
+    }
+}
+
+fn valid_namespace_segment(segment: &str) -> bool {
+    let mut bytes = segment.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
     };
     if !first.is_ascii_lowercase() {
-        return Err(SettingsError::InvalidNamespace(namespace.to_owned()));
+        return false;
     }
     let mut separator = false;
     for byte in bytes {
@@ -795,13 +876,10 @@ fn ensure_namespace(namespace: &str) -> Result<(), SettingsError> {
         } else if byte == b'-' && !separator {
             separator = true;
         } else {
-            return Err(SettingsError::InvalidNamespace(namespace.to_owned()));
+            return false;
         }
     }
-    if separator {
-        return Err(SettingsError::InvalidNamespace(namespace.to_owned()));
-    }
-    Ok(())
+    !separator
 }
 fn validate_secret_paths(paths: &[SettingPath]) -> Result<(), SettingsError> {
     let mut seen = BTreeSet::new();

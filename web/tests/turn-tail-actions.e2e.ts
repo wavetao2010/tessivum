@@ -25,7 +25,7 @@ function parseEvent(line: string): Event {
 }
 
 async function fixtureUserPrompts(): Promise<string[]> {
-  return (await readFile(FIXTURE, 'utf8')).trim().split('\n').flatMap((line) => {
+  return (await readFile(FIXTURE, 'utf8')).trim().split('\n').slice(1).flatMap((line) => {
     const event = parseEvent(line)
     const source = record(event.data.source) ? event.data.source : undefined
     const content = Array.isArray(event.data.content) ? event.data.content : []
@@ -61,7 +61,10 @@ test('turn-tail-actions withholds assistant actions until the parked turn ends',
 
     await waitUntil(async () => existsSync(marker), Boolean, 20_000)
     await harness.page.getByText(NARRATION, { exact: true }).waitFor({ timeout: 10_000 })
-    await harness.page.getByRole('status').filter({ hasText: 'Deep diving...' }).waitFor({ timeout: 10_000 })
+    expect(await harness.page.getByText(NARRATION, { exact: true }).count()).toBe(1)
+    const deepDiving = harness.page.getByRole('status').filter({ hasText: 'Deep diving...' })
+    await deepDiving.waitFor({ timeout: 10_000 })
+    expect(await deepDiving.isVisible()).toBe(true)
     const copies = harness.page.getByRole('button', { name: 'Copy' })
     await waitUntil(() => copies.count(), count => count === 1, 10_000)
     expect(await harness.page.getByRole('button', { name: 'Branch into a new conversation' }).count()).toBe(0)

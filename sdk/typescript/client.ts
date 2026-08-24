@@ -17,6 +17,7 @@ export interface InitializeResult {
 export interface SessionPromptParams {
   sessionId: string;
   contentBlocks: unknown[];
+  clientTimeZone?: string;
 }
 
 export interface SessionPromptResult {

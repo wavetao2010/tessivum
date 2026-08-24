@@ -1,5 +1,9 @@
 use serde_json::{json, Value};
-use tessivum::protocol::{ProviderRequestId, SessionEvent, SessionHeader, StreamChunk, SurfaceOp};
+use tessivum::protocol::{
+    ContentBlock, EpochHeader, FinishReason, LlmCallConfig, LlmCallConfigAdapterDefaults,
+    LlmFailure, Message, MessageId, MessageRole, MessageSource, ProviderRequestId, RequestContext,
+    SessionEvent, SessionHeader, StreamChunk, SurfaceOp, TokenUsage, ToolCallId, ToolSchema,
+};
 
 const EXPECTED_EVENTS: &str = include_str!("../fixtures/headless/expected-events.json");
 const RECORDED_REPLAY: &str = include_str!("../fixtures/headless/recorded-replay.jsonl");
@@ -206,4 +210,292 @@ fn validation_rejects_nonzero_format_negative_sequences_and_misplaced_surface_me
     let wrongly_surfaced: SessionEvent = serde_json::from_value(wrongly_surfaced)
         .expect("surface metadata is checked by SessionEvent validation");
     assert!(wrongly_surfaced.validate().is_err());
+}
+
+#[test]
+fn llm_chunks_round_trip_every_variant_and_reject_provider_leakage() {
+    let usage = TokenUsage {
+        input_tokens: 11,
+        output_tokens: 7,
+        cache_read_tokens: Some(3),
+        cache_write_tokens: Some(2),
+        reasoning_tokens: Some(5),
+    };
+    let failure = LlmFailure {
+        message: "provider busy".into(),
+        code: "RATE_LIMIT".into(),
+        status: Some(429),
+        provider_retry_after_ms: Some(250),
+        request_id: Some("req-7".into()),
+    };
+    let chunks = vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: "tool-call".into(),
+        },
+        StreamChunk::TextDelta {
+            index: 1,
+            text: "visible".into(),
+        },
+        StreamChunk::ReasoningDelta {
+            index: 2,
+            text: "thinking".into(),
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: ToolCallId::from("call-1"),
+            name: Some("lookup".into()),
+            arguments_delta: "{\"q\":\"rust\"}".into(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: ToolCallId::from("call-1"),
+                name: "lookup".into(),
+                arguments: "{\"q\":\"rust\"}".into(),
+            },
+        },
+        StreamChunk::Usage {
+            usage: usage.clone(),
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::Stop,
+            replay_state: Some(json!({"cursor": [1, 2, 3]})),
+        },
+    ];
+    for chunk in &chunks {
+        chunk.validate().expect("known chunk validates");
+        let wire = serde_json::to_value(chunk).expect("chunk serializes");
+        let round_trip: StreamChunk = serde_json::from_value(wire.clone()).expect("chunk parses");
+        assert_eq!(round_trip, *chunk);
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), wire);
+    }
+    assert_eq!(
+        serde_json::to_value(&chunks[3]).unwrap(),
+        json!({
+            "type":"tool-call-delta",
+            "index":0,
+            "id":"call-1",
+            "name":"lookup",
+            "argumentsDelta":"{\"q\":\"rust\"}"
+        })
+    );
+    for reason in [
+        FinishReason::Stop,
+        FinishReason::ToolCalls,
+        FinishReason::MaxTokens,
+        FinishReason::Error {
+            failure: failure.clone(),
+        },
+        FinishReason::Aborted { failure },
+    ] {
+        let chunk = StreamChunk::Finish {
+            reason,
+            replay_state: None,
+        };
+        chunk.validate().expect("terminal reason validates");
+        let wire = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(serde_json::from_value::<StreamChunk>(wire).unwrap(), chunk);
+    }
+
+    assert!(serde_json::from_value::<StreamChunk>(json!({
+        "type":"text-delta", "index":0, "text":"x", "providerMetadata":{}
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<StreamChunk>(json!({
+        "type":"finish",
+        "reason":{"kind":"error","failure":{"message":"busy","code":"RATE_LIMIT","vendor":{"retryable":true}}}
+    }))
+    .is_err());
+    assert_eq!(
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: "unknown".into(),
+        }
+        .validate()
+        .unwrap_err()
+        .code,
+        "INVALID_STREAM_BLOCK_TYPE"
+    );
+    let incomplete_tool_identity = StreamChunk::ToolCallDelta {
+        index: 0,
+        id: ToolCallId::from(""),
+        name: None,
+        arguments_delta: String::new(),
+    };
+    incomplete_tool_identity
+        .validate()
+        .expect("raw adapter identity is lossless");
+    assert_eq!(
+        serde_json::to_value(incomplete_tool_identity).unwrap()["id"],
+        json!("")
+    );
+    assert_eq!(
+        LlmFailure {
+            message: "retry immediately".into(),
+            code: "RATE_LIMIT".into(),
+            status: None,
+            provider_retry_after_ms: Some(0),
+            request_id: None,
+        }
+        .validate()
+        .unwrap_err()
+        .code,
+        "INVALID_POSITIVE_VALUE"
+    );
+}
+
+#[test]
+fn model_message_blocks_round_trip_without_provider_fields() {
+    let blocks = vec![
+        ContentBlock::Text {
+            text: "visible".into(),
+        },
+        ContentBlock::Reasoning {
+            text: "private reasoning".into(),
+        },
+        ContentBlock::Image {
+            attachment: json!({"id":"attachment-1","mediaType":"image/png"}),
+        },
+        ContentBlock::ToolCall {
+            id: ToolCallId::from("call-1"),
+            name: "lookup".into(),
+            arguments: "{\"query\":\"rust\"}".into(),
+        },
+        ContentBlock::ToolResult {
+            tool_call_id: ToolCallId::from("call-1"),
+            content: vec![ContentBlock::Text {
+                text: "result".into(),
+            }],
+            is_error: Some(false),
+        },
+    ];
+    let message = Message {
+        id: MessageId::from("message-1"),
+        role: MessageRole::Assistant,
+        content: blocks,
+        source: MessageSource::Model {
+            provider: "neutral-route".into(),
+            model: "model-a".into(),
+            replay_state: Some(json!({"cursor":"opaque"})),
+        },
+    };
+    message.validate().expect("model message validates");
+    let wire = serde_json::to_value(&message).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Message>(wire.clone()).unwrap(),
+        message
+    );
+    let mut leaked = wire;
+    leaked["source"]["providerPayload"] = json!({"trace":"private"});
+    assert!(serde_json::from_value::<Message>(leaked).is_err());
+}
+
+#[test]
+fn prepared_header_is_exact_config_tool_snapshot_and_context_is_separate() {
+    let tool = ToolSchema {
+        name: "lookup".into(),
+        description: "Fetch one result".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        }),
+    };
+    let header = EpochHeader {
+        config: LlmCallConfig {
+            provider: "neutral-route".into(),
+            model: "model-a".into(),
+            reasoning_effort: Some("high".into()),
+            temperature: Some(0.2),
+            max_tokens: Some(8192),
+            stop: Some(vec!["<END>".into()]),
+        },
+        adapter_defaults: Some(LlmCallConfigAdapterDefaults {
+            reasoning_effort: Some(true),
+            max_tokens: Some(true),
+        }),
+        system: Some("Follow the request.".into()),
+        tools: Some(vec![tool.clone()]),
+    };
+    header.validate().expect("prepared header validates");
+    assert_eq!(
+        serde_json::to_value(&header).unwrap(),
+        json!({
+            "config": {
+                "provider": "neutral-route",
+                "model": "model-a",
+                "reasoningEffort": "high",
+                "temperature": 0.2,
+                "maxTokens": 8192,
+                "stop": ["<END>"]
+            },
+            "adapterDefaults": {"reasoningEffort": true, "maxTokens": true},
+            "system": "Follow the request.",
+            "tools": [{
+                "name": "lookup",
+                "description": "Fetch one result",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }]
+        })
+    );
+    let round_trip: EpochHeader = serde_json::from_value(serde_json::to_value(&header).unwrap())
+        .expect("prepared header parses");
+    assert_eq!(round_trip, header);
+
+    let context = RequestContext {
+        provider: "neutral-route".into(),
+        model: "model-a".into(),
+        context_window: Some(128_000),
+    };
+    context
+        .validate()
+        .expect("separate route context validates");
+    assert_eq!(
+        serde_json::to_value(context).unwrap(),
+        json!({"provider":"neutral-route", "model":"model-a", "contextWindow":128000})
+    );
+
+    let mut duplicate = header.clone();
+    duplicate.tools = Some(vec![tool.clone(), tool]);
+    assert_eq!(
+        duplicate.validate().unwrap_err().code,
+        "DUPLICATE_TOOL_SCHEMA"
+    );
+    let mut leaked = serde_json::to_value(&header).unwrap();
+    leaked["providerOptions"] = json!({"temperatureMode":"vendor-private"});
+    assert!(serde_json::from_value::<EpochHeader>(leaked).is_err());
+
+    let mut empty_system = header.clone();
+    empty_system.system = Some(String::new());
+    assert_eq!(
+        empty_system.validate().unwrap_err().code,
+        "INVALID_EPOCH_HEADER"
+    );
+    let mut empty_tools = header.clone();
+    empty_tools.tools = Some(Vec::new());
+    assert_eq!(
+        empty_tools.validate().unwrap_err().code,
+        "INVALID_EPOCH_HEADER"
+    );
+    let mut invalid_stop = header.config.clone();
+    invalid_stop.stop = Some(vec![String::new()]);
+    assert_eq!(
+        invalid_stop.validate().unwrap_err().code,
+        "INVALID_STOP_SEQUENCES"
+    );
+    assert_eq!(
+        LlmCallConfigAdapterDefaults {
+            reasoning_effort: None,
+            max_tokens: None,
+        }
+        .validate()
+        .unwrap_err()
+        .code,
+        "INVALID_ADAPTER_DEFAULTS"
+    );
 }

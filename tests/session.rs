@@ -367,6 +367,83 @@ async fn cold_restore_repairs_one_orphan_but_live_restore_rejects_it() {
 }
 
 #[tokio::test]
+async fn cold_restore_closes_each_unsettled_tool_before_its_step_and_turn() {
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());
+    let writer = SessionStore::new(Arc::clone(&persistence));
+    let session = writer
+        .create(header("tool-orphan", None), cancellation())
+        .await
+        .unwrap();
+    for (event_type, data, source_event_seqs, surface_op) in [
+        ("turn/start", json!({"turn": 1}), None, None),
+        ("step/start", json!({"turn": 1, "step": 1}), None, None),
+        (
+            "assistant/message",
+            json!({
+                "turn": 1,
+                "step": 1,
+                "message": {
+                    "id": "assistant",
+                    "role": "assistant",
+                    "content": [{"type": "tool-call", "id": "call-1", "name": "write", "arguments": "{}"}],
+                    "source": {"kind": "model", "provider": "test", "model": "model"},
+                },
+            }),
+            Some(vec![0]),
+            Some(SurfaceOp::Append),
+        ),
+        (
+            "tool/call",
+            json!({"turn": 1, "step": 1, "callId": "call-1", "name": "write", "arguments": "{}"}),
+            None,
+            None,
+        ),
+    ] {
+        session
+            .append(
+                event(
+                    event_type,
+                    session.next_seq().unwrap(),
+                    data,
+                    source_event_seqs,
+                    surface_op,
+                ),
+                cancellation(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let restored = SessionStore::new(persistence)
+        .restore(
+            &SessionId::from("tool-orphan"),
+            RestoreMode::Cold,
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let events = restored.events();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "turn/start",
+            "step/start",
+            "assistant/message",
+            "tool/call",
+            "tool/result",
+            "step/end",
+            "turn/end"
+        ]
+    );
+    assert_eq!(events[4].data["error"]["code"], "TOOL_OUTCOME_UNKNOWN");
+    assert_eq!(events[4].source_event_seqs, Some(vec![3]));
+    assert_eq!(events[6].data["reason"]["kind"], "interrupted");
+}
+
+#[tokio::test]
 async fn subscribers_observe_admitted_live_events_and_flush_delegates() {
     let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());
     let store = SessionStore::new(Arc::clone(&persistence));
@@ -394,6 +471,36 @@ async fn subscribers_observe_admitted_live_events_and_flush_delegates() {
             .unwrap()
             .flush_count,
         1
+    );
+}
+
+#[tokio::test]
+async fn append_next_serializes_concurrent_sequence_allocation() {
+    let store = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let session = store
+        .create(header("atomic-next", None), cancellation())
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        session.append_next(
+            |seq| user_event(seq, "first", "first", SurfaceOp::Append),
+            cancellation(),
+        ),
+        session.append_next(
+            |seq| user_event(seq, "second", "second", SurfaceOp::Append),
+            cancellation(),
+        )
+    );
+    let mut sequences = [first.unwrap(), second.unwrap()];
+    sequences.sort_unstable();
+    assert_eq!(sequences, [0, 1]);
+    assert_eq!(
+        session
+            .events()
+            .into_iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
     );
 }
 

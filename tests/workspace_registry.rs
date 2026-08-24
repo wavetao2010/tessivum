@@ -236,6 +236,129 @@ fn mutations_are_ordered_idempotent_and_preserve_global_archive() {
 }
 
 #[test]
+fn workspace_insert_before_is_durable_and_atomic() {
+    let root = TempDir::new("workspace-order");
+    let host = root.dir("host");
+    let first = root.dir("first");
+    let second = root.dir("second");
+    let third = root.dir("third");
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    let bootstrap_id = registry.list().into_iter().next().unwrap().workspace_id;
+    let first_id = registry
+        .create(&first, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let second_id = registry
+        .create(&second, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let third_id = registry
+        .create(&third, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+
+    let middle_order = vec![
+        third_id.clone(),
+        first_id.clone(),
+        second_id.clone(),
+        bootstrap_id.clone(),
+    ];
+    assert_eq!(
+        registry
+            .insert_before(&first_id, Some(second_id.as_str()), None)
+            .unwrap(),
+        middle_order
+    );
+    let revision = registry.revision();
+    assert_eq!(
+        registry
+            .insert_before(&first_id, Some(second_id.as_str()), None)
+            .unwrap(),
+        middle_order
+    );
+    assert_eq!(
+        registry
+            .insert_before(&first_id, Some(first_id.as_str()), None)
+            .unwrap(),
+        middle_order
+    );
+    assert_eq!(registry.revision(), revision);
+
+    assert_eq!(
+        registry
+            .insert_before(&bootstrap_id, Some(third_id.as_str()), None)
+            .unwrap(),
+        vec![
+            bootstrap_id.clone(),
+            third_id.clone(),
+            first_id.clone(),
+            second_id.clone(),
+        ]
+    );
+    let end_order = vec![
+        bootstrap_id.clone(),
+        first_id.clone(),
+        second_id.clone(),
+        third_id.clone(),
+    ];
+    assert_eq!(
+        registry.insert_before(&third_id, None, None).unwrap(),
+        end_order
+    );
+    let revision = registry.revision();
+    assert_eq!(
+        registry.insert_before(&third_id, None, None).unwrap(),
+        end_order
+    );
+    assert_eq!(registry.revision(), revision);
+
+    let order = registry
+        .list()
+        .into_iter()
+        .map(|workspace| workspace.workspace_id)
+        .collect::<Vec<_>>();
+    let revision = registry.revision();
+    let unknown = Uuid::new_v4().to_string();
+    assert_eq!(
+        registry
+            .insert_before(&unknown, None, None)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_NOT_FOUND"
+    );
+    assert_eq!(
+        registry
+            .insert_before(&first_id, Some(&unknown), None)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_NOT_FOUND"
+    );
+    assert_eq!(registry.revision(), revision);
+    assert_eq!(
+        registry
+            .list()
+            .into_iter()
+            .map(|workspace| workspace.workspace_id)
+            .collect::<Vec<_>>(),
+        order
+    );
+
+    drop(registry);
+    let reopened = WorkspaceRegistry::open(root.path().join("data"), &host, Vec::new()).unwrap();
+    assert_eq!(
+        reopened
+            .list()
+            .into_iter()
+            .map(|workspace| workspace.workspace_id)
+            .collect::<Vec<_>>(),
+        order
+    );
+}
+
+#[test]
 fn recognized_blank_session_resolves_only_while_its_directory_is_current() {
     let root = TempDir::new("resolver");
     let host = root.dir("host");

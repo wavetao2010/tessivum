@@ -20,17 +20,25 @@ use crate::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
     },
-    ContentBlock, TessivumError,
+    ContentBlock, SessionId, TessivumError,
 };
 
 const DEFAULT_MAX_CATALOG_ENTRIES: usize = 256;
 const DEFAULT_MAX_SKILL_BYTES: usize = 1_048_576;
 const DEFAULT_MAX_RESOURCES: usize = 1_024;
 const DEFAULT_MAX_RESOURCE_BYTES: usize = 1_048_576;
+const MODEL_CATALOG_DESCRIPTION_MAX: usize = 500;
 
 /// Stable key for the scoped skill capability.
 pub fn skills_service_key() -> ServiceKey {
     ServiceKey::new("harness.skills", "1")
+}
+
+/// Per-session skill capability scopes selected by the host composition.
+pub type SkillSessionScopes = Arc<Mutex<BTreeMap<SessionId, PathBuf>>>;
+
+pub fn skill_session_scopes() -> SkillSessionScopes {
+    Arc::new(Mutex::new(BTreeMap::new()))
 }
 
 macro_rules! opaque_id {
@@ -78,12 +86,33 @@ opaque_id!(
     "Opaque base identity for a skill's resources."
 );
 
+/// Invocation surfaces permitted by a discovered skill.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInvocation {
+    pub model_invocable: bool,
+    pub user_invocable: bool,
+}
+
+impl Default for SkillInvocation {
+    fn default() -> Self {
+        Self {
+            model_invocable: true,
+            user_invocable: true,
+        }
+    }
+}
+
 /// Model-safe summary returned by a provider during discovery.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillListing {
     pub name: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
+    #[serde(default)]
+    pub invocation: SkillInvocation,
     pub locator: SkillLocator,
     pub resource_base: SkillResourceBase,
 }
@@ -98,9 +127,21 @@ impl SkillListing {
         Self {
             name: name.into(),
             description: description.into(),
+            when_to_use: None,
+            invocation: SkillInvocation::default(),
             locator: locator.into(),
             resource_base: resource_base.into(),
         }
+    }
+
+    fn with_frontmatter(
+        mut self,
+        when_to_use: Option<String>,
+        invocation: SkillInvocation,
+    ) -> Self {
+        self.when_to_use = when_to_use;
+        self.invocation = invocation;
+        self
     }
 }
 
@@ -121,6 +162,15 @@ pub struct LoadedSkill {
     pub body: String,
     #[serde(default)]
     pub resources: Vec<SkillResource>,
+}
+
+/// A policy-approved load paired with the provider selected by scoped discovery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvokedSkill {
+    pub provider: String,
+    #[serde(flatten)]
+    pub skill: LoadedSkill,
 }
 
 /// Bounded text read from a listed resource.
@@ -539,6 +589,21 @@ impl SkillRuntime {
         policy: &dyn SkillInvocationPolicy,
         cancellation: CancellationToken,
     ) -> Result<LoadedSkill, TessivumError> {
+        Ok(self
+            .invoke_with_provider(cwd, name, policy, cancellation)
+            .await?
+            .skill)
+    }
+
+    /// Like [`Self::invoke`], retaining the winner provider for the model-facing
+    /// contract without exposing its native locator.
+    pub async fn invoke_with_provider(
+        &self,
+        cwd: impl AsRef<Path>,
+        name: &str,
+        policy: &dyn SkillInvocationPolicy,
+        cancellation: CancellationToken,
+    ) -> Result<InvokedSkill, TessivumError> {
         check_cancelled(&cancellation)?;
         let (candidates, _) = self
             .catalog_with_candidates(cwd.as_ref(), cancellation.clone())
@@ -547,6 +612,9 @@ impl SkillRuntime {
             .get(name)
             .cloned()
             .ok_or_else(|| skill_not_found(name))?;
+        if !candidate.listing.invocation.model_invocable {
+            return Err(skill_not_model_invocable(name));
+        }
         if !policy
             .allow(
                 SkillPolicyStage::BeforeLoad,
@@ -559,7 +627,7 @@ impl SkillRuntime {
             return Err(skill_denied(SkillPolicyStage::BeforeLoad, name));
         }
         check_cancelled(&cancellation)?;
-        let loaded = self
+        let skill = self
             .load_candidate(&candidate, cancellation.clone())
             .await?;
         check_cancelled(&cancellation)?;
@@ -567,7 +635,7 @@ impl SkillRuntime {
             .allow(
                 SkillPolicyStage::AfterLoad,
                 &candidate.listing,
-                Some(&loaded),
+                Some(&skill),
                 cancellation.clone(),
             )
             .await?
@@ -575,7 +643,14 @@ impl SkillRuntime {
             return Err(skill_denied(SkillPolicyStage::AfterLoad, name));
         }
         check_cancelled(&cancellation)?;
-        Ok(loaded)
+        Ok(InvokedSkill {
+            provider: candidate
+                .provider
+                .strip_prefix("filesystem:")
+                .unwrap_or(&candidate.provider)
+                .to_owned(),
+            skill,
+        })
     }
 
     /// Loads a listed resource through the winning provider after validating its
@@ -938,52 +1013,82 @@ impl Drop for SkillChangeSubscription {
     }
 }
 
-/// XML-escapes a model catalog in deterministic skill-name order.
+/// Renders the upstream model-facing catalog in deterministic skill-name order.
 pub fn model_catalog(catalog: &SkillCatalog) -> String {
     let mut entries = catalog.skills.clone();
     entries.sort_by(|left, right| left.skill.name.cmp(&right.skill.name));
-    let mut output = format!(
-        "<skills revision=\"{}\" complete=\"{}\">",
-        catalog.revision, catalog.complete
+    let mut lines = vec![
+        "<system-reminder>".to_owned(),
+        "A skill is a reusable set of task-specific instructions. The following skills are available in this session:".to_owned(),
+        String::new(),
+        "<available_skills>".to_owned(),
+    ];
+    lines.extend(
+        entries
+            .into_iter()
+            .filter(|entry| entry.skill.invocation.model_invocable)
+            .map(|entry| {
+                format!(
+                    "- `{}`: {}",
+                    entry.skill.name,
+                    escape_text(&catalog_description(&entry.skill.description))
+                )
+            }),
     );
-    for entry in entries {
-        let skill = entry.skill;
-        output.push_str("<skill name=\"");
-        output.push_str(&xml_escape(&skill.name));
-        output.push_str("\" description=\"");
-        output.push_str(&xml_escape(&skill.description));
-        output.push_str("\" locator=\"");
-        output.push_str(&xml_escape(skill.locator.as_str()));
-        output.push_str("\" resourceBase=\"");
-        output.push_str(&xml_escape(skill.resource_base.as_str()));
-        output.push_str("\"/>");
+    lines.extend([
+        "</available_skills>".to_owned(),
+        String::new(),
+        "If the user names a skill, or the task clearly matches a skill's description, call the `skill` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.".to_owned(),
+        "A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.".to_owned(),
+        "</system-reminder>".to_owned(),
+    ]);
+    lines.join("\n")
+}
+fn catalog_description(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MODEL_CATALOG_DESCRIPTION_MAX {
+        return normalized;
     }
-    output.push_str("</skills>");
-    output
+    let end = normalized
+        .char_indices()
+        .nth(MODEL_CATALOG_DESCRIPTION_MAX - 3)
+        .map(|(index, _)| index)
+        .unwrap_or(normalized.len());
+    format!("{}...", &normalized[..end])
 }
 
-/// Renders one model tool result with tags that cannot be broken by skill text.
+/// Renders the canonical model instruction block for a loaded skill.
 pub fn skill_result_tag(skill: &LoadedSkill) -> String {
-    let mut output = String::new();
-    output.push_str("<skill name=\"");
-    output.push_str(&xml_escape(&skill.name));
-    output.push_str("\" locator=\"");
-    output.push_str(&xml_escape(skill.locator.as_str()));
-    output.push_str("\" resourceBase=\"");
-    output.push_str(&xml_escape(skill.resource_base.as_str()));
-    output.push_str("\">");
-    output.push_str(&xml_escape(&skill.body));
-    if !skill.resources.is_empty() {
-        output.push_str("<resources>");
-        for resource in &skill.resources {
-            output.push_str("<resource path=\"");
-            output.push_str(&xml_escape(&resource.path));
-            output.push_str("\"/>");
-        }
-        output.push_str("</resources>");
-    }
-    output.push_str("</skill>");
-    output
+    [
+        format!("<skill_content name=\"{}\">", escape_attr(&skill.name)),
+        "<skill_resources>".to_owned(),
+        format!(
+            "Resources for this skill: {}",
+            escape_text(skill.resource_base.as_str())
+        ),
+        "Load referenced resources only as needed.".to_owned(),
+        "</skill_resources>".to_owned(),
+        String::new(),
+        "<skill_instructions>".to_owned(),
+        skill.body.clone(),
+        "</skill_instructions>".to_owned(),
+        "</skill_content>".to_owned(),
+    ]
+    .join("\n")
+}
+
+fn escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('\"', "&quot;")
+        .replace('<', "&lt;")
+}
+
+fn escape_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Escapes all five XML-sensitive characters without attempting to parse input.
@@ -1002,46 +1107,36 @@ pub fn xml_escape(value: &str) -> String {
     escaped
 }
 
-/// Registers the two generic model tools. Individual skill names remain data in
-/// the catalog; they are never turned into executable dynamic tool names.
+/// Registers the one upstream-compatible model-facing skill loader.
 pub struct SkillTools {
     registrations: Vec<ToolRegistration>,
 }
 
 impl SkillTools {
-    pub fn register(
+    pub fn register_for_scopes(
         tools: &ToolRuntime,
         skills: SkillRuntime,
-        cwd: impl Into<PathBuf>,
+        scopes: SkillSessionScopes,
         policy: Arc<dyn SkillInvocationPolicy>,
     ) -> Result<Self, TessivumError> {
-        let cwd = cwd.into();
-        let mut registrations = Vec::with_capacity(2);
-        registrations.push(tools.register(ToolDefinition::new(
-            "skills-list",
-            "Lists scoped skills available to load.",
-            json!({"type":"object", "additionalProperties":false}),
-            SkillListTool {
-                skills: skills.clone(),
-                cwd: cwd.clone(),
-            },
-        ))?);
-        registrations.push(tools.register(ToolDefinition::new(
-            "skills-get",
-            "Loads one named skill after its invocation policy allows it.",
+        let registration = tools.register(ToolDefinition::new(
+            "skill",
+            "Load the full instructions for an available skill. Call this with the exact skill name from the session skill catalog before acting on a task that names or clearly matches that skill.",
             json!({
                 "type":"object",
                 "properties":{"name":{"type":"string"}},
                 "required":["name"],
                 "additionalProperties":false
             }),
-            SkillGetTool {
+            SkillTool {
                 skills,
-                cwd,
+                scopes,
                 policy,
             },
-        ))?);
-        Ok(Self { registrations })
+        ))?;
+        Ok(Self {
+            registrations: vec![registration],
+        })
     }
 
     pub fn schemas(&self) -> usize {
@@ -1049,36 +1144,14 @@ impl SkillTools {
     }
 }
 
-struct SkillListTool {
+struct SkillTool {
     skills: SkillRuntime,
-    cwd: PathBuf,
-}
-
-#[async_trait]
-impl ToolHandler for SkillListTool {
-    async fn run(&self, context: ToolRunContext, _arguments: Value) -> ToolHandlerResult {
-        let catalog = self
-            .skills
-            .catalog(&self.cwd, context.cancellation.clone())
-            .await?;
-        Ok(ToolOutput::new(
-            vec![ContentBlock::Text {
-                text: model_catalog(&catalog),
-            }],
-            false,
-            json!({"revision": catalog.revision, "complete": catalog.complete}),
-        ))
-    }
-}
-
-struct SkillGetTool {
-    skills: SkillRuntime,
-    cwd: PathBuf,
+    scopes: SkillSessionScopes,
     policy: Arc<dyn SkillInvocationPolicy>,
 }
 
 #[async_trait]
-impl ToolHandler for SkillGetTool {
+impl ToolHandler for SkillTool {
     async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
         let name = arguments
             .get("name")
@@ -1091,21 +1164,31 @@ impl ToolHandler for SkillGetTool {
                 )
             })?;
         validate_skill_name(name)?;
-        let skill = self
+        let cwd = lock(&self.scopes)
+            .get(&context.session)
+            .cloned()
+            .ok_or_else(|| skill_not_available(&context.session))?;
+        let invoked = self
             .skills
-            .invoke(
-                &self.cwd,
+            .invoke_with_provider(
+                &cwd,
                 name,
                 self.policy.as_ref(),
                 context.cancellation.clone(),
             )
             .await?;
+        let skill = invoked.skill;
+        let text = skill_result_tag(&skill);
+        let value = json!({
+            "name": skill.name,
+            "provider": invoked.provider,
+            "resourceBase": {"kind": "opaque", "description": skill.resource_base.as_str()},
+            "content": skill.body,
+        });
         Ok(ToolOutput::new(
-            vec![ContentBlock::Text {
-                text: skill_result_tag(&skill),
-            }],
+            vec![ContentBlock::Text { text }],
             false,
-            json!({"name": skill.name}),
+            value,
         ))
     }
 }
@@ -1212,15 +1295,15 @@ impl FilesystemSkillProvider {
                 .cloned()
                 .expect("scanner returns only configured roots");
             let text = read_text_bounded(&path, self.max_skill_bytes)?;
-            let (name, description, body) = parse_skill_markdown(&text, &path)?;
+            let parsed = parse_skill_markdown(&text, &path)?;
             let token = opaque_token(&path);
             let listing = SkillListing::new(
-                name,
-                description,
+                parsed.name,
+                parsed.description,
                 format!("skill://filesystem/{token}"),
                 format!("resource://filesystem/{token}/"),
-            );
-            let _ = body;
+            )
+            .with_frontmatter(parsed.when_to_use, parsed.invocation);
             entries.push(FilesystemSkillEntry {
                 root,
                 directory,
@@ -1269,8 +1352,8 @@ impl SkillProvider for FilesystemSkillProvider {
         let entry = self.entry(locator)?;
         let skill_file = confined_file(&entry.root, &entry.directory.join("SKILL.md"))?;
         let text = read_text_bounded(&skill_file, self.max_skill_bytes)?;
-        let (name, description, body) = parse_skill_markdown(&text, &skill_file)?;
-        if name != entry.listing.name || description != entry.listing.description {
+        let parsed = parse_skill_markdown(&text, &skill_file)?;
+        if parsed.name != entry.listing.name || parsed.description != entry.listing.description {
             return Err(skill_error(
                 "SKILL_CHANGED",
                 "skill metadata changed after discovery; refresh the catalog before loading",
@@ -1288,11 +1371,11 @@ impl SkillProvider for FilesystemSkillProvider {
         )?;
         check_cancelled(&cancellation)?;
         Ok(LoadedSkill {
-            name,
-            description,
+            name: parsed.name,
+            description: parsed.description,
             locator: entry.listing.locator,
             resource_base: entry.listing.resource_base,
-            body,
+            body: parsed.body,
             resources,
         })
     }
@@ -1322,12 +1405,23 @@ struct SkillFrontmatter {
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(rename = "when-to-use")]
+    when_to_use: Option<String>,
+    #[serde(rename = "disable-model-invocation")]
+    disable_model_invocation: Option<serde_yaml::Value>,
+    #[serde(rename = "user-invocable")]
+    user_invocable: Option<serde_yaml::Value>,
 }
 
-fn parse_skill_markdown(
-    text: &str,
-    path: &Path,
-) -> Result<(String, String, String), TessivumError> {
+struct ParsedSkillMarkdown {
+    name: String,
+    description: String,
+    when_to_use: Option<String>,
+    invocation: SkillInvocation,
+    body: String,
+}
+
+fn parse_skill_markdown(text: &str, path: &Path) -> Result<ParsedSkillMarkdown, TessivumError> {
     let text = text.replace("\r\n", "\n");
     let Some(after_open) = text.strip_prefix("---\n") else {
         return Err(skill_error(
@@ -1343,20 +1437,81 @@ fn parse_skill_markdown(
             json!({"path": path.display().to_string()}),
         ));
     };
-    let frontmatter: SkillFrontmatter =
-        serde_yaml::from_str(&after_open[..end]).map_err(|error| {
-            skill_error(
+    let source = &after_open[..end];
+    let value: serde_yaml::Value = serde_yaml::from_str(source).map_err(|error| {
+        skill_error(
+            "INVALID_SKILL_FRONTMATTER",
+            "SKILL.md frontmatter is not valid YAML",
+            json!({"path": path.display().to_string(), "error": error.to_string()}),
+        )
+    })?;
+    for legacy in ["disableModelInvocation", "modelInvocable", "userInvocable"] {
+        if value
+            .as_mapping()
+            .is_some_and(|fields| fields.contains_key(serde_yaml::Value::String(legacy.into())))
+        {
+            return Err(skill_error(
                 "INVALID_SKILL_FRONTMATTER",
-                "SKILL.md frontmatter is not valid YAML",
-                json!({"path": path.display().to_string(), "error": error.to_string()}),
-            )
-        })?;
+                format!("frontmatter field {legacy:?} is unsupported"),
+                json!({"path": path.display().to_string()}),
+            ));
+        }
+    }
+    let frontmatter: SkillFrontmatter = serde_yaml::from_value(value).map_err(|error| {
+        skill_error(
+            "INVALID_SKILL_FRONTMATTER",
+            "SKILL.md frontmatter is not valid YAML",
+            json!({"path": path.display().to_string(), "error": error.to_string()}),
+        )
+    })?;
     validate_skill_name(&frontmatter.name)?;
-    Ok((
-        frontmatter.name,
-        frontmatter.description,
-        after_open[end + "\n---\n".len()..].to_owned(),
-    ))
+    Ok(ParsedSkillMarkdown {
+        name: frontmatter.name,
+        description: frontmatter.description,
+        when_to_use: frontmatter.when_to_use.filter(|value| !value.is_empty()),
+        invocation: SkillInvocation {
+            model_invocable: !(frontmatter_bool(
+                frontmatter.disable_model_invocation,
+                "disable-model-invocation",
+                path,
+            )?
+            .unwrap_or(false)),
+            user_invocable: frontmatter_bool(frontmatter.user_invocable, "user-invocable", path)?
+                .unwrap_or(true),
+        },
+        body: after_open[end + "\n---\n".len()..].to_owned(),
+    })
+}
+
+fn frontmatter_bool(
+    value: Option<serde_yaml::Value>,
+    field: &str,
+    path: &Path,
+) -> Result<Option<bool>, TessivumError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let parsed = match value {
+        serde_yaml::Value::Bool(value) => Some(value),
+        serde_yaml::Value::Number(value) => match value.as_i64() {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        },
+        serde_yaml::Value::String(value) => match value.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => Some(true),
+            "false" | "no" | "off" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    };
+    parsed.map(Some).ok_or_else(|| {
+        skill_error(
+            "INVALID_SKILL_FRONTMATTER",
+            format!("frontmatter field {field:?} must be a boolean"),
+            json!({"path": path.display().to_string()}),
+        )
+    })
 }
 
 fn collect_skill_markdown(
@@ -1608,6 +1763,14 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<(), TessivumError
     }
 }
 
+fn skill_not_available(session: &SessionId) -> TessivumError {
+    skill_error(
+        "SKILL_NOT_AVAILABLE",
+        "the skill tool is not enabled for this session",
+        json!({"sessionId": session}),
+    )
+}
+
 fn skill_not_found(name: &str) -> TessivumError {
     skill_error(
         "SKILL_NOT_FOUND",
@@ -1621,6 +1784,14 @@ fn skill_denied(stage: SkillPolicyStage, name: &str) -> TessivumError {
         "SKILL_DENIED",
         "skill invocation was denied by policy",
         json!({"name": name, "stage": match stage { SkillPolicyStage::BeforeLoad => "before-load", SkillPolicyStage::AfterLoad => "after-load"}}),
+    )
+}
+
+fn skill_not_model_invocable(name: &str) -> TessivumError {
+    skill_error(
+        "SKILL_NOT_MODEL_INVOCABLE",
+        "the requested skill is not available for model invocation",
+        json!({"name": name}),
     )
 }
 

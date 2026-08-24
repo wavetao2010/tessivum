@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -32,8 +32,6 @@ const MAX_HMR_QUEUE: usize = 64;
 #[serde(rename_all = "camelCase")]
 pub struct WebBootEntry {
     pub id: String,
-    pub package: String,
-    pub name: String,
     pub url: String,
     pub rev: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,7 +451,6 @@ fn scan_roots(roots: &[PathBuf]) -> Result<ScannedPackages, FrontendError> {
         left.entry
             .id
             .cmp(&right.entry.id)
-            .then_with(|| left.entry.package.cmp(&right.entry.package))
             .then_with(|| left.manifest.cmp(&right.manifest))
     });
     for pair in rows.windows(2) {
@@ -608,16 +605,13 @@ fn scan_manifest(manifest: &Path) -> Result<Option<ScannedRow>, FrontendManifest
         return Ok(None);
     }
     let package_name = required_string(manifest, package.get("name"), "name")?;
-    let id = optional_string(manifest, client.get("id"), "dsh.client.id")?
-        .unwrap_or_else(|| default_id(&package_name));
-    if !valid_id(&id) {
+    if !valid_package_id(&package_name) {
         return Err(manifest_error(
             manifest,
-            "dsh.client.id must contain 1..=128 ASCII letters, digits, '.', '_', '-' or '~'",
+            "name must be an unscoped package or @scope/package using safe ASCII characters",
         ));
     }
-    let name = optional_string(manifest, client.get("name"), "dsh.client.name")?
-        .unwrap_or_else(|| package_name.clone());
+    let id = package_name;
     let inject = optional_inject(manifest, client.get("inject"))?;
     let immediately = match client.get("immediately") {
         Some(Value::Bool(value)) => Some(*value),
@@ -648,10 +642,8 @@ fn scan_manifest(manifest: &Path) -> Result<Option<ScannedRow>, FrontendManifest
     Ok(Some(ScannedRow {
         manifest: manifest.to_path_buf(),
         entry: WebBootEntry {
-            url: format!("/plugins/{id}/client.js"),
+            url: format!("/plugins/{id}/client.js?rev={rev}"),
             id,
-            package: package_name,
-            name,
             rev,
             inject,
             immediately,
@@ -751,16 +743,6 @@ fn required_string(
     Ok(value.into())
 }
 
-fn optional_string(
-    manifest: &Path,
-    value: Option<&Value>,
-    field: &str,
-) -> Result<Option<String>, FrontendManifestError> {
-    value
-        .map(|value| required_string(manifest, Some(value), field))
-        .transpose()
-}
-
 fn select_client_export(
     manifest: &Path,
     export: Option<&Value>,
@@ -828,8 +810,22 @@ fn optional_inject(
     Ok(Some(inject))
 }
 
-fn default_id(package: &str) -> String {
-    package.trim_start_matches('@').replace('/', "~")
+fn valid_package_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > MAX_STRING_BYTES {
+        return false;
+    }
+    let valid_segment = |segment: &str| {
+        !segment.is_empty()
+            && segment.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~')
+            })
+    };
+    if let Some(scoped) = id.strip_prefix('@') {
+        let mut parts = scoped.split('/');
+        matches!((parts.next(), parts.next(), parts.next()), (Some(scope), Some(package), None) if valid_segment(scope) && valid_segment(package))
+    } else {
+        !id.contains('/') && valid_segment(id)
+    }
 }
 
 fn valid_id(id: &str) -> bool {
@@ -852,10 +848,9 @@ fn graph_rev(entries: &[WebBootEntry]) -> String {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity("sha256:".len() + digest.len() * 2);
-    output.push_str("sha256:");
-    for byte in digest {
+    let digest = Sha1::digest(bytes);
+    let mut output = String::with_capacity(12);
+    for byte in &digest[..6] {
         use std::fmt::Write;
         let _ = write!(output, "{byte:02x}");
     }
@@ -943,7 +938,7 @@ fn hex(byte: u8) -> Option<u8> {
 
 fn plugin_id(path: &str) -> Option<&str> {
     let id = path.strip_prefix("/plugins/")?.strip_suffix("/client.js")?;
-    (!id.is_empty() && !id.contains('/') && valid_id(id)).then_some(id)
+    valid_package_id(id).then_some(id)
 }
 
 fn inject_first_head_script(mut html: String, script: &str) -> Result<String, FrontendError> {

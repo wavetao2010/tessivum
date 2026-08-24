@@ -406,11 +406,13 @@ async fn web_selection_is_unambiguous_and_search_is_capped() {
                         title: "one".into(),
                         url: "https://one.example".into(),
                         snippet: None,
+                        published_at: None,
                     },
                     WebSearchSource {
                         title: "two".into(),
                         url: "https://two.example".into(),
                         snippet: None,
+                        published_at: None,
                     },
                 ],
             }),

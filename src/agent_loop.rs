@@ -1,8 +1,12 @@
 //! Durable, wake-coalesced agent turn driver.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    collections::BTreeSet,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -12,26 +16,119 @@ use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::{sync::Notify, task::JoinHandle};
 
 use crate::{
-    agent::{AgentError, AgentFactory, AgentOptions, AgentRuntime, AgentStatus, Inbox},
-    llm::LlmRuntime,
+    agent::{
+        AgentCancelCause, AgentError, AgentFactory, AgentOptions, AgentRuntime, AgentStatus, Inbox,
+        InboxClaimReservation,
+    },
+    agent_preset::{error_parts as preset_error_parts, AgentPresetService},
+    compaction::{CompactionOutcome, CompactionService, CompactionTrigger},
+    llm::{BlockAssembler, LlmRuntime},
+    permissions::runtime_context,
     protocol::{
-        ContentBlock, EpochHeader, FinishReason, GenerateRequest, LlmCallConfig, LlmFailure,
-        Message, MessageId, MessageRole, MessageSource, SessionEvent, SurfaceOp,
-        TurnEndCancelCause, TurnEndReason,
+        ContentBlock, ContextForm, EpochHeader, FinishReason, GenerateRequest, LlmCallConfig,
+        LlmFailure, Message, MessageId, MessageRole, MessageSource, SessionEvent, SessionOrigin,
+        SurfaceOp, TurnEndCancelCause, TurnEndReason,
     },
     session::Session,
+    skills::{model_catalog, skill_result_tag, SkillRuntime, SkillSessionScopes},
     system_prompt::{PromptSection, SystemPrompt},
-    tools::{ToolOutput, ToolRunContext, ToolRuntime},
+    tools::{ToolOutput, ToolRestrictions, ToolRunContext, ToolRuntime},
+    TessivumError,
 };
 
+/// Resolves the advertised prompt capacity for an exact provider/model route.
+pub type ContextWindowResolver = Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
+const STANDARD_TOOL_NAMES: &[&str] = &[
+    "ask_user_question",
+    "bash",
+    "cordis_define",
+    "cordis_inspect_list",
+    "cordis_inspect_query",
+    "cordis_inspect_self",
+    "cordis_run",
+    "cordis_stop",
+    "create_goal",
+    "edit",
+    "exit_plan_mode",
+    "get_goal",
+    "glob",
+    "grep",
+    "interrupt_agent",
+    "jobs.kill",
+    "jobs.list",
+    "jobs.read",
+    "jobs.wait",
+    "list_agents",
+    "ralph",
+    "read",
+    "read_image",
+    "schedule_create",
+    "schedule_delete",
+    "schedule_list",
+    "send_message",
+    "skill",
+    "subagent",
+    "subagent_fork",
+    "todo_write",
+    "update_goal",
+    "web_search",
+    "workflow",
+    "write",
+];
+
+const HOST_GLOBAL_OPTIONAL_TOOL_NAMES: &[&str] = &[
+    "cordis_define",
+    "cordis_inspect_list",
+    "cordis_inspect_query",
+    "cordis_inspect_self",
+    "cordis_run",
+    "cordis_stop",
+    "schedule_create",
+    "schedule_delete",
+    "schedule_list",
+];
+const CHILD_OWNER_BOUND_TOOL_NAMES: &[&str] = &[
+    "ask_user_question",
+    "bash",
+    "create_goal",
+    "exit_plan_mode",
+    "get_goal",
+    "jobs.kill",
+    "jobs.list",
+    "jobs.read",
+    "jobs.wait",
+    "schedule_create",
+    "schedule_delete",
+    "schedule_list",
+    "todo_write",
+    "update_goal",
+    "subagent",
+    "subagent_fork",
+];
+
 /// Constructs durable agent runtimes backed by the current LLM, prompt, and tool services.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AgentLoopFactory {
     llm: LlmRuntime,
     prompt: SystemPrompt,
     tools: ToolRuntime,
+    dispatch_tools: ToolRuntime,
+    presets: Option<Arc<AgentPresetService>>,
+    code_mode: bool,
+    approval_required_tools: BTreeSet<String>,
+    compaction: Option<CompactionService>,
+    skills: Option<(SkillRuntime, SkillSessionScopes)>,
+    context_window: Option<ContextWindowResolver>,
+    standard_catalog: bool,
     max_parallel_tool_calls: usize,
     max_steps: u64,
+}
+impl std::fmt::Debug for AgentLoopFactory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentLoopFactory")
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentLoopFactory {
@@ -42,10 +139,59 @@ impl AgentLoopFactory {
         Self {
             llm,
             prompt,
+            dispatch_tools: tools.clone(),
             tools,
+            presets: None,
+            code_mode: false,
+            approval_required_tools: BTreeSet::new(),
+            compaction: None,
+            skills: None,
+            standard_catalog: false,
+            context_window: None,
             max_parallel_tool_calls: Self::DEFAULT_MAX_PARALLEL_TOOL_CALLS,
             max_steps: Self::DEFAULT_MAX_STEPS,
         }
+    }
+
+    /// Supplies the unrestricted native dispatcher used for non-Code catalogs.
+    pub fn with_dispatch_tools(mut self, dispatch_tools: ToolRuntime) -> Self {
+        self.dispatch_tools = dispatch_tools;
+        self
+    }
+
+    pub fn with_presets(mut self, presets: Arc<AgentPresetService>) -> Self {
+        self.presets = Some(presets);
+        self
+    }
+
+    /// Keeps the model-facing catalog at `run_code` while native tools dispatch underneath it.
+    pub fn with_code_mode(mut self) -> Self {
+        self.code_mode = true;
+        self
+    }
+
+    pub fn with_approval_required_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.approval_required_tools = names.into_iter().collect();
+        self
+    }
+
+    pub fn with_compaction(mut self, compaction: CompactionService) -> Self {
+        self.compaction = Some(compaction);
+        self
+    }
+
+    pub fn with_skills(mut self, skills: SkillRuntime, scopes: SkillSessionScopes) -> Self {
+        self.skills = Some((skills, scopes));
+        self
+    }
+
+    pub fn with_standard_catalog(mut self) -> Self {
+        self.standard_catalog = true;
+        self
+    }
+    pub fn with_context_window_resolver(mut self, resolver: ContextWindowResolver) -> Self {
+        self.context_window = Some(resolver);
+        self
     }
 
     pub fn with_max_parallel_tool_calls(mut self, max_parallel_tool_calls: usize) -> Self {
@@ -79,6 +225,89 @@ impl AgentFactory for AgentLoopFactory {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
+        let selected_preset = session
+            .events()
+            .into_iter()
+            .rev()
+            .find(|event| event.event_type == "agent-preset/selected")
+            .and_then(|event| {
+                event
+                    .data
+                    .get("agentPreset")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .or_else(|| session.header().agent_preset);
+        let catalog = match (selected_preset.as_deref(), &self.presets) {
+            (Some(preset), Some(presets)) => {
+                let catalog = presets.model_catalog(preset).await.map_err(|error| {
+                    let (code, message, details) = preset_error_parts(&error);
+                    AgentError::Message(TessivumError::new(code, message, "agent-preset", details))
+                })?;
+                Some(catalog)
+            }
+            _ => None,
+        };
+        let mut tool_names = catalog.as_ref().map(|catalog| catalog.tools.clone());
+        match &mut tool_names {
+            Some(names)
+                if catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.complete_system.as_ref())
+                    .is_none() =>
+            {
+                if self.standard_catalog {
+                    names.extend(
+                        HOST_GLOBAL_OPTIONAL_TOOL_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    );
+                }
+            }
+            None if self.standard_catalog => {
+                tool_names = Some(
+                    STANDARD_TOOL_NAMES
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+        if session.header().origin == Some(SessionOrigin::Subagent) {
+            if let Some(names) = &mut tool_names {
+                names.retain(|name| !CHILD_OWNER_BOUND_TOOL_NAMES.contains(&name.as_str()));
+            }
+        }
+        let skills_enabled = self
+            .skills
+            .as_ref()
+            .is_some_and(|(_, scopes)| lock(scopes).contains_key(&session.id()));
+        let tools = match tool_names {
+            Some(_) if self.code_mode => self.tools.clone(),
+            Some(names) => {
+                let approval_required = self
+                    .approval_required_tools
+                    .iter()
+                    .filter(|name| names.contains(*name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let restrictions = approval_required
+                    .into_iter()
+                    .fold(ToolRestrictions::allow_only(names), ToolRestrictions::ask);
+                self.dispatch_tools
+                    .scoped(restrictions)
+                    .map_err(AgentError::Message)?
+            }
+            None => self.tools.clone(),
+        };
+        let tools = if skills_enabled {
+            tools
+        } else {
+            tools
+                .scoped(ToolRestrictions::new().deny("skill"))
+                .map_err(AgentError::Message)?
+        };
         Ok(AgentLoop::spawn(
             session,
             options,
@@ -86,7 +315,11 @@ impl AgentFactory for AgentLoopFactory {
             cancellation,
             self.llm.clone(),
             self.prompt.clone(),
-            self.tools.clone(),
+            catalog.and_then(|catalog| catalog.complete_system),
+            tools,
+            self.compaction.clone(),
+            self.skills.clone(),
+            self.context_window.clone(),
             self.max_parallel_tool_calls,
             self.max_steps,
         ))
@@ -113,10 +346,15 @@ struct Inner {
     options: AgentOptions,
     inbox: Inbox,
     cancellation: CancellationToken,
+    cancellation_cause: Mutex<Option<AgentCancelCause>>,
     finalization: CancellationToken,
     llm: LlmRuntime,
     prompt: SystemPrompt,
+    prompt_override: Option<String>,
     tools: ToolRuntime,
+    compaction: Option<CompactionService>,
+    skills: Option<(SkillRuntime, SkillSessionScopes)>,
+    context_window: Option<ContextWindowResolver>,
     max_parallel_tool_calls: usize,
     max_steps: u64,
     running: AtomicBool,
@@ -144,7 +382,11 @@ impl AgentLoop {
         cancellation: CancellationToken,
         llm: LlmRuntime,
         prompt: SystemPrompt,
+        prompt_override: Option<String>,
         tools: ToolRuntime,
+        compaction: Option<CompactionService>,
+        skills: Option<(SkillRuntime, SkillSessionScopes)>,
+        context_window: Option<ContextWindowResolver>,
         max_parallel_tool_calls: usize,
         max_steps: u64,
     ) -> Arc<Self> {
@@ -157,10 +399,15 @@ impl AgentLoop {
             options,
             inbox,
             cancellation,
+            cancellation_cause: Mutex::new(None),
             finalization: ContextHandle::root().scope().cancellation(),
             llm,
             prompt,
+            prompt_override,
             tools,
+            compaction,
+            skills,
+            context_window,
             max_parallel_tool_calls,
             max_steps,
             running: AtomicBool::new(false),
@@ -193,6 +440,13 @@ impl AgentRuntime for AgentLoop {
             AgentStatus::Running
         } else {
             AgentStatus::Idle
+        }
+    }
+
+    fn cancel(&self, cause: AgentCancelCause) {
+        let mut cancellation_cause = lock(&self.inner.cancellation_cause);
+        if cancellation_cause.is_none() {
+            *cancellation_cause = Some(cause);
         }
     }
 
@@ -237,6 +491,7 @@ impl AgentRuntime for AgentLoop {
             state.disposed = true;
             state.worker.take()
         };
+        self.cancel(AgentCancelCause::Disposed);
         self.inner.cancellation.cancel();
         self.inner.wake.notify_waiters();
         self.inner.idle.notify_waiters();
@@ -273,16 +528,28 @@ async fn drive(inner: Arc<Inner>) {
             if inner.cancellation.is_cancelled() {
                 break;
             }
-            let Some(message) = inner.inbox.take_next_turn() else {
-                let revision = lock(&inner.state).wake_revision;
-                if revision != seen_wake {
-                    seen_wake = revision;
-                    continue;
+            let message = match claim_next_turn(&inner).await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    let revision = lock(&inner.state).wake_revision;
+                    if revision != seen_wake {
+                        seen_wake = revision;
+                        continue;
+                    }
+                    lock(&inner.state).settled_revision = revision;
+                    inner.running.store(false, Ordering::Release);
+                    inner.idle.notify_waiters();
+                    break;
                 }
-                lock(&inner.state).settled_revision = revision;
-                inner.running.store(false, Ordering::Release);
-                inner.idle.notify_waiters();
-                break;
+                Err(error) => {
+                    let revision = lock(&inner.state).wake_revision;
+                    let mut state = lock(&inner.state);
+                    state.last_error = Some(error);
+                    state.settled_revision = revision;
+                    inner.running.store(false, Ordering::Release);
+                    inner.idle.notify_waiters();
+                    break;
+                }
             };
 
             if let Err(error) = run_turn(&inner, message).await {
@@ -306,10 +573,9 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
     append(inner, "turn/start", json!({"turn": turn}), None, None).await?;
 
     let mut pending_initial = Some(initial_message);
-    let mut pending_steer = None;
     for step in 1..=inner.max_steps {
         if inner.cancellation.is_cancelled() {
-            return end_turn(inner, turn, aborted()).await;
+            return end_turn(inner, turn, aborted(inner)).await;
         }
         append(
             inner,
@@ -320,32 +586,73 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
         )
         .await?;
 
+        let mut messages = claim_step_batch(inner).await?;
         if let Some(message) = pending_initial.take() {
-            append_message(inner, "user/message", turn, step, message, None).await?;
+            messages.push(message);
         }
-        if let Some(message) = inner.inbox.take_pre_step() {
-            append_message(inner, "user/message", turn, step, message, None).await?;
+        for message in &messages {
+            append_message(
+                inner,
+                "user/message",
+                turn,
+                step,
+                message.clone(),
+                None,
+                None,
+            )
+            .await?;
         }
-        if let Some(message) = pending_steer
-            .take()
-            .or_else(|| inner.inbox.take_next_step())
-        {
-            append_message(inner, "user/message", turn, step, message, None).await?;
+        append_skill_context(inner, turn, step, &messages).await?;
+        if step == 1 {
+            append_workspace_instructions(inner, turn, step).await?;
+            append_runtime_context(inner, turn, step).await?;
         }
         if inner.cancellation.is_cancelled() {
             return close_cancelled_step(inner, turn, step).await;
+        }
+        if let Some(compaction) = &inner.compaction {
+            let has_prior_request = inner
+                .session
+                .events()
+                .iter()
+                .any(|event| event.event_type == "request/header");
+            if has_prior_request
+                && inner.session.surface().len() >= compaction.config().max_surface_messages
+            {
+                if let Err(error) = compaction
+                    .compact_for_trigger(
+                        &inner.session,
+                        CompactionTrigger::Pressure,
+                        inner.cancellation.clone(),
+                    )
+                    .await
+                {
+                    close_step(inner, turn, step).await?;
+                    return end_turn(
+                        inner,
+                        turn,
+                        TurnEndReason::Error {
+                            error: compaction_failure(error),
+                        },
+                    )
+                    .await;
+                }
+            }
         }
 
         let assembly = inner
             .prompt
             .assemble(Vec::<PromptSection>::new(), inner.tools.schemas())
             .map_err(|error| AgentError::Runtime(error.to_string()))?;
-        let request = GenerateRequest {
+        let mut request = GenerateRequest {
             provider: inner.options.provider.clone(),
             model: inner.options.model.clone(),
-            reasoning_effort: None,
-            messages: inner.session.derive_messages(),
-            system: (!assembly.text.is_empty()).then_some(assembly.text.clone()),
+            reasoning_effort: inner.options.reasoning_effort.clone(),
+            messages: request_messages(inner),
+            system: inner
+                .prompt_override
+                .clone()
+                .or_else(|| (!assembly.text.is_empty()).then_some(assembly.text.clone())),
             tools: (!assembly.tools.is_empty()).then_some(assembly.tools.clone()),
             temperature: None,
             max_tokens: inner.options.max_tokens,
@@ -378,41 +685,116 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             .await?;
             record_request_header(inner, effective_header);
         }
-
-        let generation = match inner
-            .llm
-            .complete(request, inner.cancellation.clone())
-            .await
+        let mut request_context = json!({
+            "provider": request.provider.clone(),
+            "model": request.model.clone(),
+        });
+        if let Some(context_window) = inner
+            .context_window
+            .as_ref()
+            .and_then(|resolve| resolve(&request.provider, &request.model))
         {
-            Ok(generation) => generation,
-            Err(_) if inner.cancellation.is_cancelled() => {
-                return close_cancelled_step(inner, turn, step).await;
-            }
-            Err(error) => {
-                close_step(inner, turn, step).await?;
-                return end_turn(
-                    inner,
-                    turn,
-                    TurnEndReason::Error {
-                        error: failure(error),
-                    },
-                )
-                .await;
+            request_context["contextWindow"] = Value::from(context_window);
+        }
+        let previous_context = inner
+            .session
+            .events()
+            .into_iter()
+            .rev()
+            .find(|event| event.event_type == "request/context")
+            .map(|event| event.data);
+        if previous_context.as_ref() != Some(&request_context) {
+            append(inner, "request/context", request_context, None, None).await?;
+        }
+
+        let mut context_overflow_recovered = false;
+        let (generation, chunk_seqs) = loop {
+            match consume_generation_attempt(inner, turn, step, request.clone()).await {
+                Ok((generation, chunk_seqs)) => match &generation.finish_reason {
+                    FinishReason::Error { failure: error } => {
+                        if !context_overflow_recovered && is_context_overflow(&error.code) {
+                            match compact_context_overflow(inner).await {
+                                Ok(true) => {
+                                    context_overflow_recovered = true;
+                                    request.messages = inner.session.derive_messages();
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    close_step(inner, turn, step).await?;
+                                    return end_turn(
+                                        inner,
+                                        turn,
+                                        TurnEndReason::Error {
+                                            error: compaction_failure(error),
+                                        },
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        if schedule_retry(inner, turn, step, &request.provider, error).await? {
+                            continue;
+                        }
+                        if inner.cancellation.is_cancelled() {
+                            return close_cancelled_step(inner, turn, step).await;
+                        }
+                        close_step(inner, turn, step).await?;
+                        return end_turn(
+                            inner,
+                            turn,
+                            TurnEndReason::Error {
+                                error: error.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                    FinishReason::Aborted { .. } => {
+                        return close_cancelled_step(inner, turn, step).await;
+                    }
+                    FinishReason::Stop | FinishReason::ToolCalls | FinishReason::MaxTokens => {
+                        break (generation, chunk_seqs);
+                    }
+                },
+                Err(_error) if inner.cancellation.is_cancelled() => {
+                    return close_cancelled_step(inner, turn, step).await;
+                }
+                Err(error) => {
+                    let error = failure(error);
+                    if !context_overflow_recovered && is_context_overflow(&error.code) {
+                        match compact_context_overflow(inner).await {
+                            Ok(true) => {
+                                context_overflow_recovered = true;
+                                request.messages = inner.session.derive_messages();
+                                continue;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                close_step(inner, turn, step).await?;
+                                return end_turn(
+                                    inner,
+                                    turn,
+                                    TurnEndReason::Error {
+                                        error: compaction_failure(error),
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    if schedule_retry(inner, turn, step, &request.provider, &error).await? {
+                        continue;
+                    }
+                    if inner.cancellation.is_cancelled() {
+                        return close_cancelled_step(inner, turn, step).await;
+                    }
+                    close_step(inner, turn, step).await?;
+                    return end_turn(inner, turn, TurnEndReason::Error { error }).await;
+                }
             }
         };
-
-        let mut chunk_seqs = Vec::with_capacity(generation.chunks.len());
-        for chunk in &generation.chunks {
-            chunk_seqs.push(
-                append(
-                    inner,
-                    "assistant/chunk",
-                    json!({"turn": turn, "step": step, "chunk": chunk}),
-                    None,
-                    None,
-                )
-                .await?,
-            );
+        if inner.cancellation.is_cancelled() {
+            return close_cancelled_step(inner, turn, step).await;
         }
         append_assistant(
             inner,
@@ -426,10 +808,13 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
 
         match generation.finish_reason {
             FinishReason::ToolCalls => {
-                run_tools(inner, turn, step, &generation.message).await?;
+                let exit_plan_mode = run_tools(inner, turn, step, &generation.message).await?;
                 close_step(inner, turn, step).await?;
+                if exit_plan_mode {
+                    append(inner, "plan/mode", json!({"active": false}), None, None).await?;
+                }
                 if inner.cancellation.is_cancelled() {
-                    return end_turn(inner, turn, aborted()).await;
+                    return end_turn(inner, turn, aborted(inner)).await;
                 }
                 if step == inner.max_steps {
                     return end_turn(inner, turn, TurnEndReason::Blocked).await;
@@ -438,13 +823,12 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             FinishReason::Stop => {
                 close_step(inner, turn, step).await?;
                 if inner.cancellation.is_cancelled() {
-                    return end_turn(inner, turn, aborted()).await;
+                    return end_turn(inner, turn, aborted(inner)).await;
                 }
-                if let Some(steer) = inner.inbox.take_next_step() {
+                if inner.inbox.has_next_step() {
                     if step == inner.max_steps {
                         return end_turn(inner, turn, TurnEndReason::Blocked).await;
                     }
-                    pending_steer = Some(steer);
                 } else {
                     return end_turn(inner, turn, TurnEndReason::Completed).await;
                 }
@@ -459,11 +843,353 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             }
             FinishReason::Aborted { .. } => {
                 close_step(inner, turn, step).await?;
-                return end_turn(inner, turn, aborted()).await;
+                return end_turn(inner, turn, aborted(inner)).await;
             }
         }
     }
     end_turn(inner, turn, TurnEndReason::Blocked).await
+}
+
+async fn claim_next_turn(inner: &Inner) -> Result<Option<Message>, AgentError> {
+    let Some(reservation) = inner.inbox.reserve_next_turn_claim() else {
+        return Ok(None);
+    };
+    let mut messages = commit_inbox_claim(inner, reservation).await?;
+    debug_assert_eq!(messages.len(), 1);
+    Ok(messages.pop())
+}
+
+async fn claim_step_batch(inner: &Inner) -> Result<Vec<Message>, AgentError> {
+    let Some(reservation) = inner.inbox.reserve_step_batch_claim() else {
+        return Ok(Vec::new());
+    };
+    commit_inbox_claim(inner, reservation).await
+}
+
+async fn commit_inbox_claim(
+    inner: &Inner,
+    reservation: InboxClaimReservation,
+) -> Result<Vec<Message>, AgentError> {
+    if durable_inbox_claim(&inner.session, reservation.messages()) {
+        append(
+            inner,
+            "agent/inbox/spliced",
+            json!({
+                "target": reservation.target(),
+                "start": 0,
+                "removedCount": reservation.messages().len(),
+                "inserted": [],
+            }),
+            None,
+            None,
+        )
+        .await?;
+    }
+    reservation
+        .commit()
+        .ok_or_else(|| AgentError::Runtime("inbox claim reservation was lost".into()))
+}
+
+fn durable_inbox_claim(session: &Session, messages: &[Message]) -> bool {
+    !messages.is_empty()
+        && messages.iter().all(|message| {
+            session.events().iter().any(|event| {
+                event.event_type == "agent/inbox/enqueued"
+                    && event.data.pointer("/message/id").and_then(Value::as_str)
+                        == Some(message.id.as_str())
+            })
+        })
+}
+
+async fn append_skill_context(
+    inner: &Inner,
+    turn: u64,
+    step: u64,
+    messages: &[Message],
+) -> Result<(), AgentError> {
+    let Some((skills, scopes)) = &inner.skills else {
+        return Ok(());
+    };
+    let Some(cwd) = lock(scopes).get(&inner.session.id()).cloned() else {
+        return Ok(());
+    };
+    let catalog = skills.catalog(&cwd, inner.cancellation.clone()).await?;
+    let catalog_visible = inner.session.derive_messages().iter().any(|message| {
+        matches!(
+            &message.source,
+            MessageSource::Plugin {
+                plugin,
+                form: Some(ContextForm::Catalog),
+                ..
+            } if plugin == "@deepseek-ai/dsh-tool-skill"
+        )
+    });
+    if catalog.complete
+        && catalog
+            .skills
+            .iter()
+            .any(|entry| entry.skill.invocation.model_invocable)
+        && !catalog_visible
+    {
+        append_message(
+            inner,
+            "user/message",
+            turn,
+            step,
+            Message {
+                id: MessageId::from(format!("skill-catalog-{turn}-{step}")),
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: model_catalog(&catalog),
+                }],
+                source: MessageSource::Plugin {
+                    plugin: "@deepseek-ai/dsh-tool-skill".into(),
+                    compaction_id: None,
+                    form: Some(ContextForm::Catalog),
+                    sections: None,
+                    summary: None,
+                },
+            },
+            None,
+            None,
+        )
+        .await?;
+    }
+    let user_invocable = catalog
+        .skills
+        .iter()
+        .filter(|entry| entry.skill.invocation.user_invocable)
+        .map(|entry| entry.skill.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (index, name) in invoked_skill_names(messages, &user_invocable)
+        .into_iter()
+        .enumerate()
+    {
+        let skill = skills.get(&cwd, &name, inner.cancellation.clone()).await?;
+        append_message(
+            inner,
+            "user/message",
+            turn,
+            step,
+            Message {
+                id: MessageId::from(format!("skill-invocation-{turn}-{step}-{index}")),
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: skill_result_tag(&skill),
+                }],
+                source: MessageSource::SkillInvocation {
+                    name,
+                    form: ContextForm::Instructions,
+                },
+            },
+            None,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_runtime_context(inner: &Inner, turn: u64, step: u64) -> Result<(), AgentError> {
+    let header = inner.session.header();
+    let text = runtime_context(&inner.session.events(), header.cwd.as_deref());
+    let unchanged = inner
+        .session
+        .surface()
+        .into_iter()
+        .rev()
+        .find(|entry| matches!(&entry.message.source, MessageSource::Plugin { plugin, .. } if plugin == "@deepseek-ai/dsh-system-prompt"))
+        .is_some_and(|entry| matches!(entry.message.content.as_slice(), [ContentBlock::Text { text: previous }] if previous == &text));
+    if unchanged {
+        return Ok(());
+    }
+    append_message(
+        inner,
+        "user/message",
+        turn,
+        step,
+        Message {
+            id: MessageId::from(format!("runtime-context-{turn}")),
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text }],
+            source: MessageSource::Plugin {
+                plugin: "@deepseek-ai/dsh-system-prompt".into(),
+                compaction_id: None,
+                form: None,
+                sections: None,
+                summary: None,
+            },
+        },
+        None,
+        None,
+    )
+    .await
+}
+
+async fn append_workspace_instructions(
+    inner: &Inner,
+    turn: u64,
+    step: u64,
+) -> Result<(), AgentError> {
+    let Some(cwd) = inner.session.header().cwd else {
+        return Ok(());
+    };
+    let Ok(instructions) = std::fs::read_to_string(std::path::Path::new(&cwd).join("AGENTS.md"))
+    else {
+        return Ok(());
+    };
+    let instructions = instructions.trim();
+    if instructions.is_empty() {
+        return Ok(());
+    }
+    let text = format!(
+        "<system-reminder>\nThe following workspace instructions may be relevant to your work. Use them as guidance when applicable. More specific instructions take precedence over broader ones. They do not override system, developer, or direct user instructions.\n\nInstructions from: AGENTS.md\n\n{instructions}\n\n</system-reminder>"
+    );
+    let unchanged = inner.session.surface().into_iter().rev().any(|entry| {
+        matches!(&entry.message.source, MessageSource::Plugin { plugin, .. } if plugin == "tessivum-workspace-instructions")
+            && matches!(entry.message.content.as_slice(), [ContentBlock::Text { text: previous }] if previous == &text)
+    });
+    if unchanged {
+        return Ok(());
+    }
+    append_message(
+        inner,
+        "user/message",
+        turn,
+        step,
+        Message {
+            id: MessageId::from(format!("workspace-instructions-{turn}")),
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text }],
+            source: MessageSource::Plugin {
+                plugin: "tessivum-workspace-instructions".into(),
+                compaction_id: None,
+                form: Some(ContextForm::Instructions),
+                sections: None,
+                summary: Some("AGENTS.md".into()),
+            },
+        },
+        None,
+        None,
+    )
+    .await
+}
+
+fn request_messages(inner: &Inner) -> Vec<Message> {
+    let mut messages = inner.session.derive_messages();
+    if let Some(instructions) = inner.session.events().into_iter().rev().find_map(|event| {
+        (event.event_type == "user/message"
+            && event.data.pointer("/source/kind").and_then(Value::as_str) == Some("plugin")
+            && event.data.pointer("/source/plugin").and_then(Value::as_str)
+                == Some("tessivum-workspace-instructions"))
+        .then(|| serde_json::from_value::<Message>(event.data).ok())
+        .flatten()
+    }) {
+        if !messages.iter().any(|message| message.id == instructions.id) {
+            messages.push(instructions);
+        }
+    }
+    messages
+}
+
+fn invoked_skill_names(messages: &[Message], available: &BTreeSet<&str>) -> Vec<String> {
+    let mut names = Vec::new();
+    for message in messages
+        .iter()
+        .filter(|message| matches!(message.source, MessageSource::User { .. }))
+    {
+        for text in message.content.iter().filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        }) {
+            for name in skill_gestures(text) {
+                if available.contains(name) && !names.iter().any(|known| known == name) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn skill_gestures(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices('/').filter_map(move |(index, _)| {
+        if text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|character| !character.is_whitespace())
+        {
+            return None;
+        }
+        let rest = &text[index + 1..];
+        let bytes = rest.as_bytes();
+        let mut end = 0;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        {
+            end += 1;
+        }
+        if end == 0 {
+            return None;
+        }
+        while bytes.get(end) == Some(&b'-') {
+            let segment = end + 1;
+            if !bytes
+                .get(segment)
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            {
+                break;
+            }
+            end = segment + 1;
+            while bytes
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            {
+                end += 1;
+            }
+        }
+        rest[end..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+            .then_some(&rest[..end])
+    })
+}
+
+fn is_context_overflow(code: &str) -> bool {
+    matches!(
+        code,
+        "CONTEXT_OVERFLOW" | "CONTEXT_WINDOW_EXCEEDED" | "CONTEXT_LENGTH_EXCEEDED"
+    )
+}
+
+async fn compact_context_overflow(
+    inner: &Inner,
+) -> Result<bool, crate::compaction::CompactionError> {
+    let Some(compaction) = &inner.compaction else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        compaction
+            .compact_for_trigger(
+                &inner.session,
+                CompactionTrigger::ContextOverflow,
+                inner.cancellation.clone(),
+            )
+            .await?,
+        CompactionOutcome::Compacted(_)
+    ))
+}
+
+fn compaction_failure(error: crate::compaction::CompactionError) -> LlmFailure {
+    LlmFailure {
+        message: error.to_string(),
+        code: error.code().into(),
+        status: None,
+        provider_retry_after_ms: None,
+        request_id: None,
+    }
 }
 
 async fn run_tools(
@@ -471,7 +1197,7 @@ async fn run_tools(
     turn: u64,
     step: u64,
     assistant: &Message,
-) -> Result<(), AgentError> {
+) -> Result<bool, AgentError> {
     let calls = assistant
         .content
         .iter()
@@ -542,7 +1268,29 @@ async fn run_tools(
     let mut outputs = outputs;
     outputs.sort_by_key(|(index, _, _)| *index);
 
+    let mut exit_plan_mode = false;
     for ((_, call, output), source_seq) in outputs.into_iter().zip(call_seqs) {
+        if let Some(dispatches) = output.meta.get("codeDispatches").and_then(Value::as_array) {
+            for dispatch in dispatches {
+                let Some(event_type) = dispatch.get("type").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(data) = dispatch.get("data") else {
+                    continue;
+                };
+                append(inner, event_type, data.clone(), None, None).await?;
+            }
+        }
+        exit_plan_mode |= output
+            .meta
+            .get("deferredPlanExit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut meta = output.meta.clone();
+        let deferred_context = meta.as_object_mut().and_then(|object| {
+            object.remove("deferredPlanExit");
+            object.remove("deferredContext")
+        });
         let message = Message {
             id: MessageId::random(),
             role: MessageRole::User,
@@ -556,10 +1304,178 @@ async fn run_tools(
             step,
             message,
             Some(vec![source_seq]),
+            Some(meta),
         )
         .await?;
+        if let Some(context) = deferred_context.as_ref().and_then(Value::as_object) {
+            let plugin = context.get("plugin").and_then(Value::as_str);
+            let summary = context.get("summary").and_then(Value::as_str);
+            let text = context.get("text").and_then(Value::as_str);
+            if let (Some(plugin), Some(summary), Some(text)) = (plugin, summary, text) {
+                append_message(
+                    inner,
+                    "user/message",
+                    turn,
+                    step,
+                    Message {
+                        id: MessageId::from(format!("tool-context-{turn}-{step}-{source_seq}")),
+                        role: MessageRole::User,
+                        content: vec![ContentBlock::Text { text: text.into() }],
+                        source: MessageSource::Plugin {
+                            plugin: plugin.into(),
+                            compaction_id: None,
+                            form: Some(ContextForm::Notice),
+                            sections: None,
+                            summary: Some(summary.into()),
+                        },
+                    },
+                    None,
+                    None,
+                )
+                .await?;
+            }
+        }
     }
-    Ok(())
+    Ok(exit_plan_mode)
+}
+
+async fn consume_generation_attempt(
+    inner: &Inner,
+    turn: u64,
+    step: u64,
+    request: GenerateRequest,
+) -> Result<(crate::llm::LlmGeneration, Vec<u64>), crate::TessivumError> {
+    let provider = request.provider.clone();
+    let model = request.model.clone();
+    let mut stream = inner
+        .llm
+        .generate(request, inner.cancellation.clone())
+        .await?;
+    let mut assembler = BlockAssembler::new(provider, model);
+    let mut chunk_seqs = Vec::new();
+    let mut generation = None;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let completed = assembler.push(chunk.clone())?;
+        let seq = append(
+            inner,
+            "assistant/chunk",
+            json!({"turn": turn, "step": step, "chunk": chunk}),
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| {
+            crate::TessivumError::new(
+                "SESSION_APPEND_FAILED",
+                error.to_string(),
+                "agent-loop",
+                Value::Null,
+            )
+        })?;
+        chunk_seqs.push(seq);
+        if let Some(completed) = completed {
+            generation = Some(completed);
+        }
+    }
+
+    generation
+        .ok_or_else(|| {
+            crate::TessivumError::new(
+                "LLM_STREAM_ENDED_EARLY",
+                "the LLM stream ended before a finish chunk",
+                "llm",
+                Value::Null,
+            )
+        })
+        .map(|generation| (generation, chunk_seqs))
+}
+
+async fn schedule_retry(
+    inner: &Inner,
+    turn: u64,
+    step: u64,
+    provider: &str,
+    failure: &LlmFailure,
+) -> Result<bool, AgentError> {
+    let Some(policy) = inner.llm.provider_retry_policy(provider) else {
+        return Ok(false);
+    };
+    if inner.cancellation.is_cancelled() || !policy.permits_failure(&failure.code) {
+        return Ok(false);
+    }
+    let policy_key = policy.policy_key();
+    let prior = inner.session.events().into_iter().rev().find(|event| {
+        event.event_type == "llm/retry"
+            && event.data.get("turn").and_then(Value::as_u64) == Some(turn)
+            && event.data.get("step").and_then(Value::as_u64) == Some(step)
+            && event.data.get("provider").and_then(Value::as_str) == Some(provider)
+            && event.data.get("policyKey").and_then(Value::as_str) == Some(policy_key.as_str())
+    });
+    let prior_retry = prior
+        .as_ref()
+        .and_then(|event| event.data.get("retry").and_then(Value::as_u64))
+        .unwrap_or(0);
+    if policy
+        .max_retries()
+        .is_some_and(|max_retries| prior_retry >= max_retries)
+    {
+        return Ok(false);
+    }
+    let retry = prior_retry + 1;
+    let retry_id = prior
+        .as_ref()
+        .and_then(|event| event.data.get("retryId").and_then(Value::as_str))
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let random = u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()) as f64 / u128::MAX as f64;
+    let local_delay_ms = policy.local_delay_ms(retry, random);
+    let delay_ms = match failure.provider_retry_after_ms {
+        Some(delay) if (delay as f64) > policy.max_delay_ms() && policy.max_retries().is_some() => {
+            return Ok(false)
+        }
+        Some(delay) if (delay as f64) > policy.max_delay_ms() => local_delay_ms,
+        Some(delay) if delay > 0 => delay as f64,
+        _ => local_delay_ms,
+    };
+    let mut retry_event = json!({
+        "retryId": retry_id,
+        "turn": turn,
+        "step": step,
+        "provider": provider,
+        "mode": policy.mode(),
+        "policyKey": policy_key,
+        "retry": retry,
+        "delayMs": delay_ms,
+        "failure": failure,
+    });
+    if let Some(max_retries) = policy.max_retries() {
+        retry_event
+            .as_object_mut()
+            .expect("retry event is an object")
+            .insert("maxRetries".into(), Value::from(max_retries));
+    }
+    append(inner, "llm/retry", retry_event, None, None).await?;
+    if inner.cancellation.is_cancelled() {
+        return Ok(false);
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs_f64(delay_ms / 1_000.0)) => {}
+        _ = inner.cancellation.cancelled() => return Ok(false),
+    }
+    if inner.cancellation.is_cancelled() {
+        return Ok(false);
+    }
+    append(
+        inner,
+        "llm/retry-started",
+        json!({"retryId": retry_id, "turn": turn, "step": step, "retry": retry}),
+        None,
+        None,
+    )
+    .await?;
+    Ok(!inner.cancellation.is_cancelled())
 }
 
 async fn append_assistant(
@@ -593,12 +1509,16 @@ async fn append_message(
     step: u64,
     message: Message,
     source_event_seqs: Option<Vec<u64>>,
+    meta: Option<Value>,
 ) -> Result<(), AgentError> {
-    let data = if event_type == "user/message" {
+    let mut data = if event_type == "user/message" {
         serde_json::to_value(message).map_err(|error| AgentError::Runtime(error.to_string()))?
     } else {
         json!({"turn": turn, "step": step, "message": message})
     };
+    if let Some(meta) = meta {
+        data["meta"] = meta;
+    }
     append(
         inner,
         event_type,
@@ -637,10 +1557,15 @@ async fn close_step(inner: &Inner, turn: u64, step: u64) -> Result<(), AgentErro
 
 async fn close_cancelled_step(inner: &Inner, turn: u64, step: u64) -> Result<(), AgentError> {
     close_step(inner, turn, step).await?;
-    end_turn(inner, turn, aborted()).await
+    end_turn(inner, turn, aborted(inner)).await
 }
 
 async fn end_turn(inner: &Inner, turn: u64, reason: TurnEndReason) -> Result<(), AgentError> {
+    let reason = if inner.cancellation.is_cancelled() {
+        aborted(inner)
+    } else {
+        reason
+    };
     append(
         inner,
         "turn/end",
@@ -659,23 +1584,28 @@ async fn append(
     source_event_seqs: Option<Vec<u64>>,
     surface_op: Option<SurfaceOp>,
 ) -> Result<u64, AgentError> {
-    let seq = inner.session.next_seq()?;
-    let event = SessionEvent {
-        event_type: event_type.into(),
-        seq,
-        time: 0,
-        data,
-        ignorable: None,
-        source_event_seqs,
-        surface_op,
-    };
     let cancellation = if inner.cancellation.is_cancelled() {
         inner.finalization.clone()
     } else {
         inner.cancellation.clone()
     };
-    inner.session.append(event, cancellation).await?;
-    Ok(seq)
+    Ok(inner
+        .session
+        .append_next(
+            |seq| SessionEvent {
+                event_type: event_type.into(),
+                seq,
+                time: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |value| value.as_millis().try_into().unwrap_or(u64::MAX)),
+                data,
+                ignorable: None,
+                source_event_seqs,
+                surface_op,
+            },
+            cancellation,
+        )
+        .await?)
 }
 
 fn next_turn(session: &Session) -> u64 {
@@ -689,9 +1619,12 @@ fn next_turn(session: &Session) -> u64 {
         .saturating_add(1)
 }
 
-fn aborted() -> TurnEndReason {
+fn aborted(inner: &Inner) -> TurnEndReason {
     TurnEndReason::Aborted {
-        reason: TurnEndCancelCause::Legacy,
+        reason: lock(&inner.cancellation_cause)
+            .clone()
+            .map(TurnEndCancelCause::from)
+            .unwrap_or(TurnEndCancelCause::Legacy),
     }
 }
 

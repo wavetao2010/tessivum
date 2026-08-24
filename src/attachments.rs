@@ -297,9 +297,9 @@ pub struct AttachmentLimits {
 impl Default for AttachmentLimits {
     fn default() -> Self {
         Self {
-            max_image_bytes: 20 * 1024 * 1024,
-            max_images_per_message: 16,
-            max_message_image_bytes: 40 * 1024 * 1024,
+            max_image_bytes: 5 * 1024 * 1024,
+            max_images_per_message: 20,
+            max_message_image_bytes: 100 * 1024 * 1024,
             max_image_pixels: 40_000_000,
             media_types: [
                 ImageMediaType::Png,

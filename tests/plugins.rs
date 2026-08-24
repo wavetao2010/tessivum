@@ -504,7 +504,8 @@ fn wasm_product_declaration_projects_exact_permissions_from_every_location() {
         {"service":"tools@1","methods":["schemas"]},
         {"service":"logger@1","methods":["log"]},
         {"service":"credentials@1","methods":["describe"]},
-        {"service":"settings@1","methods":["describe"]}
+        {"service":"settings@1","methods":["describe"]},
+        {"service":"systemPrompt@1","methods":["assemble"]}
     ]"#;
     let expected = BTreeSet::from([
         ServiceMethodPermission {
@@ -518,6 +519,10 @@ fn wasm_product_declaration_projects_exact_permissions_from_every_location() {
         ServiceMethodPermission {
             service: "settings@1".into(),
             method: "describe".into(),
+        },
+        ServiceMethodPermission {
+            service: "systemPrompt@1".into(),
+            method: "assemble".into(),
         },
         ServiceMethodPermission {
             service: "tools@1".into(),
@@ -547,10 +552,11 @@ fn wasm_product_declaration_projects_exact_permissions_from_every_location() {
             fs::canonicalize(fixture.path().join("plugin.wasm")).unwrap()
         );
         assert_eq!(product.root, fs::canonicalize(fixture.path()).unwrap());
-
         let report = PluginRouter::new().inspect(fixture.path(), None).unwrap();
+
         assert_eq!(report.service_permissions[0].service, "credentials@1");
-        assert_eq!(report.service_permissions[3].service, "tools@1");
+        assert_eq!(report.service_permissions[3].service, "systemPrompt@1");
+        assert_eq!(report.service_permissions[4].service, "tools@1");
         let report = serde_json::to_string(&report).unwrap();
         assert!(!report.contains("configSchema"));
     }
@@ -622,6 +628,16 @@ fn service_permission_validation_rejects_every_invalid_edge_in_every_location() 
             "unknown-method",
             r#"["cordis.service.call"]"#,
             r#"[{"service":"tools@1","methods":["execute"]}]"#,
+        ),
+        (
+            "unknown-system-prompt-method",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"systemPrompt@1","methods":["unknown"]}]"#,
+        ),
+        (
+            "forbidden-system-prompt-registration",
+            r#"["cordis.service.call"]"#,
+            r#"[{"service":"systemPrompt@1","methods":["register"]}]"#,
         ),
         (
             "missing-capability",

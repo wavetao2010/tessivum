@@ -13,8 +13,14 @@ pub struct Cli {
 pub enum CliCommand {
     Headless(HeadlessCommand),
     Sdk,
-    Web,
+    Web(WebCommand),
     PluginReport,
+}
+
+/// Inputs owned by the web launcher profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebCommand {
+    pub patches: Vec<PathBuf>,
 }
 
 /// Inputs owned by the headless launcher, independent of service internals.
@@ -61,6 +67,8 @@ enum Profile {
 struct RawCli {
     #[arg(long, value_enum)]
     profile: Option<Profile>,
+    #[arg(long = "patch", value_name = "PATCH", global = true)]
+    patches: Vec<PathBuf>,
     #[command(subcommand)]
     command: Option<RawCommand>,
     #[command(flatten)]
@@ -77,8 +85,6 @@ enum RawCommand {
 
 #[derive(Debug, Args)]
 struct RawHeadlessCommand {
-    #[arg(long = "patch", value_name = "PATCH")]
-    patches: Vec<PathBuf>,
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
     #[arg(long, value_name = "SESSION")]
@@ -114,13 +120,26 @@ where
                 "commands sdk, web, and plugin-report do not accept headless launcher options",
             ));
         }
-        return Ok(Cli {
-            command: match command {
-                RawCommand::Sdk => CliCommand::Sdk,
-                RawCommand::Web => CliCommand::Web,
-                RawCommand::PluginReport => CliCommand::PluginReport,
-            },
-        });
+        let command = match command {
+            RawCommand::Web => CliCommand::Web(WebCommand {
+                patches: raw.patches,
+            }),
+            RawCommand::Sdk => {
+                if !raw.patches.is_empty() {
+                    return Err(usage_error("the sdk command does not accept --patch"));
+                }
+                CliCommand::Sdk
+            }
+            RawCommand::PluginReport => {
+                if !raw.patches.is_empty() {
+                    return Err(usage_error(
+                        "the plugin-report command does not accept --patch",
+                    ));
+                }
+                CliCommand::PluginReport
+            }
+        };
+        return Ok(Cli { command });
     }
 
     match raw.profile.unwrap_or(Profile::Headless) {
@@ -131,12 +150,14 @@ where
                 ));
             }
             Ok(Cli {
-                command: CliCommand::Web,
+                command: CliCommand::Web(WebCommand {
+                    patches: raw.patches,
+                }),
             })
         }
         Profile::Headless => {
             reject_launcher_options_after_task(&args)?;
-            headless_command(raw.headless).map(|command| Cli {
+            headless_command(raw.headless, raw.patches).map(|command| Cli {
                 command: CliCommand::Headless(command),
             })
         }
@@ -145,8 +166,7 @@ where
 
 impl RawHeadlessCommand {
     fn is_set(&self) -> bool {
-        !self.patches.is_empty()
-            || self.data_dir.is_some()
+        self.data_dir.is_some()
             || self.session.is_some()
             || self.resume
             || self.replay.is_some()
@@ -158,7 +178,10 @@ impl RawHeadlessCommand {
     }
 }
 
-fn headless_command(raw: RawHeadlessCommand) -> Result<HeadlessCommand, Error> {
+fn headless_command(
+    raw: RawHeadlessCommand,
+    patches: Vec<PathBuf>,
+) -> Result<HeadlessCommand, Error> {
     if raw.resume && raw.session.is_none() {
         return Err(usage_error("--resume requires --session"));
     }
@@ -178,7 +201,7 @@ fn headless_command(raw: RawHeadlessCommand) -> Result<HeadlessCommand, Error> {
     }
 
     Ok(HeadlessCommand {
-        patches: raw.patches,
+        patches,
         data_dir: raw.data_dir,
         session: raw.session,
         resume: raw.resume,

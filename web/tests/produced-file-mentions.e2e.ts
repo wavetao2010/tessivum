@@ -1,3 +1,5 @@
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { expect, test } from 'bun:test'
 import { openSeededSession, RustWebHarness, waitUntil } from './support'
 
@@ -27,9 +29,11 @@ function recording(): string {
     arguments: JSON.stringify({ file_path: path, content: `content of ${path}\n` }),
   }))
   append('assistant/message', {
-    id: 'mention-calls', role: 'assistant', turn: 1, step: 1,
-    content: calls.map(call => ({ type: 'tool-call', id: call.callId, name: 'write', arguments: call.arguments })),
-    source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    turn: 1, step: 1, message: {
+      id: 'mention-calls', role: 'assistant',
+      content: calls.map(call => ({ type: 'tool-call', id: call.callId, name: 'write', arguments: call.arguments })),
+      source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    },
   }, 'append')
   for (const call of calls) {
     const callSeq = seq
@@ -49,9 +53,11 @@ function recording(): string {
   append('step/end', { turn: 1, step: 1 })
   append('step/start', { turn: 1, step: 2 })
   append('assistant/message', {
-    id: 'mention-done', role: 'assistant', turn: 1, step: 2,
-    content: [{ type: 'text', text: `Wrote \`report.html\` plus two \`style.css\` copies; \`notes.md\` untouched.\n\n${DONE}` }],
-    source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    turn: 1, step: 2, message: {
+      id: 'mention-done', role: 'assistant',
+      content: [{ type: 'text', text: `Wrote \`report.html\` plus two \`style.css\` copies; \`notes.md\` untouched.\n\n${DONE}` }],
+      source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    },
   }, 'append')
   append('step/end', { turn: 1, step: 2 })
   append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -63,14 +69,27 @@ async function history(harness: RustWebHarness): Promise<HistoryEntry[]> {
   if (!result.ok || result.value === undefined) throw new Error(`session.history failed: ${JSON.stringify(result.error)}`)
   return result.value.events
 }
+async function seedProducedFiles(workspace: string): Promise<void> {
+  await Promise.all(WRITES.map(async (path) => {
+    const file = join(workspace, path)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, `content of ${path}\n`)
+  }))
+}
+
 
 test('only a unique produced-file inline-code basename is actionable', async () => {
   const harness = await RustWebHarness.launch({
     name: 'produced-file-mentions',
-    beforeStart: candidate => candidate.seedSession(SESSION, recording()),
+    beforeStart: async candidate => {
+      await seedProducedFiles(candidate.workspace)
+      await candidate.seedSession(SESSION, recording())
+    },
   })
   try {
     await openSeededSession(harness, DONE)
+    expect(await Promise.all(WRITES.map(path => readFile(join(harness.workspace, path), 'utf8'))))
+      .toEqual(WRITES.map(path => `content of ${path}\n`))
     const results = (await history(harness)).filter(entry => entry.event.type === 'tool/result')
     expect(results.map(entry => entry.view?.view.card)).toEqual(['diff', 'diff', 'diff'])
     expect(results.map(entry => entry.view?.view.locations)).toEqual(WRITES.map(path => [{ path }]))

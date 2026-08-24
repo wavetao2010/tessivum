@@ -21,7 +21,7 @@ use tessivum::{
         ApprovalAnswerer, ApprovalAsked, ApprovalDecision, ApprovalError, ApprovalOutcome,
         ApprovalPolicy, ApprovalRequest, ApprovalService, HostApprovalRegistry,
     },
-    goal::{GoalError, GoalPhase, GoalRef, GoalService, GoalSnapshot},
+    goal::{GoalError, GoalPhase, GoalRef, GoalService, GoalSnapshot, DEFAULT_MAX_GOAL_ROUNDS},
     planning::{PlanMode, PlanningService},
     session::{
         MemorySessionPersistence, Session, SessionError, SessionInspection, SessionPersistence,
@@ -102,6 +102,7 @@ async fn append_turn_end(session: &Session, turn: u64) {
 struct AskedFailingPersistence {
     inner: MemorySessionPersistence,
     fail_asked: AtomicBool,
+    fail_goal_change: AtomicBool,
     block_policy: AtomicBool,
     policy_entered: Arc<Notify>,
     policy_release: Arc<Notify>,
@@ -123,6 +124,9 @@ impl SessionPersistence for AskedFailingPersistence {
         event: &SessionEvent,
         cancellation: CancellationToken,
     ) -> Result<(), SessionError> {
+        if event.event_type == "goal/change" && self.fail_goal_change.load(Ordering::Acquire) {
+            return Err(SessionError::NotFound(session_id.clone()));
+        }
         if event.event_type == "approval/asked" && self.fail_asked.load(Ordering::Acquire) {
             return Err(SessionError::NotFound(session_id.clone()));
         }
@@ -186,6 +190,19 @@ async fn agent(id: &str) -> (AgentHandle, AgentRegistry) {
         .unwrap();
     (handle, registry)
 }
+async fn agent_with_persistence(
+    id: &str,
+    persistence: Arc<dyn SessionPersistence>,
+) -> (AgentHandle, AgentRegistry) {
+    let store = SessionStore::new(persistence);
+    let registry = AgentRegistry::new(store);
+    let _factory = registry.register_factory(Arc::new(Factory)).unwrap();
+    let handle = registry
+        .create(header(id), options(), cancellation())
+        .await
+        .unwrap();
+    (handle, registry)
+}
 
 async fn append_turn_start(session: &Session, turn: u64) {
     session
@@ -238,6 +255,7 @@ fn goal(revision: u64, phase: GoalPhase, tombstone: bool) -> GoalSnapshot {
         },
         phase,
         title: "Ship durable goals".into(),
+        max_goal_rounds: 1,
         tombstone,
     }
 }
@@ -314,6 +332,137 @@ async fn goals_are_cas_transitioned_tombstoned_and_round_bounded() {
 }
 
 #[tokio::test]
+async fn goal_lifecycle_helpers_are_cas_durable_and_reloadable() {
+    let (agent, registry) = agent("goal-lifecycle").await;
+    let session = agent.session();
+    let service = GoalService::new(agent).unwrap();
+
+    let created = service
+        .create("  ship the release  ".into(), Some(3), cancellation())
+        .await
+        .unwrap();
+    assert_eq!(created.reference.revision, 1);
+    assert_eq!(created.title, "ship the release");
+    assert_eq!(created.max_goal_rounds, 3);
+
+    let edited = service
+        .edit(
+            created.reference.clone(),
+            Some("ship safely".into()),
+            Some(4),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        service
+            .pause(created.reference.clone(), cancellation())
+            .await,
+        Err(GoalError::Stale)
+    ));
+    let paused = service
+        .pause(edited.reference.clone(), cancellation())
+        .await
+        .unwrap();
+    let resumed = service
+        .resume(paused.reference.clone(), cancellation())
+        .await
+        .unwrap();
+    let complete = service
+        .complete(resumed.reference.clone(), cancellation())
+        .await
+        .unwrap();
+    assert!(matches!(
+        service
+            .resume(complete.reference.clone(), cancellation())
+            .await,
+        Err(GoalError::InvalidTransition)
+    ));
+    let cleared = service
+        .clear(complete.reference.clone(), cancellation())
+        .await
+        .unwrap();
+    assert!(cleared.tombstone);
+    assert_eq!(cleared.reference.revision, 6);
+    assert!(matches!(
+        service
+            .resume(cleared.reference.clone(), cancellation())
+            .await,
+        Err(GoalError::Tombstoned)
+    ));
+
+    let cancelled = cancellation();
+    cancelled.cancel();
+    assert!(matches!(
+        service
+            .create("must not persist".into(), None, cancelled)
+            .await,
+        Err(GoalError::Cancelled)
+    ));
+    assert_eq!(
+        session
+            .events()
+            .iter()
+            .filter(|event| event.event_type == "goal/change")
+            .count(),
+        6
+    );
+    let changes = session
+        .events()
+        .into_iter()
+        .filter(|event| event.event_type == "goal/change")
+        .collect::<Vec<_>>();
+    assert_eq!(changes[0].data["operation"], "create");
+    assert_eq!(changes[0].data["goal"]["objective"], "ship the release");
+    assert_eq!(changes[0].data["goal"]["revision"], 1);
+    assert!(
+        changes[0].data["createdAt"].as_u64().unwrap()
+            <= changes[0].data["updatedAt"].as_u64().unwrap()
+    );
+    assert_eq!(changes[5].data["operation"], "clear");
+    assert_eq!(
+        changes[5].data["cleared"],
+        serde_json::to_value(&cleared.reference).unwrap()
+    );
+    assert!(changes[5].data.get("goal").is_none());
+
+    let reloaded =
+        GoalService::new(registry.get(&SessionId::from("goal-lifecycle")).unwrap()).unwrap();
+    assert_eq!(
+        reloaded.snapshot(&cleared.reference.id).await,
+        Some(cleared)
+    );
+    assert_eq!(DEFAULT_MAX_GOAL_ROUNDS, 256);
+}
+
+#[tokio::test]
+async fn failed_goal_append_leaves_no_snapshot_or_event() {
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(AskedFailingPersistence {
+        inner: MemorySessionPersistence::new(),
+        fail_asked: AtomicBool::new(false),
+        fail_goal_change: AtomicBool::new(true),
+        block_policy: AtomicBool::new(false),
+        policy_entered: Arc::new(Notify::new()),
+        policy_release: Arc::new(Notify::new()),
+    });
+    let (agent, _registry) = agent_with_persistence("goal-failed-write", persistence).await;
+    let session = agent.session();
+    let service = GoalService::new(agent).unwrap();
+
+    assert!(matches!(
+        service
+            .create("must not commit".into(), None, cancellation())
+            .await,
+        Err(GoalError::Session(_))
+    ));
+    assert!(service.snapshots().await.is_empty());
+    assert!(session
+        .events()
+        .into_iter()
+        .all(|event| event.event_type != "goal/change"));
+}
+
+#[tokio::test]
 async fn planning_is_an_observable_mode_with_frozen_whole_todos() {
     let (agent, _registry) = agent("plan-session").await;
     let session = agent.session();
@@ -344,7 +493,7 @@ async fn planning_is_an_observable_mode_with_frozen_whole_todos() {
     assert!(session
         .events()
         .iter()
-        .any(|event| event.event_type == "plan/change"));
+        .any(|event| event.event_type == "plan/mode"));
 }
 
 struct CountingAnswerer(AtomicUsize);
@@ -576,128 +725,6 @@ impl ApprovalAnswerer for ReentrantAnswerer {
 }
 
 #[tokio::test]
-async fn one_shot_override_is_consumed_across_restart() {
-    let persistence = Arc::new(MemorySessionPersistence::new());
-    let first_store = SessionStore::new(persistence.clone());
-    let first_registry = AgentRegistry::new(first_store);
-    let _first_factory = first_registry.register_factory(Arc::new(Factory)).unwrap();
-    let first = first_registry
-        .create(header("approval-restart"), options(), cancellation())
-        .await
-        .unwrap();
-    let first_session = first.session();
-    append_turn_start(&first_session, 1).await;
-    let approvals = ApprovalService::new(first).unwrap();
-    approvals
-        .override_next_step(ApprovalPolicy::Allow, cancellation())
-        .await
-        .unwrap();
-    assert_eq!(
-        approvals
-            .approve(
-                ApprovalRequest {
-                    action: "first".into(),
-                    details: json!({})
-                },
-                cancellation()
-            )
-            .await,
-        ApprovalOutcome::AllowedOnce,
-    );
-    append_turn_end(&first_session, 1).await;
-    drop(approvals);
-    drop(first_registry);
-
-    let second_store = SessionStore::new(persistence);
-    let second_registry = AgentRegistry::new(second_store);
-    let _second_factory = second_registry.register_factory(Arc::new(Factory)).unwrap();
-    let second = second_registry
-        .resume(
-            SessionId::from("approval-restart"),
-            options(),
-            cancellation(),
-        )
-        .await
-        .unwrap();
-    let second_session = second.session();
-    append_turn_start(&second_session, 2).await;
-    let restarted = ApprovalService::new(second).unwrap();
-    assert_eq!(
-        restarted
-            .approve(
-                ApprovalRequest {
-                    action: "second".into(),
-                    details: json!({})
-                },
-                cancellation()
-            )
-            .await,
-        ApprovalOutcome::Unavailable,
-    );
-    let policies = second_session
-        .events()
-        .into_iter()
-        .filter_map(|event| {
-            (event.event_type == "approval/asked").then(|| {
-                serde_json::from_value::<tessivum::approval::ApprovalAsked>(event.data)
-                    .unwrap()
-                    .policy
-            })
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(policies, vec![ApprovalPolicy::Allow, ApprovalPolicy::Ask]);
-}
-
-#[tokio::test]
-async fn failed_asked_append_retains_the_one_shot_override() {
-    let persistence = Arc::new(AskedFailingPersistence {
-        inner: MemorySessionPersistence::new(),
-        fail_asked: AtomicBool::new(true),
-        block_policy: AtomicBool::new(false),
-        policy_entered: Arc::new(Notify::new()),
-        policy_release: Arc::new(Notify::new()),
-    });
-    let registry = AgentRegistry::new(SessionStore::new(persistence.clone()));
-    let _factory = registry.register_factory(Arc::new(Factory)).unwrap();
-    let agent = registry
-        .create(header("approval-asked-failure"), options(), cancellation())
-        .await
-        .unwrap();
-    let session = agent.session();
-    append_turn_start(&session, 1).await;
-    let approvals = ApprovalService::new(agent).unwrap();
-    approvals
-        .override_next_step(ApprovalPolicy::Allow, cancellation())
-        .await
-        .unwrap();
-    assert_eq!(
-        approvals
-            .approve(
-                ApprovalRequest {
-                    action: "first".into(),
-                    details: json!({})
-                },
-                cancellation()
-            )
-            .await,
-        ApprovalOutcome::Rejected,
-    );
-    persistence.fail_asked.store(false, Ordering::Release);
-    assert_eq!(
-        approvals
-            .approve(
-                ApprovalRequest {
-                    action: "second".into(),
-                    details: json!({})
-                },
-                cancellation()
-            )
-            .await,
-        ApprovalOutcome::AllowedOnce,
-    );
-}
-
-#[tokio::test]
 async fn answerer_reentry_does_not_hold_the_write_gate() {
     let (agent, _registry) = agent("approval-reentry").await;
     let owner = agent.authority();
@@ -913,6 +940,7 @@ async fn cancellation_waiting_for_finalization_is_recorded() {
     let persistence = Arc::new(AskedFailingPersistence {
         inner: MemorySessionPersistence::new(),
         fail_asked: AtomicBool::new(false),
+        fail_goal_change: AtomicBool::new(false),
         block_policy: AtomicBool::new(true),
         policy_entered: policy_entered.clone(),
         policy_release: policy_release.clone(),

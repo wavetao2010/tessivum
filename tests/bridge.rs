@@ -141,6 +141,7 @@ fn agent_options() -> AgentOptions {
     AgentOptions {
         provider: "test".into(),
         model: "test".into(),
+        reasoning_effort: None,
         max_tokens: Some(1),
     }
 }
@@ -832,12 +833,16 @@ async fn remaining_service_proxies_reject_invalid_ownership_or_routes() {
     let (services, _, _, _) = bridge_services();
     let bridge = DomainBridge::new(services).unwrap();
 
-    assert_eq!(
-        remote_code(bridge.dispatch_native(DomainRequest {
+    let missing_provider = bridge
+        .dispatch_native(DomainRequest {
             service: LLM_SERVICE.into(),
             method: "generate".into(),
             params: json!({"request": {"provider": "missing", "model": "m", "messages": []}}),
-        }).unwrap_err()),
+        })
+        .unwrap();
+    assert_eq!(missing_provider["finishReason"]["kind"], "error");
+    assert_eq!(
+        missing_provider["finishReason"]["failure"]["code"],
         "LLM_PROVIDER_NOT_FOUND"
     );
     assert_eq!(
@@ -989,6 +994,18 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
     let _other = registry
         .install(wasm_policy("plugin-b", &[(TOOLS_SERVICE, "schemas")]))
         .unwrap();
+    let _system_prompt = registry
+        .install(wasm_policy(
+            "plugin-prompt",
+            &[(SYSTEM_PROMPT_SERVICE, "assemble")],
+        ))
+        .unwrap();
+    let _unknown_method = registry
+        .install(wasm_policy(
+            "plugin-unknown",
+            &[(SYSTEM_PROMPT_SERVICE, "unknown")],
+        ))
+        .unwrap();
     let limits = BridgeLimits {
         max_json_bytes: 128,
         ..BridgeLimits::default()
@@ -1016,6 +1033,42 @@ async fn wasm_service_calls_require_exact_live_policy_and_hide_payloads() {
         json!({"logged": true})
     );
     assert_eq!(logger.0.lock().len(), 1);
+
+    assert_eq!(
+        CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-prompt",
+                json!({
+                    "service": SYSTEM_PROMPT_SERVICE,
+                    "method": "assemble",
+                    "payload": {"sections": [{"id": "p", "order": 0, "text": "x"}]},
+                }),
+            ),
+        )
+        .unwrap(),
+        json!({"text": "x", "tools": []})
+    );
+    assert_eq!(
+        plugin_code(rejected(CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-prompt",
+                json!({"service": SYSTEM_PROMPT_SERVICE, "method": "register", "payload": {}}),
+            ),
+        ))),
+        "SERVICE_PERMISSION_DENIED"
+    );
+    assert_eq!(
+        plugin_code(rejected(CapabilityHandler::call(
+            &bridge,
+            wasm_service_call(
+                "plugin-unknown",
+                json!({"service": SYSTEM_PROMPT_SERVICE, "method": "unknown", "payload": {}}),
+            ),
+        ))),
+        "UNKNOWN_METHOD"
+    );
 
     assert_eq!(
         plugin_code(rejected(CapabilityHandler::call(

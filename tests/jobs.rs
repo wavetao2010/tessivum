@@ -66,6 +66,7 @@ fn agent_options() -> AgentOptions {
     AgentOptions {
         provider: "test".into(),
         model: "test".into(),
+        reasoning_effort: None,
         max_tokens: None,
     }
 }

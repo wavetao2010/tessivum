@@ -83,6 +83,22 @@ pub struct FsObservation {
     pub len: u64,
     pub version: FsVersion,
 }
+/// The complete atomic outcome of a text write, including the exact
+/// LF-normalized content that was replaced under the target gate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsTextWriteOutcome {
+    pub observation: FsObservation,
+    pub before: Option<String>,
+    pub after: String,
+}
+
+/// The complete atomic outcome of one literal text edit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsTextEditOutcome {
+    pub observation: FsObservation,
+    pub before: String,
+    pub after: String,
+}
 
 /// Guard applied to an atomic text write.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -248,6 +264,21 @@ impl Filesystem {
         })
     }
 
+    /// Returns the modification time of a regular file inside this capability.
+    pub async fn modified(
+        &self,
+        target: &FsTarget,
+    ) -> Result<std::time::SystemTime, TessivumError> {
+        let target = self.resolve(target).await?;
+        let metadata = fs::metadata(&target.path)
+            .await
+            .map_err(|error| io_error("stat modification time", &target.path, error))?;
+        ensure_regular(&target, &metadata)?;
+        metadata
+            .modified()
+            .map_err(|error| io_error("read modification time", &target.path, error))
+    }
+
     /// Reads at most `max_bytes` bytes from a regular file after following its
     /// final symlink.
     pub async fn read_bytes(
@@ -332,6 +363,20 @@ impl Filesystem {
         text: impl AsRef<str>,
         guard: FsWriteGuard,
     ) -> Result<FsObservation, TessivumError> {
+        Ok(self
+            .write_text_outcome(target, text, guard)
+            .await?
+            .observation)
+    }
+
+    /// Atomically writes text and returns the exact pre- and post-write values
+    /// captured while the target gate was held.
+    pub async fn write_text_outcome(
+        &self,
+        target: &FsTarget,
+        text: impl AsRef<str>,
+        guard: FsWriteGuard,
+    ) -> Result<FsTextWriteOutcome, TessivumError> {
         if guard.create_if_absent && guard.replace_if_version.is_some() {
             return Err(fs_error(
                 "FS_IO_ERROR",
@@ -363,9 +408,28 @@ impl Filesystem {
                 json!({"path": path.display().to_string()}),
             ));
         }
-        let bytes = normalize_lf(text.as_ref()).into_bytes();
-        atomic_publish(&path, &bytes, guard.create_if_absent).await?;
-        self.observe_path(path).await
+        let before = if existing.is_some() {
+            let bytes = fs::read(&path)
+                .await
+                .map_err(|error| io_error("read before write", &path, error))?;
+            Some(String::from_utf8(bytes).map_err(|_| {
+                fs_error(
+                    "FS_NOT_TEXT",
+                    "filesystem target does not contain UTF-8 text",
+                    json!({"path": path.display().to_string()}),
+                )
+            })?)
+        } else {
+            None
+        };
+        let before = before.as_deref().map(normalize_lf);
+        let after = normalize_lf(text.as_ref());
+        atomic_publish(&path, after.as_bytes(), guard.create_if_absent).await?;
+        Ok(FsTextWriteOutcome {
+            observation: self.observe_path(path).await?,
+            before,
+            after,
+        })
     }
 
     /// Applies one literal, exactly-once edit while holding the same target
@@ -376,6 +440,37 @@ impl Filesystem {
         target: &FsTarget,
         edit: FsLiteralEdit,
     ) -> Result<FsObservation, TessivumError> {
+        Ok(self.edit_text_outcome(target, edit).await?.observation)
+    }
+
+    /// Applies one literal, exactly-once edit and returns the exact text pair
+    /// published under the target gate.
+    pub async fn edit_text_outcome(
+        &self,
+        target: &FsTarget,
+        edit: FsLiteralEdit,
+    ) -> Result<FsTextEditOutcome, TessivumError> {
+        self.edit_text_outcome_inner(target, edit, false).await
+    }
+
+    /// Applies a literal edit and, when requested, replaces every occurrence.
+    /// The exact pre- and post-edit text pair is captured under the target gate.
+    pub async fn edit_text_outcome_all(
+        &self,
+        target: &FsTarget,
+        edit: FsLiteralEdit,
+        replace_all: bool,
+    ) -> Result<FsTextEditOutcome, TessivumError> {
+        self.edit_text_outcome_inner(target, edit, replace_all)
+            .await
+    }
+
+    async fn edit_text_outcome_inner(
+        &self,
+        target: &FsTarget,
+        edit: FsLiteralEdit,
+        replace_all: bool,
+    ) -> Result<FsTextEditOutcome, TessivumError> {
         let path = self.write_path(target).await?;
         let gate = self.gate(&path);
         let _guard = gate.lock().await;
@@ -394,14 +489,14 @@ impl Filesystem {
         let bytes = fs::read(&path)
             .await
             .map_err(|error| io_error("read before edit", &path, error))?;
-        let text = String::from_utf8(bytes).map_err(|_| {
+        let before = String::from_utf8(bytes).map_err(|_| {
             fs_error(
                 "FS_NOT_TEXT",
                 "filesystem target does not contain UTF-8 text",
                 json!({"path": path.display().to_string()}),
             )
         })?;
-        let text = normalize_lf(&text);
+        let before = normalize_lf(&before);
         let expected = normalize_lf(&edit.expected);
         let replacement = normalize_lf(&edit.replacement);
         if expected.is_empty() {
@@ -411,7 +506,7 @@ impl Filesystem {
                 json!({"path": path.display().to_string()}),
             ));
         }
-        let matches = text.match_indices(&expected).count();
+        let matches = before.match_indices(&expected).count();
         if matches == 0 {
             return Err(fs_error(
                 "FS_EDIT_NOT_FOUND",
@@ -419,16 +514,24 @@ impl Filesystem {
                 json!({"path": path.display().to_string()}),
             ));
         }
-        if matches != 1 {
+        if !replace_all && matches != 1 {
             return Err(fs_error(
                 "FS_AMBIGUOUS_EDIT",
                 "literal edit text matched more than once",
                 json!({"path": path.display().to_string(), "matches": matches}),
             ));
         }
-        let edited = text.replacen(&expected, &replacement, 1);
-        atomic_publish(&path, edited.as_bytes(), false).await?;
-        self.observe_path(path).await
+        let after = if replace_all {
+            before.replace(&expected, &replacement)
+        } else {
+            before.replacen(&expected, &replacement, 1)
+        };
+        atomic_publish(&path, after.as_bytes(), false).await?;
+        Ok(FsTextEditOutcome {
+            observation: self.observe_path(path).await?,
+            before,
+            after,
+        })
     }
 
     fn gate(&self, path: &Path) -> Arc<AsyncMutex<()>> {

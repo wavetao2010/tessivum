@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import {
-  acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness,
+  acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, waitUntil,
 } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/onboarding-deepseek-config')
@@ -79,8 +79,11 @@ test('first-run DeepSeek credential setup survives native reloads and model edit
     await deepSeekRow.locator('xpath=ancestor::li').getByRole('button', { name: '编辑' }).click()
     const configuredInput = settings.getByLabel('API 密钥', { exact: true })
     await configuredInput.waitFor({ timeout: 10_000 })
-    await expect.poll(() => configuredInput.getAttribute('placeholder'), { timeout: 10_000 })
-      .toBe('已配置——输入新值可替换')
+    await waitUntil(
+      () => configuredInput.getAttribute('placeholder'),
+      placeholder => placeholder === '已配置——输入新值可替换',
+      10_000,
+    )
 
     const secondReloadWarnings = harness.warnings.length
     await harness.page.reload({ waitUntil: 'load' })
@@ -173,6 +176,9 @@ test('first-run DeepSeek credential setup survives native reloads and model edit
     await harness.page.getByRole('menuitem', { name: /模型/ }).click()
     expect(await harness.page.getByText('deepseek-v4-flash', { exact: true }).count()).toBe(0)
     await harness.page.getByRole('menuitemradio', { name: 'Private Preview' }).waitFor({ timeout: 10_000 })
+    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
+      'missing.expected.md', 'models.expected.md', 'welcome.expected.md',
+    ])
     harness.assertClean()
   } finally {
     await harness.close()

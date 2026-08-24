@@ -17,17 +17,17 @@ use thiserror::Error;
 use crate::{
     llm::LlmRuntime,
     protocol::{
-        ContentBlock, ContextForm, FinishReason, GeneratePurpose, GenerateRequest, Message,
-        MessageId, MessageRole, MessageSource, SessionEvent, SessionId, SurfaceOp,
+        ContentBlock, FinishReason, GeneratePurpose, GenerateRequest, Message, MessageId,
+        MessageRole, MessageSource, SessionEvent, SessionId, SurfaceOp,
     },
     session::{Session, SessionError, SurfaceMessage},
     TessivumError,
 };
 
-const DEFAULT_MAX_SURFACE_MESSAGES: usize = 128;
+const DEFAULT_MAX_SURFACE_MESSAGES: usize = 512;
 const DEFAULT_MAX_INPUT_CODEPOINTS: usize = 65_536;
 const DEFAULT_MAX_SUMMARY_CODEPOINTS: usize = 16_384;
-const COMPACTION_PLUGIN: &str = "harness.compaction@1";
+const COMPACTION_PLUGIN: &str = "compact";
 const DEFAULT_SYSTEM_PROMPT: &str = "Summarize the supplied conversation faithfully. Return only the summary as plain text; do not call tools.";
 
 /// Stable key for the optional durable compaction service.
@@ -211,18 +211,6 @@ impl CompactionError {
             Self::Session(error) => error.code(),
         }
     }
-
-    fn facts(&self) -> Value {
-        match self {
-            Self::Busy { session } => json!({"session": session}),
-            Self::Cancelled => Value::Null,
-            Self::Invalid(error) | Self::Llm(error) => json!({
-                "phase": error.phase,
-                "details": error.details,
-            }),
-            Self::Session(error) => json!({"error": error.to_string()}),
-        }
-    }
 }
 
 /// A single optional service: it owns only its deterministic LLM configuration
@@ -234,7 +222,6 @@ pub struct CompactionService {
     config: CompactionConfig,
     active: Arc<Mutex<BTreeSet<SessionId>>>,
 }
-
 impl std::fmt::Debug for CompactionService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -518,15 +505,15 @@ impl CompactionService {
         cancellation: CancellationToken,
     ) -> Result<CompactionResult, CompactionError> {
         check_cancellation(&cancellation)?;
+        let compaction_id = uuid::Uuid::new_v4().to_string();
+        let turn = open_turn(session);
         let start_seq = append(
             session,
             AppendSpec {
                 event_type: "compaction/start",
                 data: json!({
-                    "trigger": trigger,
-                    "range": plan.range,
-                    "shadowedEventSeqs": plan.shadowed_event_seqs,
-                    "tokenEstimate": plan.token_estimate,
+                    "compactionId": compaction_id.clone(),
+                    "turn": turn,
                 }),
                 source_event_seqs: None,
                 surface_op: None,
@@ -536,7 +523,6 @@ impl CompactionService {
             cancellation.clone(),
         )
         .await?;
-        let compaction_id = format!("{}:{start_seq}", session.id());
         let request = GenerateRequest {
             provider: self.config.provider.clone(),
             model: self.config.model.clone(),
@@ -581,22 +567,53 @@ impl CompactionService {
                     .await;
             }
         };
-        if generation.finish_reason != FinishReason::Stop {
-            return self
-                .finish_error(
-                    session,
-                    &compaction_id,
-                    start_seq,
-                    &plan,
-                    invalid(
-                        "INVALID_COMPACTION_SUMMARY",
-                        "compaction summary must finish normally without tool calls",
-                        json!({"finishReason": generation.finish_reason}),
-                    ),
-                )
-                .await;
+        match &generation.finish_reason {
+            FinishReason::Stop => {}
+            FinishReason::Aborted { .. } => {
+                return self
+                    .finish_error(
+                        session,
+                        &compaction_id,
+                        start_seq,
+                        &plan,
+                        CompactionError::Cancelled,
+                    )
+                    .await;
+            }
+            FinishReason::Error { failure } => {
+                return self
+                    .finish_error(
+                        session,
+                        &compaction_id,
+                        start_seq,
+                        &plan,
+                        CompactionError::Llm(TessivumError::new(
+                            failure.code.clone(),
+                            failure.message.clone(),
+                            "llm",
+                            serde_json::to_value(failure).unwrap_or(Value::Null),
+                        )),
+                    )
+                    .await;
+            }
+            FinishReason::ToolCalls | FinishReason::MaxTokens => {
+                return self
+                    .finish_error(
+                        session,
+                        &compaction_id,
+                        start_seq,
+                        &plan,
+                        invalid(
+                            "INVALID_COMPACTION_SUMMARY",
+                            "compaction summary must finish normally without tool calls",
+                            json!({"finishReason": generation.finish_reason}),
+                        ),
+                    )
+                    .await;
+            }
         }
-        let summary = match summary_text(&generation.message, self.config.max_summary_codepoints) {
+        let summary = match summary_blocks(&generation.message, self.config.max_summary_codepoints)
+        {
             Ok(summary) => summary,
             Err(error) => {
                 return self
@@ -609,10 +626,19 @@ impl CompactionService {
             AppendSpec {
                 event_type: "compaction/summary",
                 data: json!({
-                    "compactionId": compaction_id,
-                    "message": generation.message,
+                    "compactionId": compaction_id.clone(),
+                    "summary": summary.clone(),
+                    "rawOutput": generation.message.content,
+                    "provider": self.config.provider.clone(),
+                    "model": self.config.model.clone(),
+                    "llmStreamCall": true,
+                    "shadowedRange": {
+                        "start": plan.shadowed_event_seqs.first(),
+                        "end": plan.shadowed_event_seqs.last(),
+                    },
+                    "shadowedSeqs": plan.shadowed_event_seqs.clone(),
+                    "shadowedTokenCount": plan.token_estimate,
                     "usage": generation.usage,
-                    "tokenEstimate": plan.token_estimate,
                 }),
                 source_event_seqs: None,
                 surface_op: None,
@@ -650,12 +676,13 @@ impl CompactionService {
         let replacement = Message {
             id: MessageId::from(format!("compaction-{start_seq}")),
             role: MessageRole::User,
-            content: vec![ContentBlock::Text { text: summary }],
+            content: summary,
             source: MessageSource::Plugin {
                 plugin: COMPACTION_PLUGIN.into(),
-                form: Some(ContextForm::Notice),
+                compaction_id: Some(compaction_id.clone()),
+                form: None,
                 sections: None,
-                summary: Some("Conversation summary".into()),
+                summary: None,
             },
         };
         let mut sources = Vec::with_capacity(plan.shadowed_event_seqs.len() + 2);
@@ -702,11 +729,7 @@ impl CompactionService {
             session,
             EndSpec {
                 compaction_id: &compaction_id,
-                outcome: "completed",
-                start_seq,
-                plan: &plan,
-                summary_seq: Some(summary_seq),
-                replacement_seq: Some(replacement_seq),
+                turn,
                 error: None,
             },
         )
@@ -730,24 +753,15 @@ impl CompactionService {
         &self,
         session: &Session,
         compaction_id: &str,
-        start_seq: u64,
-        plan: &Plan,
+        _start_seq: u64,
+        _plan: &Plan,
         error: CompactionError,
     ) -> Result<CompactionResult, CompactionError> {
-        let outcome = if matches!(error, CompactionError::Cancelled) {
-            "cancelled"
-        } else {
-            "failed"
-        };
         append_end(
             session,
             EndSpec {
                 compaction_id,
-                outcome,
-                start_seq,
-                plan,
-                summary_seq: None,
-                replacement_seq: None,
+                turn: open_turn(session),
                 error: Some(&error),
             },
         )
@@ -786,11 +800,7 @@ struct AppendSpec<'a> {
 
 struct EndSpec<'a> {
     compaction_id: &'a str,
-    outcome: &'a str,
-    start_seq: u64,
-    plan: &'a Plan,
-    summary_seq: Option<u64>,
-    replacement_seq: Option<u64>,
+    turn: Option<u64>,
     error: Option<&'a CompactionError>,
 }
 
@@ -823,24 +833,10 @@ async fn append(
 async fn append_end(session: &Session, spec: EndSpec<'_>) -> Result<u64, CompactionError> {
     let mut data = json!({
         "compactionId": spec.compaction_id,
-        "outcome": spec.outcome,
-        "startEventSeq": spec.start_seq,
-        "range": spec.plan.range,
-        "shadowedEventSeqs": spec.plan.shadowed_event_seqs,
-        "tokenEstimate": spec.plan.token_estimate,
+        "turn": spec.turn,
     });
-    if let Some(summary_seq) = spec.summary_seq {
-        data["summaryEventSeq"] = json!(summary_seq);
-    }
-    if let Some(replacement_seq) = spec.replacement_seq {
-        data["replacementEventSeq"] = json!(replacement_seq);
-    }
     if let Some(error) = spec.error {
-        data["failure"] = json!({
-            "code": error.code(),
-            "message": error.to_string(),
-            "facts": error.facts(),
-        });
+        data["error"] = Value::String(error.to_string());
     }
     // A start event is already durable when this helper is reached. Closing
     // that durable attempt must not be defeated by the caller's cancellation.
@@ -977,15 +973,17 @@ fn collect_tool_results(block: &ContentBlock, results: &mut Vec<String>) {
     }
 }
 
-fn summary_text(message: &Message, max_codepoints: usize) -> Result<String, CompactionError> {
-    let mut text = String::new();
+fn summary_blocks(
+    message: &Message,
+    max_codepoints: usize,
+) -> Result<Vec<ContentBlock>, CompactionError> {
+    let mut summary = Vec::new();
+    let mut codepoints_count = 0_u64;
     for block in &message.content {
         match block {
-            ContentBlock::Text { text: next } => {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(next);
+            ContentBlock::Text { text } => {
+                codepoints_count = codepoints_count.saturating_add(codepoints(text));
+                summary.push(block.clone());
             }
             ContentBlock::Reasoning { .. } => {}
             ContentBlock::Image { .. }
@@ -999,21 +997,37 @@ fn summary_text(message: &Message, max_codepoints: usize) -> Result<String, Comp
             }
         }
     }
-    if text.trim().is_empty() {
+    if summary.is_empty()
+        || summary
+            .iter()
+            .all(|block| matches!(block, ContentBlock::Text { text } if text.trim().is_empty()))
+    {
         return Err(invalid(
             "INVALID_COMPACTION_SUMMARY",
             "compaction summary must contain text",
             Value::Null,
         ));
     }
-    if codepoints(&text) > max_codepoints as u64 {
+    if codepoints_count > max_codepoints as u64 {
         return Err(invalid(
             "COMPACTION_SUMMARY_TOO_LARGE",
             "compaction summary exceeds the configured codepoint bound",
             json!({"maximum": max_codepoints}),
         ));
     }
-    Ok(text)
+    Ok(summary)
+}
+
+fn open_turn(session: &Session) -> Option<u64> {
+    let mut turn = None;
+    for event in session.events() {
+        match event.event_type.as_str() {
+            "turn/start" => turn = event.data.get("turn").and_then(Value::as_u64),
+            "turn/end" if event.data.get("turn").and_then(Value::as_u64) == turn => turn = None,
+            _ => {}
+        }
+    }
+    turn
 }
 
 fn tool_result(

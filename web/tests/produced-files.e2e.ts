@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import { openSeededSession, RustWebHarness, waitUntil } from './support'
@@ -41,9 +41,11 @@ function recording(): string {
     arguments: JSON.stringify({ file_path: path, content: `content of ${path}\n` }),
   }))
   append('assistant/message', {
-    id: 'produced-calls', role: 'assistant', turn: 1, step: 1,
-    content: calls.map(call => ({ type: 'tool-call', id: call.callId, name: 'write', arguments: call.arguments })),
-    source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    turn: 1, step: 1, message: {
+      id: 'produced-calls', role: 'assistant',
+      content: calls.map(call => ({ type: 'tool-call', id: call.callId, name: 'write', arguments: call.arguments })),
+      source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    },
   }, 'append')
   for (const call of calls) {
     const callSeq = seq
@@ -63,9 +65,11 @@ function recording(): string {
   append('step/end', { turn: 1, step: 1 })
   append('step/start', { turn: 1, step: 2 })
   append('assistant/message', {
-    id: 'produced-done', role: 'assistant', turn: 1, step: 2,
-    content: [{ type: 'text', text: `Created the site.\n\n${DONE}` }],
-    source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    turn: 1, step: 2, message: {
+      id: 'produced-done', role: 'assistant',
+      content: [{ type: 'text', text: `Created the site.\n\n${DONE}` }],
+      source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    },
   }, 'append')
   append('step/end', { turn: 1, step: 2 })
   append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -77,16 +81,25 @@ async function history(harness: RustWebHarness): Promise<HistoryEntry[]> {
   if (!result.ok || result.value === undefined) throw new Error(`session.history failed: ${JSON.stringify(result.error)}`)
   return result.value.events
 }
+async function seedProducedFiles(workspace: string): Promise<void> {
+  await Promise.all(PRODUCED.map(path => writeFile(join(workspace, path), `content of ${path}\n`)))
+}
+
 
 test('a completed write turn keeps a one-line ten-file summary and native folder handoff', async () => {
   expect(await readFile(OVERLAY, 'utf8')).toContain('nativeOpen: true')
   const harness = await RustWebHarness.launch({
     name: 'produced-files',
     viewport: { width: 1280, height: 900 },
-    beforeStart: candidate => candidate.seedSession(SESSION, recording()),
+    beforeStart: async candidate => {
+      await seedProducedFiles(candidate.workspace)
+      await candidate.seedSession(SESSION, recording())
+    },
   })
   try {
     await openSeededSession(harness, DONE)
+    expect(await Promise.all(PRODUCED.map(path => readFile(join(harness.workspace, path), 'utf8'))))
+      .toEqual(PRODUCED.map(path => `content of ${path}\n`))
     const entries = await history(harness)
     const calls = entries.filter(entry => entry.event.type === 'tool/call')
     const results = entries.filter(entry => entry.event.type === 'tool/result')

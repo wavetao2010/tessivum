@@ -138,6 +138,9 @@ pub struct ProjectionRegistry {
 
 struct Inner {
     definitions: Mutex<BTreeMap<String, ProjectionDefinition>>,
+    /// Projection callbacks run outside state locks, but each event must fold from
+    /// the state committed by its predecessor.
+    apply_gate: Mutex<()>,
     sessions: Mutex<BTreeMap<SessionId, AttachedSession>>,
     subscriptions: Mutex<Vec<JoinHandle<()>>>,
     shutdown: watch::Sender<bool>,
@@ -170,6 +173,7 @@ impl ProjectionRegistry {
         Self {
             inner: Arc::new(Inner {
                 definitions: Mutex::new(BTreeMap::new()),
+                apply_gate: Mutex::new(()),
                 sessions: Mutex::new(BTreeMap::new()),
                 subscriptions: Mutex::new(Vec::new()),
                 shutdown,
@@ -205,6 +209,9 @@ impl ProjectionRegistry {
         }
         let header = session.header();
         let id = header.id.clone();
+        if lock(&self.inner.sessions).contains_key(&id) {
+            return Ok(());
+        }
         let definitions = lock(&self.inner.definitions).clone();
         let mut projections = BTreeMap::new();
         for definition in definitions.values() {
@@ -281,6 +288,23 @@ impl ProjectionRegistry {
     ) -> Result<ProjectionSnapshot, ProjectionError> {
         self.snapshot_as_of(session_id, key, Some(as_of_seq))
     }
+    /// Returns every registered projection for one attached session at one log point.
+    pub fn snapshots(
+        &self,
+        session_id: &SessionId,
+        as_of_seq: Option<u64>,
+    ) -> Result<Vec<ProjectionSnapshot>, ProjectionError> {
+        let keys = lock(&self.inner.definitions)
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .map(|key| match as_of_seq {
+                Some(seq) => self.as_of_seq(session_id, &key, seq),
+                None => self.snapshot(session_id, &key),
+            })
+            .collect()
+    }
 
     /// Captures a JSON-only durable checkpoint.
     pub fn checkpoint(
@@ -331,8 +355,9 @@ impl ProjectionRegistry {
                     base_seq: floor,
                 });
             }
+            let _apply = lock(&self.inner.apply_gate);
             self.reset_projection(session, &definition)?;
-            return self.replay(session);
+            return self.replay_locked(session);
         }
         let checkpoint_next = checkpoint.as_of_seq.map_or(0, |seq| seq.saturating_add(1));
         if checkpoint_next < floor {
@@ -342,6 +367,7 @@ impl ProjectionRegistry {
                 base_seq: floor,
             });
         }
+        let _apply = lock(&self.inner.apply_gate);
         {
             let mut sessions = lock(&self.inner.sessions);
             let attached =
@@ -365,7 +391,7 @@ impl ProjectionRegistry {
                 },
             );
         }
-        self.replay(session)
+        self.replay_locked(session)
     }
 
     /// Returns a contained callback failure, if an asynchronous observer encountered one.
@@ -386,8 +412,13 @@ impl ProjectionRegistry {
     }
 
     fn replay(&self, session: &Session) -> Result<(), ProjectionError> {
+        let _apply = lock(&self.inner.apply_gate);
+        self.replay_locked(session)
+    }
+
+    fn replay_locked(&self, session: &Session) -> Result<(), ProjectionError> {
         for event in session.events() {
-            self.apply_event(&session.id(), &event)?;
+            self.apply_event_locked(&session.id(), &event)?;
         }
         Ok(())
     }
@@ -422,7 +453,16 @@ impl ProjectionRegistry {
         Ok(())
     }
 
-    fn apply_event(
+    pub fn apply(
+        &self,
+        session_id: &SessionId,
+        event: &SessionEvent,
+    ) -> Result<(), ProjectionError> {
+        let _apply = lock(&self.inner.apply_gate);
+        self.apply_event_locked(session_id, event)
+    }
+
+    fn apply_event_locked(
         &self,
         session_id: &SessionId,
         event: &SessionEvent,
@@ -553,7 +593,7 @@ async fn observe_session(
             }
             event = receiver.recv() => match event {
                 Ok(event) => {
-                    if let Err(error) = registry.apply_event(&session.id(), &event) {
+                    if let Err(error) = registry.apply(&session.id(), &event) {
                         record_error(&inner, &session.id(), error);
                     }
                 }

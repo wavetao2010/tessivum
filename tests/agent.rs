@@ -1,4 +1,5 @@
 use std::{
+    fs,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -11,13 +12,18 @@ use serde_json::json;
 use tessivum::{
     agent::{
         agents_service_key, AgentCancelCause, AgentError, AgentFactory, AgentOptions,
-        AgentRegistry, AgentRuntime, AgentStatus, Inbox,
+        AgentRegistry, AgentRuntime, AgentStatus, Inbox, InboxTarget, InboxUpdate,
+        InboxUpdateResult,
     },
-    protocol::{Message, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
-    session::{MemorySessionPersistence, Session},
+    agent_preset::{AgentPresetRoot, AgentPresetService, AgentPresetTrust},
+    protocol::{
+        Message, SessionEvent, SessionHeader, SessionId, SurfaceOp, SESSION_FORMAT_VERSION,
+    },
+    session::{MemorySessionPersistence, Session, SessionError, SessionPersistence, SessionStore},
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::Notify;
+use uuid::Uuid;
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -41,6 +47,7 @@ fn options() -> AgentOptions {
     AgentOptions {
         provider: "fake".into(),
         model: "deterministic".into(),
+        reasoning_effort: None,
         max_tokens: Some(32),
     }
 }
@@ -53,6 +60,18 @@ fn message(id: &str) -> Message {
         "source": {"kind": "user"},
     }))
     .unwrap()
+}
+
+fn inbox_event(session: &Session, event_type: &str, data: serde_json::Value) -> SessionEvent {
+    SessionEvent {
+        event_type: event_type.into(),
+        seq: session.next_seq().unwrap(),
+        time: 0,
+        data,
+        ignorable: Some(true),
+        source_event_seqs: None,
+        surface_op: None,
+    }
 }
 
 #[derive(Default)]
@@ -179,7 +198,7 @@ async fn factory_and_live_session_ids_are_unique() {
         registry
             .create_or_resume(header("one"), options(), cancellation())
             .await,
-        Err(AgentError::DuplicateLive(id)) if id == SessionId::from("one")
+        Err(AgentError::Session(SessionError::DuplicateLive(id))) if id == SessionId::from("one")
     ));
     handle.dispose().await.unwrap();
 }
@@ -214,29 +233,259 @@ async fn targeted_inbox_is_fifo_and_only_wakeable_delivery_wakes() {
     handle.dispose().await.unwrap();
 }
 
+#[test]
+fn step_inbox_preserves_arrival_order_across_steer_inject_and_splice() {
+    let inbox = Inbox::new();
+    let steer = message("steer-first");
+    let inject = message("inject-second");
+    let followup = message("followup-third");
+    inbox.steer(steer).unwrap();
+    inbox.inject(inject).unwrap();
+    inbox.followup(followup.clone()).unwrap();
+    assert!(matches!(
+        inbox.update(&followup.id, InboxUpdate::Steer),
+        InboxUpdateResult::Updated {
+            target: InboxTarget::Steer,
+            ..
+        }
+    ));
+
+    assert_eq!(
+        inbox
+            .take_step_batch()
+            .into_iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        vec![
+            tessivum::protocol::MessageId::from("steer-first"),
+            tessivum::protocol::MessageId::from("inject-second"),
+            tessivum::protocol::MessageId::from("followup-third"),
+        ]
+    );
+    assert!(inbox.is_empty());
+}
+
+#[test]
+fn inbox_updates_duplicate_bodies_by_id_without_reordering_fifo() {
+    let inbox = Inbox::new();
+    let mut first = message("first");
+    let mut second = message("second");
+    let mut third = message("third");
+    for queued in [&mut first, &mut second, &mut third] {
+        queued.content = vec![tessivum::protocol::ContentBlock::Text {
+            text: "same body".into(),
+        }];
+        inbox.followup(queued.clone()).unwrap();
+    }
+
+    assert!(matches!(
+        inbox.update(
+            &second.id,
+            InboxUpdate::Edit {
+                content: vec![tessivum::protocol::ContentBlock::Text {
+                    text: "edited".into(),
+                }],
+            },
+        ),
+        InboxUpdateResult::Updated {
+            target: InboxTarget::Followup,
+            ..
+        }
+    ));
+    assert!(matches!(
+        inbox.update(&first.id, InboxUpdate::Remove),
+        InboxUpdateResult::Updated {
+            target: InboxTarget::Followup,
+            ..
+        }
+    ));
+    assert!(matches!(
+        inbox.update(&second.id, InboxUpdate::Steer),
+        InboxUpdateResult::Updated {
+            target: InboxTarget::Steer,
+            ..
+        }
+    ));
+
+    assert_eq!(inbox.take_next_turn().unwrap().id, third.id);
+    let steered = inbox.take_next_step().unwrap();
+    assert_eq!(steered.id, second.id);
+    assert_eq!(
+        steered.content,
+        vec![tessivum::protocol::ContentBlock::Text {
+            text: "edited".into(),
+        }]
+    );
+    assert_eq!(
+        inbox.update(&first.id, InboxUpdate::Remove),
+        InboxUpdateResult::NotPending
+    );
+}
+
 #[tokio::test]
-async fn cancellation_is_first_wins_and_keep_inbox_is_sticky() {
+async fn resume_replays_only_unclaimed_next_turn_inbox_mutations() {
+    let persistence = Arc::new(MemorySessionPersistence::new());
+    let first_registry = AgentRegistry::new(SessionStore::new(persistence.clone()));
+    let factory = Arc::new(FakeFactory::default());
+    let _factory = first_registry.register_factory(factory.clone()).unwrap();
+    let first = first_registry
+        .create(header("durable-inbox"), options(), cancellation())
+        .await
+        .unwrap();
+    let session = first.session();
+    let first_message = message("first");
+    let original_edited = message("edited");
+    let mut edited = original_edited.clone();
+    edited.content = vec![tessivum::protocol::ContentBlock::Text {
+        text: "已编辑".into(),
+    }];
+    let edited_id = edited.id.clone();
+    let edited_content = edited.content.clone();
+    let steered = message("steered");
+    let claimed = message("claimed");
+
+    for queued in [&first_message, &original_edited, &steered, &claimed] {
+        session
+            .append(
+                inbox_event(
+                    &session,
+                    "agent/inbox/enqueued",
+                    json!({"target": "next-turn", "message": queued}),
+                ),
+                cancellation(),
+            )
+            .await
+            .unwrap();
+    }
+    session
+        .append(
+            inbox_event(
+                &session,
+                "agent/inbox/spliced",
+                json!({"target": "next-turn", "itemId": "edited", "action": "edit", "message": edited}),
+            ),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    session
+        .append(
+            inbox_event(
+                &session,
+                "agent/inbox/spliced",
+                json!({"target": "next-turn", "itemId": "first", "action": "remove", "message": first_message}),
+            ),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    session
+        .append(
+            inbox_event(
+                &session,
+                "agent/inbox/spliced",
+                json!({"target": "next-step", "itemId": "steered", "action": "steer", "message": steered}),
+            ),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    session
+        .append(
+            SessionEvent {
+                event_type: "user/message".into(),
+                seq: session.next_seq().unwrap(),
+                time: 0,
+                data: serde_json::to_value(&claimed).unwrap(),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: Some(SurfaceOp::Append),
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    first.dispose().await.unwrap();
+
+    let resumed_registry = AgentRegistry::new(SessionStore::new(persistence));
+    let _factory = resumed_registry.register_factory(factory).unwrap();
+    let resumed = resumed_registry
+        .resume(SessionId::from("durable-inbox"), options(), cancellation())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resumed
+            .inbox()
+            .pending()
+            .into_iter()
+            .map(|(target, message)| (target, message.id, message.content))
+            .collect::<Vec<_>>(),
+        vec![(InboxTarget::Followup, edited_id, edited_content)]
+    );
+    resumed.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_rejects_out_of_order_durable_inbox_mutations() {
+    let persistence = Arc::new(MemorySessionPersistence::new());
+    let id = SessionId::from("corrupt-durable-inbox");
+    persistence
+        .create(&header(id.as_str()), cancellation())
+        .await
+        .unwrap();
+    persistence
+        .append(
+            &id,
+            &SessionEvent {
+                event_type: "agent/inbox/spliced".into(),
+                seq: 0,
+                time: 0,
+                data: json!({
+                    "target": "next-turn",
+                    "itemId": "missing",
+                    "action": "remove",
+                    "message": message("missing"),
+                }),
+                ignorable: Some(true),
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(persistence));
+    let _factory = registry
+        .register_factory(Arc::new(FakeFactory::default()))
+        .unwrap();
+
+    assert!(matches!(
+        registry.resume(id, options(), cancellation()).await,
+        Err(AgentError::Session(
+            SessionError::InboxMutationOutOfOrder { .. }
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn idle_cancellation_is_a_noop_and_followups_remain_accepted() {
     let (registry, factory) = registry();
     let _factory = registry.register_factory(factory).unwrap();
-    let kept = registry
-        .create_or_resume(header("kept"), options(), cancellation())
+    let handle = registry
+        .create_or_resume(header("idle-cancel"), options(), cancellation())
         .await
         .unwrap();
-    kept.followup(message("keep")).await.unwrap();
-    assert!(kept.cancel(AgentCancelCause::User, true));
-    assert!(!kept.cancel(AgentCancelCause::Parent, false));
-    assert_eq!(kept.inbox().take_next_turn().unwrap().id.as_str(), "keep");
-    assert_eq!(kept.cancel_options().unwrap().cause, AgentCancelCause::User);
 
-    let cleared = registry
-        .create_or_resume(header("cleared"), options(), cancellation())
-        .await
-        .unwrap();
-    cleared.followup(message("clear")).await.unwrap();
-    assert!(cleared.cancel(AgentCancelCause::Parent, false));
-    assert!(cleared.inbox().is_empty());
-    kept.dispose().await.unwrap();
-    cleared.dispose().await.unwrap();
+    assert!(!handle.cancel(AgentCancelCause::User, false));
+    assert!(handle.cancel_options().is_none());
+    handle.followup(message("after-cancel")).await.unwrap();
+    assert_eq!(
+        handle.inbox().take_next_turn().unwrap().id.as_str(),
+        "after-cancel"
+    );
+
+    handle.dispose().await.unwrap();
 }
 
 #[tokio::test]
@@ -340,4 +589,79 @@ fn registry_publishes_the_versioned_service_to_context() {
         .get::<AgentRegistry>(&agents_service_key())
         .unwrap()
         .is_some());
+}
+#[tokio::test]
+async fn preset_authoring_confines_the_writable_root_and_dereferences_copies() {
+    let root = std::env::temp_dir().join(format!("tessivum-preset-{}", Uuid::new_v4()));
+    let system = root.join("system");
+    let foreign_user = root.join("foreign-user");
+    let writable_user = root.join("writable-user");
+    for (directory, content) in [
+        (system.join("base"), "[]\n"),
+        (system.join("shadow"), "[]\n"),
+        (foreign_user.join("foreign"), "[]\n"),
+    ] {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("agent.cordis.yml"), content).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        fs::write(system.join("base/template.txt"), "copied").unwrap();
+        symlink("template.txt", system.join("base/shared.txt")).unwrap();
+    }
+    let presets = AgentPresetService::with_roots(
+        vec![
+            AgentPresetRoot {
+                path: system,
+                trust: AgentPresetTrust::System,
+            },
+            AgentPresetRoot {
+                path: foreign_user.clone(),
+                trust: AgentPresetTrust::User,
+            },
+            AgentPresetRoot {
+                path: writable_user.clone(),
+                trust: AgentPresetTrust::User,
+            },
+        ],
+        Some(writable_user.clone()),
+    );
+
+    assert_eq!(
+        presets.read("missing").await.unwrap_err()["code"],
+        "agent-preset-not-found"
+    );
+    assert_eq!(
+        presets.copy("base", "shadow", None).await.unwrap_err()["code"],
+        "agent-preset-invalid"
+    );
+    assert!(!writable_user.join("shadow").exists());
+    assert_eq!(
+        presets.copy("base", "working", None).await.unwrap(),
+        "working"
+    );
+    let copied = presets.read("working").await.unwrap();
+    assert_eq!(copied.content, "[]\n");
+    assert_eq!(copied.name, None);
+    #[cfg(unix)]
+    assert!(
+        !fs::symlink_metadata(writable_user.join("working/shared.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        presets.remove("base").await.unwrap_err()["code"],
+        "agent-preset-read-only"
+    );
+    assert_eq!(
+        presets.remove("foreign").await.unwrap_err()["code"],
+        "agent-preset-read-only"
+    );
+    assert!(foreign_user.join("foreign").exists());
+    presets.remove("working").await.unwrap();
+    assert!(!writable_user.join("working").exists());
+    let _ = fs::remove_dir_all(root);
 }

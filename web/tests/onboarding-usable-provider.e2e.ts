@@ -1,7 +1,7 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness } from './support'
+import { acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT = join(import.meta.dir, 'snapshots/onboarding-usable-provider/dismissed.expected.md')
 const CREDENTIAL_STEP = '添加一个 API Key 开始使用'
@@ -12,6 +12,7 @@ test('another usable provider ends first-run onboarding', async () => {
   harness = await RustWebHarness.launch({
     name: 'onboarding-usable-provider-web-e2e',
     locale: 'zh-CN',
+    preserveCredentialOnboarding: true,
     env: { DEEPSEEK_API_KEY: '' },
   })
   try {
@@ -27,21 +28,23 @@ test('another usable provider ends first-run onboarding', async () => {
     const setupKey = settings.getByRole('textbox', { name: 'API 密钥', exact: true })
     await setupKey.waitFor({ timeout: 10_000 })
     const add = settings.getByRole('button', { name: '添加提供方' })
-    await expect.poll(() => add.isEnabled(), { timeout: 10_000 }).toBe(true)
+    await waitUntil(() => add.isEnabled(), enabled => enabled, 10_000)
     await add.click()
     const pick = settings.getByLabel('提供方')
     await pick.waitFor({ timeout: 10_000 })
     await pick.selectOption('minimax-cn')
-    await expect.poll(
+    await waitUntil(
       () => settings.getByRole('textbox', { name: 'API 密钥', exact: true }).count(),
-      { timeout: 10_000 },
-    ).toBe(2)
+      count => count === 2,
+      10_000,
+    )
     await settings.getByRole('button', { name: '取消', exact: true }).first().click()
     expect(await settings.getByLabel('提供方').count()).toBe(1)
-    await expect.poll(
+    await waitUntil(
       () => settings.getByRole('textbox', { name: 'API 密钥', exact: true }).count(),
-      { timeout: 10_000 },
-    ).toBe(1)
+      count => count === 1,
+      10_000,
+    )
     await settings.getByRole('button', { name: '编辑 DeepSeek (deepseek-official)' }).waitFor({ timeout: 10_000 })
     expect(await captureStableAria(harness.page, '[role="dialog"]')).toBe((await readFile(SNAPSHOT, 'utf8')).trim())
 
@@ -58,10 +61,11 @@ test('another usable provider ends first-run onboarding', async () => {
     await harness.page.reload({ waitUntil: 'load' })
     acknowledgeReloadConnectionLoss(harness, warningsBefore)
     await harness.page.locator('[class*="frame"]').waitFor({ timeout: 15_000 })
-    await expect.poll(
+    await waitUntil(
       () => harness?.page.getByRole('dialog', { name: CREDENTIAL_STEP }).count() ?? 0,
-      { timeout: 10_000 },
-    ).toBe(0)
+      count => count === 0,
+      10_000,
+    )
     expect(await harness.page.locator('#root').evaluate(root => (root as HTMLElement).inert)).toBe(false)
 
     await harness.page.getByRole('button', { name: '设置', exact: true }).click()
@@ -70,6 +74,7 @@ test('another usable provider ends first-run onboarding', async () => {
     await settings.getByRole('button', { name: '编辑 DeepSeek (deepseek-official)' }).waitFor({ timeout: 10_000 })
     expect(await settings.getByRole('textbox', { name: 'API 密钥', exact: true }).count()).toBe(0)
     expect((await harness.page.content()).includes('sk-e2e-minimax')).toBe(false)
+    expect(await readdir(join(import.meta.dir, 'snapshots/onboarding-usable-provider'))).toEqual(['dismissed.expected.md'])
     harness.assertClean()
   } finally {
     await harness.close()

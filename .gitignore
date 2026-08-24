@@ -3,3 +3,6 @@
 *.db-wal
 /web/node_modules/
 /web/dist/
+
+/web/client-packages/
+/graphify-out/

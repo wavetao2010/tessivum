@@ -1,8 +1,9 @@
 # Tessivum 二阶段开发计划
 
-> 状态：阶段一、阶段二与 Phase 3 已完成；Alpha.6 已批准待实施
-> 基线日期：2026-08-17
-> 当前基线：`v0.1.0-alpha.5`（`6b00190`）
+> 状态：两阶段迁移完成；Rust Cordis 内核、Rust-native Harness 与冻结的 source-exact Web 兼容基线均已通过验收
+> 计划校准日期：2026-08-24
+> Tessivum 实现基线：`v0.1.0-alpha.6`
+> 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、插件生态兼容与 Web 模型配置面
 
 ## 1. 文档集
@@ -15,6 +16,8 @@
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
+
+> 本文后半保留 Alpha.2–Alpha.6 的产品实施记录；其中“已完成”只描述 Tessivum 自有 Alpha 路径，不代表 DeepSeek Harness 外部契约兼容完成。当前冻结契约、真实缺口和唯一完成定义以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md) 为准。
 
 ## 2. 目标与边界
 
@@ -49,8 +52,8 @@ TypeScript Web    现有 React/浏览器插件
 
 | 项目 | 本地路径 | 固定提交 |
 |---|---|---|
-| Cordis | `upstream/cordis` | `47f943859bef60e4160492346772ded9b24f765a` |
-| DeepSeek Harness | `upstream/deepseek-harness` | `8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4` |
+| Cordis | `upstream/cordis` | `8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4` |
+| DeepSeek Harness | `upstream/deepseek-harness` | `47f943859bef60e4160492346772ded9b24f765a` |
 
 Rust Cordis 的行为基线不是单独的最新上游 Cordis，而是：
 
@@ -588,7 +591,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前后续工作入口
 
-阶段一、阶段二与 Phase 3 已关闭；`v0.1.0-alpha.5` 已证明原生 OpenAI Responses text/reasoning/function-tool wire、Headless/Web/SDK 启动与无状态 encrypted reasoning continuation。下一项固定工作是 Alpha.6 的 Web Provider 配置与 Codex 图片输入闭环；在该闭环通过前，不再把环境变量入口描述成完整产品配置体验。
+原 Alpha 阶段只完成了 Rust-native 产品纵向闭环，不能据此关闭两阶段迁移。当前冻结 Core RPC method roster 已达到 52/52，LLM/Agent 的 chunk、prepared request、retry/cancel、queue/steer、durable assistant state 与 JSONL replay 已有 focused/differential Rust 契约；`cordis.node/v1` 保持真实 compat-host 与社区插件回归。上游 `AppWebEntry` 和 38 个 client bundles 现从固定 `0.1.0-rc.5` 源码构建，staging 校验 handoff id、source/staged SHA-1 与 Rust graph revision，且默认 Web 路径不再扫描 registry artifacts。当前固定工作顺序是完成并通过 69 个真实 Chromium 场景，在场景暴露具体 schema/event/Host domain 缺口时修复源契约，并持续保留 Node regression gate。详见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)。
 
 ---
 

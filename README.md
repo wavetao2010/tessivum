@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/wavetao2010/tessivum/actions/workflows/ci.yml/badge.svg)](https://github.com/wavetao2010/tessivum/actions/workflows/ci.yml)
 
-Tessivum is an independent, Rust-native agent harness inspired by the architecture of DeepSeek Harness and Cordis. It keeps the useful compatibility boundaries—Legacy Node for existing npm/Cordis plugins and Browser Cordis for the published React UI—while moving the Host, Agent, session, tool, API, and SDK runtime to Rust.
+Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harness and Cordis. It targets two explicit compatibility planes—Legacy Node for existing npm/Cordis plugins and Browser Cordis for the upstream React UI—while moving the Host, Agent, session, tool, API, and SDK runtime to Rust.
 
 > Tessivum is a community project. It is not affiliated with DeepSeek, is not an official DeepSeek project, and does not aim to replace the official DeepSeek Harness repository or its publication process.
 
@@ -10,20 +10,23 @@ Tessivum is an independent, Rust-native agent harness inspired by the architectu
 
 `v0.1.0-alpha.6` is a source release and reproducible baseline, not a production-stable API promise.
 
-Implemented and verified:
+Current implementation foundation:
 
-- Rust Host, Agent, Agent Loop, sessions, tools, system prompt, and recorded LLM runtime;
+- Rust Host, Agent, Agent Loop, sessions, tools, system prompt, and provider-neutral LLM runtime;
 - durable JSONL/SQLite sessions, cold resume, rollback, and bounded transports;
 - Headless CLI plus NDJSON JSON-RPC/ACP SDK with TypeScript and Python clients;
-- HTTP API, durable SSE, published full-form RPC, and Browser WebSocket downlinks;
-- published Browser Cordis/React shell with workspace/session recovery and tool cards;
-- Legacy Node compatibility host with generation cleanup and real Cordis community samples;
-- Native/WASM/Legacy/Browser plugin routing and actionable compatibility reports;
-- exact per-plugin WASM service permissions plus a pinned real Rust/Extism Guest;
-- Browser stop/resume, durable approval request/response/reconnect, and writable redacted settings/credentials;
-- one HostRuntime with durable opaque multi-workspace/session authority, restart migration, workspace-scoped Bash, and subagent inheritance.
-- Web-configured OpenAI Responses routes with redacted Settings/Credentials, dynamic model discovery/selection, durable default/session model state, bounded image upload, AttachmentRef persistence, and Responses `input_image` serialization.
-- native OpenAI Responses streaming for API-key relays, including stateless encrypted-reasoning and function-tool continuation.
+- HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
+- Native/WASM/Browser routing plus a real Legacy Node compat-host over the bounded `cordis.node/v1` bridge and DomainBridge services;
+- Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the upstream `AppWebEntry` source shell with a 38-package `dsh.client` graph.
+
+The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline is complete:
+
+- the source Web shell and all 38 composed client packages build from commit `47f943859bef60e4160492346772ded9b24f765a`; Tessivum applies its checked-in compatibility patch before auditing and building the source tree;
+- the Rust `/api` dispatcher implements all 52 frozen Core RPC method names and both Browser WebSocket downlinks;
+- provider-neutral streaming, retry, cancellation, atomic queue/steer, durable sessions, presets, Subagents, Workflow, Native/WASM tools, and JSONL replay are covered by focused Rust contracts;
+- all 69 source-Web Chromium scenarios pass as the behavioral schema/event parity gate.
+
+The authoritative contract and completion gates are in [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md).
 
 ## Architecture
 
@@ -41,6 +44,12 @@ plugins   boundary   npm/Cordis plugins
 ```
 
 The Host remains authoritative for permissions and durable facts. Legacy Node and Browser Cordis are intentional compatibility planes, not temporary TypeScript Host/Agent implementations.
+
+### Legacy Node boundary
+
+Tessivum does not export the legacy Host modules `agentCore`, `llm`, `systemPrompt`, `sessionStore`, or `toolRuntime` into Node Cordis contexts. A plugin that requires one of those module names is unsupported: direct lookup stays absent, and a named bridge call must return an explicit `SERVICE_UNAVAILABLE`/`UNKNOWN_SERVICE` error—never a successful no-op, empty model result, or fabricated service.
+
+Supported cross-runtime operations use the bounded, versioned DomainBridge contracts (`agents@1`, `llm@1`, `systemPrompt@1`, `sessions@1`, and `tools@1`). These contracts are not aliases for the omitted legacy modules.
 
 ## Requirements
 
@@ -115,20 +124,21 @@ SDK mode reads newline-delimited JSON-RPC from stdin and writes protocol frames 
 ## Verification
 
 ```bash
+python3 scripts/check_compat_baseline.py
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
-cd web && bun install --frozen-lockfile && bun run build
+cd web && bun install --frozen-lockfile && bun run build && bun run test:source-client
+bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000
 ```
 
-The Alpha6 baseline passes 290 Rust tests across 39 suites, the Browser typecheck/build, real Web Provider/Credentials/Models/discovery/default-selection/image-upload/restart flows against a local Responses relay, native text/reasoning/function-tool/image serialization tests, real Headless and SDK process journeys, real Chromium model/stop/approval/settings/credential and multi-workspace/restart interaction, community plugin loading, real Extism allow/deny/trap/update/unload flows, rollback drills, workspace-scoped Bash/subagent inheritance, workspace-authorized session attachment reads, and graceful shutdown checks.
+These gates exercise the Rust-native runtime, the pinned DeepSeek client packages, all 69 source-Web Chromium scenarios, Headless and SDK journeys, Extism permissions, persistence, rollback, workspace isolation, and shutdown.
 
 ## Known Alpha limits
 
 - only production-wired cwd-sensitive capabilities are workspace-scoped; latent library-only Skills/LSP/Filesystem integrations remain unavailable from the Host;
 - Browser configuration exposes only the published settings namespace allowlist; arbitrary registered namespaces remain Host-internal;
-- WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, and `credentials@1.describe`;
-- several unpublished upstream Browser packages require explicit compatibility overrides;
+- WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, `credentials@1.describe`, and `systemPrompt@1.assemble`;
 - the native Responses adapter requires the standard API-key `/responses` contract; direct ChatGPT/Codex OAuth and remote image URLs are not wired;
 - image-bearing MCP/tool-result serialization is covered by focused adapter tests; the real Browser E2E currently exercises text tool continuation plus user image input, because no production-configured image-producing tool is exposed;
 - API listeners are loopback-only and this release does not ship prebuilt binaries.
@@ -141,6 +151,8 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Development and cutover plan](docs/DEVELOPMENT_PLAN.md)
 - [Plugin compatibility](docs/PLUGIN_COMPATIBILITY.md)
 - [Phase 3 product capability plan](docs/PHASE3_PRODUCT_PLAN.md)
+- [DeepSeek Harness compatibility baseline](docs/COMPATIBILITY_BASELINE.md)
+- [Web E2E port checklist (69 upstream files)](docs/WEB_E2E_PORT_CHECKLIST.md)
 
 ## License
 

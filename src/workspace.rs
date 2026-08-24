@@ -639,6 +639,73 @@ impl WorkspaceRegistry {
             Ok((true, true))
         })
     }
+    /// DOM `insertBefore` for durable workspace order. An omitted reference appends.
+    pub fn insert_before(
+        &self,
+        workspace_id: impl AsRef<str>,
+        before_workspace_id: Option<&str>,
+        expected_revision: Option<u64>,
+    ) -> Result<Vec<WorkspaceId>, WorkspaceError> {
+        let id = WorkspaceId::from(workspace_id.as_ref());
+        validate_workspace_id(&id)?;
+        let before = before_workspace_id.map(WorkspaceId::from);
+        if let Some(before) = &before {
+            validate_workspace_id(before)?;
+        }
+        self.mutate(expected_revision, |snapshot, _| {
+            let source = workspace_index(snapshot, &id)?;
+            match before.as_ref() {
+                Some(before) if before == &id => {
+                    return Ok((
+                        false,
+                        snapshot
+                            .items
+                            .iter()
+                            .map(|workspace| workspace.workspace_id.clone())
+                            .collect(),
+                    ));
+                }
+                Some(before) => {
+                    let target = workspace_index(snapshot, before)?;
+                    if source + 1 == target {
+                        return Ok((
+                            false,
+                            snapshot
+                                .items
+                                .iter()
+                                .map(|workspace| workspace.workspace_id.clone())
+                                .collect(),
+                        ));
+                    }
+                    let workspace = snapshot.items.remove(source);
+                    let target = workspace_index(snapshot, before)?;
+                    snapshot.items.insert(target, workspace);
+                }
+                None => {
+                    if source + 1 == snapshot.items.len() {
+                        return Ok((
+                            false,
+                            snapshot
+                                .items
+                                .iter()
+                                .map(|workspace| workspace.workspace_id.clone())
+                                .collect(),
+                        ));
+                    }
+                    let workspace = snapshot.items.remove(source);
+                    snapshot.items.push(workspace);
+                }
+            }
+            Ok((
+                true,
+                snapshot
+                    .items
+                    .iter()
+                    .map(|workspace| workspace.workspace_id.clone())
+                    .collect(),
+            ))
+        })
+    }
 
     pub fn attach_session(
         &self,

@@ -3,10 +3,11 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { RustWebHarness, waitUntil } from './support'
+import { captureStableAria, RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/web-search-round')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
+const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const PROMPT = 'Use web_search to search exactly "DeepSeek Harness snapshot search". Then reply exactly SEARCH_DONE and stop.'
 const QUERY = 'DeepSeek Harness snapshot search'
 const MAX_RESULTS = 8
@@ -35,8 +36,8 @@ async function fixturePrompts(): Promise<string[]> {
   return (await readFile(FIXTURE, 'utf8'))
     .trim()
     .split('\n')
-    .map(line => JSON.parse(line) as { type?: string; data?: { content?: Array<{ type?: string; text?: string }> } })
-    .filter(row => row.type === 'user/message')
+    .map(line => JSON.parse(line) as { type?: string; data?: { content?: Array<{ type?: string; text?: string }>; source?: { kind?: string } } })
+    .filter(row => row.type === 'user/message' && row.data?.source?.kind === 'user')
     .flatMap(row => row.data?.content ?? [])
     .flatMap(block => block.type === 'text' && block.text !== undefined ? [block.text] : [])
 }
@@ -132,7 +133,10 @@ test('web search uses the real DeepSeek seam, preserves citations, and projects 
     if (searchCall === undefined) throw new Error('the replayed turn did not call web_search')
     const searchResult = log.find(event => event.type === 'tool/result' && event.data.message?.source?.callId === searchCall.data.callId)
     if (searchResult === undefined) throw new Error('web_search produced no durable result')
-    const rendered = JSON.stringify(searchResult.data.message)
+    const content = searchResult.data.message?.content?.[0]
+    if (content === undefined) throw new Error('web_search produced no result content')
+    expect(content.isError).toBe(false)
+    const rendered = content.content.filter((block: { type?: string }) => block.type === 'text').map((block: { text?: string }) => block.text ?? '').join('')
     for (let ordinal = 1; ordinal <= MAX_RESULTS; ordinal += 1) {
       expect(rendered).toContain(`[${resultTitle(ordinal)}](${resultUrl(ordinal)})`)
     }
@@ -147,6 +151,8 @@ test('web search uses the real DeepSeek seam, preserves citations, and projects 
       truncated: true,
     })
 
+
+    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(UI_EXPECTED, 'utf8'))
     const row = harness.page.locator('[data-tool="web_search"] [data-expandable]').first()
     await row.click()
     expect(await waitUntil(() => row.getAttribute('aria-expanded'), value => value === 'true')).toBe('true')

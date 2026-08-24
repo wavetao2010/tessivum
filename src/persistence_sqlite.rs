@@ -241,6 +241,31 @@ impl SessionPersistence for SqliteSessionPersistence {
             .commit()
             .map_err(|error| sqlite_error("commit append", error))
     }
+    async fn delete(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        check_cancellation(&cancellation)?;
+        let mut connection = lock(&self.connection);
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin delete", error))?;
+        check_cancellation(&cancellation)?;
+        if transaction
+            .execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![session_id.as_str()],
+            )
+            .map_err(|error| sqlite_error("delete session", error))?
+            == 0
+        {
+            return Err(SessionError::NotFound(session_id.clone()));
+        }
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit delete", error))
+    }
 
     async fn load(
         &self,

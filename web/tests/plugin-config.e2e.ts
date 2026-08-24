@@ -1,7 +1,7 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness } from './support'
+import { captureStableAria, RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT = join(import.meta.dir, 'snapshots/plugin-config/section.expected.md')
 
@@ -14,15 +14,15 @@ test('plugin settings stage, validate, save, discard, and reset native overrides
       const existing = harness?.page.getByRole('dialog', { name: '设置' })
       if (existing !== undefined && await existing.count() > 0) {
         await harness?.page.keyboard.press('Escape')
-        await expect.poll(() => harness?.page.getByRole('dialog', { name: '设置' }).count() ?? 0, { timeout: 5_000 }).toBe(0)
+        await waitUntil(() => harness?.page.getByRole('dialog', { name: '设置' }).count() ?? 0, count => count === 0, 5_000)
       }
       await harness?.page.getByRole('button', { name: '设置', exact: true }).click()
       const dialog = harness?.page.getByRole('dialog', { name: '设置' })
       if (dialog === undefined) throw new Error('settings dialog did not open')
       await dialog.waitFor({ timeout: 10_000 })
       await dialog.getByRole('button', { name: '插件', exact: true }).click()
-      await expect.poll(() => dialog.getByRole('button', { name: '插件', exact: true }).getAttribute('aria-current'), { timeout: 5_000 }).toBe('true')
-      await expect.poll(() => dialog.getByRole('tab', { name: '插件配置', exact: true }).getAttribute('aria-selected'), { timeout: 5_000 }).toBe('true')
+      await waitUntil(() => dialog.getByRole('button', { name: '插件', exact: true }).getAttribute('aria-current'), value => value === 'true', 5_000)
+      await waitUntil(() => dialog.getByRole('tab', { name: '插件配置', exact: true }).getAttribute('aria-selected'), value => value === 'true', 5_000)
       return dialog
     }
     const settingsDocument = async (): Promise<string> => readFile(join(harness?.dataDir ?? '', 'settings.yaml'), 'utf8').catch(() => '')
@@ -43,12 +43,12 @@ test('plugin settings stage, validate, save, discard, and reset native overrides
     await timeout.blur()
     expect(await settingsDocument()).not.toContain('timeoutMs')
     const save = dialog.getByRole('button', { name: '保存', exact: true })
-    await expect.poll(() => save.isEnabled(), { timeout: 5_000 }).toBe(true)
+    await waitUntil(() => save.isEnabled(), enabled => enabled, 5_000)
     await save.click()
-    await expect.poll(async () => (await settingsDocument()).includes('timeoutMs: 12000'), { timeout: 10_000 }).toBe(true)
-    await expect.poll(() => dialog.getByText('已覆盖').count(), { timeout: 5_000 }).toBe(1)
+    await waitUntil(async () => (await settingsDocument()).includes('timeoutMs: 12000'), saved => saved, 10_000)
+    await waitUntil(() => dialog.getByText('已覆盖').count(), count => count === 1, 5_000)
     expect(await dialog.getByRole('button', { name: '恢复默认' }).count()).toBe(1)
-    await expect.poll(() => save.isDisabled(), { timeout: 5_000 }).toBe(true)
+    await waitUntil(() => save.isDisabled(), disabled => disabled, 5_000)
 
     dialog = await openPlugins()
     await dialog.getByText('终端', { exact: true }).click()
@@ -56,7 +56,7 @@ test('plugin settings stage, validate, save, discard, and reset native overrides
     await discardTimeout.waitFor({ timeout: 10_000 })
     await discardTimeout.fill('7000')
     await dialog.getByRole('button', { name: '放弃修改' }).click()
-    await expect.poll(() => discardTimeout.inputValue(), { timeout: 5_000 }).toBe('12000')
+    await waitUntil(() => discardTimeout.inputValue(), value => value === '12000', 5_000)
     expect(await settingsDocument()).toContain('timeoutMs: 12000')
 
     dialog = await openPlugins()
@@ -65,7 +65,7 @@ test('plugin settings stage, validate, save, discard, and reset native overrides
     await invalidTimeout.waitFor({ timeout: 10_000 })
     await invalidTimeout.fill('soon')
     const invalidSave = dialog.getByRole('button', { name: '保存', exact: true })
-    await expect.poll(() => invalidSave.isDisabled(), { timeout: 5_000 }).toBe(true)
+    await waitUntil(() => invalidSave.isDisabled(), disabled => disabled, 5_000)
     expect(await dialog.getByText('请填数字；留空表示使用默认值。').count()).toBe(1)
     await dialog.getByRole('button', { name: '放弃修改' }).click()
 
@@ -75,12 +75,13 @@ test('plugin settings stage, validate, save, discard, and reset native overrides
     await resetTimeout.waitFor({ timeout: 10_000 })
     expect(await resetTimeout.inputValue()).toBe('12000')
     await dialog.getByRole('button', { name: '恢复默认' }).click()
-    await expect.poll(() => resetTimeout.inputValue(), { timeout: 5_000 }).toBe('60000')
+    await waitUntil(() => resetTimeout.inputValue(), value => value === '60000', 5_000)
     expect(await settingsDocument()).toContain('timeoutMs: 12000')
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
-    await expect.poll(async () => (await settingsDocument()).includes('timeoutMs'), { timeout: 10_000 }).toBe(false)
+    await waitUntil(async () => (await settingsDocument()).includes('timeoutMs'), present => !present, 10_000)
     expect(await resetTimeout.inputValue()).toBe('60000')
     expect(await dialog.getByText('已覆盖').count()).toBe(0)
+    expect(await readdir(join(import.meta.dir, 'snapshots/plugin-config'))).toEqual(['section.expected.md'])
     harness.assertClean()
   } finally {
     await harness.close()

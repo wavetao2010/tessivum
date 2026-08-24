@@ -12,13 +12,19 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
+use parking_lot::Mutex as ParkingMutex;
 use serde_json::{json, Value};
 use tessivum::{
+    agent_preset::AgentPresetTrust,
     api::{ApiServer, MAX_FRAME_BYTES},
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     host::{
         HostApi, HostConfig, HostLlmAdapterFactory, HostModelGroup, HostModelInfo,
-        HostNotification, HostProviderDirectoryEntry, HostRuntime, HostSessionModels,
+        HostModelReasoning, HostModelReasoningEffort, HostNotification, HostPathOpener,
+        HostProviderDirectoryEntry, HostProviderEnabled, HostRuntime, HostSessionModels,
+        HostSessionQueueItem, HostSessionQueueNotification, HostSessionRenameResult,
+        HostSessionSearchHit, HostSessionSearchResult, SessionQueueAction,
+        SessionUpdateQueueParams, SessionUpdateQueueResult,
     },
     llm::{LlmAdapter, LlmStream},
     openai_responses::{ResponsesModel, ResponsesRoute},
@@ -28,7 +34,12 @@ use tessivum::{
         SessionId, SessionModelSelection, SessionPromptParams, SessionPromptResult, SessionStatus,
         StreamChunk,
     },
-    settings::SettingsRegistration,
+    settings::{MemorySettingsProvider, Settings, SettingsRegistration},
+    subagent::{
+        SessionProjectionsBlock, SubagentDeleteRequest, SubagentDeleteResult,
+        SubagentHistoryRequest, SubagentHistoryResult, SubagentInterruptRequest,
+        SubagentInterruptResult, SubagentMode, SubagentPromptRequest, SubagentPromptResult,
+    },
     TessivumError,
 };
 use tokio::{
@@ -45,6 +56,11 @@ struct FakeHost {
     notifications: broadcast::Sender<HostNotification>,
     initializations: Mutex<Vec<InitializeParams>>,
     prompt_params: Mutex<Vec<SessionPromptParams>>,
+    subagent_history_params: ParkingMutex<Vec<SubagentHistoryRequest>>,
+    subagent_prompt_params: ParkingMutex<Vec<SubagentPromptRequest>>,
+    subagent_interrupt_params: ParkingMutex<Vec<SubagentInterruptRequest>>,
+    subagent_error: ParkingMutex<Option<TessivumError>>,
+    subagent_delete_params: ParkingMutex<Vec<SubagentDeleteRequest>>,
     prompts: AtomicUsize,
     steers: AtomicUsize,
     cancels: AtomicUsize,
@@ -52,6 +68,15 @@ struct FakeHost {
     delay_prompt: AtomicBool,
     prompt_started: Notify,
     cancel_seen: Notify,
+    queue_updates: Mutex<Vec<SessionUpdateQueueParams>>,
+    queue_error: Mutex<Option<TessivumError>>,
+    provider_enable_available: AtomicBool,
+    provider_enable_calls: Mutex<Vec<(String, bool)>>,
+    desktop_enabled: AtomicBool,
+    picked_directory: Mutex<Option<PathBuf>>,
+    opened_paths: Mutex<Vec<String>>,
+    settings_opens: AtomicUsize,
+    settings: Arc<Settings>,
 }
 
 impl FakeHost {
@@ -70,6 +95,20 @@ impl FakeHost {
             delay_prompt: AtomicBool::new(false),
             prompt_started: Notify::new(),
             cancel_seen: Notify::new(),
+            queue_updates: Mutex::new(Vec::new()),
+            subagent_history_params: ParkingMutex::new(Vec::new()),
+            subagent_prompt_params: ParkingMutex::new(Vec::new()),
+            subagent_interrupt_params: ParkingMutex::new(Vec::new()),
+            subagent_error: ParkingMutex::new(None),
+            subagent_delete_params: ParkingMutex::new(Vec::new()),
+            queue_error: Mutex::new(None),
+            provider_enable_available: AtomicBool::new(false),
+            provider_enable_calls: Mutex::new(Vec::new()),
+            desktop_enabled: AtomicBool::new(false),
+            picked_directory: Mutex::new(None),
+            opened_paths: Mutex::new(Vec::new()),
+            settings_opens: AtomicUsize::new(0),
+            settings: Arc::new(Settings::new(Arc::new(MemorySettingsProvider::new()))),
         }
     }
 
@@ -144,6 +183,20 @@ impl HostApi for FakeHost {
         Ok(true)
     }
 
+    async fn update_queue(
+        &self,
+        params: SessionUpdateQueueParams,
+    ) -> Result<SessionUpdateQueueResult, TessivumError> {
+        if let Some(error) = self.queue_error.lock().expect("queue error lock").clone() {
+            return Err(error);
+        }
+        self.queue_updates
+            .lock()
+            .expect("queue update lock")
+            .push(params);
+        Ok(SessionUpdateQueueResult { accepted: true })
+    }
+
     async fn events(
         &self,
         session: SessionId,
@@ -169,6 +222,58 @@ impl HostApi for FakeHost {
             .get(&session)
             .copied())
     }
+    async fn subagent_history(
+        &self,
+        params: SubagentHistoryRequest,
+    ) -> Result<SubagentHistoryResult, TessivumError> {
+        if let Some(error) = self.subagent_error.lock().clone() {
+            return Err(error);
+        }
+        self.subagent_history_params.lock().push(params);
+        Ok(SubagentHistoryResult {
+            events: Vec::new(),
+            has_more: false,
+            projections: Some(SessionProjectionsBlock {
+                as_of_seq: -1,
+                values: BTreeMap::new(),
+            }),
+        })
+    }
+
+    async fn subagent_prompt(
+        &self,
+        params: SubagentPromptRequest,
+    ) -> Result<SubagentPromptResult, TessivumError> {
+        if let Some(error) = self.subagent_error.lock().clone() {
+            return Err(error);
+        }
+        self.subagent_prompt_params.lock().push(params);
+        Ok(SubagentPromptResult {
+            message_id: MessageId::from("subagent-message"),
+        })
+    }
+
+    async fn subagent_interrupt(
+        &self,
+        params: SubagentInterruptRequest,
+    ) -> Result<SubagentInterruptResult, TessivumError> {
+        if let Some(error) = self.subagent_error.lock().clone() {
+            return Err(error);
+        }
+        self.subagent_interrupt_params.lock().push(params);
+        Ok(SubagentInterruptResult { accepted: true })
+    }
+    async fn subagent_delete(
+        &self,
+        params: SubagentDeleteRequest,
+    ) -> Result<SubagentDeleteResult, TessivumError> {
+        if let Some(error) = self.subagent_error.lock().clone() {
+            return Err(error);
+        }
+        self.subagent_delete_params.lock().push(params);
+        Ok(SubagentDeleteResult { deleted: true })
+    }
+
     fn provider_directory(&self) -> Vec<HostProviderDirectoryEntry> {
         vec![HostProviderDirectoryEntry {
             route: ResponsesRoute::new(
@@ -197,9 +302,18 @@ impl HostApi for FakeHost {
                 provider: provider.into(),
                 id: "fake-model".into(),
                 name: Some("Fake Model".into()),
+                description: Some("Fixture model".into()),
                 input_modalities: vec!["text".into(), "image".into()],
                 context_window: Some(4096),
                 max_tokens: Some(512),
+                reasoning: Some(HostModelReasoning {
+                    efforts: vec![HostModelReasoningEffort {
+                        id: "high".into(),
+                        name: "High".into(),
+                        description: None,
+                    }],
+                    default_effort: Some("high".into()),
+                }),
                 routable: true,
             }],
             credential_configured: true,
@@ -237,7 +351,125 @@ impl HostApi for FakeHost {
             reasoning_effort,
         })
     }
+    async fn set_provider_enabled(
+        &self,
+        provider: String,
+        enabled: bool,
+    ) -> Result<HostProviderEnabled, TessivumError> {
+        if !self.provider_enable_available.load(Ordering::SeqCst) {
+            return Err(TessivumError::new(
+                "SETTINGS_UNAVAILABLE",
+                "settings service is unavailable",
+                "settings",
+                json!({"namespace": "llm-pi-ai"}),
+            ));
+        }
+        self.provider_enable_calls
+            .lock()
+            .expect("provider enable lock")
+            .push((provider.clone(), enabled));
+        Ok(HostProviderEnabled { provider, enabled })
+    }
+    async fn search_sessions(
+        &self,
+        query: String,
+    ) -> Result<HostSessionSearchResult, TessivumError> {
+        Ok(HostSessionSearchResult {
+            items: vec![HostSessionSearchHit {
+                session_id: SessionId::from("visible-session"),
+                snippet: format!("matched {query}"),
+            }],
+            has_more: true,
+        })
+    }
 
+    async fn rename_session(
+        &self,
+        _session_id: SessionId,
+        title: String,
+    ) -> Result<HostSessionRenameResult, TessivumError> {
+        if title.trim().is_empty() {
+            return Err(TessivumError::new(
+                "TITLE_INVALID",
+                "session title must contain visible text",
+                "host",
+                Value::Null,
+            ));
+        }
+        Ok(HostSessionRenameResult { title, seq: 0 })
+    }
+
+    async fn fork_session(
+        &self,
+        session_id: SessionId,
+        at_seq: Option<u64>,
+    ) -> Result<SessionId, TessivumError> {
+        if at_seq == Some(99) {
+            return Err(TessivumError::new(
+                "FORK_UNAVAILABLE",
+                "session has no completed turn at the requested sequence",
+                "host",
+                Value::Null,
+            ));
+        }
+        let _ = session_id;
+        Ok(SessionId::from("forked-session"))
+    }
+
+    fn can_open_path(&self) -> bool {
+        self.desktop_enabled.load(Ordering::SeqCst)
+    }
+    fn has_settings_document(&self) -> bool {
+        self.desktop_enabled.load(Ordering::SeqCst)
+    }
+    fn settings(&self) -> Option<Arc<Settings>> {
+        self.desktop_enabled
+            .load(Ordering::SeqCst)
+            .then(|| Arc::clone(&self.settings))
+    }
+    async fn pick_directory(&self) -> Result<Option<String>, TessivumError> {
+        if !self.desktop_enabled.load(Ordering::SeqCst) {
+            return Err(TessivumError::new(
+                "DIRECTORY_PICKER_UNAVAILABLE",
+                "native directory picker is unavailable",
+                "host",
+                json!({"capability": "absent"}),
+            ));
+        }
+        Ok(self
+            .picked_directory
+            .lock()
+            .expect("picked directory lock")
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()))
+    }
+    async fn open_path(&self, path: String) -> Result<(), TessivumError> {
+        if !self.desktop_enabled.load(Ordering::SeqCst) {
+            return Err(TessivumError::new(
+                "PATH_OPENER_UNAVAILABLE",
+                "native path opener is unavailable",
+                "host",
+                Value::Null,
+            ));
+        }
+        self.opened_paths
+            .lock()
+            .expect("opened paths lock")
+            .push(path);
+        Ok(())
+    }
+    async fn open_settings_document(&self) -> Result<(), TessivumError> {
+        if !self.desktop_enabled.load(Ordering::SeqCst) {
+            return Err(TessivumError::new(
+                "SETTINGS_DOCUMENT_UNAVAILABLE",
+                "settings document opener is unavailable",
+                "settings",
+                Value::Null,
+            ));
+        }
+        self.settings_opens.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
     fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
         self.notifications.subscribe()
     }
@@ -265,6 +497,23 @@ async fn start() -> (ApiServer, Arc<FakeHost>, String) {
     let server = ApiServer::bind(host.clone()).await.expect("server binds");
     let base = format!("http://{}", server.local_addr());
     (server, host, base)
+}
+
+struct RecordingNativeOpener(Mutex<Vec<PathBuf>>);
+
+#[async_trait]
+impl HostPathOpener for RecordingNativeOpener {
+    fn can_open_path(&self) -> bool {
+        true
+    }
+    async fn open_path(&self, path: PathBuf) -> Result<(), TessivumError> {
+        self.0.lock().expect("native opener lock").push(path);
+        Ok(())
+    }
+    async fn open_text_file(&self, path: PathBuf) -> Result<(), TessivumError> {
+        self.0.lock().expect("native opener lock").push(path);
+        Ok(())
+    }
 }
 async fn raw_http_status(
     address: SocketAddr,
@@ -341,6 +590,8 @@ impl Drop for BrowserStopFixture {
 
 struct DelayedAdapter {
     calls: AtomicUsize,
+    model_calls: AtomicUsize,
+    model_configs: ParkingMutex<Vec<Value>>,
     started: Notify,
 }
 
@@ -348,6 +599,8 @@ impl DelayedAdapter {
     fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
+            model_calls: AtomicUsize::new(0),
+            model_configs: ParkingMutex::new(Vec::new()),
             started: Notify::new(),
         }
     }
@@ -395,6 +648,19 @@ impl LlmAdapter for DelayedAdapter {
             .into_iter()
             .map(Ok),
         )))
+    }
+
+    async fn models(&self, config: Value) -> Result<Value, TessivumError> {
+        self.model_calls.fetch_add(1, Ordering::SeqCst);
+        self.model_configs.lock().push(config);
+        Ok(json!([{
+            "id": "fake-model",
+            "name": "Fake Model",
+            "contextWindow": 4096,
+            "maxOutput": 512,
+            "reasoning": true,
+            "input": ["text", "image"]
+        }]))
     }
 }
 
@@ -617,10 +883,222 @@ async fn browser_call(
 }
 
 #[tokio::test]
+async fn browser_permission_remote_switches_and_seeds_projection_history() {
+    let fixture = BrowserStopFixture::new();
+    let runtime = Arc::new(
+        HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
+            .await
+            .unwrap(),
+    );
+    let session = SessionId::from("browser-permission");
+    runtime.create_session(session.clone()).await.unwrap();
+    let mut server = ApiServer::bind(runtime).await.unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let listed = browser_call(
+        &client,
+        &base,
+        "permission-list",
+        "commands/list",
+        json!({"args": {"agentId": session}}),
+    )
+    .await;
+    assert!(
+        listed["result"]["value"]
+            .as_array()
+            .is_some_and(|commands| commands
+                .iter()
+                .any(|command| command["name"] == "permission")),
+        "{listed}"
+    );
+
+    let executed = browser_call(
+        &client,
+        &base,
+        "permission-execute",
+        "commands/execute",
+        json!({"args": {"agentId": session, "line": "/permission danger-full-access"}}),
+    )
+    .await;
+    assert_eq!(
+        executed["result"]["value"]["result"],
+        json!({"kind": "success", "text": "preset danger-full-access"})
+    );
+
+    let history = browser_call(
+        &client,
+        &base,
+        "permission-history",
+        "session.history",
+        json!({"sessionId": session}),
+    )
+    .await;
+    assert_eq!(
+        history["result"]["value"]["projections"]["values"]["permissions"]["currentValue"],
+        "danger-full-access"
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_subagent_routes_validate_and_preserve_payloads() {
+    let (mut server, host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let history = browser_call(
+        &client,
+        &base,
+        "subagent-history",
+        "subagent.history",
+        json!({
+            "parentSessionId": "parent",
+            "childSessionId": "child",
+            "mode": "one-shot",
+            "beforeSeq": 2,
+            "maxMessages": 1,
+        }),
+    )
+    .await;
+    assert_eq!(history["result"]["value"]["hasMore"], false);
+    assert_eq!(
+        host.subagent_history_params.lock().as_slice(),
+        &[SubagentHistoryRequest {
+            parent_session_id: SessionId::from("parent"),
+            child_session_id: SessionId::from("child"),
+            mode: SubagentMode::OneShot,
+            before_seq: Some(2),
+            max_messages: Some(1),
+        }]
+    );
+
+    let prompt = browser_call(
+        &client,
+        &base,
+        "subagent-prompt",
+        "subagent.prompt",
+        json!({
+            "parentSessionId": "parent",
+            "childSessionId": "child",
+            "mode": "continuable",
+            "content": [{"type": "text", "text": "continue"}],
+            "clientTimeZone": "UTC",
+        }),
+    )
+    .await;
+    assert_eq!(prompt["result"]["value"]["messageId"], "subagent-message");
+    assert_eq!(
+        host.subagent_prompt_params.lock()[0].mode,
+        SubagentMode::Continuable
+    );
+    assert_eq!(
+        host.subagent_prompt_params.lock()[0]
+            .client_time_zone
+            .as_deref(),
+        Some("UTC")
+    );
+
+    let interrupt = browser_call(
+        &client,
+        &base,
+        "subagent-interrupt",
+        "subagent.interrupt",
+        json!({
+            "parentSessionId": "parent",
+            "childSessionId": "child",
+            "mode": "continuable",
+        }),
+    )
+    .await;
+    assert_eq!(interrupt["result"]["value"]["accepted"], true);
+    assert_eq!(
+        host.subagent_interrupt_params.lock()[0].mode,
+        SubagentMode::Continuable
+    );
+    let deleted = browser_call(
+        &client,
+        &base,
+        "subagent-delete",
+        "subagent.delete",
+        json!({
+            "parentSessionId": "parent",
+            "childSessionId": "child",
+        }),
+    )
+    .await;
+    assert_eq!(deleted["result"]["value"]["deleted"], true);
+    assert_eq!(
+        host.subagent_delete_params.lock().as_slice(),
+        &[SubagentDeleteRequest {
+            parent_session_id: SessionId::from("parent"),
+            child_session_id: SessionId::from("child"),
+        }]
+    );
+
+    let invalid = browser_call(
+        &client,
+        &base,
+        "subagent-invalid",
+        "subagent.history",
+        json!({
+            "parentSessionId": "parent",
+            "childSessionId": "child",
+            "mode": "one-shot",
+            "unexpected": true,
+        }),
+    )
+    .await;
+    assert_eq!(invalid["result"]["error"]["code"], "bad-request");
+
+    *host.subagent_error.lock() = Some(TessivumError::new(
+        "SUBAGENT_PARENT_MISMATCH",
+        "forged parent",
+        "subagent",
+        Value::Null,
+    ));
+    let denied = browser_call(
+        &client,
+        &base,
+        "subagent-denied",
+        "subagent.interrupt",
+        json!({
+            "parentSessionId": "parent",
+            "childSessionId": "child",
+            "mode": "continuable",
+        }),
+    )
+    .await;
+    assert_eq!(denied["result"]["error"]["code"], "subagent-unauthorized");
+    assert_eq!(
+        denied["result"]["error"]["details"]["childSessionId"],
+        "child"
+    );
+    *host.subagent_error.lock() = Some(TessivumError::new(
+        "SUBAGENT_DELETE_HAS_CHILDREN",
+        "delete leaves first",
+        "subagent",
+        Value::Null,
+    ));
+    let blocked_delete = browser_call(
+        &client,
+        &base,
+        "subagent-delete-blocked",
+        "subagent.delete",
+        json!({"parentSessionId": "parent", "childSessionId": "child"}),
+    )
+    .await;
+    assert_eq!(
+        blocked_delete["result"]["error"]["code"],
+        "subagent-has-children"
+    );
+    server.shutdown().await.expect("server shuts down");
+}
+#[tokio::test]
 async fn browser_directory_rpc_lists_and_creates_directories() {
     let root = BrowserStopFixture::new();
     fs::create_dir(root.0.join("visible")).unwrap();
     fs::create_dir(root.0.join(".hidden")).unwrap();
+
     fs::write(root.0.join("file.txt"), b"not a directory").unwrap();
     let canonical = fs::canonicalize(&root.0).unwrap();
     let (mut server, _host, base) = start().await;
@@ -663,6 +1141,288 @@ async fn browser_directory_rpc_lists_and_creates_directories() {
         canonical.join("created").to_string_lossy().as_ref()
     );
     assert!(root.0.join("created").is_dir());
+    server.shutdown().await.expect("server shuts down");
+}
+#[tokio::test]
+async fn browser_session_search_rename_and_fork_use_strict_contracts() {
+    let (mut server, _host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let search = browser_call(
+        &client,
+        &base,
+        "search",
+        "session.search",
+        json!({"query": "  needle  "}),
+    )
+    .await;
+    assert_eq!(
+        search["result"]["value"]["items"][0]["sessionId"],
+        "visible-session"
+    );
+    assert_eq!(
+        search["result"]["value"]["items"][0]["snippet"],
+        "matched needle"
+    );
+    assert_eq!(search["result"]["value"]["hasMore"], true);
+
+    let invalid_search = browser_call(
+        &client,
+        &base,
+        "invalid-search",
+        "session.search",
+        json!({"query": "\u{0000}"}),
+    )
+    .await;
+    assert_eq!(invalid_search["result"]["error"]["code"], "bad-request");
+    let invalid_fork = browser_call(
+        &client,
+        &base,
+        "invalid-fork-seq",
+        "session.fork",
+        json!({"sessionId": "source", "atSeq": -1}),
+    )
+    .await;
+    assert_eq!(invalid_fork["result"]["error"]["code"], "bad-request");
+
+    let rename_extra = browser_call(
+        &client,
+        &base,
+        "rename-extra",
+        "session.rename",
+        json!({"sessionId": "source", "title": "Renamed", "unexpected": true}),
+    )
+    .await;
+    assert_eq!(rename_extra["result"]["error"]["code"], "bad-request");
+
+    let title_invalid = browser_call(
+        &client,
+        &base,
+        "title-invalid",
+        "session.rename",
+        json!({"sessionId": "source", "title": "   "}),
+    )
+    .await;
+    assert_eq!(title_invalid["result"]["error"]["code"], "title-invalid");
+
+    let renamed = browser_call(
+        &client,
+        &base,
+        "rename",
+        "session.rename",
+        json!({"sessionId": "source", "title": "Renamed"}),
+    )
+    .await;
+    assert_eq!(renamed["result"]["value"]["title"], "Renamed");
+    assert_eq!(
+        renamed["result"]["value"],
+        json!({"title": "Renamed", "seq": 0})
+    );
+
+    let unavailable = browser_call(
+        &client,
+        &base,
+        "fork-unavailable",
+        "session.fork",
+        json!({"sessionId": "source", "atSeq": 99}),
+    )
+    .await;
+    assert_eq!(unavailable["result"]["error"]["code"], "fork-unavailable");
+
+    let forked = browser_call(
+        &client,
+        &base,
+        "fork",
+        "session.fork",
+        json!({"sessionId": "source"}),
+    )
+    .await;
+    assert_eq!(forked["result"]["value"]["sessionId"], "forked-session");
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn browser_desktop_compat_rpcs_report_absence_without_success() {
+    let (mut server, _host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let described = browser_call(
+        &client,
+        &base,
+        "desktop-describe",
+        "host.describe",
+        json!({}),
+    )
+    .await;
+    assert_eq!(described["result"]["value"]["canOpenPath"], false);
+    let picked = browser_call(
+        &client,
+        &base,
+        "desktop-pick",
+        "host.pickDirectory",
+        json!({}),
+    )
+    .await;
+    assert_eq!(picked["result"]["ok"], false);
+    assert_eq!(
+        picked["result"]["error"]["code"],
+        "directory-picker-unavailable"
+    );
+    assert_eq!(
+        picked["result"]["error"]["details"],
+        json!({"capability": "absent"})
+    );
+    let pick_extra = browser_call(
+        &client,
+        &base,
+        "desktop-pick-extra",
+        "host.pickDirectory",
+        json!({"unexpected": true}),
+    )
+    .await;
+    assert_eq!(pick_extra["result"]["error"]["code"], "bad-request");
+
+    let opened = browser_call(
+        &client,
+        &base,
+        "desktop-open",
+        "host.openPath",
+        json!({"path": "/tmp"}),
+    )
+    .await;
+    assert_eq!(opened["result"]["ok"], false);
+    assert_eq!(opened["result"]["error"]["code"], "internal");
+    assert_eq!(opened["result"]["error"]["details"], json!({}));
+    let empty_open = browser_call(
+        &client,
+        &base,
+        "desktop-open-empty",
+        "host.openPath",
+        json!({"path": ""}),
+    )
+    .await;
+    assert_eq!(empty_open["result"]["error"]["code"], "bad-request");
+    let open_extra = browser_call(
+        &client,
+        &base,
+        "desktop-open-extra",
+        "host.openPath",
+        json!({"path": "/tmp", "unexpected": true}),
+    )
+    .await;
+    assert_eq!(open_extra["result"]["error"]["code"], "bad-request");
+
+    let settings = browser_call(
+        &client,
+        &base,
+        "desktop-settings",
+        "settings.openDocument",
+        json!({}),
+    )
+    .await;
+    assert_eq!(settings["result"]["ok"], false);
+    assert_eq!(settings["result"]["error"]["code"], "internal");
+    assert!(settings["result"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("settings service is absent"));
+    let settings_extra = browser_call(
+        &client,
+        &base,
+        "desktop-settings-extra",
+        "settings.openDocument",
+        json!({"unexpected": true}),
+    )
+    .await;
+    assert_eq!(settings_extra["result"]["error"]["code"], "bad-request");
+
+    server.shutdown().await.expect("server shuts down");
+}
+#[tokio::test]
+async fn browser_desktop_rpcs_preserve_success_cancel_and_origin_envelopes() {
+    let (mut server, host, base) = start().await;
+    let client = reqwest::Client::new();
+    host.desktop_enabled.store(true, Ordering::SeqCst);
+    *host.picked_directory.lock().expect("picked directory lock") = Some(PathBuf::from("/chosen"));
+
+    let described = browser_call(&client, &base, "desktop-ready", "host.describe", json!({})).await;
+    assert_eq!(described["result"]["value"]["canOpenPath"], true);
+
+    let picked = browser_call(
+        &client,
+        &base,
+        "desktop-picked",
+        "host.pickDirectory",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        picked["result"],
+        json!({"ok": true, "value": {"path": "/chosen"}})
+    );
+    *host.picked_directory.lock().expect("picked directory lock") = None;
+    let cancelled = browser_call(
+        &client,
+        &base,
+        "desktop-cancelled",
+        "host.pickDirectory",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        cancelled["result"],
+        json!({"ok": true, "value": {"path": null}})
+    );
+
+    let opened = browser_call(
+        &client,
+        &base,
+        "desktop-opened",
+        "host.openPath",
+        json!({"path": "/chosen/file.txt"}),
+    )
+    .await;
+    assert_eq!(
+        opened["result"],
+        json!({"ok": true, "value": {"opened": true}})
+    );
+    assert_eq!(
+        host.opened_paths
+            .lock()
+            .expect("opened paths lock")
+            .as_slice(),
+        ["/chosen/file.txt"]
+    );
+
+    let settings = browser_call(
+        &client,
+        &base,
+        "desktop-settings",
+        "settings.openDocument",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        settings["result"],
+        json!({"ok": true, "value": {"opened": true}})
+    );
+    assert_eq!(host.settings_opens.load(Ordering::SeqCst), 1);
+
+    let body = r#"{"requestId":"desktop-remote","args":{"path":"/chosen/file.txt"}}"#;
+    let status = raw_http_status(
+        server.local_addr(),
+        "POST",
+        "/api/host.openPath",
+        "attacker.example",
+        &["http://attacker.example"],
+        body,
+    )
+    .await;
+    assert!(
+        status.contains(" 403 "),
+        "openPath accepted an untrusted origin: {status}"
+    );
     server.shutdown().await.expect("server shuts down");
 }
 
@@ -787,12 +1547,16 @@ async fn browser_model_rpcs_use_host_dtos_and_published_selection_wire() {
         "fake-provider"
     );
     assert_eq!(
-        models["result"]["value"]["groups"][0]["models"][0]["contextWindow"],
-        4096
+        models["result"]["value"]["groups"][0]["models"][0]["description"],
+        "Fixture model"
     );
     assert_eq!(
-        models["result"]["value"]["groups"][0]["models"][0]["inputModalities"],
-        json!(["text", "image"])
+        models["result"]["value"]["groups"][0]["models"][0]["reasoning"]["efforts"][0],
+        json!({"id": "high", "name": "High"})
+    );
+    assert_eq!(
+        models["result"]["value"]["groups"][0]["models"][0]["reasoning"]["defaultEffort"],
+        "high"
     );
 
     let session = browser_call(
@@ -825,6 +1589,289 @@ async fn browser_model_rpcs_use_host_dtos_and_published_selection_wire() {
             "model": "fake-model",
             "reasoningEffort": "high"
         })
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn browser_provider_enable_rpc_is_strict_and_structured() {
+    let (mut server, host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let absent = browser_call(
+        &client,
+        &base,
+        "provider-enable-absent-settings",
+        "llm.setProviderEnabled",
+        json!({"provider": "fake-provider", "enabled": true}),
+    )
+    .await;
+    assert_eq!(absent["result"]["ok"], false);
+    assert_eq!(
+        absent["result"]["error"],
+        json!({
+            "code": "SETTINGS_UNAVAILABLE",
+            "message": "settings service is unavailable",
+            "details": {"namespace": "llm-pi-ai"},
+        })
+    );
+
+    host.provider_enable_available.store(true, Ordering::SeqCst);
+    let enabled = browser_call(
+        &client,
+        &base,
+        "provider-enable",
+        "llm.setProviderEnabled",
+        json!({"provider": "fake-provider", "enabled": true}),
+    )
+    .await;
+    assert_eq!(
+        enabled["result"]["value"],
+        json!({
+            "provider": "fake-provider",
+            "enabled": true,
+        })
+    );
+    assert_eq!(
+        host.provider_enable_calls
+            .lock()
+            .expect("provider enable lock")
+            .as_slice(),
+        &[("fake-provider".into(), true)]
+    );
+
+    let extra = browser_call(
+        &client,
+        &base,
+        "provider-enable-extra",
+        "llm.setProviderEnabled",
+        json!({"provider": "fake-provider", "enabled": false, "unexpected": true}),
+    )
+    .await;
+    assert_eq!(extra["result"]["error"]["code"], "bad-request");
+    assert_eq!(
+        host.provider_enable_calls
+            .lock()
+            .expect("provider enable lock")
+            .len(),
+        1
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn browser_adapter_updates_keep_the_owner_event_name() {
+    let (mut server, host, _base) = start().await;
+    let mut socket = RawWebSocket::connect_path(server.local_addr(), "/api/events.host").await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    host.notifications
+        .send(HostNotification::AdaptersUpdated)
+        .expect("owner event sends");
+    let frame: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), socket.read_text())
+            .await
+            .expect("owner event arrives")
+            .expect("owner socket remains open"),
+    )
+    .expect("owner event is JSON");
+    assert_eq!(frame["method"], "host/remote-event");
+    assert_eq!(
+        frame["payload"],
+        json!({"type": "host/remote-event", "event": "llm/adapters-updated", "args": []})
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn browser_provider_models_uses_strict_payloads_and_exact_result_envelopes() {
+    let fixture = BrowserStopFixture::new();
+    let adapter = Arc::new(DelayedAdapter::new());
+    let mut config = HostConfig::new(&fixture.0, fixture.0.join("data"))
+        .with_adapter_factory(Arc::new(DelayedFactory(Arc::clone(&adapter))));
+    config.provider = "fake-provider".into();
+    config.model = "fake-model".into();
+    let runtime = Arc::new(HostRuntime::boot(config).await.expect("real Host boots"));
+    let mut server = ApiServer::bind(runtime.clone())
+        .await
+        .expect("server binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let default_config = browser_call(
+        &client,
+        &base,
+        "provider-models-default",
+        "llm.providerModels",
+        json!({"provider": "fake-provider"}),
+    )
+    .await;
+    let updated_at = default_config["result"]["value"]["updatedAt"]
+        .as_u64()
+        .expect("epoch-millisecond timestamp");
+    assert_eq!(
+        default_config,
+        json!({
+            "type": "server-response",
+            "rpcId": "provider-models-default",
+            "result": {
+                "ok": true,
+                "value": {
+                    "provider": "fake-provider",
+                    "models": [{
+                        "id": "fake-model",
+                        "name": "Fake Model",
+                        "contextWindow": 4096,
+                        "maxOutput": 512,
+                        "reasoning": true,
+                        "input": ["text", "image"],
+                    }],
+                    "updatedAt": updated_at,
+                },
+            },
+        })
+    );
+
+    let custom = json!({"apiKey": "draft-key", "nested": {"region": "test"}});
+    let custom_config = browser_call(
+        &client,
+        &base,
+        "provider-models-custom",
+        "llm.providerModels",
+        json!({"provider": "fake-provider", "config": custom.clone()}),
+    )
+    .await;
+    assert_eq!(custom_config["result"]["ok"], true);
+
+    let unknown = browser_call(
+        &client,
+        &base,
+        "provider-models-unknown",
+        "llm.providerModels",
+        json!({"provider": "fake-provider-alias"}),
+    )
+    .await;
+    assert_eq!(unknown["type"], "server-response");
+    assert_eq!(unknown["rpcId"], "provider-models-unknown");
+    assert_eq!(unknown["result"]["ok"], false);
+    assert_eq!(unknown["result"]["error"]["code"], "LLM_PROVIDER_NOT_FOUND");
+    assert_eq!(
+        unknown["result"]["error"]["details"],
+        json!({
+            "provider": "fake-provider-alias",
+            "attempts": 0,
+            "retries": 0,
+            "retryable": false,
+        })
+    );
+
+    for (rpc_id, payload) in [
+        (
+            "provider-models-extra",
+            json!({"provider": "fake-provider", "unexpected": true}),
+        ),
+        (
+            "provider-models-config-array",
+            json!({"provider": "fake-provider", "config": []}),
+        ),
+    ] {
+        let response = browser_call(&client, &base, rpc_id, "llm.providerModels", payload).await;
+        assert_eq!(response["type"], "server-response");
+        assert_eq!(response["rpcId"], rpc_id);
+        assert_eq!(response["result"]["ok"], false);
+        assert_eq!(response["result"]["error"]["code"], "bad-request");
+        assert_eq!(
+            response["result"]["error"]["details"],
+            json!({"issues": []})
+        );
+    }
+    assert_eq!(adapter.model_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*adapter.model_configs.lock(), vec![json!({}), custom]);
+
+    server.shutdown().await.expect("server shuts down");
+    runtime.shutdown().await.expect("host shuts down");
+}
+
+#[tokio::test]
+async fn browser_queue_rpc_is_strict_and_preserves_host_queue_errors() {
+    let (mut server, host, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let accepted = browser_call(
+        &client,
+        &base,
+        "queue-edit",
+        "session.updateQueue",
+        json!({
+            "sessionId": "queue-session",
+            "itemId": "second",
+            "action": {"kind": "edit", "content": [{"type": "text", "text": "edited"}]},
+        }),
+    )
+    .await;
+    assert_eq!(accepted["result"]["value"], json!({"accepted": true}));
+    {
+        let updates = host.queue_updates.lock().expect("queue update lock");
+        assert!(matches!(
+            updates.as_slice(),
+            [SessionUpdateQueueParams {
+                session_id,
+                item_id,
+                action: SessionQueueAction::Edit { .. },
+            }] if session_id == &SessionId::from("queue-session") && item_id.as_str() == "second"
+        ));
+    }
+
+    let malformed = browser_call(
+        &client,
+        &base,
+        "queue-malformed",
+        "session.updateQueue",
+        json!({
+            "sessionId": "queue-session",
+            "itemId": "second",
+            "action": {"kind": "remove", "extra": true}
+        }),
+    )
+    .await;
+    assert_eq!(malformed["type"], "server-response");
+    assert_eq!(malformed["rpcId"], "queue-malformed");
+    assert_eq!(malformed["result"]["ok"], false);
+    assert_eq!(malformed["result"]["error"]["code"], "bad-request");
+    assert_eq!(
+        malformed["result"]["error"]["details"],
+        json!({"issues": []})
+    );
+    assert!(malformed["result"].get("value").is_none());
+    assert_eq!(
+        host.queue_updates.lock().expect("queue update lock").len(),
+        1
+    );
+
+    *host.queue_error.lock().expect("queue error lock") = Some(TessivumError::new(
+        "steer-unavailable",
+        "current turn no longer accepts steering",
+        "queue",
+        json!({"itemId": "second"}),
+    ));
+    let unavailable = browser_call(
+        &client,
+        &base,
+        "queue-steer",
+        "session.updateQueue",
+        json!({
+            "sessionId": "queue-session",
+            "itemId": "second",
+            "action": {"kind": "steer"},
+        }),
+    )
+    .await;
+    assert_eq!(unavailable["result"]["error"]["code"], "steer-unavailable");
+    assert_eq!(
+        unavailable["result"]["error"]["details"],
+        json!({"itemId": "second"})
     );
 
     server.shutdown().await.expect("server shuts down");
@@ -928,6 +1975,43 @@ async fn browser_host_websocket_wraps_compatibility_frames_as_server_requests() 
     server.shutdown().await.expect("server shuts down");
 }
 
+#[tokio::test]
+async fn browser_queue_notifications_publish_full_snapshots() {
+    let (mut server, host, _base) = start().await;
+    let mut socket = RawWebSocket::connect_path(server.local_addr(), "/api/events.mux").await;
+    let message = serde_json::from_value(json!({
+        "id": "queue-item",
+        "role": "user",
+        "content": [{"type": "text", "text": "pending"}],
+        "source": {"kind": "user"},
+    }))
+    .expect("queue message");
+    host.notifications
+        .send(HostNotification::SessionQueue(
+            HostSessionQueueNotification {
+                session_id: SessionId::from("queue-session"),
+                items: vec![HostSessionQueueItem {
+                    id: MessageId::from("queue-item"),
+                    placement: "queued".into(),
+                    message,
+                }],
+            },
+        ))
+        .expect("queue notification publishes");
+    let frame: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), socket.read_text())
+            .await
+            .expect("queue frame arrives")
+            .expect("queue socket remains open"),
+    )
+    .expect("queue frame JSON");
+    assert_eq!(frame["payload"]["type"], "session/queue");
+    assert_eq!(frame["payload"]["items"][0]["id"], "queue-item");
+    assert_eq!(frame["payload"]["items"][0]["placement"], "queued");
+
+    server.shutdown().await.expect("server shuts down");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_workspace_archives_publish_monotonic_snapshots() {
     let fixture = BrowserStopFixture::new();
@@ -1013,6 +2097,270 @@ async fn concurrent_workspace_archives_publish_monotonic_snapshots() {
 }
 
 #[tokio::test]
+async fn browser_workspace_insert_before_is_durable_and_broadcasts_complete_order() {
+    let fixture = BrowserStopFixture::new();
+    let first_path = fixture.0.join("first");
+    let second_path = fixture.0.join("second");
+    fs::create_dir(&first_path).unwrap();
+    fs::create_dir(&second_path).unwrap();
+    let runtime = HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
+        .await
+        .expect("real Host boots");
+    let handle = runtime.handle();
+    let host: Arc<dyn HostApi> = Arc::new(handle.clone());
+    let mut server = ApiServer::bind(host).await.expect("real API binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    let first = browser_call(
+        &client,
+        &base,
+        "workspace-first",
+        "workspace.create",
+        json!({"path": first_path.to_string_lossy()}),
+    )
+    .await;
+    let first_id = first["result"]["value"]["workspace"]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = browser_call(
+        &client,
+        &base,
+        "workspace-second",
+        "workspace.create",
+        json!({"path": second_path.to_string_lossy()}),
+    )
+    .await;
+    let second_id = second["result"]["value"]["workspace"]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let initial = browser_call(
+        &client,
+        &base,
+        "workspace-order-initial",
+        "workspace.list",
+        json!({}),
+    )
+    .await;
+    let default_id = initial["result"]["value"]["items"][2]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        initial["result"]["value"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workspace| workspace["workspaceId"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String(second_id.clone()),
+            Value::String(first_id.clone()),
+            Value::String(default_id.clone()),
+        ]
+    );
+
+    let mut downlink = RawWebSocket::connect_path(server.local_addr(), "/api/events.host").await;
+    let reordered = browser_call(
+        &client,
+        &base,
+        "workspace-order-before",
+        "workspace.insertBefore",
+        json!({"workspaceId": default_id, "beforeWorkspaceId": second_id}),
+    )
+    .await;
+    let first_order = json!([default_id, second_id, first_id]);
+    assert_eq!(
+        reordered,
+        json!({
+            "type": "server-response",
+            "rpcId": "workspace-order-before",
+            "result": {"ok": true, "value": {"workspaceIds": first_order}},
+        })
+    );
+    let first_frame: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), downlink.read_text())
+            .await
+            .expect("workspace order frame arrives")
+            .expect("workspace order frame is text"),
+    )
+    .expect("workspace order frame is JSON");
+    assert_eq!(first_frame["type"], "server-request");
+    assert_eq!(first_frame["method"], "host/workspace-order-changed");
+    assert_eq!(first_frame["payload"]["workspaceIds"], first_order);
+
+    let appended = browser_call(
+        &client,
+        &base,
+        "workspace-order-append",
+        "workspace.insertBefore",
+        json!({"workspaceId": default_id}),
+    )
+    .await;
+    let appended_order = json!([second_id, first_id, default_id]);
+    assert_eq!(
+        appended,
+        json!({
+            "type": "server-response",
+            "rpcId": "workspace-order-append",
+            "result": {"ok": true, "value": {"workspaceIds": appended_order}},
+        })
+    );
+    let appended_frame: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), downlink.read_text())
+            .await
+            .expect("workspace append frame arrives")
+            .expect("workspace append frame is text"),
+    )
+    .expect("workspace append frame is JSON");
+    assert_eq!(appended_frame["type"], "server-request");
+    assert_eq!(appended_frame["method"], "host/workspace-order-changed");
+    assert_eq!(appended_frame["payload"]["workspaceIds"], appended_order);
+
+    let no_op = browser_call(
+        &client,
+        &base,
+        "workspace-order-no-op",
+        "workspace.insertBefore",
+        json!({"workspaceId": default_id, "beforeWorkspaceId": default_id}),
+    )
+    .await;
+    assert_eq!(
+        no_op,
+        json!({
+            "type": "server-response",
+            "rpcId": "workspace-order-no-op",
+            "result": {"ok": true, "value": {"workspaceIds": appended_order}},
+        })
+    );
+    assert!(
+        timeout(Duration::from_millis(100), downlink.read_text())
+            .await
+            .is_err(),
+        "no-op workspace reorders emit no order frame"
+    );
+
+    let unknown = Uuid::new_v4().to_string();
+    let unknown_source = browser_call(
+        &client,
+        &base,
+        "workspace-order-unknown-source",
+        "workspace.insertBefore",
+        json!({"workspaceId": unknown.clone()}),
+    )
+    .await;
+    assert_eq!(
+        unknown_source,
+        json!({
+            "type": "server-response",
+            "rpcId": "workspace-order-unknown-source",
+            "result": {"ok": false, "error": {
+                "code": "workspace-not-found",
+                "message": "workspace was not found",
+                "details": {"workspaceId": unknown},
+            }},
+        })
+    );
+    let unknown_anchor = browser_call(
+        &client,
+        &base,
+        "workspace-order-unknown-anchor",
+        "workspace.insertBefore",
+        json!({"workspaceId": default_id.clone(), "beforeWorkspaceId": unknown.clone()}),
+    )
+    .await;
+    assert_eq!(
+        unknown_anchor,
+        json!({
+            "type": "server-response",
+            "rpcId": "workspace-order-unknown-anchor",
+            "result": {"ok": false, "error": {
+                "code": "workspace-not-found",
+                "message": "workspace was not found",
+                "details": {"workspaceId": unknown},
+            }},
+        })
+    );
+    for (rpc_id, payload) in [
+        (
+            "workspace-order-extra",
+            json!({"workspaceId": default_id.clone(), "extra": true}),
+        ),
+        (
+            "workspace-order-null-anchor",
+            json!({"workspaceId": default_id.clone(), "beforeWorkspaceId": null}),
+        ),
+    ] {
+        let rejected =
+            browser_call(&client, &base, rpc_id, "workspace.insertBefore", payload).await;
+        assert_eq!(rejected["type"], "server-response");
+        assert_eq!(rejected["rpcId"], rpc_id);
+        assert_eq!(rejected["result"]["ok"], false);
+        assert_eq!(rejected["result"]["error"]["code"], "bad-request");
+        assert_eq!(
+            rejected["result"]["error"]["details"],
+            json!({"issues": []})
+        );
+    }
+
+    let data_dir = fixture.0.join("data");
+    let displaced_data_dir = fixture.0.join("data-displaced");
+    fs::rename(&data_dir, &displaced_data_dir).unwrap();
+    fs::create_dir(&data_dir).unwrap();
+    let failed_write = browser_call(
+        &client,
+        &base,
+        "workspace-order-failed-write",
+        "workspace.insertBefore",
+        json!({"workspaceId": first_id, "beforeWorkspaceId": second_id}),
+    )
+    .await;
+    fs::remove_dir(&data_dir).unwrap();
+    fs::rename(&displaced_data_dir, &data_dir).unwrap();
+    assert_eq!(
+        failed_write,
+        json!({
+            "type": "server-response",
+            "rpcId": "workspace-order-failed-write",
+            "result": {"ok": false, "error": {
+                "code": "internal",
+                "message": "workspace operation failed: WORKSPACE_PERSISTENCE_FAILED",
+                "details": {},
+            }},
+        })
+    );
+    let unchanged = browser_call(
+        &client,
+        &base,
+        "workspace-order-unchanged",
+        "workspace.list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        Value::Array(
+            unchanged["result"]["value"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|workspace| workspace["workspaceId"].clone())
+                .collect(),
+        ),
+        appended_order
+    );
+    assert!(
+        timeout(Duration::from_millis(100), downlink.read_text())
+            .await
+            .is_err(),
+        "rejected workspace reorders emit no order frame"
+    );
+
+    server.shutdown().await.expect("API shuts down");
+    runtime.shutdown().await.expect("Host shuts down");
+}
+
+#[tokio::test]
 async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
     let (mut server, host, _base) = start().await;
     let mut mux = RawWebSocket::connect_path(server.local_addr(), "/api/events.mux").await;
@@ -1072,12 +2420,15 @@ async fn approval_mux_frames_keep_the_stable_rpc_id_and_redact_arguments() {
 #[tokio::test]
 async fn browser_settings_and_credentials_use_redacted_published_wire() {
     let fixture = BrowserStopFixture::new();
-    let runtime = HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
-        .await
-        .expect("real Host boots");
+    let opener = Arc::new(RecordingNativeOpener(Mutex::new(Vec::new())));
+    let runtime = HostRuntime::boot(
+        HostConfig::new(&fixture.0, fixture.0.join("data")).with_path_opener(opener.clone()),
+    )
+    .await
+    .expect("real Host boots");
     let handle = runtime.handle();
     let settings = handle.settings().expect("settings service");
-    let namespace = "ui-theme".to_owned();
+    let namespace = "llm-settings-wire".to_owned();
     settings
         .register(
             SettingsRegistration::new(
@@ -1090,6 +2441,7 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
         )
         .await
         .expect("namespace registers");
+    let restart_namespace = "agent-default-model".to_owned();
     let internal_namespace = "internal-settings".to_owned();
     settings
         .register(SettingsRegistration::new(
@@ -1116,7 +2468,35 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
     .await;
     let value = &described["result"]["value"];
     assert_eq!(value["writable"], true);
-    assert_eq!(value["hasDocument"], false);
+    assert_eq!(value["hasDocument"], true);
+
+    let opened_document = browser_call(
+        &client,
+        &base,
+        "settings-open-document",
+        "settings.openDocument",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        opened_document["result"],
+        json!({"ok": true, "value": {"opened": true}})
+    );
+    let settings_path = fixture.0.join("data/settings.yaml");
+    assert!(settings_path.is_file());
+    assert_eq!(
+        opener.0.lock().expect("native opener lock").as_slice(),
+        [fs::canonicalize(settings_path).unwrap()]
+    );
+    let document_extra = browser_call(
+        &client,
+        &base,
+        "settings-open-document-extra",
+        "settings.openDocument",
+        json!({"unexpected": true}),
+    )
+    .await;
+    assert_eq!(document_extra["result"]["error"]["code"], "bad-request");
     let namespaces = value["namespaces"].as_array().unwrap();
     let namespace_view = namespaces
         .iter()
@@ -1126,6 +2506,11 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
         .iter()
         .all(|view| view["ns"].as_str() != Some(internal_namespace.as_str())));
     assert_eq!(namespace_view["applies"], "live");
+    let restart_view = namespaces
+        .iter()
+        .find(|view| view["ns"].as_str() == Some(restart_namespace.as_str()))
+        .expect("restart namespace is described");
+    assert_eq!(restart_view["applies"], "restart");
     assert_eq!(
         namespace_view["secrets"],
         json!([{"path": ["secret"], "set": true}])
@@ -1187,17 +2572,16 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
             let frame: Value =
                 serde_json::from_str(&downlink.read_text().await.expect("host frame"))
                     .expect("host frame JSON");
-            if frame["payload"]["type"] == "host/settings-changed" {
+            if frame["payload"]["type"] == "host/remote-event"
+                && frame["payload"]["event"] == "settings/document-updated"
+            {
                 return frame;
             }
         }
     })
     .await
     .expect("settings invalidation arrives");
-    assert_eq!(
-        settings_frame["payload"]["ns"].as_str(),
-        Some(namespace.as_str())
-    );
+    assert_eq!(settings_frame["payload"]["args"], json!([namespace, 1]));
     assert!(!settings_frame.to_string().contains(secret));
 
     let reference = format!("TESSIVUM_BROWSER_{}", Uuid::new_v4().simple());
@@ -1234,17 +2618,16 @@ async fn browser_settings_and_credentials_use_redacted_published_wire() {
             let frame: Value =
                 serde_json::from_str(&downlink.read_text().await.expect("host frame"))
                     .expect("host frame JSON");
-            if frame["payload"]["type"] == "host/credentials-changed" {
+            if frame["payload"]["type"] == "host/remote-event"
+                && frame["payload"]["event"] == "credentials/updated"
+            {
                 return frame;
             }
         }
     })
     .await
     .expect("credential invalidation arrives");
-    assert_eq!(
-        credential_frame["payload"]["ref"].as_str(),
-        Some(reference.as_str())
-    );
+    assert_eq!(credential_frame["payload"]["args"], json!([reference]));
     assert!(!credential_frame.to_string().contains(credential_secret));
 
     let shadow = format!("TESSIVUM_SHADOW_{}", Uuid::new_v4().simple());
@@ -1416,6 +2799,239 @@ async fn browser_stop_quiesces_output_and_next_prompt_uses_fresh_generation() {
 }
 
 #[tokio::test]
+async fn browser_goal_rpc_reports_missing_service() {
+    let (mut server, _host, base) = start().await;
+    let response = browser_call(
+        &reqwest::Client::new(),
+        &base,
+        "goal-service-missing",
+        "goal.create",
+        json!({"sessionId": "session", "objective": "ship"}),
+    )
+    .await;
+    assert_eq!(response["result"]["error"]["code"], "internal");
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test]
+async fn browser_goal_rpcs_are_cas_durable_and_structured() {
+    let fixture = BrowserStopFixture::new();
+    let adapter = Arc::new(DelayedAdapter::new());
+    let mut config = HostConfig::new(&fixture.0, fixture.0.join("data"))
+        .with_adapter_factory(Arc::new(DelayedFactory(Arc::clone(&adapter))));
+    config.provider = "delayed".into();
+    config.model = "delayed".into();
+    let runtime = HostRuntime::boot(config).await.expect("real Host boots");
+    let handle = runtime.handle();
+    let host: Arc<dyn HostApi> = Arc::new(handle.clone());
+    let mut server = ApiServer::bind(host).await.expect("real API binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    let session = "goal-api";
+
+    let missing = browser_call(
+        &client,
+        &base,
+        "goal-missing",
+        "goal.create",
+        json!({"sessionId": "missing-goal-session", "objective": "missing"}),
+    )
+    .await;
+    assert_eq!(missing["result"]["error"]["code"], "session-not-found");
+
+    let created_session = browser_call(
+        &client,
+        &base,
+        "goal-session",
+        "session.create",
+        json!({"sessionId": session}),
+    )
+    .await;
+    assert_eq!(created_session["result"]["ok"], true);
+    let malformed = browser_call(
+        &client,
+        &base,
+        "goal-malformed",
+        "goal.create",
+        json!({"sessionId": session, "objective": "ship", "unexpected": true}),
+    )
+    .await;
+    assert_eq!(malformed["type"], "server-response");
+    assert_eq!(malformed["rpcId"], "goal-malformed");
+    assert_eq!(malformed["result"]["error"]["code"], "bad-request");
+    assert_eq!(
+        malformed["result"]["error"]["details"],
+        json!({"issues": []})
+    );
+
+    let unsafe_rounds = browser_call(
+        &client,
+        &base,
+        "goal-unsafe-rounds",
+        "goal.create",
+        json!({"sessionId": session, "objective": "ship", "maxGoalRounds": 9_007_199_254_740_992u64}),
+    )
+    .await;
+    assert_eq!(unsafe_rounds["result"]["error"]["code"], "bad-request");
+
+    let created = browser_call(
+        &client,
+        &base,
+        "goal-create",
+        "goal.create",
+        json!({"sessionId": session, "objective": "ship", "maxGoalRounds": 3}),
+    )
+    .await;
+    assert_eq!(created["result"]["ok"], true);
+    let first = created["result"]["value"]["ref"].clone();
+    assert_eq!(
+        created["result"],
+        json!({"ok": true, "value": {"ref": first.clone()}})
+    );
+
+    let other = "goal-api-other";
+    browser_call(
+        &client,
+        &base,
+        "goal-other-session",
+        "session.create",
+        json!({"sessionId": other}),
+    )
+    .await;
+    let other_created = browser_call(
+        &client,
+        &base,
+        "goal-other-create",
+        "goal.create",
+        json!({"sessionId": other, "objective": "other"}),
+    )
+    .await;
+    assert_eq!(other_created["result"]["ok"], true);
+    let foreign = browser_call(
+        &client,
+        &base,
+        "goal-cross-session",
+        "goal.pause",
+        json!({"sessionId": other, "ref": first.clone()}),
+    )
+    .await;
+    assert_eq!(foreign["result"]["error"]["code"], "internal");
+    assert_eq!(
+        foreign["result"]["error"]["details"]["goalCode"],
+        "GOAL_NOT_FOUND"
+    );
+    assert_eq!(
+        handle
+            .events(SessionId::from(other), 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "goal/change")
+            .count(),
+        1
+    );
+
+    let edited = browser_call(
+        &client,
+        &base,
+        "goal-edit",
+        "goal.edit",
+        json!({"sessionId": session, "ref": first, "objective": "ship safely", "maxGoalRounds": 4}),
+    )
+    .await;
+    let second = edited["result"]["value"]["ref"].clone();
+    assert_eq!(second["revision"], 2);
+
+    let stale = browser_call(
+        &client,
+        &base,
+        "goal-stale",
+        "goal.pause",
+        json!({"sessionId": session, "ref": created["result"]["value"]["ref"]}),
+    )
+    .await;
+    assert_eq!(stale["result"]["error"]["code"], "internal");
+    assert_eq!(
+        stale["result"]["error"]["details"]["goalCode"],
+        "GOAL_STALE_REVISION"
+    );
+
+    let paused = browser_call(
+        &client,
+        &base,
+        "goal-pause",
+        "goal.pause",
+        json!({"sessionId": session, "ref": second}),
+    )
+    .await;
+    let repeated_pause = browser_call(
+        &client,
+        &base,
+        "goal-repeated-pause",
+        "goal.pause",
+        json!({"sessionId": session, "ref": paused["result"]["value"]["ref"]}),
+    )
+    .await;
+    assert_eq!(repeated_pause["result"]["error"]["code"], "internal");
+    assert_eq!(
+        repeated_pause["result"]["error"]["details"]["goalCode"],
+        "GOAL_INVALID_TRANSITION"
+    );
+    let resumed = browser_call(
+        &client,
+        &base,
+        "goal-resume",
+        "goal.resume",
+        json!({"sessionId": session, "ref": paused["result"]["value"]["ref"]}),
+    )
+    .await;
+    let complete = browser_call(
+        &client,
+        &base,
+        "goal-complete",
+        "goal.complete",
+        json!({"sessionId": session, "ref": resumed["result"]["value"]["ref"]}),
+    )
+    .await;
+    let cleared = browser_call(
+        &client,
+        &base,
+        "goal-clear",
+        "goal.clear",
+        json!({"sessionId": session, "ref": complete["result"]["value"]["ref"]}),
+    )
+    .await;
+    assert_eq!(cleared["result"]["value"], json!({"cleared": true}));
+
+    let goal_events = handle.events(SessionId::from(session), 0).await.unwrap();
+    assert_eq!(
+        goal_events
+            .iter()
+            .filter(|event| event.event_type == "goal/change")
+            .count(),
+        6
+    );
+    assert_eq!(goal_events.last().unwrap().data["operation"], "clear");
+    assert_eq!(
+        goal_events.last().unwrap().data["cleared"]["id"],
+        complete["result"]["value"]["ref"]["id"]
+    );
+    assert_eq!(
+        goal_events.last().unwrap().data["cleared"]["revision"]
+            .as_u64()
+            .unwrap(),
+        complete["result"]["value"]["ref"]["revision"]
+            .as_u64()
+            .unwrap()
+            + 1
+    );
+    assert!(goal_events.last().unwrap().data.get("goal").is_none());
+
+    server.shutdown().await.expect("API shuts down");
+    runtime.shutdown().await.expect("Host shuts down");
+}
+
+#[tokio::test]
 async fn unary_routes_are_allowlisted_strict_and_stably_enveloped() {
     let (mut server, host, base) = start().await;
     let client = reqwest::Client::new();
@@ -1509,6 +3125,64 @@ async fn unary_routes_are_allowlisted_strict_and_stably_enveloped() {
 
     server.shutdown().await.expect("server shuts down");
     assert!(client.get(base).send().await.is_err(), "listener is closed");
+}
+
+#[tokio::test]
+async fn unary_subagent_methods_are_strict_and_use_the_frozen_wire() {
+    let (mut server, _, base) = start().await;
+    let client = reqwest::Client::new();
+
+    let history: Value = client
+        .post(format!("{base}/api/subagent/history"))
+        .json(&json!({"requestId": "history-1", "args": {
+            "parentSessionId": "parent", "childSessionId": "child", "mode": "one-shot", "maxMessages": 1
+        }}))
+        .send()
+        .await
+        .expect("history response")
+        .json()
+        .await
+        .expect("history JSON");
+    assert_eq!(history["output"]["hasMore"], false);
+    assert_eq!(history["output"]["projections"]["asOfSeq"], -1);
+
+    let wrong_mode = client
+        .post(format!("{base}/api/subagent/prompt"))
+        .json(&json!({"requestId": "prompt-mode", "args": {
+            "parentSessionId": "parent", "childSessionId": "child", "mode": "one-shot", "content": []
+        }}))
+        .send()
+        .await
+        .expect("wrong mode response");
+    assert_eq!(wrong_mode.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let prompt: Value = client
+        .post(format!("{base}/api/subagent/prompt"))
+        .json(&json!({"requestId": "prompt-1", "args": {
+            "parentSessionId": "parent", "childSessionId": "child", "mode": "continuable", "content": [{"type": "text", "text": "continue"}]
+        }}))
+        .send()
+        .await
+        .expect("prompt response")
+        .json()
+        .await
+        .expect("prompt JSON");
+    assert_eq!(prompt["output"]["messageId"], "subagent-message");
+
+    let interrupt: Value = client
+        .post(format!("{base}/api/subagent/interrupt"))
+        .json(&json!({"requestId": "interrupt-1", "args": {
+            "parentSessionId": "parent", "childSessionId": "child", "mode": "continuable"
+        }}))
+        .send()
+        .await
+        .expect("interrupt response")
+        .json()
+        .await
+        .expect("interrupt JSON");
+    assert_eq!(interrupt["output"]["accepted"], true);
+
+    server.shutdown().await.expect("server shuts down");
 }
 
 #[tokio::test]
@@ -1765,4 +3439,294 @@ impl RawWebSocket {
             opcode => panic!("unexpected WebSocket opcode {opcode}"),
         }
     }
+}
+
+#[tokio::test]
+async fn browser_agent_preset_rpc_is_durable_and_truthful() {
+    let fixture = BrowserStopFixture::new();
+    let data = fixture.0.join("data");
+    let system_root = fixture.0.join("preset-roots/system");
+    let system = system_root.join("base");
+    fs::create_dir_all(&system).unwrap();
+    fs::write(system.join("agent.cordis.yml"), "[]\n").unwrap();
+    fs::write(
+        system.join("preset.yml"),
+        "name: Base\ndescription: system preset\n",
+    )
+    .unwrap();
+    let broken = system_root.join("broken");
+    fs::create_dir_all(&broken).unwrap();
+    fs::write(broken.join("agent.cordis.yml"), "- name:\n").unwrap();
+
+    let opened_paths = Arc::new(ParkingMutex::new(Vec::new()));
+    let opened = Arc::clone(&opened_paths);
+    let runtime = HostRuntime::boot(
+        HostConfig::new(&fixture.0, &data)
+            .with_agent_preset_root(&system_root, AgentPresetTrust::System)
+            .with_path_opener(Arc::new(move |path: &std::path::Path| {
+                opened.lock().push(path.to_path_buf());
+                Ok(())
+            })),
+    )
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    let mut server = ApiServer::bind(Arc::new(handle.clone())).await.unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let listed = browser_call(&client, &base, "presets", "agentPreset.list", json!({})).await;
+    assert_eq!(listed["result"]["value"]["presets"][0]["trust"], "system");
+    assert_eq!(listed["result"]["value"]["presets"][0]["isDefault"], true);
+    assert_eq!(listed["result"]["value"]["authorable"], true);
+    assert_eq!(listed["result"]["value"]["hasDocument"], true);
+    let copied = browser_call(
+        &client,
+        &base,
+        "copy",
+        "agentPreset.copy",
+        json!({"from":"base","agentPreset":"working","name":"Working"}),
+    )
+    .await;
+    assert_eq!(
+        copied["result"],
+        json!({"ok": true, "value": {"agentPreset": "working"}})
+    );
+    let read = browser_call(
+        &client,
+        &base,
+        "read",
+        "agentPreset.read",
+        json!({"agentPreset":"working"}),
+    )
+    .await;
+    assert_eq!(
+        read["result"],
+        json!({"ok": true, "value": {
+            "agentPreset": "working",
+            "trust": "user",
+            "content": "[]\n",
+            "name": "Working",
+            "description": "system preset",
+        }})
+    );
+    let opened = browser_call(
+        &client,
+        &base,
+        "open",
+        "agentPreset.openDocument",
+        json!({"agentPreset":"working"}),
+    )
+    .await;
+    assert_eq!(
+        opened["result"],
+        json!({"ok": true, "value": {"opened": true}})
+    );
+    assert_eq!(opened_paths.lock().len(), 1);
+    assert!(opened_paths.lock()[0].ends_with(".agent-presets/working"));
+    let unknown = browser_call(
+        &client,
+        &base,
+        "read-unknown",
+        "agentPreset.read",
+        json!({"agentPreset":"missing"}),
+    )
+    .await;
+    assert_eq!(unknown["result"]["error"]["code"], "agent-preset-not-found");
+    for (rpc_id, method, payload) in [
+        (
+            "read-extra",
+            "agentPreset.read",
+            json!({"agentPreset":"working","unexpected":true}),
+        ),
+        (
+            "copy-extra",
+            "agentPreset.copy",
+            json!({"from":"base","agentPreset":"next","unexpected":true}),
+        ),
+        (
+            "open-extra",
+            "agentPreset.openDocument",
+            json!({"agentPreset":"working","unexpected":true}),
+        ),
+        (
+            "remove-extra",
+            "agentPreset.remove",
+            json!({"agentPreset":"working","unexpected":true}),
+        ),
+        (
+            "select-extra",
+            "agentPreset.select",
+            json!({"sessionId":"preset-cold","agentPreset":"working","unexpected":true}),
+        ),
+    ] {
+        let rejected = browser_call(&client, &base, rpc_id, method, payload).await;
+        assert_eq!(rejected["result"]["error"]["code"], "bad-request");
+        assert_eq!(
+            rejected["result"]["error"]["details"],
+            json!({"issues": []})
+        );
+    }
+    let blank = browser_call(
+        &client,
+        &base,
+        "copy-blank",
+        "agentPreset.copy",
+        json!({"from":"","agentPreset":"next"}),
+    )
+    .await;
+    assert_eq!(blank["result"]["error"]["code"], "bad-request");
+    let traversal = browser_call(
+        &client,
+        &base,
+        "traversal",
+        "agentPreset.copy",
+        json!({"from":"base","agentPreset":"../escape"}),
+    )
+    .await;
+    assert_eq!(traversal["result"]["error"]["code"], "agent-preset-invalid");
+    let readonly = browser_call(
+        &client,
+        &base,
+        "readonly",
+        "agentPreset.remove",
+        json!({"agentPreset":"base"}),
+    )
+    .await;
+    assert_eq!(
+        readonly["result"]["error"]["code"],
+        "agent-preset-read-only"
+    );
+    let system_document = browser_call(
+        &client,
+        &base,
+        "system-document",
+        "agentPreset.openDocument",
+        json!({"agentPreset":"base"}),
+    )
+    .await;
+    assert_eq!(
+        system_document["result"]["error"]["code"],
+        "agent-preset-read-only"
+    );
+
+    let created = browser_call(
+        &client,
+        &base,
+        "cold-create",
+        "session.create",
+        json!({"sessionId":"preset-cold"}),
+    )
+    .await;
+    assert_eq!(created["result"]["ok"], true);
+    let renamed = browser_call(
+        &client,
+        &base,
+        "cold-rename",
+        "session.rename",
+        json!({"sessionId":"preset-cold","title":"Cold preset session"}),
+    )
+    .await;
+    assert_eq!(
+        renamed["result"]["value"]["title"], "Cold preset session",
+        "{renamed}"
+    );
+    let invalid = browser_call(
+        &client,
+        &base,
+        "invalid-preset",
+        "agentPreset.select",
+        json!({"sessionId":"preset-cold","agentPreset":"broken"}),
+    )
+    .await;
+    assert_eq!(invalid["result"]["error"]["code"], "agent-preset-invalid");
+    assert!(!handle
+        .events(SessionId::from("preset-cold"), 0)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type == "agent-preset/selected"));
+    let selected = browser_call(
+        &client,
+        &base,
+        "cold-select",
+        "agentPreset.select",
+        json!({"sessionId":"preset-cold","agentPreset":"working"}),
+    )
+    .await;
+    assert_eq!(
+        selected["result"],
+        json!({"ok": true, "value": {"agentPreset": "working"}})
+    );
+    let selected_events = handle
+        .events(SessionId::from("preset-cold"), 0)
+        .await
+        .unwrap();
+    assert!(selected_events.iter().any(|event| {
+        event.event_type == "agent-preset/selected"
+            && event.data == json!({"agentPreset": "working"})
+    }));
+    let listed_sessions =
+        browser_call(&client, &base, "selected-list", "session.list", json!({})).await;
+    assert_eq!(
+        listed_sessions["result"]["value"]["items"][0]["agentPreset"],
+        "working"
+    );
+    let projections = &listed_sessions["result"]["value"]["items"][0]["projections"];
+    assert_eq!(projections["asOfSeq"], selected_events.last().unwrap().seq);
+    assert_eq!(projections["values"]["title"], "Cold preset session");
+    assert_eq!(
+        projections["values"]["permissions"]["currentValue"],
+        "workspace-write"
+    );
+    assert_eq!(projections["values"]["plan"]["active"], false);
+    assert_eq!(projections["values"]["todos"], Value::Null);
+    let prompted = browser_call(&client, &base, "live-prompt", "session.prompt", json!({"sessionId":"preset-cold","mode":"queue","content":[{"type":"text","text":"hello"}]})).await;
+    assert_eq!(prompted["result"]["ok"], true);
+    let locked = browser_call(
+        &client,
+        &base,
+        "live-select",
+        "agentPreset.select",
+        json!({"sessionId":"preset-cold","agentPreset":"working"}),
+    )
+    .await;
+    assert_eq!(locked["result"]["error"]["code"], "agent-preset-locked");
+
+    server.shutdown().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    let runtime = HostRuntime::boot(HostConfig::new(&fixture.0, &data))
+        .await
+        .unwrap();
+    let handle = runtime.handle();
+    assert!(handle
+        .events(SessionId::from("preset-cold"), 0)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type == "agent-preset/selected"));
+    let mut server = ApiServer::bind(Arc::new(handle)).await.unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let removed = browser_call(
+        &client,
+        &base,
+        "remove",
+        "agentPreset.remove",
+        json!({"agentPreset":"working"}),
+    )
+    .await;
+    assert_eq!(removed["result"]["ok"], true);
+    server.shutdown().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    let runtime = HostRuntime::boot(HostConfig::new(&fixture.0, &data))
+        .await
+        .unwrap();
+    assert!(!runtime
+        .handle()
+        .agent_preset_list()
+        .await
+        .unwrap()
+        .iter()
+        .any(|preset| preset.id == "working"));
+    runtime.shutdown().await.unwrap();
 }

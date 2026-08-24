@@ -202,6 +202,7 @@ async fn run_headless_validated(
         let options = AgentOptions {
             provider: config.provider.clone(),
             model: config.model.clone(),
+            reasoning_effort: None,
             max_tokens: config.max_tokens,
         };
         let cancellation = scope.root.scope().cancellation();
@@ -227,7 +228,9 @@ async fn run_headless_validated(
                 id: MessageId::from(config.session_id.as_str()),
                 role: MessageRole::User,
                 content: vec![ContentBlock::Text { text: task }],
-                source: MessageSource::User,
+                source: MessageSource::User {
+                    client_time_zone: None,
+                },
             })
             .await?;
         handle.when_idle().await?;

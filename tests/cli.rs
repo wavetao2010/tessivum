@@ -102,10 +102,41 @@ fn direct_web_and_profile_web_are_the_same_future_command() {
         ["tessivum", "web"].as_slice(),
         ["tessivum", "--profile", "web"].as_slice(),
     ] {
-        assert_eq!(
-            parse_cli(args.iter().copied()).unwrap().command,
-            CliCommand::Web
-        );
+        match parse_cli(args.iter().copied()).unwrap().command {
+            CliCommand::Web(command) => assert!(command.patches.is_empty()),
+            command => panic!("expected Web, got {command:?}"),
+        }
+    }
+}
+
+#[test]
+fn web_patch_overlays_keep_argv_order_for_both_web_spellings() {
+    for args in [
+        [
+            "tessivum",
+            "web",
+            "--patch",
+            "base.yml",
+            "--patch=local.yml",
+        ]
+        .as_slice(),
+        [
+            "tessivum",
+            "--profile",
+            "web",
+            "--patch",
+            "base.yml",
+            "--patch=local.yml",
+        ]
+        .as_slice(),
+    ] {
+        match parse_cli(args.iter().copied()).unwrap().command {
+            CliCommand::Web(command) => assert_eq!(
+                command.patches,
+                vec![PathBuf::from("base.yml"), PathBuf::from("local.yml")]
+            ),
+            command => panic!("expected Web, got {command:?}"),
+        }
     }
 }
 

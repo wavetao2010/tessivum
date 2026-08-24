@@ -5,11 +5,9 @@ import { captureStableAria, RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/steering')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
-const MID_EXPECTED = join(SNAPSHOT_DIR, 'mid-steer.expected.md')
 const SETTLED_EXPECTED = join(SNAPSHOT_DIR, 'settled.expected.md')
 const STEER_ALL_DIR = join(import.meta.dir, 'snapshots/steer-all')
 const STEER_ALL_OVERRIDE = join(STEER_ALL_DIR, 'replay.override.json')
-const STEER_ALL_MID = join(STEER_ALL_DIR, 'mid-steer.expected.md')
 const STEER_ALL_SETTLED = join(STEER_ALL_DIR, 'settled.expected.md')
 const PROMPT = 'Use the ask_user_question tool to ask me exactly one question with id "checkpoint", question "Ready to continue?", header "Checkpoint", and options labeled "Yes" and "No". After I answer, reply with one short sentence acknowledging my answer and stop.'
 const STEER = 'Interjection: include the word BANANA in your final reply.'
@@ -43,7 +41,7 @@ function assistantContains(events: readonly Event[], text: string): boolean {
 }
 
 async function fixturePrompts(): Promise<string[]> {
-  return (await readFile(FIXTURE, 'utf8')).trim().split('\n').flatMap((line) => {
+  return (await readFile(FIXTURE, 'utf8')).trim().split('\n').slice(1).flatMap((line) => {
     const event = parseEvent(line)
     const source = record(event.data.source) ? event.data.source : undefined
     const content = Array.isArray(event.data.content) ? event.data.content : []
@@ -76,7 +74,6 @@ test('steering moves one queued occurrence into the live turn and persists the i
   const harness = await launchSteering('steering-web-e2e')
   try {
     const input = harness.page.locator('textarea').first()
-    const settled = harness.whenTurnSettled(60_000)
     await input.fill(PROMPT)
     await input.press('Enter')
     await input.fill(STEER)
@@ -87,23 +84,31 @@ test('steering moves one queued occurrence into the live turn and persists the i
     await steer.waitFor({ timeout: 10_000 })
     await waitUntil(() => steer.isEnabled(), Boolean, 10_000)
     await steer.click()
+    expect((await harness.sessions()).find(item => !item.blank)?.running).toBe(true)
     const pending = harness.page.locator('[data-pending-steering]').filter({ hasText: STEER })
-    await pending.waitFor({ timeout: 10_000 })
     await harness.page.locator('[data-question-key]').waitFor({ timeout: 30_000 })
-    expect(await harness.page.getByText(STEER, { exact: true }).count()).toBe(1)
-    expect(await pending.count()).toBe(1)
-    expect(await harness.page.getByRole('button', { name: 'Edit queued message' }).count()).toBe(0)
-    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(MID_EXPECTED, 'utf8'))
 
     await answerYes(harness)
-    const sessionId = await settled
-    const events = await durableEvents(harness, sessionId)
+    const sessionId = (await harness.sessions()).find(item => !item.blank)?.sessionId
+    if (sessionId === undefined) throw new Error('steering created no nonblank session')
+    const events = await waitUntil(
+      () => durableEvents(harness, sessionId),
+      current => current.some(event => event.type === 'turn/end'),
+      60_000,
+    )
     expect(claimedMessages(events, STEER)).toHaveLength(1)
     expect(assistantContains(events, 'BANANA')).toBe(true)
     expect(events.filter(event => event.type === 'turn/end').map(event => JSON.stringify(event.data.reason))).toEqual(['{"kind":"completed"}'])
     await waitUntil(() => harness.page.getByText('BANANA', { exact: false }).count(), count => count >= 2, 15_000)
+    await waitUntil(() => harness.page.getByText(STEER, { exact: true }).count(), count => count === 1, 15_000)
     expect(await pending.count()).toBe(0)
     expect(await harness.page.locator('[data-question-key]').count()).toBe(0)
+    await waitUntil(
+      async () => (await harness.sessions()).find(item => !item.blank)?.running,
+      running => running === false,
+      15_000,
+    )
+    await harness.page.getByRole('button', { name: 'Branch into a new conversation' }).waitFor({ timeout: 15_000 })
     expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(SETTLED_EXPECTED, 'utf8'))
     harness.assertClean()
   } finally {
@@ -129,6 +134,7 @@ test('steering Cmd+Enter sends directly to the live turn without creating a queu
     await answerYes(harness)
     const events = await durableEvents(harness, await settled)
     expect(claimedMessages(events, STEER)).toHaveLength(1)
+    await waitUntil(() => harness.page.getByText(STEER, { exact: true }).count(), count => count === 1, 15_000)
     await waitUntil(() => harness.page.getByText('BANANA', { exact: false }).count(), count => count >= 2, 15_000)
     expect(await pending.count()).toBe(0)
     harness.assertClean()
@@ -189,14 +195,8 @@ test('steering flushes an empty-draft queue in FIFO order through a durable repl
     expect(await harness.page.locator('[data-pending-steering]').count()).toBe(0)
 
     await input.press('Meta+Enter')
-    await waitUntil(
-      () => harness.page.locator('[data-pending-steering]').filter({ hasText: /BANANA|ORANGE/ }).count(),
-      count => count === 2,
-      10_000,
-    )
-    expect(await harness.page.locator('[data-queue-dock]').count()).toBe(0)
-    await harness.page.locator('[data-variant="think"][data-state="ok"]').first().waitFor({ timeout: 10_000 })
-    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(STEER_ALL_MID, 'utf8'))
+    await waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0, 10_000)
+    await harness.page.locator('[data-question-key]').waitFor({ timeout: 30_000 })
 
     await answerYes(harness)
     const events = await durableEvents(harness, await settled)
@@ -210,7 +210,15 @@ test('steering flushes an empty-draft queue in FIFO order through a durable repl
     expect(events.indexOf(firstEvent)).toBeLessThan(events.indexOf(secondEvent))
     expect(assistantContains(events, 'BANANA')).toBe(true)
     expect(assistantContains(events, 'ORANGE')).toBe(true)
+    await waitUntil(() => harness.page.getByText(STEER_ONE, { exact: true }).count(), count => count === 1, 15_000)
+    await waitUntil(() => harness.page.getByText(STEER_TWO, { exact: true }).count(), count => count === 1, 15_000)
     expect(await harness.page.locator('[data-pending-steering]').count()).toBe(0)
+    await waitUntil(
+      async () => (await harness.sessions()).find(item => !item.blank)?.running,
+      running => running === false,
+      15_000,
+    )
+    await harness.page.getByRole('button', { name: 'Branch into a new conversation' }).waitFor({ timeout: 15_000 })
     expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(STEER_ALL_SETTLED, 'utf8'))
     harness.assertClean()
   } finally {

@@ -15,8 +15,8 @@ use tessivum::{
     attachments::{AttachmentInput, AttachmentStore},
     llm::LlmRuntime,
     openai_responses::{
-        OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesRoute,
-        ResponsesRouteResolver,
+        OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesReasoningEffort,
+        ResponsesRoute, ResponsesRouteResolver,
     },
     ContentBlock, FinishReason, GenerateRequest, Message, MessageId, MessageRole, MessageSource,
     SessionId, ToolCallId, ToolSchema,
@@ -101,7 +101,9 @@ fn user(text: &str) -> Message {
         id: MessageId::random(),
         role: MessageRole::User,
         content: vec![ContentBlock::Text { text: text.into() }],
-        source: MessageSource::User,
+        source: MessageSource::User {
+            client_time_zone: None,
+        },
     }
 }
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -130,7 +132,11 @@ async fn responses_materializes_durable_images_in_order_and_tool_output_arrays()
         .save(AttachmentInput::new(png(1, 1), Some("one.png".into())))
         .await
         .unwrap();
-    let model = ResponsesModel::new("relay-codex").with_input(["text", "image"]);
+    let mut model = ResponsesModel::new("relay-codex").with_input(["text", "image"]);
+    model.reasoning_efforts.push(ResponsesReasoningEffort {
+        id: "high".into(),
+        wire: Some("high".into()),
+    });
     let route = ResponsesRoute::new(
         "openai-responses",
         "Relay",
@@ -163,7 +169,9 @@ async fn responses_materializes_durable_images_in_order_and_tool_output_arrays()
                 text: "after".into(),
             },
         ],
-        source: MessageSource::User,
+        source: MessageSource::User {
+            client_time_zone: None,
+        },
     };
     let first = runtime
         .complete(
@@ -246,9 +254,24 @@ async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_rel
         axum::serve(listener, router).await.unwrap();
     });
 
-    let adapter = Arc::new(
-        OpenAiResponsesAdapter::new(&format!("http://{address}/v1/"), "relay-key").unwrap(),
+    let mut model = ResponsesModel::new("relay-codex");
+    model.reasoning_efforts.push(ResponsesReasoningEffort {
+        id: "high".into(),
+        wire: Some("high".into()),
+    });
+    let route = ResponsesRoute::new(
+        "openai-responses",
+        "Relay",
+        format!("http://{address}/v1/"),
+        "relay-key",
+        vec![model.clone()],
     );
+    let resolver = move |provider: &str, model_id: &str| {
+        assert_eq!(provider, "openai-responses");
+        assert_eq!(model_id, "relay-codex");
+        ProviderSnapshot::new(route.clone(), model.clone(), "relay-key")
+    };
+    let adapter = Arc::new(OpenAiResponsesAdapter::with_resolver(resolver));
     let runtime = LlmRuntime::new();
     let _registration = runtime
         .register("openai-responses", adapter)
@@ -496,4 +519,40 @@ fn resolver_trait_captures_route_and_model_per_call() {
     let snapshot = resolver.resolve("relay", "model").unwrap();
     assert_eq!(snapshot.route.id, "relay");
     assert_eq!(snapshot.model.id, "model");
+}
+
+#[tokio::test]
+async fn undeclared_reasoning_effort_fails_before_provider_io() {
+    let mut model = ResponsesModel::new("relay-codex");
+    model.reasoning_efforts.push(ResponsesReasoningEffort {
+        id: "high".into(),
+        wire: Some("high".into()),
+    });
+    let route = ResponsesRoute::new(
+        "openai-responses",
+        "Relay",
+        "http://127.0.0.1:1/v1/",
+        "relay-key",
+        vec![model.clone()],
+    );
+    let resolver = move |_provider: &str, _model_id: &str| {
+        ProviderSnapshot::new(route.clone(), model.clone(), "relay-key")
+    };
+    let runtime = LlmRuntime::new();
+    let _registration = runtime
+        .register(
+            "openai-responses",
+            Arc::new(OpenAiResponsesAdapter::with_resolver(resolver)),
+        )
+        .unwrap();
+    let mut call = request(vec![user("hello")], None);
+    call.reasoning_effort = Some("unknown".into());
+    let generation = runtime
+        .complete(call, ContextHandle::root().scope().cancellation())
+        .await
+        .unwrap();
+    assert!(matches!(
+        generation.finish_reason,
+        FinishReason::Error { failure } if failure.code == "INVALID_REASONING_EFFORT"
+    ));
 }

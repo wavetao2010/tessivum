@@ -17,7 +17,7 @@ use std::{
 
 use async_stream::stream;
 use axum::{
-    body::to_bytes,
+    body::{to_bytes, Body},
     extract::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
         Path, Request, State,
@@ -31,11 +31,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bytes::Bytes;
+use crc32fast::hash as crc32;
 use futures_util::{
     stream::{FuturesUnordered, StreamExt},
     SinkExt,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::{
     net::TcpListener,
@@ -43,24 +45,41 @@ use tokio::{
     task::JoinHandle,
 };
 
+#[cfg(test)]
+use crate::protocol::SurfaceOp;
 use crate::{
+    agent_preset::composition_contains_plugin,
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
-    attachments::{AttachmentId, AttachmentRef},
+    attachments::{AttachmentId, AttachmentLimits, AttachmentRef},
     credentials::{CredentialRef, CredentialSource},
     frontend::FrontendStatic,
+    goal::{GoalError, GoalRef, GoalService},
     host::{
         HostApi, HostDescriptor, HostModelGroup, HostModelInfo, HostNotification,
-        HostProviderDirectoryEntry, HostRouteFailure, HostSessionModels, HostSettingsMutation,
+        HostProviderDirectoryEntry, HostSessionModels, HostSettingsMutation, SessionQueueAction,
+        SessionUpdateQueueParams,
+    },
+    permissions::{
+        fold as fold_permission_events, select as permission_select, PERMISSION_SETTINGS_NAMESPACE,
     },
     protocol::{
-        AgentCancelCause, InitializeParams, SessionEventNotification, SessionId,
-        SessionPromptParams, MAX_SAFE_INTEGER,
+        AgentCancelCause, ContentBlock, InitializeParams, SessionEvent, SessionEventNotification,
+        SessionId, SessionOrigin, SessionPromptParams, MAX_SAFE_INTEGER,
     },
+    question::AskUserQuestionAnswer,
+    session::SessionRawArtifact,
+    session_query::SESSION_SEARCH_QUERY_MAX_CHARS,
     settings::{SettingsDescriptor, SettingsError, SettingsPathOp, LLM_PI_AI_NAMESPACE},
+    skills::{FilesystemSkillProvider, SkillProvider},
+    subagent::{
+        SessionProjectionsBlock, SubagentDeleteRequest, SubagentHistoryRequest,
+        SubagentInterruptRequest, SubagentMode, SubagentPromptRequest,
+    },
     workspace::{WorkspaceError, WorkspaceId},
     TessivumError,
 };
 use reqwest::redirect::Policy;
+use tessivum_core::ContextHandle;
 use url::Url;
 use uuid::Uuid;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -113,10 +132,19 @@ impl ApiServer {
         .await
     }
 
-    /// Binds the configured listener and starts the transport task.
+    /// Binds the configured listener with loopback-only browser authority.
     pub async fn bind_with_config(
         host: Arc<dyn HostApi>,
         config: ApiServerConfig,
+    ) -> io::Result<Self> {
+        Self::bind_with_trusted_authorities(host, config, Vec::new()).await
+    }
+
+    /// Binds with an explicit list of exact non-loopback Web authorities.
+    pub async fn bind_with_trusted_authorities(
+        host: Arc<dyn HostApi>,
+        config: ApiServerConfig,
+        trusted_authorities: Vec<String>,
     ) -> io::Result<Self> {
         if !config.bind_addr.ip().is_loopback() {
             return Err(io::Error::new(
@@ -126,13 +154,14 @@ impl ApiServer {
         }
         let listener = TcpListener::bind(config.bind_addr).await?;
         let address = listener.local_addr()?;
+        let authority_guard = AuthorityGuard::new(address, trusted_authorities)?;
         let (socket_shutdown, _) = broadcast::channel(1);
         let (listener_shutdown, listener_stopped) = oneshot::channel();
         let app = router_with_shutdown(
             host,
             config.frontend,
             socket_shutdown.clone(),
-            Some(address),
+            Some(authority_guard),
         );
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -193,7 +222,7 @@ fn router_with_shutdown(
     host: Arc<dyn HostApi>,
     frontend: Option<FrontendStatic>,
     socket_shutdown: broadcast::Sender<()>,
-    bound_addr: Option<SocketAddr>,
+    authority_guard: Option<AuthorityGuard>,
 ) -> Router {
     let compat = Arc::new(CompatibilityState::new(host.descriptor()));
     let state = ApiState {
@@ -202,9 +231,7 @@ fn router_with_shutdown(
         frontend,
         compat,
         workspace_mutation: Arc::new(AsyncMutex::new(())),
-        bound_addr,
     };
-    let authority_guard = state.bound_addr.map(AuthorityGuard::new);
     let router = Router::new()
         // Static routes are registered before the catch-all unary route.
         .route("/events/{session}", get(sse_events))
@@ -216,8 +243,30 @@ fn router_with_shutdown(
         )
         .route("/api/events.host", get(compat_events_host))
         .route(
+            "/api/session.export",
+            get(session_export)
+                .head(session_export_head)
+                .fallback(method_not_allowed),
+        )
+        .route(
             "/api/respond",
             post(compat_approval_response).fallback(method_not_allowed),
+        )
+        .route("/api/commands/list", post(compat_commands_list))
+        .route("/plugins/events", get(plugin_events))
+        .route("/api/commands/execute", post(compat_commands_execute))
+        .route(
+            "/api/dynamicCordisRunner/{method}",
+            post(compat_dynamic_cordis),
+        )
+        .route(
+            "/api/pluginInventory/{method}",
+            post(compat_plugin_inventory),
+        )
+        .route("/api/goals/{method}", post(compat_goals))
+        .route(
+            "/api/messageFeedback/{method}",
+            post(compat_message_feedback),
         )
         .route(
             "/api/{method}",
@@ -229,9 +278,9 @@ fn router_with_shutdown(
         )
         .fallback(frontend_fallback)
         .with_state(state);
-    if let Some(authority_guard) = authority_guard {
+    if let Some(authority_guard) = authority_guard.map(Arc::new) {
         router.layer(middleware::from_fn(move |request, next| {
-            require_bound_authority(authority_guard.clone(), request, next)
+            require_bound_authority(Arc::clone(&authority_guard), request, next)
         }))
     } else {
         router
@@ -264,46 +313,143 @@ struct ApiState {
     frontend: Option<FrontendStatic>,
     compat: Arc<CompatibilityState>,
     workspace_mutation: Arc<AsyncMutex<()>>,
-    bound_addr: Option<SocketAddr>,
 }
 
-#[derive(Clone)]
-struct AuthorityGuard {
+struct ExactAuthority {
     host: HeaderValue,
     origin: HeaderValue,
 }
 
-impl AuthorityGuard {
-    fn new(address: SocketAddr) -> Self {
+impl ExactAuthority {
+    fn bound(address: SocketAddr) -> Self {
         let authority = address.to_string();
         Self {
-            host: HeaderValue::from_str(&authority)
+            host: HeaderValue::try_from(authority.as_str())
                 .expect("socket address is a valid HTTP authority"),
-            origin: HeaderValue::from_str(&format!("http://{authority}"))
+            origin: HeaderValue::try_from(format!("http://{authority}"))
                 .expect("loopback origin is a valid HTTP header"),
         }
     }
 
-    fn allows(&self, headers: &HeaderMap) -> bool {
-        let mut hosts = headers.get_all(header::HOST).iter();
-        if !matches!((hosts.next(), hosts.next()), (Some(host), None) if host == self.host) {
-            return false;
+    fn trusted(authority: &str) -> io::Result<Self> {
+        let serialized = format!("http://{authority}/");
+        let parsed = Url::parse(&serialized).map_err(|_| invalid_trusted_authority(authority))?;
+        if authority.is_empty()
+            || authority.trim() != authority
+            || parsed.as_str() != serialized
+            || parsed.port().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(invalid_trusted_authority(authority));
         }
-        let mut origins = headers.get_all(header::ORIGIN).iter();
-        match (origins.next(), origins.next()) {
-            (None, None) => true,
-            (Some(origin), None) => origin == self.origin,
-            _ => false,
-        }
+        Ok(Self {
+            host: HeaderValue::try_from(authority)
+                .map_err(|_| invalid_trusted_authority(authority))?,
+            origin: HeaderValue::try_from(serialized.trim_end_matches('/'))
+                .map_err(|_| invalid_trusted_authority(authority))?,
+        })
+    }
+
+    fn matches(&self, host: &HeaderValue, origin: Option<&HeaderValue>) -> bool {
+        host == self.host && origin.is_none_or(|origin| origin == self.origin)
     }
 }
 
+struct AuthorityGuard {
+    bound: ExactAuthority,
+    trusted: Vec<ExactAuthority>,
+}
+
+impl AuthorityGuard {
+    fn new(address: SocketAddr, trusted: Vec<String>) -> io::Result<Self> {
+        Ok(Self {
+            bound: ExactAuthority::bound(address),
+            trusted: trusted
+                .iter()
+                .map(|authority| ExactAuthority::trusted(authority))
+                .collect::<io::Result<Vec<_>>>()?,
+        })
+    }
+
+    fn allows(&self, headers: &HeaderMap, path: &str) -> bool {
+        let mut hosts = headers.get_all(header::HOST).iter();
+        let (Some(host), None) = (hosts.next(), hosts.next()) else {
+            return false;
+        };
+        let mut origins = headers.get_all(header::ORIGIN).iter();
+        let origin = match (origins.next(), origins.next()) {
+            (None, None) => None,
+            (Some(origin), None) => Some(origin),
+            _ => return false,
+        };
+        self.bound.matches(host, origin)
+            || (!loopback_only_path(path)
+                && self
+                    .trusted
+                    .iter()
+                    .any(|authority| authority.matches(host, origin)))
+    }
+}
+
+fn invalid_trusted_authority(authority: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("trusted Web authority must be an exact canonical host:port: {authority:?}"),
+    )
+}
+
+fn loopback_only_path(path: &str) -> bool {
+    let Some(method) = path.strip_prefix("/api/") else {
+        return false;
+    };
+    if method.contains('%') {
+        return true;
+    }
+    matches!(
+        method,
+        "agentPreset.read"
+            | "agentPreset/read"
+            | "agentPreset.copy"
+            | "agentPreset/copy"
+            | "agentPreset.openDocument"
+            | "agentPreset/openDocument"
+            | "agentPreset.remove"
+            | "agentPreset/remove"
+            | "host.pickDirectory"
+            | "host/pickDirectory"
+            | "host.openPath"
+            | "host/openPath"
+            | "settings.describe"
+            | "settings/describe"
+            | "settings.openDocument"
+            | "settings/openDocument"
+            | "settings.update"
+            | "settings/update"
+            | "settings.replace"
+            | "settings/replace"
+            | "settings.mutate"
+            | "settings/mutate"
+            | "credentials.describe"
+            | "credentials/describe"
+            | "credentials.set"
+            | "credentials/set"
+            | "credentials.unset"
+            | "credentials/unset"
+            | "llm.discoverModels"
+            | "llm/discoverModels"
+    )
+}
+
 async fn require_bound_authority(
-    authority: AuthorityGuard,
+    authority: Arc<AuthorityGuard>,
     request: Request,
     next: Next,
 ) -> Response {
-    if !authority.allows(request.headers()) {
+    if !authority.allows(request.headers(), request.uri().path()) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut response = next.run(request).await;
@@ -335,6 +481,13 @@ struct CompatibilityState {
 struct CompatibilityData {
     // Presentation-only state. Durable session/workspace authority lives in Host.
     sessions: BTreeMap<SessionId, CompatSession>,
+    tool_calls: BTreeMap<(SessionId, String), CompatToolCall>,
+}
+
+#[derive(Clone)]
+struct CompatToolCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -346,6 +499,21 @@ struct CompatSession {
     running: bool,
     blank: bool,
     cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<SessionOrigin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projections: Option<CompatSessionProjections>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompatSessionProjections {
+    as_of_seq: u64,
+    values: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -371,6 +539,7 @@ impl CompatibilityState {
             max_tokens: descriptor.max_tokens,
             data: Mutex::new(CompatibilityData {
                 sessions: BTreeMap::new(),
+                tool_calls: BTreeMap::new(),
             }),
             initialized: AsyncMutex::new(false),
             frames,
@@ -525,15 +694,53 @@ impl CompatError {
 }
 
 fn compat_host_error(error: TessivumError) -> CompatError {
-    if error.code == "CANCELLED" {
-        CompatError {
+    match error.code.as_str() {
+        "MODEL_SELECTION_RESTART_REQUIRED" => CompatError {
+            code: "model-selection-restart-required".into(),
+            message: error.message,
+            details: error.details,
+        },
+        "CANCELLED" => CompatError {
             code: "cancelled".into(),
             message: error.message,
             details: json!({}),
-        }
-    } else {
-        CompatError::internal(error.message)
+        },
+        "DIRECTORY_PICKER_UNAVAILABLE" => CompatError {
+            code: "directory-picker-unavailable".into(),
+            message: error.message,
+            details: error.details,
+        },
+        "queue-item-not-found"
+        | "steer-unavailable"
+        | "subagent-ownership"
+        | "attachment-error" => CompatError {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+        },
+        _ => CompatError::internal(error.message),
     }
+}
+
+fn compat_provider_models_error(error: TessivumError) -> CompatError {
+    CompatError {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+    }
+}
+fn compat_preset_error(error: TessivumError) -> CompatError {
+    if error.code == "CANCELLED" {
+        return compat_host_error(error);
+    }
+    if error.code.starts_with("agent-preset-") {
+        return CompatError {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+        };
+    }
+    CompatError::internal(error.message)
 }
 
 #[derive(Deserialize)]
@@ -552,14 +759,22 @@ struct CompatClientResponse {
     #[serde(rename = "type")]
     response_type: String,
     rpc_id: String,
-    result: CompatApprovalResult,
+    result: CompatResponseResult,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompatApprovalResult {
+struct CompatResponseResult {
     ok: bool,
-    value: CompatApprovalValue,
+    #[serde(default)]
+    value: Option<Value>,
+    #[serde(default)]
+    error: Option<CompatResponseError>,
+}
+
+#[derive(Deserialize)]
+struct CompatResponseError {
+    code: String,
 }
 
 #[derive(Deserialize)]
@@ -571,8 +786,41 @@ struct CompatApprovalValue {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatQuestionValue {
+    session_id: SessionId,
+    answer: AskUserQuestionAnswer,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompatEmptyPayload {}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatAgentPresetRef {
+    agent_preset: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatAgentPresetCopy {
+    from: String,
+    agent_preset: String,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatAgentPresetSelect {
+    session_id: SessionId,
+    agent_preset: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatOpenPath {
+    path: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -608,6 +856,28 @@ struct CompatWorkspaceDelete {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatWorkspaceInsertBefore {
+    workspace_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    before_workspace_id: Option<String>,
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatSessionMove {
     workspace_id: String,
     session_id: SessionId,
@@ -629,9 +899,201 @@ struct CompatSessionRef {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatRemotePayload<T> {
+    args: T,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCordisInspectManifest {
+    providers: Vec<CompatCordisInspectProviderManifest>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCordisInspectProviderManifest {
+    id: String,
+    description: String,
+    methods: Vec<CompatCordisInspectMethodManifest>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCordisInspectMethodManifest {
+    name: String,
+    description: String,
+    input_schema: Value,
+    output_schema: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCommandList {
+    agent_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatCommandExecute {
+    agent_id: SessionId,
+    line: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatMessageFeedbackCall<T> {
+    request: T,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatMessageFeedbackList {
+    session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatMessageFeedbackPut {
+    session_id: SessionId,
+    message_id: String,
+    rating: String,
+    note: Option<String>,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
+    if_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatMessageFeedbackDelete {
+    session_id: SessionId,
+    message_id: String,
+    if_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatGoalCreate {
+    session_id: SessionId,
+    objective: String,
+    max_goal_rounds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatGoalEdit {
+    session_id: SessionId,
+    #[serde(rename = "ref")]
+    reference: GoalRef,
+    objective: Option<String>,
+    max_goal_rounds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatGoalRef {
+    session_id: SessionId,
+    #[serde(rename = "ref")]
+    reference: GoalRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatRemoteGoalCreate {
+    agent_id: SessionId,
+    request: CompatGoalCreateRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatGoalCreateRequest {
+    objective: String,
+    max_goal_rounds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatRemoteGoalEdit {
+    agent_id: SessionId,
+    #[serde(rename = "ref")]
+    reference: GoalRef,
+    request: CompatGoalEditRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatGoalEditRequest {
+    objective: Option<String>,
+    max_goal_rounds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatRemoteGoalRef {
+    agent_id: SessionId,
+    #[serde(rename = "ref")]
+    reference: GoalRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionSearch {
+    query: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionRename {
+    session_id: SessionId,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionFork {
+    session_id: SessionId,
+    at_seq: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatSubagentList {
     parent_session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSubagentDelete {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSubagentHistory {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    mode: SubagentMode,
+    before_seq: Option<u64>,
+    max_messages: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSubagentPrompt {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    mode: ContinuableMode,
+    content: Vec<ContentBlock>,
+    client_time_zone: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSubagentInterrupt {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    mode: ContinuableMode,
 }
 
 #[derive(Deserialize)]
@@ -694,9 +1156,26 @@ struct CompatDiscoveredModel {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatLlmModels {}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompatLlmModels {
-    provider: Option<String>,
+struct CompatProviderModels {
+    provider: String,
+    #[serde(default = "empty_object")]
+    config: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSetProviderEnabled {
+    provider: String,
+    enabled: bool,
+}
+
+fn empty_object() -> Value {
+    json!({})
 }
 
 #[derive(Deserialize)]
@@ -757,8 +1236,26 @@ struct CompatPrompt {
     session_id: SessionId,
     mode: CompatPromptMode,
     content: Vec<CompatPromptContent>,
-    #[serde(default, rename = "clientTimeZone")]
-    _client_time_zone: Option<String>,
+    #[serde(default)]
+    client_time_zone: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatUpdateQueue {
+    session_id: SessionId,
+    item_id: crate::protocol::MessageId,
+    action: CompatQueueAction,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum CompatQueueAction {
+    Edit {
+        content: Vec<crate::protocol::ContentBlock>,
+    },
+    Remove {},
+    Steer {},
 }
 
 #[derive(Deserialize)]
@@ -856,6 +1353,511 @@ fn attachment_error(error: TessivumError) -> ApiError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SessionExportError {
+    NotFound,
+    RawUnavailable,
+    Failed,
+}
+
+struct SessionExportQuery {
+    session_id: SessionId,
+    include_descendants: bool,
+}
+
+struct SessionExportEntry {
+    path: String,
+    bytes: Vec<u8>,
+}
+
+struct SessionExportMedia {
+    owner: SessionId,
+    reference: AttachmentRef,
+}
+
+async fn session_export(State(state): State<ApiState>, uri: Uri) -> Response {
+    let query = match session_export_query(&uri) {
+        Ok(query) => query,
+        Err(()) => {
+            return session_export_response(
+                StatusCode::BAD_REQUEST,
+                "missing or invalid sessionId query parameter",
+            )
+        }
+    };
+    let filename = session_log_zip_filename(&query.session_id);
+    let entries = match prepare_session_export(&state, query).await {
+        Ok(entries) => entries,
+        Err(error) => return session_export_error(error),
+    };
+    let archive = match stored_zip(entries) {
+        Ok(archive) => archive,
+        Err(()) => return session_export_error(SessionExportError::Failed),
+    };
+    let mut response = Response::new(Body::from(Bytes::from(archive)));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .extend(session_export_headers(&filename));
+    response
+}
+
+async fn session_export_head(State(state): State<ApiState>, uri: Uri) -> Response {
+    let query = match session_export_query(&uri) {
+        Ok(query) => query,
+        Err(()) => {
+            return session_export_response(
+                StatusCode::BAD_REQUEST,
+                "missing or invalid sessionId query parameter",
+            )
+        }
+    };
+    if let Err(error) = prepare_session_export_root(&state, query.session_id.clone()).await {
+        return session_export_head_error(error);
+    }
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .extend(session_export_headers(&session_log_zip_filename(
+            &query.session_id,
+        )));
+    response
+}
+
+fn session_export_query(uri: &Uri) -> Result<SessionExportQuery, ()> {
+    let mut session_id = None;
+    let mut include_descendants = None;
+    for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "sessionId" => session_id = Some(value.into_owned()),
+            "includeDescendants" => include_descendants = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let session_id = session_id.filter(|value| !value.is_empty()).ok_or(())?;
+    let include_descendants = match include_descendants.as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(()),
+    };
+    Ok(SessionExportQuery {
+        session_id: SessionId::from(session_id),
+        include_descendants,
+    })
+}
+
+async fn prepare_session_export(
+    state: &ApiState,
+    query: SessionExportQuery,
+) -> Result<Vec<SessionExportEntry>, SessionExportError> {
+    let root = prepare_session_export_root(state, query.session_id.clone()).await?;
+    let mut entries = Vec::new();
+    let mut paths = BTreeSet::new();
+    if root.bytes.len() > MAX_PROMPT_FRAME_BYTES {
+        return Err(SessionExportError::Failed);
+    }
+    let mut total = 0usize;
+    let mut media = Vec::new();
+    let mut media_indices = BTreeMap::new();
+    remember_artifact_media(
+        &root.bytes,
+        &query.session_id,
+        &mut media,
+        &mut media_indices,
+    )?;
+    let root_path = safe_artifact_basename(&root.filename).ok_or(SessionExportError::Failed)?;
+    push_session_export_entry(
+        &mut entries,
+        &mut paths,
+        &mut total,
+        root_path.to_owned(),
+        root.bytes,
+    )?;
+
+    if query.include_descendants {
+        let sessions = state
+            .host
+            .list_sessions()
+            .await
+            .map_err(|_| SessionExportError::Failed)?;
+        for descendant in session_export_descendants(sessions, &query.session_id)? {
+            let raw = state
+                .host
+                .read_raw_session(descendant.clone())
+                .await
+                .map_err(|_| SessionExportError::Failed)?
+                .ok_or(SessionExportError::Failed)?;
+            if raw.bytes.len() > MAX_PROMPT_FRAME_BYTES {
+                return Err(SessionExportError::Failed);
+            }
+            remember_artifact_media(&raw.bytes, &descendant, &mut media, &mut media_indices)?;
+            let basename =
+                safe_artifact_basename(&raw.filename).ok_or(SessionExportError::Failed)?;
+            let path = format!(
+                "subagents/{}/{basename}",
+                safe_session_id_segment(descendant.as_str())
+            );
+            push_session_export_entry(&mut entries, &mut paths, &mut total, path, raw.bytes)?;
+        }
+    }
+
+    for media in media {
+        let attachment = state
+            .host
+            .read_attachment(media.owner, media.reference.attachment_id.clone())
+            .await
+            .map_err(|_| SessionExportError::Failed)?;
+        let path = format!(
+            "media/{}.{}",
+            media.reference.attachment_id,
+            media_extension(&media.reference)
+        );
+        push_session_export_entry(&mut entries, &mut paths, &mut total, path, attachment.data)?;
+    }
+    Ok(entries)
+}
+
+async fn prepare_session_export_root(
+    state: &ApiState,
+    session_id: SessionId,
+) -> Result<SessionRawArtifact, SessionExportError> {
+    match state.host.read_raw_session(session_id).await {
+        Ok(Some(raw)) => Ok(raw),
+        Ok(None) => Err(SessionExportError::NotFound),
+        Err(error) if error.code == "SESSION_RAW_ARTIFACTS_UNSUPPORTED" => {
+            Err(SessionExportError::RawUnavailable)
+        }
+        Err(_) => Err(SessionExportError::Failed),
+    }
+}
+
+fn session_export_descendants(
+    sessions: Vec<crate::host::HostSessionInfo>,
+    root: &SessionId,
+) -> Result<Vec<SessionId>, SessionExportError> {
+    if sessions.len() > MAX_DIRECTORY_ENTRIES {
+        return Err(SessionExportError::Failed);
+    }
+    let mut children = BTreeMap::<SessionId, Vec<(u64, SessionId)>>::new();
+    for session in sessions {
+        if let Some(parent) = session.parent_session {
+            children
+                .entry(parent)
+                .or_default()
+                .push((session.created_at, session.session_id));
+        }
+    }
+    for entries in children.values_mut() {
+        entries.sort();
+    }
+    let mut seen = BTreeSet::from([root.clone()]);
+    let mut pending = children.get(root).cloned().unwrap_or_default();
+    pending.reverse();
+    let mut descendants = Vec::new();
+    while let Some((_, session_id)) = pending.pop() {
+        if !seen.insert(session_id.clone()) || descendants.len() >= MAX_DIRECTORY_ENTRIES {
+            return Err(SessionExportError::Failed);
+        }
+        descendants.push(session_id.clone());
+        if let Some(children) = children.get(&session_id) {
+            pending.extend(children.iter().rev().cloned());
+        }
+    }
+    Ok(descendants)
+}
+
+fn remember_artifact_media(
+    bytes: &[u8],
+    owner: &SessionId,
+    media: &mut Vec<SessionExportMedia>,
+    indices: &mut BTreeMap<String, usize>,
+) -> Result<(), SessionExportError> {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        remember_content_media(data.get("content"), owner, media, indices)?;
+        remember_content_media(
+            data.get("message")
+                .and_then(|message| message.get("content")),
+            owner,
+            media,
+            indices,
+        )?;
+        if let Some(inserted) = data.get("inserted").and_then(Value::as_array) {
+            for message in inserted {
+                remember_content_media(message.get("content"), owner, media, indices)?;
+            }
+        }
+        if let Some(block) = data.get("chunk").and_then(|chunk| {
+            (chunk.get("type").and_then(Value::as_str) == Some("block-end"))
+                .then(|| chunk.get("block"))
+                .flatten()
+        }) {
+            remember_blocks_media(vec![block], owner, media, indices)?;
+        }
+    }
+    Ok(())
+}
+
+fn remember_content_media(
+    content: Option<&Value>,
+    owner: &SessionId,
+    media: &mut Vec<SessionExportMedia>,
+    indices: &mut BTreeMap<String, usize>,
+) -> Result<(), SessionExportError> {
+    let Some(content) = content.and_then(Value::as_array) else {
+        return Ok(());
+    };
+    remember_blocks_media(content.iter().collect(), owner, media, indices)
+}
+
+fn remember_blocks_media(
+    mut pending: Vec<&Value>,
+    owner: &SessionId,
+    media: &mut Vec<SessionExportMedia>,
+    indices: &mut BTreeMap<String, usize>,
+) -> Result<(), SessionExportError> {
+    while let Some(block) = pending.pop() {
+        let Some(object) = block.as_object() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) == Some("image") {
+            let reference = object
+                .get("attachment")
+                .ok_or(SessionExportError::Failed)
+                .and_then(|value| {
+                    AttachmentRef::from_value(value).map_err(|_| SessionExportError::Failed)
+                })?;
+            let id = reference.attachment_id.to_string();
+            if let Some(index) = indices.get(&id).copied() {
+                media[index] = SessionExportMedia {
+                    owner: owner.clone(),
+                    reference,
+                };
+            } else {
+                indices.insert(id, media.len());
+                media.push(SessionExportMedia {
+                    owner: owner.clone(),
+                    reference,
+                });
+            }
+        }
+        if let Some(nested) = object.get("content").and_then(Value::as_array) {
+            pending.extend(nested);
+        }
+    }
+    Ok(())
+}
+
+fn push_session_export_entry(
+    entries: &mut Vec<SessionExportEntry>,
+    paths: &mut BTreeSet<String>,
+    total: &mut usize,
+    path: String,
+    bytes: Vec<u8>,
+) -> Result<(), SessionExportError> {
+    if entries.len() >= MAX_DIRECTORY_ENTRIES
+        || !safe_archive_path(&path)
+        || !paths.insert(path.clone())
+    {
+        return Err(SessionExportError::Failed);
+    }
+    *total = total
+        .checked_add(bytes.len())
+        .filter(|total| *total <= MAX_PROMPT_FRAME_BYTES)
+        .ok_or(SessionExportError::Failed)?;
+    entries.push(SessionExportEntry { path, bytes });
+    Ok(())
+}
+
+fn safe_artifact_basename(filename: &str) -> Option<&str> {
+    (!filename.is_empty()
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && !matches!(filename, "." | "..")
+        && filename.bytes().all(|byte| byte >= 0x20 && byte != 0x7f))
+    .then_some(filename)
+}
+
+fn safe_archive_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && !matches!(segment, "." | "..")
+                && segment.bytes().all(|byte| byte >= 0x20 && byte != 0x7f)
+        })
+}
+
+fn safe_session_id_segment(session_id: &str) -> String {
+    session_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn media_extension(reference: &AttachmentRef) -> &'static str {
+    match reference.media_type_str() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => unreachable!("AttachmentRef only permits admitted image media types"),
+    }
+}
+
+fn session_log_zip_filename(session_id: &SessionId) -> String {
+    format!(
+        "dsh-session-{}.zip",
+        safe_session_id_segment(session_id.as_str())
+    )
+}
+
+fn session_export_headers(filename: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_bytes(format!("attachment; filename=\"{filename}\"").as_bytes())
+            .expect("session export filename is ASCII"),
+    );
+    headers
+}
+
+fn session_export_error(error: SessionExportError) -> Response {
+    match error {
+        SessionExportError::NotFound => session_export_response(StatusCode::NOT_FOUND, "session not found"),
+        SessionExportError::RawUnavailable => session_export_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "session log export is unavailable: the persistence backend does not expose per-session raw artifacts",
+        ),
+        SessionExportError::Failed => session_export_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session log export failed to prepare the stored artifact",
+        ),
+    }
+}
+
+fn session_export_head_error(error: SessionExportError) -> Response {
+    let status = match error {
+        SessionExportError::NotFound => StatusCode::NOT_FOUND,
+        SessionExportError::RawUnavailable => StatusCode::NOT_IMPLEMENTED,
+        SessionExportError::Failed => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+}
+
+fn session_export_response(status: StatusCode, body: &'static str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn stored_zip(entries: Vec<SessionExportEntry>) -> Result<Vec<u8>, ()> {
+    let entry_count = u16::try_from(entries.len()).map_err(|_| ())?;
+    let mut archive = Vec::new();
+    let mut index = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !safe_archive_path(&entry.path) {
+            return Err(());
+        }
+        let path = entry.path.into_bytes();
+        let path_len = u16::try_from(path.len()).map_err(|_| ())?;
+        let bytes_len = u32::try_from(entry.bytes.len()).map_err(|_| ())?;
+        let offset = u32::try_from(archive.len()).map_err(|_| ())?;
+        let checksum = crc32(&entry.bytes);
+        zip_u32(&mut archive, 0x0403_4b50);
+        zip_u16(&mut archive, 20);
+        zip_u16(&mut archive, 0x0800);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u32(&mut archive, checksum);
+        zip_u32(&mut archive, bytes_len);
+        zip_u32(&mut archive, bytes_len);
+        zip_u16(&mut archive, path_len);
+        zip_u16(&mut archive, 0);
+        archive.extend_from_slice(&path);
+        archive.extend_from_slice(&entry.bytes);
+        index.push((path, checksum, bytes_len, offset));
+        if archive.len() > MAX_PROMPT_FRAME_BYTES {
+            return Err(());
+        }
+    }
+    let central_offset = u32::try_from(archive.len()).map_err(|_| ())?;
+    for (path, checksum, bytes_len, offset) in index {
+        let path_len = u16::try_from(path.len()).map_err(|_| ())?;
+        zip_u32(&mut archive, 0x0201_4b50);
+        zip_u16(&mut archive, 0x0314);
+        zip_u16(&mut archive, 20);
+        zip_u16(&mut archive, 0x0800);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u32(&mut archive, checksum);
+        zip_u32(&mut archive, bytes_len);
+        zip_u32(&mut archive, bytes_len);
+        zip_u16(&mut archive, path_len);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u32(&mut archive, 0);
+        zip_u32(&mut archive, offset);
+        archive.extend_from_slice(&path);
+        if archive.len() > MAX_PROMPT_FRAME_BYTES {
+            return Err(());
+        }
+    }
+    let central_len = u32::try_from(archive.len()).map_err(|_| ())? - central_offset;
+    zip_u32(&mut archive, 0x0605_4b50);
+    zip_u16(&mut archive, 0);
+    zip_u16(&mut archive, 0);
+    zip_u16(&mut archive, entry_count);
+    zip_u16(&mut archive, entry_count);
+    zip_u32(&mut archive, central_len);
+    zip_u32(&mut archive, central_offset);
+    zip_u16(&mut archive, 0);
+    (archive.len() <= MAX_PROMPT_FRAME_BYTES)
+        .then_some(archive)
+        .ok_or(())
+}
+
+fn zip_u16(output: &mut Vec<u8>, value: u16) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
+fn zip_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
 async fn compat_approval_response(State(state): State<ApiState>, request: Request) -> Response {
     if !is_json(request.headers()) || content_length_exceeds(request.headers(), MAX_FRAME_BYTES) {
         return compat_receipt(RpcReceipt::bad_response());
@@ -868,28 +1870,149 @@ async fn compat_approval_response(State(state): State<ApiState>, request: Reques
         Ok(response) => response,
         Err(_) => return compat_receipt(RpcReceipt::bad_response()),
     };
-    if response.response_type != "client-response"
-        || !response.result.ok
-        || validate_request_id(&response.rpc_id).is_err()
+    if response.response_type != "client-response" || validate_request_id(&response.rpc_id).is_err()
     {
         return compat_receipt(RpcReceipt::bad_response());
     }
-    let receipt = state
-        .host
-        .approval_registry()
-        .map_or_else(RpcReceipt::not_pending, |registry| {
-            registry.respond(
-                &response.rpc_id,
-                &response.result.value.session_id,
-                &response.result.value.approval_id,
-                response.result.value.outcome,
-            )
-        });
-    compat_receipt(receipt)
+    let questions = state.host.question_registry();
+    if questions
+        .as_ref()
+        .is_some_and(|registry| registry.is_pending(&response.rpc_id))
+    {
+        let Some(registry) = questions else {
+            return compat_receipt(RpcReceipt::not_pending());
+        };
+        if !response.result.ok {
+            let receipt = response
+                .result
+                .error
+                .as_ref()
+                .filter(|error| error.code == "cancelled")
+                .map_or_else(RpcReceipt::bad_response, |_| {
+                    registry.respond_cancelled(&response.rpc_id)
+                });
+            return compat_receipt(receipt);
+        }
+        let Some(value) = response.result.value else {
+            return compat_receipt(RpcReceipt::bad_response());
+        };
+        let value: CompatQuestionValue = match serde_json::from_value(value) {
+            Ok(value) => value,
+            Err(_) => return compat_receipt(RpcReceipt::bad_response()),
+        };
+        return compat_receipt(registry.respond_answer(
+            &response.rpc_id,
+            &value.session_id,
+            value.answer,
+        ));
+    }
+    let Some(registry) = state.host.approval_registry() else {
+        return compat_receipt(RpcReceipt::not_pending());
+    };
+    if !response.result.ok {
+        return compat_receipt(RpcReceipt::bad_response());
+    }
+    let Some(value) = response.result.value else {
+        return compat_receipt(RpcReceipt::bad_response());
+    };
+    let value: CompatApprovalValue = match serde_json::from_value(value) {
+        Ok(value) => value,
+        Err(_) => return compat_receipt(RpcReceipt::bad_response()),
+    };
+    compat_receipt(registry.respond(
+        &response.rpc_id,
+        &value.session_id,
+        &value.approval_id,
+        value.outcome,
+    ))
 }
 
 fn compat_receipt(receipt: RpcReceipt) -> Response {
     (StatusCode::OK, Json(receipt)).into_response()
+}
+
+async fn plugin_events(State(state): State<ApiState>) -> Response {
+    let events = stream! {
+        if let Some(frontend) = state.frontend {
+            if let Some(mut updates) = frontend.subscribe_hmr() {
+                let mut previous = frontend.graph();
+                yield Ok::<Event, Infallible>(Event::default().data(json!({
+                    "type": "graph",
+                    "graph": previous,
+                }).to_string()));
+                let mut poll = tokio::time::interval(Duration::from_millis(500));
+                poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                poll.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = poll.tick() => {
+                            let frontend = frontend.clone();
+                            let _ = tokio::task::spawn_blocking(move || frontend.rebuild()).await;
+                        }
+                        update = updates.recv() => {
+                            let next = match update {
+                                Ok(update) => update.graph,
+                                Err(broadcast::error::RecvError::Lagged(_)) => frontend.graph(),
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            };
+                            let previous_revs = previous.entries.iter()
+                                .map(|entry| (entry.id.as_str(), entry.rev.as_str()))
+                                .collect::<BTreeMap<_, _>>();
+                            for entry in &next.entries {
+                                if previous_revs.get(entry.id.as_str()).copied()
+                                    .is_some_and(|rev| rev != entry.rev.as_str())
+                                {
+                                    yield Ok(Event::default().data(json!({
+                                        "type": "rebuilt",
+                                        "id": entry.id,
+                                        "rev": entry.rev,
+                                    }).to_string()));
+                                }
+                            }
+                            previous = next;
+                        }
+                    }
+                }
+            } else {
+                futures_util::future::pending::<()>().await;
+            }
+        } else {
+            futures_util::future::pending::<()>().await;
+        }
+    };
+    Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+async fn compat_dynamic_cordis(
+    State(state): State<ApiState>,
+    Path(method): Path<String>,
+    request: Request,
+) -> Response {
+    compat_unary_method(state, format!("dynamicCordisRunner/{method}"), request).await
+}
+async fn compat_plugin_inventory(
+    State(state): State<ApiState>,
+    Path(method): Path<String>,
+    request: Request,
+) -> Response {
+    compat_unary_method(state, format!("pluginInventory/{method}"), request).await
+}
+async fn compat_goals(
+    State(state): State<ApiState>,
+    Path(method): Path<String>,
+    request: Request,
+) -> Response {
+    compat_unary_method(state, format!("goals/{method}"), request).await
+}
+
+async fn compat_message_feedback(
+    State(state): State<ApiState>,
+    Path(method): Path<String>,
+    request: Request,
+) -> Response {
+    compat_unary_method(state, format!("messageFeedback/{method}"), request).await
 }
 
 async fn compat_unary(
@@ -897,6 +2020,18 @@ async fn compat_unary(
     Path(method): Path<String>,
     request: Request,
 ) -> Response {
+    compat_unary_method(state, method, request).await
+}
+
+async fn compat_commands_list(State(state): State<ApiState>, request: Request) -> Response {
+    compat_unary_method(state, "commands/list".into(), request).await
+}
+
+async fn compat_commands_execute(State(state): State<ApiState>, request: Request) -> Response {
+    compat_unary_method(state, "commands/execute".into(), request).await
+}
+
+async fn compat_unary_method(state: ApiState, method: String, request: Request) -> Response {
     if !is_json(request.headers()) {
         return compat_response_error(
             Value::Null,
@@ -969,12 +2104,37 @@ fn prompt_body_limit(state: &ApiState) -> usize {
         .unwrap_or(MAX_PROMPT_FRAME_BYTES)
         .clamp(MAX_FRAME_BYTES, MAX_PROMPT_FRAME_BYTES)
 }
+fn canonical_client_time_zone(value: &str) -> Option<String> {
+    if value == "UTC" {
+        return Some("UTC".into());
+    }
+    if value.is_empty()
+        || value.trim() != value
+        || !value.contains('/')
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'.' | b'-' | b'/')
+        })
+    {
+        return None;
+    }
+    let root = fs::canonicalize("/usr/share/zoneinfo").ok()?;
+    let zone = fs::canonicalize(root.join(value)).ok()?;
+    zone.strip_prefix(root)
+        .ok()?
+        .to_str()
+        .filter(|zone| {
+            zone.contains('/') && !zone.starts_with("posix/") && !zone.starts_with("right/")
+        })
+        .map(str::to_owned)
+}
 
 fn compat_response_limit(state: &ApiState, method: &str) -> usize {
-    if method == "session.attachment" {
-        compat_attachment_response_limit(state.host.attachment_limits().max_image_bytes)
-    } else {
-        MAX_FRAME_BYTES
+    match method {
+        "session.attachment" => {
+            compat_attachment_response_limit(state.host.attachment_limits().max_image_bytes)
+        }
+        "session.history" | "subagent.history" => MAX_PROMPT_FRAME_BYTES,
+        _ => MAX_FRAME_BYTES,
     }
 }
 
@@ -1028,6 +2188,7 @@ async fn compat_dispatch(
         "workspace.create"
             | "workspace.rename"
             | "workspace.delete"
+            | "workspace.insertBefore"
             | "workspace.insertSessionBefore"
             | "workspace.archiveSession"
             | "session.create"
@@ -1051,16 +2212,30 @@ async fn compat_dispatch(
                 "provider": state.compat.provider,
                 "model": state.compat.model,
                 "attachedSessions": attached_sessions,
-                "canOpenPath": false,
+                "canOpenPath": state.host.can_open_path(),
             }))
         }
         "settings.describe" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
             compat_settings_describe(state)
         }
+        "settings.openDocument" => {
+            let _: CompatEmptyPayload = compat_decode(payload)?;
+            compat_settings_open_document(state).await
+        }
         "settings.update" => compat_settings_update(state, compat_decode(payload)?).await,
         "settings.replace" => compat_settings_replace(state, compat_decode(payload)?).await,
         "settings.mutate" => compat_settings_mutate(state, compat_decode(payload)?).await,
+        "host.pickDirectory" => {
+            let _: CompatEmptyPayload = compat_decode(payload)?;
+            let path = state
+                .host
+                .pick_directory()
+                .await
+                .map_err(compat_host_error)?;
+            Ok(json!({"path": path}))
+        }
+        "host.openPath" => compat_open_path(state, compat_decode(payload)?).await,
         "host.listDirectory" => compat_list_directory(compat_decode(payload)?),
         "host.createDirectory" => compat_create_directory(compat_decode(payload)?),
         "workspace.list" => {
@@ -1074,6 +2249,7 @@ async fn compat_dispatch(
         "workspace.create" => compat_workspace_create(state, compat_decode(payload)?),
         "workspace.rename" => compat_workspace_rename(state, compat_decode(payload)?),
         "workspace.delete" => compat_workspace_delete(state, compat_decode(payload)?).await,
+        "workspace.insertBefore" => compat_workspace_insert_before(state, compat_decode(payload)?),
         "workspace.insertSessionBefore" => compat_session_move(state, compat_decode(payload)?),
         "workspace.archiveSession" => compat_archive_session(state, compat_decode(payload)?),
         "session.list" => {
@@ -1084,6 +2260,9 @@ async fn compat_dispatch(
         }
         "session.create" => compat_session_create(state, compat_decode(payload)?).await,
         "session.history" => compat_session_history(state, compat_decode(payload)?).await,
+        "session.search" => compat_session_search(state, compat_decode(payload)?).await,
+        "session.rename" => compat_session_rename(state, compat_decode(payload)?).await,
+        "session.fork" => compat_session_fork(state, compat_decode(payload)?).await,
         "session.models" => {
             let args: CompatSessionModels = compat_decode(payload)?;
             let session_id = args
@@ -1114,32 +2293,327 @@ async fn compat_dispatch(
             Ok(json!({"selected": selected}))
         }
         "session.prompt" => compat_session_prompt(state, compat_decode(payload)?).await,
+        "session.updateQueue" => compat_session_update_queue(state, compat_decode(payload)?).await,
         "session.cancel" => compat_session_cancel(state, compat_decode(payload)?).await,
+        "goal.create" => compat_goal_create(state, compat_decode(payload)?).await,
+        "goal.edit" => compat_goal_edit(state, compat_decode(payload)?).await,
+        "goal.pause" => compat_goal_pause(state, compat_decode(payload)?).await,
+        "goal.resume" => compat_goal_resume(state, compat_decode(payload)?).await,
+        "goal.complete" => compat_goal_complete(state, compat_decode(payload)?).await,
+        "goal.clear" => compat_goal_clear(state, compat_decode(payload)?).await,
+        "goals/create" => {
+            let payload: CompatRemotePayload<CompatRemoteGoalCreate> = compat_decode(payload)?;
+            compat_goal_create(
+                state,
+                CompatGoalCreate {
+                    session_id: payload.args.agent_id,
+                    objective: payload.args.request.objective,
+                    max_goal_rounds: payload.args.request.max_goal_rounds,
+                },
+            )
+            .await
+        }
+        "goals/edit" => {
+            let payload: CompatRemotePayload<CompatRemoteGoalEdit> = compat_decode(payload)?;
+            let session_id = payload.args.agent_id;
+            compat_goal_edit(
+                state,
+                CompatGoalEdit {
+                    session_id: session_id.clone(),
+                    reference: payload.args.reference,
+                    objective: payload.args.request.objective,
+                    max_goal_rounds: payload.args.request.max_goal_rounds,
+                },
+            )
+            .await?;
+            compat_remote_goal_view(state, &session_id).await
+        }
+        "goals/pause" | "goals/resume" | "goals/complete" => {
+            let action = method;
+            let payload: CompatRemotePayload<CompatRemoteGoalRef> = compat_decode(payload)?;
+            let session_id = payload.args.agent_id;
+            let args = CompatGoalRef {
+                session_id: session_id.clone(),
+                reference: payload.args.reference,
+            };
+            match action {
+                "goals/pause" => compat_goal_pause(state, args).await?,
+                "goals/resume" => compat_goal_resume(state, args).await?,
+                _ => compat_goal_complete(state, args).await?,
+            };
+            compat_remote_goal_view(state, &session_id).await
+        }
+        "goals/clear" => {
+            let payload: CompatRemotePayload<CompatRemoteGoalRef> = compat_decode(payload)?;
+            let reference = payload.args.reference;
+            compat_goal_clear(
+                state,
+                CompatGoalRef {
+                    session_id: payload.args.agent_id,
+                    reference: reference.clone(),
+                },
+            )
+            .await?;
+            serde_json::to_value(reference)
+                .map_err(|error| CompatError::internal(error.to_string()))
+        }
         "subagent.list" => {
             let args: CompatSubagentList = compat_decode(payload)?;
             compat_require_session(&args.parent_session_id)?;
-            Ok(json!({"entries": [], "parentAvailable": true}))
+            let catalog = state
+                .host
+                .subagent_list(args.parent_session_id)
+                .await
+                .map_err(compat_host_error)?;
+            serde_json::to_value(catalog).map_err(|error| CompatError::internal(error.to_string()))
         }
+        "subagent.history" => compat_subagent_history(state, compat_decode(payload)?).await,
+        "subagent.prompt" => compat_subagent_prompt(state, compat_decode(payload)?).await,
+        "subagent.interrupt" => compat_subagent_interrupt(state, compat_decode(payload)?).await,
+        "subagent.delete" => compat_subagent_delete(state, compat_decode(payload)?).await,
         "command.list" => {
-            let _: CompatSessionRef = compat_decode(payload)?;
-            Ok(json!({"commands": []}))
+            let args: CompatSessionRef = compat_decode(payload)?;
+            let commands = state
+                .host
+                .command_list(args.session_id.clone())
+                .await
+                .map_err(|error| compat_session_rpc_error(error, &args.session_id))?;
+            Ok(json!({"commands": commands}))
+        }
+        "commands/list" => {
+            let payload: CompatRemotePayload<CompatCommandList> = compat_decode(payload)?;
+            serde_json::to_value(
+                state
+                    .host
+                    .command_list(payload.args.agent_id.clone())
+                    .await
+                    .map_err(|error| compat_session_rpc_error(error, &payload.args.agent_id))?,
+            )
+            .map_err(|error| CompatError::internal(error.to_string()))
+        }
+        "commands/execute" => {
+            let payload: CompatRemotePayload<CompatCommandExecute> = compat_decode(payload)?;
+            serde_json::to_value(
+                state
+                    .host
+                    .command_execute(payload.args.agent_id.clone(), payload.args.line)
+                    .await
+                    .map_err(|error| compat_session_rpc_error(error, &payload.args.agent_id))?,
+            )
+            .map_err(|error| CompatError::internal(error.to_string()))
+        }
+        "messageFeedback/list" => {
+            let payload: CompatRemotePayload<CompatMessageFeedbackCall<CompatMessageFeedbackList>> =
+                compat_decode(payload)?;
+            compat_message_feedback_list(state, payload.args.request).await
+        }
+        "messageFeedback/put" => {
+            let payload: CompatRemotePayload<CompatMessageFeedbackCall<CompatMessageFeedbackPut>> =
+                compat_decode(payload)?;
+            compat_message_feedback_put(state, payload.args.request).await
+        }
+        "messageFeedback/delete" => {
+            let payload: CompatRemotePayload<
+                CompatMessageFeedbackCall<CompatMessageFeedbackDelete>,
+            > = compat_decode(payload)?;
+            compat_message_feedback_delete(state, payload.args.request).await
+        }
+        "pluginInventory/list" => {
+            let _: CompatRemotePayload<CompatEmptyPayload> = compat_decode(payload)?;
+            let entries = state.frontend.as_ref().map_or_else(Vec::new, |frontend| {
+                frontend
+                    .graph()
+                    .entries
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "entryId": entry.id,
+                            "moduleName": entry.id,
+                            "enabled": true,
+                            "fiberPhase": "active",
+                        })
+                    })
+                    .collect()
+            });
+            Ok(json!({"entries": entries}))
+        }
+        "dynamicCordisRunner/syncInspectManifest" => {
+            let payload: CompatRemotePayload<CompatCordisInspectManifest> = compat_decode(payload)?;
+            let args = serde_json::to_value(payload.args)
+                .map_err(|error| CompatError::invalid(error.to_string()))?;
+            state
+                .host
+                .dynamic_cordis_call("syncInspectManifest", args)
+                .await
+                .map_err(compat_host_error)
+        }
+        "dynamicCordisRunner/inventory" => {
+            let _: CompatRemotePayload<CompatEmptyPayload> = compat_decode(payload)?;
+            state
+                .host
+                .dynamic_cordis_inventory()
+                .map_err(compat_host_error)
+        }
+        "dynamicCordisRunner/runHostHalf" => {
+            let payload: CompatRemotePayload<Value> = compat_decode(payload)?;
+            state
+                .host
+                .dynamic_cordis_run_host_half(payload.args)
+                .await
+                .map_err(compat_host_error)
+        }
+        "dynamicCordisRunner/getClientCode"
+        | "dynamicCordisRunner/resolveRequestRun"
+        | "dynamicCordisRunner/undefineFromPanel"
+        | "dynamicCordisRunner/settleUserRun"
+        | "dynamicCordisRunner/stopFromPanel"
+        | "dynamicCordisRunner/resolveInspectQuery"
+        | "dynamicCordisRunner/reportRenderFailure"
+        | "dynamicCordisRunner/reportClientGuardFailure"
+        | "dynamicCordisRunner/invoke" => {
+            let payload: CompatRemotePayload<Value> = compat_decode(payload)?;
+            let method = method
+                .rsplit('/')
+                .next()
+                .expect("dynamic Cordis method has a suffix");
+            state
+                .host
+                .dynamic_cordis_call(method, payload.args)
+                .await
+                .map_err(compat_host_error)
         }
         "skill.list" => {
-            let _: CompatSessionRef = compat_decode(payload)?;
-            Ok(json!({"skills": []}))
+            let args: CompatSessionRef = compat_decode(payload)?;
+            let session = state
+                .host
+                .list_sessions()
+                .await
+                .map_err(compat_host_error)?
+                .into_iter()
+                .find(|session| session.session_id == args.session_id)
+                .ok_or_else(|| CompatError {
+                    code: "session-not-found".into(),
+                    message: "session was not found".into(),
+                    details: json!({"sessionId": args.session_id}),
+                })?;
+            let supports_filesystem = match session.agent_preset {
+                Some(preset) => match state.host.agent_preset_read(preset).await {
+                    Ok(document) => composition_contains_plugin(
+                        &document.content,
+                        "@deepseek-ai/dsh-skill-filesystem",
+                    )
+                    .unwrap_or(false),
+                    Err(_) => false,
+                },
+                None => true,
+            };
+            let Some(cwd) = session.cwd.filter(|_| supports_filesystem) else {
+                return Ok(json!({"skills": []}));
+            };
+            let root = std::path::PathBuf::from(cwd).join(".agents/skills");
+            if !root.is_dir() {
+                return Ok(json!({"skills": []}));
+            }
+            let provider = FilesystemSkillProvider::from_root(root)
+                .map_err(|error| CompatError::internal(error.to_string()))?;
+            let skills = provider
+                .list(ContextHandle::root().scope().cancellation())
+                .await
+                .map_err(|error| CompatError::internal(error.to_string()))?
+                .into_iter()
+                .filter(|skill| skill.invocation.user_invocable)
+                .map(|skill| {
+                    let mut entry = json!({
+                        "name": skill.name,
+                        "description": skill.description,
+                        "modelInvocable": skill.invocation.model_invocable,
+                    });
+                    if let Some(when_to_use) = skill.when_to_use {
+                        entry["whenToUse"] = Value::String(when_to_use);
+                    }
+                    entry
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({"skills": skills}))
         }
         "agentPreset.list" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
-            Ok(json!({
-                "presets": [{
-                    "id": "default",
-                    "trust": "system",
-                    "isDefault": true,
-                    "name": "Default",
-                }],
-                "authorable": false,
-                "hasDocument": false,
-            }))
+            let presets = state
+                .host
+                .agent_preset_list()
+                .await
+                .map_err(compat_preset_error)?;
+            let (authorable, has_document) = state.host.agent_preset_capabilities();
+            Ok(json!({"presets": presets, "authorable": authorable, "hasDocument": has_document}))
+        }
+        "agentPreset.read" => {
+            let args: CompatAgentPresetRef = compat_decode(payload)?;
+            compat_require_nonblank("agentPreset", &args.agent_preset)?;
+            serde_json::to_value(
+                state
+                    .host
+                    .agent_preset_read(args.agent_preset)
+                    .await
+                    .map_err(compat_preset_error)?,
+            )
+            .map_err(|error| CompatError::internal(error.to_string()))
+        }
+        "agentPreset.copy" => {
+            let args: CompatAgentPresetCopy = compat_decode(payload)?;
+            compat_require_nonblank("from", &args.from)?;
+            compat_require_nonblank("agentPreset", &args.agent_preset)?;
+            let agent_preset = state
+                .host
+                .agent_preset_copy(args.from, args.agent_preset, args.name)
+                .await
+                .map_err(compat_preset_error)?;
+            Ok(json!({"agentPreset": agent_preset}))
+        }
+        "agentPreset.remove" => {
+            let args: CompatAgentPresetRef = compat_decode(payload)?;
+            compat_require_nonblank("agentPreset", &args.agent_preset)?;
+            state
+                .host
+                .agent_preset_remove(args.agent_preset)
+                .await
+                .map_err(compat_preset_error)?;
+            Ok(json!({}))
+        }
+        "agentPreset.openDocument" => {
+            let args: CompatAgentPresetRef = compat_decode(payload)?;
+            compat_require_nonblank("agentPreset", &args.agent_preset)?;
+            serde_json::to_value(
+                state
+                    .host
+                    .agent_preset_open_document(args.agent_preset)
+                    .await
+                    .map_err(compat_preset_error)?,
+            )
+            .map_err(|error| CompatError::internal(error.to_string()))
+        }
+        "agentPreset.select" => {
+            let args: CompatAgentPresetSelect = compat_decode(payload)?;
+            compat_require_session(&args.session_id)?;
+            compat_require_nonblank("agentPreset", &args.agent_preset)?;
+            let session_id = args.session_id.clone();
+            let agent_preset = state
+                .host
+                .agent_preset_select(args.session_id, args.agent_preset)
+                .await
+                .map_err(compat_preset_error)?;
+            if let Some(session) = compat_data(&state.compat).sessions.get_mut(&session_id) {
+                session.agent_preset = Some(agent_preset.clone());
+            }
+            broadcast_compat(
+                &state.compat,
+                CompatStream::Host,
+                json!({
+                    "type": "host/remote-event",
+                    "event": "agent-preset/selected",
+                    "args": [session_id, agent_preset],
+                }),
+            );
+            Ok(json!({"agentPreset": agent_preset}))
         }
         "llm.providers" => {
             let _: CompatEmptyPayload = compat_decode(payload)?;
@@ -1154,11 +2628,255 @@ async fn compat_dispatch(
         }
         "llm.models" => compat_llm_models(state, compat_decode(payload)?).await,
         "llm.discoverModels" => compat_discover_models(state, compat_decode(payload)?).await,
+        "llm.providerModels" => {
+            let args: CompatProviderModels = compat_decode(payload)?;
+            compat_require_nonblank("provider", &args.provider)?;
+            if !args.config.is_object() {
+                return Err(CompatError::invalid("config must be an object"));
+            }
+            serde_json::to_value(
+                state
+                    .host
+                    .provider_models(args.provider, args.config)
+                    .await
+                    .map_err(compat_provider_models_error)?,
+            )
+            .map_err(|error| CompatError::internal(error.to_string()))
+        }
+        "llm.setProviderEnabled" => {
+            let args: CompatSetProviderEnabled = compat_decode(payload)?;
+            compat_require_nonblank("provider", &args.provider)?;
+            serde_json::to_value(
+                state
+                    .host
+                    .set_provider_enabled(args.provider, args.enabled)
+                    .await
+                    .map_err(compat_provider_models_error)?,
+            )
+            .map_err(|error| CompatError::internal(error.to_string()))
+        }
         "credentials.describe" => compat_credentials_describe(state, compat_decode(payload)?).await,
         "credentials.set" => compat_credentials_set(state, compat_decode(payload)?).await,
         "credentials.unset" => compat_credentials_unset(state, compat_decode(payload)?).await,
         _ => Err(CompatError::not_found()),
     }
+}
+
+async fn compat_goal_service(
+    state: &ApiState,
+    session_id: &SessionId,
+) -> Result<GoalService, CompatError> {
+    compat_require_session(session_id)?;
+    state
+        .host
+        .goal_service(session_id.clone())
+        .await
+        .map_err(|error| {
+            if error.code == "SESSION_NOT_FOUND" {
+                CompatError {
+                    code: "session-not-found".into(),
+                    message: error.message,
+                    details: json!({"sessionId": session_id}),
+                }
+            } else {
+                compat_host_error(error)
+            }
+        })
+}
+
+fn compat_goal_error(error: GoalError) -> CompatError {
+    if error.code() == "CANCELLED" {
+        CompatError {
+            code: "cancelled".into(),
+            message: error.to_string(),
+            details: json!({}),
+        }
+    } else {
+        CompatError {
+            code: "internal".into(),
+            message: error.to_string(),
+            details: json!({"goalCode": error.code()}),
+        }
+    }
+}
+
+fn compat_validate_goal_create(args: &CompatGoalCreate) -> Result<(), CompatError> {
+    if args.objective.is_empty() {
+        return Err(CompatError::invalid("objective must be a non-empty string"));
+    }
+    if args
+        .max_goal_rounds
+        .is_some_and(|rounds| rounds == 0 || rounds > 9_007_199_254_740_991)
+    {
+        return Err(CompatError::invalid(
+            "maxGoalRounds must be a positive safe integer",
+        ));
+    }
+    Ok(())
+}
+
+fn compat_validate_goal_ref(reference: &GoalRef) -> Result<(), CompatError> {
+    if reference.revision == 0 {
+        return Err(CompatError::invalid(
+            "ref.revision must be a positive integer",
+        ));
+    }
+    Ok(())
+}
+
+async fn compat_goal_create(
+    state: &ApiState,
+    args: CompatGoalCreate,
+) -> Result<Value, CompatError> {
+    compat_validate_goal_create(&args)?;
+    let goals = compat_goal_service(state, &args.session_id).await?;
+    let cancellation = goals.cancellation();
+    let snapshot = goals
+        .create(args.objective, args.max_goal_rounds, cancellation)
+        .await
+        .map_err(compat_goal_error)?;
+    goals.drive().await.map_err(compat_goal_error)?;
+    Ok(json!({"ref": snapshot.reference}))
+}
+
+async fn compat_goal_edit(state: &ApiState, args: CompatGoalEdit) -> Result<Value, CompatError> {
+    if args.objective.is_none() && args.max_goal_rounds.is_none() {
+        return Err(CompatError::invalid(
+            "goal.edit requires objective or maxGoalRounds",
+        ));
+    }
+    if args.objective.as_deref() == Some("")
+        || args
+            .max_goal_rounds
+            .is_some_and(|rounds| rounds == 0 || rounds > 9_007_199_254_740_991)
+    {
+        return Err(CompatError::invalid(
+            "goal edit fields must be safe, positive, and non-empty",
+        ));
+    }
+    compat_validate_goal_ref(&args.reference)?;
+    let goals = compat_goal_service(state, &args.session_id).await?;
+    let cancellation = goals.cancellation();
+    let snapshot = goals
+        .edit(
+            args.reference,
+            args.objective,
+            args.max_goal_rounds,
+            cancellation,
+        )
+        .await
+        .map_err(compat_goal_error)?;
+    Ok(json!({"ref": snapshot.reference}))
+}
+
+async fn compat_goal_pause(state: &ApiState, args: CompatGoalRef) -> Result<Value, CompatError> {
+    compat_validate_goal_ref(&args.reference)?;
+    let goals = compat_goal_service(state, &args.session_id).await?;
+    let cancellation = goals.cancellation();
+    let snapshot = goals
+        .pause(args.reference, cancellation)
+        .await
+        .map_err(compat_goal_error)?;
+    Ok(json!({"ref": snapshot.reference}))
+}
+
+async fn compat_goal_resume(state: &ApiState, args: CompatGoalRef) -> Result<Value, CompatError> {
+    compat_validate_goal_ref(&args.reference)?;
+    let goals = compat_goal_service(state, &args.session_id).await?;
+    let cancellation = goals.cancellation();
+    let snapshot = goals
+        .resume(args.reference, cancellation)
+        .await
+        .map_err(compat_goal_error)?;
+    goals.drive().await.map_err(compat_goal_error)?;
+    Ok(json!({"ref": snapshot.reference}))
+}
+
+async fn compat_goal_complete(state: &ApiState, args: CompatGoalRef) -> Result<Value, CompatError> {
+    compat_validate_goal_ref(&args.reference)?;
+    let goals = compat_goal_service(state, &args.session_id).await?;
+    let cancellation = goals.cancellation();
+    let snapshot = goals
+        .complete(args.reference, cancellation)
+        .await
+        .map_err(compat_goal_error)?;
+    Ok(json!({"ref": snapshot.reference}))
+}
+
+async fn compat_goal_clear(state: &ApiState, args: CompatGoalRef) -> Result<Value, CompatError> {
+    compat_validate_goal_ref(&args.reference)?;
+    let goals = compat_goal_service(state, &args.session_id).await?;
+    let cancellation = goals.cancellation();
+    goals
+        .clear(args.reference, cancellation)
+        .await
+        .map_err(compat_goal_error)?;
+    Ok(json!({"cleared": true}))
+}
+
+async fn compat_remote_goal_view(
+    state: &ApiState,
+    session_id: &SessionId,
+) -> Result<Value, CompatError> {
+    let goals = compat_goal_service(state, session_id).await?;
+    let projection = goals
+        .projection()
+        .await
+        .ok_or_else(|| CompatError::internal("goal projection is unavailable"))?;
+    let mut goal = projection
+        .get("goal")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| CompatError::internal("goal projection is malformed"))?;
+    let activation = if goal.get("phase").and_then(Value::as_str) == Some("active") {
+        "armed"
+    } else {
+        "disarmed"
+    };
+    goal.insert("activation".into(), Value::String(activation.into()));
+    for key in ["roundsStarted", "createdAt", "updatedAt"] {
+        goal.insert(key.into(), projection[key].clone());
+    }
+    Ok(Value::Object(goal))
+}
+
+async fn compat_message_feedback_list(
+    state: &ApiState,
+    args: CompatMessageFeedbackList,
+) -> Result<Value, CompatError> {
+    state
+        .host
+        .message_feedback_list(args.session_id)
+        .await
+        .map_err(compat_host_error)
+}
+
+async fn compat_message_feedback_put(
+    state: &ApiState,
+    args: CompatMessageFeedbackPut,
+) -> Result<Value, CompatError> {
+    state
+        .host
+        .message_feedback_put(
+            args.session_id,
+            args.message_id,
+            args.rating,
+            args.note,
+            args.if_version,
+        )
+        .await
+        .map_err(compat_host_error)
+}
+
+async fn compat_message_feedback_delete(
+    state: &ApiState,
+    args: CompatMessageFeedbackDelete,
+) -> Result<Value, CompatError> {
+    state
+        .host
+        .message_feedback_delete(args.session_id, args.message_id, args.if_version)
+        .await
+        .map_err(compat_host_error)
 }
 
 fn compat_settings_describe(state: &ApiState) -> Result<Value, CompatError> {
@@ -1175,9 +2893,23 @@ fn compat_settings_describe(state: &ApiState) -> Result<Value, CompatError> {
         .collect::<Vec<_>>();
     Ok(json!({
         "writable": settings.writable(),
-        "hasDocument": false,
+        "hasDocument": state.host.has_settings_document(),
         "namespaces": namespaces,
     }))
+}
+
+async fn compat_settings_open_document(state: &ApiState) -> Result<Value, CompatError> {
+    if state.host.settings().is_none() {
+        return Err(CompatError::internal(
+            "settings service is absent: this deployment does not mount a settings provider",
+        ));
+    }
+    state
+        .host
+        .open_settings_document()
+        .await
+        .map_err(compat_host_error)?;
+    Ok(json!({"opened": true}))
 }
 
 fn compat_settings_view(descriptor: SettingsDescriptor) -> Value {
@@ -1185,7 +2917,10 @@ fn compat_settings_view(descriptor: SettingsDescriptor) -> Value {
         ("ns".into(), Value::String(descriptor.namespace)),
         ("schema".into(), descriptor.schema),
         ("value".into(), descriptor.resolved),
-        ("applies".into(), Value::String("live".into())),
+        (
+            "applies".into(),
+            serde_json::to_value(descriptor.applies).expect("settings applies is serializable"),
+        ),
         (
             "secrets".into(),
             Value::Array(
@@ -1208,21 +2943,22 @@ fn compat_settings_view(descriptor: SettingsDescriptor) -> Value {
     Value::Object(view)
 }
 fn is_exposed_settings_namespace(ns: &str) -> bool {
-    matches!(
-        ns,
-        "agent-loop"
-            | "agent-default-model"
-            | "shell"
-            | "locale"
-            | "permission"
-            | "ui-conversation"
-            | "ui-theme"
-            | "web-search-deepseek"
-            | "ui-onboarding"
-            | "agent-presets"
-    ) || ns
-        .strip_prefix("llm-")
-        .is_some_and(|provider| !provider.is_empty())
+    ns == PERMISSION_SETTINGS_NAMESPACE
+        || matches!(
+            ns,
+            "agent-loop"
+                | "agent-default-model"
+                | "shell"
+                | "locale"
+                | "ui-conversation"
+                | "ui-theme"
+                | "web-search-deepseek"
+                | "ui-onboarding"
+                | "agent-presets"
+        )
+        || ns
+            .strip_prefix("llm-")
+            .is_some_and(|provider| !provider.is_empty())
 }
 fn compat_require_ns(ns: &str) -> Result<(), CompatError> {
     if !is_exposed_settings_namespace(ns) {
@@ -1525,6 +3261,18 @@ fn compat_create_directory(args: CompatCreateDirectory) -> Result<Value, CompatE
     Ok(json!({"path": path.to_string_lossy()}))
 }
 
+async fn compat_open_path(state: &ApiState, args: CompatOpenPath) -> Result<Value, CompatError> {
+    if args.path.trim().is_empty() {
+        return Err(CompatError::invalid("path must not be empty"));
+    }
+    state
+        .host
+        .open_path(args.path)
+        .await
+        .map_err(compat_host_error)?;
+    Ok(json!({"opened": true}))
+}
+
 fn compat_registry(state: &ApiState) -> Result<crate::workspace::WorkspaceRegistry, CompatError> {
     state
         .host
@@ -1697,6 +3445,44 @@ async fn compat_workspace_delete(
     Ok(json!({"deleted": true}))
 }
 
+fn compat_workspace_insert_before(
+    state: &ApiState,
+    args: CompatWorkspaceInsertBefore,
+) -> Result<Value, CompatError> {
+    if args.workspace_id.is_empty() {
+        return Err(CompatError::invalid("workspaceId must not be empty"));
+    }
+    if args
+        .before_workspace_id
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(CompatError::invalid("beforeWorkspaceId must not be empty"));
+    }
+    let registry = compat_registry(state)?;
+    let before = registry
+        .snapshot()
+        .items
+        .into_iter()
+        .map(|workspace| workspace.workspace_id)
+        .collect::<Vec<_>>();
+    let workspace_ids = registry
+        .insert_before(
+            &args.workspace_id,
+            args.before_workspace_id.as_deref(),
+            None,
+        )
+        .map_err(compat_workspace_error)?;
+    if before != workspace_ids {
+        broadcast_compat(
+            &state.compat,
+            CompatStream::Host,
+            json!({"type": "host/workspace-order-changed", "workspaceIds": workspace_ids.clone()}),
+        );
+    }
+    Ok(json!({"workspaceIds": workspace_ids}))
+}
+
 fn compat_session_move(state: &ApiState, args: CompatSessionMove) -> Result<Value, CompatError> {
     compat_require_nonblank("workspaceId", &args.workspace_id)?;
     compat_require_session(&args.session_id)?;
@@ -1784,6 +3570,31 @@ async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
         .list_sessions()
         .await
         .map_err(compat_host_error)?;
+    let mut projections = BTreeMap::new();
+    let attachment_limits = state.host.attachment_limits();
+    for session in &sessions {
+        let events = state
+            .host
+            .events(session.session_id.clone(), 0)
+            .await
+            .map_err(compat_host_error)?;
+        let mut values = compat_derived_projection_values(&events, &attachment_limits);
+        for projection in state
+            .host
+            .session_projections(session.session_id.clone())
+            .await
+            .map_err(compat_host_error)?
+        {
+            values.insert(projection.key, projection.value);
+        }
+        projections.insert(
+            session.session_id.clone(),
+            (!values.is_empty()).then_some(CompatSessionProjections {
+                as_of_seq: events.last().map_or(0, |event| event.seq),
+                values,
+            }),
+        );
+    }
     let mut data = compat_data(&state.compat);
     let live_ids: BTreeSet<_> = sessions
         .iter()
@@ -1791,23 +3602,34 @@ async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
         .collect();
     data.sessions.retain(|id, _| live_ids.contains(id));
     for session in sessions {
+        let projection = projections.remove(&session.session_id).flatten();
+        let agent_preset = session.agent_preset.clone();
         let entry = data
             .sessions
             .entry(session.session_id.clone())
             .or_insert_with(|| CompatSession {
                 session_id: session.session_id.clone(),
                 workspace_id: session.workspace_id.clone(),
-                updated_at: session.created_at.min(MAX_SAFE_INTEGER),
-                running: false,
-                blank: session.event_count <= 1,
+                updated_at: session.updated_at.min(MAX_SAFE_INTEGER),
+                running: session.running,
+                blank: session.blank,
                 cwd: session.cwd.clone(),
+                parent_session_id: session.parent_session.clone(),
+                origin: session.origin,
+                agent_preset: agent_preset.clone(),
+                projections: projection.clone(),
             });
         entry.workspace_id = session.workspace_id;
         entry.updated_at = entry
             .updated_at
-            .max(session.created_at.min(MAX_SAFE_INTEGER));
-        entry.blank = session.event_count <= 1;
+            .max(session.updated_at.min(MAX_SAFE_INTEGER));
+        entry.running = session.running;
+        entry.blank = session.blank;
         entry.cwd = session.cwd;
+        entry.parent_session_id = session.parent_session;
+        entry.origin = session.origin;
+        entry.agent_preset = agent_preset;
+        entry.projections = projection;
     }
     Ok(())
 }
@@ -1857,6 +3679,44 @@ fn compat_session_host_error(
     }
 }
 
+fn compat_session_added_payload(session: &CompatSession) -> Value {
+    let mut payload = json!({
+        "type": "host/session-added",
+        "sessionId": session.session_id,
+        "blank": session.blank,
+    });
+    let fields = payload
+        .as_object_mut()
+        .expect("session-added payload is an object");
+    for (name, value) in [
+        (
+            "cwd",
+            serde_json::to_value(&session.cwd).expect("cwd serializes"),
+        ),
+        (
+            "workspaceId",
+            serde_json::to_value(&session.workspace_id).expect("workspace id serializes"),
+        ),
+        (
+            "parentSessionId",
+            serde_json::to_value(&session.parent_session_id).expect("parent session serializes"),
+        ),
+        (
+            "origin",
+            serde_json::to_value(session.origin).expect("origin serializes"),
+        ),
+        (
+            "agentPreset",
+            serde_json::to_value(&session.agent_preset).expect("agent preset serializes"),
+        ),
+    ] {
+        if !value.is_null() {
+            fields.insert(name.into(), value);
+        }
+    }
+    payload
+}
+
 async fn compat_session_create(
     state: &ApiState,
     args: CompatSessionCreate,
@@ -1889,10 +3749,14 @@ async fn compat_session_create(
         let session = CompatSession {
             session_id: session_id.clone(),
             workspace_id: persisted.workspace_id.clone(),
-            updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
-            running: false,
-            blank: persisted.event_count <= 1,
+            updated_at: persisted.updated_at.min(MAX_SAFE_INTEGER),
+            running: persisted.running,
+            blank: persisted.blank,
             cwd: persisted.cwd,
+            parent_session_id: persisted.parent_session,
+            origin: persisted.origin,
+            agent_preset: persisted.agent_preset,
+            projections: None,
         };
         compat_data(&state.compat)
             .sessions
@@ -1901,12 +3765,7 @@ async fn compat_session_create(
             broadcast_compat(
                 &state.compat,
                 CompatStream::Host,
-                json!({
-                    "type": "host/session-added",
-                    "sessionId": session.session_id,
-                    "blank": session.blank,
-                    "cwd": session.cwd,
-                }),
+                compat_session_added_payload(&session),
             );
         }
         return Ok(json!({"sessionId": session_id}));
@@ -1955,10 +3814,14 @@ async fn compat_session_create(
             .workspace_id
             .clone()
             .or_else(|| Some(requested_cwd.0.clone())),
-        updated_at: persisted.created_at.min(MAX_SAFE_INTEGER),
-        running: false,
-        blank: persisted.event_count <= 1,
+        updated_at: persisted.updated_at.min(MAX_SAFE_INTEGER),
+        running: persisted.running,
+        blank: persisted.blank,
         cwd: persisted.cwd.or_else(|| Some(requested_cwd.1.clone())),
+        parent_session_id: persisted.parent_session,
+        origin: persisted.origin,
+        agent_preset: persisted.agent_preset,
+        projections: None,
     };
     compat_data(&state.compat)
         .sessions
@@ -1982,13 +3845,7 @@ async fn compat_session_create(
         broadcast_compat(
             &state.compat,
             CompatStream::Host,
-            json!({
-                "type": "host/session-added",
-                "sessionId": session.session_id,
-                "blank": session.blank,
-                "cwd": session.cwd,
-                "workspaceId": requested_cwd.0,
-            }),
+            compat_session_added_payload(&session),
         );
     }
     Ok(json!({"sessionId": session_id}))
@@ -2006,13 +3863,13 @@ async fn compat_session_history(
             ));
         }
     }
-    let max_messages = args.max_messages.unwrap_or(1_000);
-    if max_messages > 1_000 {
+    let max_messages = args.max_messages.unwrap_or(50);
+    if max_messages == 0 || max_messages > 1_000 {
         return Err(CompatError::invalid(
-            "maxMessages exceeds the supported range",
+            "maxMessages must be between 1 and 1000",
         ));
     }
-    let mut events: Vec<_> = match state.host.events(args.session_id, 0).await {
+    let events: Vec<_> = match state.host.events(args.session_id.clone(), 0).await {
         Ok(events) => events,
         Err(error) if error.code == "SESSION_NOT_FOUND" => Vec::new(),
         Err(error) => return Err(compat_host_error(error)),
@@ -2023,15 +3880,832 @@ async fn compat_session_history(
             .is_none_or(|before_seq| event.seq < before_seq)
     })
     .collect();
-    let has_more = events.len() > max_messages;
-    if has_more {
-        events.drain(..events.len() - max_messages);
-    }
-    Ok(json!({
-        "events": events.into_iter().map(|event| json!({"event": event})).collect::<Vec<_>>(),
+    let tool_calls = compat_tool_calls(&events);
+    let attachment_limits = state.host.attachment_limits();
+    let projections = if args.before_seq.is_none() {
+        let mut values = compat_derived_projection_values(&events, &attachment_limits);
+        for projection in state
+            .host
+            .session_projections(args.session_id.clone())
+            .await
+            .map_err(compat_host_error)?
+        {
+            values.insert(projection.key, projection.value);
+        }
+        let as_of_seq = events.last().map_or(-1, |event| event.seq as i64);
+        Some(json!({"asOfSeq": as_of_seq, "values": values}))
+    } else {
+        None
+    };
+    let (events, has_more) = compat_paginate_history(events, max_messages);
+    let cwd = compat_data(&state.compat)
+        .sessions
+        .get(&args.session_id)
+        .and_then(|session| session.cwd.clone())
+        .unwrap_or_else(|| state.compat.cwd.clone());
+    let entries = events
+        .iter()
+        .map(|event| {
+            let mut entry = json!({"event": event});
+            if let Some(view) = compat_history_tool_view(event, &tool_calls, &cwd) {
+                entry["view"] = view;
+            }
+            entry
+        })
+        .collect::<Vec<_>>();
+    let mut output = json!({
+        "events": entries,
         "hasMore": has_more,
+    });
+    if let Some(projections) = projections {
+        output["projections"] = projections;
+    }
+    Ok(output)
+}
+
+fn compat_paginate_history(
+    mut events: Vec<SessionEvent>,
+    max_messages: usize,
+) -> (Vec<SessionEvent>, bool) {
+    let mut messages = 0;
+    let mut cut = 0;
+    for (index, event) in events.iter().enumerate().rev() {
+        if matches!(
+            event.event_type.as_str(),
+            "user/message" | "assistant/message"
+        ) {
+            messages += 1;
+        }
+        if event.event_type == "turn/start" && messages >= max_messages {
+            cut = index;
+            break;
+        }
+    }
+    events.drain(..cut);
+    (events, cut > 0)
+}
+
+fn compat_tool_calls(events: &[SessionEvent]) -> BTreeMap<String, CompatToolCall> {
+    events
+        .iter()
+        .filter_map(|event| {
+            (event.event_type == "tool/call")
+                .then(|| {
+                    Some((
+                        event.data.get("callId")?.as_str()?.to_owned(),
+                        compat_tool_call(event)?,
+                    ))
+                })
+                .flatten()
+        })
+        .collect()
+}
+
+fn compat_history_tool_view(
+    event: &SessionEvent,
+    calls: &BTreeMap<String, CompatToolCall>,
+    cwd: &str,
+) -> Option<Value> {
+    if event.event_type == "tool/call" {
+        return compat_tool_call(event)
+            .and_then(|call| compat_present_tool_call(&call, cwd))
+            .map(|view| json!({"for": "call", "view": view}));
+    }
+    let call = calls.get(compat_tool_result_call_id(event)?)?;
+    compat_present_tool_result(call, event).map(|view| json!({"for": "result", "view": view}))
+}
+
+async fn compat_live_tool_view(
+    state: &ApiState,
+    session_id: &SessionId,
+    event: &SessionEvent,
+) -> Option<Value> {
+    if event.event_type == "tool/call" {
+        let call_id = event.data.get("callId")?.as_str()?.to_owned();
+        let call = compat_tool_call(event)?;
+        let mut data = compat_data(&state.compat);
+        let cwd = data
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.cwd.as_deref())
+            .unwrap_or(&state.compat.cwd)
+            .to_owned();
+        // ponytail: bounded presentation cache; use an LRU only if concurrent pending calls exceed this ceiling.
+        if data.tool_calls.len() >= 4_096 {
+            data.tool_calls.pop_first();
+        }
+        data.tool_calls
+            .insert((session_id.clone(), call_id), call.clone());
+        return compat_present_tool_call(&call, &cwd)
+            .map(|view| json!({"for": "call", "view": view}));
+    }
+    let call_id = compat_tool_result_call_id(event)?;
+    let cached = compat_data(&state.compat)
+        .tool_calls
+        .get(&(session_id.clone(), call_id.to_owned()))
+        .cloned();
+    let call = match cached {
+        Some(call) => call,
+        None => state
+            .host
+            .events(session_id.clone(), 0)
+            .await
+            .ok()?
+            .into_iter()
+            .rev()
+            .find_map(|candidate| {
+                (candidate.event_type == "tool/call"
+                    && candidate.data.get("callId").and_then(Value::as_str) == Some(call_id))
+                .then(|| compat_tool_call(&candidate))
+                .flatten()
+            })?,
+    };
+    compat_present_tool_result(&call, event).map(|view| json!({"for": "result", "view": view}))
+}
+
+fn compat_tool_call(event: &SessionEvent) -> Option<CompatToolCall> {
+    Some(CompatToolCall {
+        name: event.data.get("name")?.as_str()?.to_owned(),
+        arguments: event.data.get("arguments")?.as_str()?.to_owned(),
+    })
+}
+
+fn compat_present_tool_call(call: &CompatToolCall, cwd: &str) -> Option<Value> {
+    let arguments: Value = serde_json::from_str(&call.arguments).ok()?;
+    if call.name == "bash" {
+        let command = arguments.get("command")?.as_str()?;
+        let mut view = json!({"card": "terminal", "title": command, "cwd": cwd});
+        if let Some(description) = arguments.get("description").and_then(Value::as_str) {
+            view["description"] = json!(description);
+        }
+        return Some(view);
+    }
+    if matches!(call.name.as_str(), "write" | "edit" | "apply_patch") {
+        let path = arguments
+            .get("file_path")
+            .or_else(|| arguments.get("path"))
+            .and_then(Value::as_str)?;
+        let (old_text, new_text) = match call.name.as_str() {
+            "write" => (
+                Value::Null,
+                arguments.get("content").cloned().unwrap_or(Value::Null),
+            ),
+            "edit" => (
+                arguments.get("old_string").cloned().unwrap_or(Value::Null),
+                arguments.get("new_string").cloned().unwrap_or(Value::Null),
+            ),
+            _ => (Value::Null, Value::Null),
+        };
+        return Some(json!({
+            "card": "diff",
+            "title": format!("{} {}", call.name, path),
+            "diffs": [{"path": path, "oldText": old_text, "newText": new_text}],
+            "locations": [{"path": path}],
+        }));
+    }
+    Some(json!({
+        "card": "generic",
+        "title": call.name.as_str(),
+        "kind": compat_tool_kind(&call.name),
+        "rawInput": arguments,
     }))
 }
+
+fn compat_tool_kind(name: &str) -> &'static str {
+    match name {
+        "read" | "read_image" => "read",
+        "edit" | "write" | "apply_patch" => "edit",
+        "delete" => "delete",
+        "move" | "rename" => "move",
+        "grep" | "glob" | "web_search" => "search",
+        "eval" | "execute" => "execute",
+        "web_fetch" => "fetch",
+        _ => "other",
+    }
+}
+
+fn compat_present_tool_result(call: &CompatToolCall, event: &SessionEvent) -> Option<Value> {
+    if event
+        .data
+        .pointer("/error/code")
+        .or_else(|| event.data.pointer("/message/error/code"))
+        .or_else(|| event.data.pointer("/meta/code"))
+        .and_then(Value::as_str)
+        .is_some_and(|code| matches!(code, "ABORTED" | "ABORTED_BEFORE_DISPATCH"))
+    {
+        return None;
+    }
+    match call.name.as_str() {
+        "write" | "edit" | "apply_patch" => {
+            let metadata = event.data.get("meta").cloned().unwrap_or_else(|| json!({}));
+            Some(json!({
+                "card": "diff",
+                "title": call.name.as_str(),
+                "diffs": metadata.get("diffs").cloned().unwrap_or_else(|| json!([])),
+                "locations": metadata.get("locations").cloned().unwrap_or_else(|| json!([])),
+            }))
+        }
+        "web_search" => {
+            compat_web_search_result(call, event).or_else(|| Some(json!({"card": "generic"})))
+        }
+        "web_fetch" => compat_web_fetch_result(event).or_else(|| Some(json!({"card": "generic"}))),
+        "grep" | "glob" => compat_search_result(event).or_else(|| Some(json!({"card": "generic"}))),
+        "bash" => {
+            let output = compat_tool_result_text(event)?;
+            let mut view = json!({
+                "card": "terminal",
+                "output": output,
+            });
+            if let Some(signal) = event.data.pointer("/meta/signal").and_then(Value::as_str) {
+                view["signal"] = json!(signal);
+            } else {
+                view["exitCode"] = json!(compat_terminal_exit_code(&output).unwrap_or(0));
+            }
+            Some(view)
+        }
+        _ => Some(json!({"card": "generic"})),
+    }
+}
+
+fn compat_search_result(event: &SessionEvent) -> Option<Value> {
+    if event.data.pointer("/message/content/0/isError") == Some(&Value::Bool(true)) {
+        return None;
+    }
+    let meta = event.data.get("meta")?;
+    let shape = meta.get("shape")?.as_str()?;
+    let truncated = meta.get("truncated")?.as_bool()?;
+    let total = meta.get("total")?.as_u64()?;
+    match shape {
+        "matches" if meta.get("files").is_some_and(Value::is_array) => Some(json!({
+            "card": "search",
+            "shape": "matches",
+            "files": meta.get("files")?,
+            "truncated": truncated,
+            "total": total,
+        })),
+        "paths" if meta.get("paths").is_some_and(Value::is_array) => Some(json!({
+            "card": "search",
+            "shape": "paths",
+            "paths": meta.get("paths")?,
+            "truncated": truncated,
+            "total": total,
+        })),
+        _ => None,
+    }
+}
+
+fn compat_web_search_result(call: &CompatToolCall, event: &SessionEvent) -> Option<Value> {
+    if event.data.pointer("/message/content/0/isError") == Some(&Value::Bool(true)) {
+        return None;
+    }
+    let query = serde_json::from_str::<Value>(&call.arguments)
+        .ok()?
+        .get("query")?
+        .as_str()?
+        .to_owned();
+    let meta = event.data.get("meta")?;
+    let sources = meta
+        .get("sources")?
+        .as_array()?
+        .iter()
+        .filter_map(|source| {
+            let url = source.get("url")?.as_str()?.trim();
+            (!url.is_empty()).then(|| {
+                let mut projected = serde_json::Map::new();
+                projected.insert("url".into(), Value::String(url.to_owned()));
+                for key in ["title", "snippet", "publishedAt"] {
+                    if let Some(value) = source
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                    {
+                        projected.insert(key.into(), Value::String(value.to_owned()));
+                    }
+                }
+                Value::Object(projected)
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(json!({
+        "card": "web",
+        "kind": "search",
+        "title": query,
+        "sources": sources,
+        "truncated": meta.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+    }))
+}
+
+fn compat_web_fetch_result(event: &SessionEvent) -> Option<Value> {
+    if event.data.pointer("/message/content/0/isError") == Some(&Value::Bool(true)) {
+        return None;
+    }
+    let meta = event.data.get("meta")?;
+    let url = meta.get("url")?.as_str()?.trim();
+    let status_code = meta.get("statusCode")?.as_u64()?;
+    (!url.is_empty() && u16::try_from(status_code).is_ok()).then(|| {
+        json!({
+            "card": "web",
+            "kind": "fetch",
+            "url": url,
+            "statusCode": status_code,
+            "truncated": meta.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+        })
+    })
+}
+
+fn compat_tool_result_text(event: &SessionEvent) -> Option<String> {
+    Some(
+        event
+            .data
+            .pointer("/message/content")?
+            .as_array()?
+            .iter()
+            .find(|block| block.get("type").and_then(Value::as_str) == Some("tool-result"))?
+            .get("content")?
+            .as_array()?
+            .iter()
+            .filter_map(|block| {
+                (block.get("type").and_then(Value::as_str) == Some("text"))
+                    .then(|| block.get("text").and_then(Value::as_str))
+                    .flatten()
+            })
+            .collect(),
+    )
+}
+
+fn compat_tool_result_call_id(event: &SessionEvent) -> Option<&str> {
+    (event.event_type == "tool/result")
+        .then(|| {
+            event
+                .data
+                .pointer("/message/source/callId")
+                .and_then(Value::as_str)
+        })
+        .flatten()
+}
+
+fn compat_terminal_exit_code(output: &str) -> Option<i64> {
+    let marker = output.rsplit_once("[exit code: ")?.1;
+    marker.split_once(']')?.0.parse().ok()
+}
+
+#[derive(Clone, Copy, Default)]
+struct CompatTokenBuckets {
+    uncached_input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+}
+
+#[derive(Clone, Copy)]
+struct CompatUsageSample {
+    turn: u64,
+    step: u64,
+    buckets: CompatTokenBuckets,
+}
+
+#[derive(Clone, Copy)]
+struct CompatOpenStep {
+    turn: u64,
+    step: u64,
+    start_time: u64,
+    first_token_time: Option<u64>,
+}
+
+#[derive(Default)]
+struct CompatSessionStats {
+    turns: u64,
+    steps: u64,
+    llm_ms: u64,
+    tool_ms: u64,
+    ttft_ms: u64,
+    ttft_steps: u64,
+    decode_ms: u64,
+    decode_tokens: u64,
+    last_turn: Option<u64>,
+    open_step: Option<CompatOpenStep>,
+    pending_calls: BTreeMap<String, u64>,
+}
+
+fn compat_token_usage(events: &[SessionEvent]) -> Value {
+    let mut totals = CompatTokenBuckets::default();
+    let mut last = None;
+    for event in events {
+        let Some((turn, step, buckets)) = compat_token_usage_sample(event) else {
+            continue;
+        };
+        let previous = last
+            .filter(|sample: &CompatUsageSample| sample.turn == turn && sample.step == step)
+            .map(|sample| sample.buckets)
+            .unwrap_or_default();
+        totals.uncached_input_tokens = totals
+            .uncached_input_tokens
+            .saturating_sub(previous.uncached_input_tokens)
+            .saturating_add(buckets.uncached_input_tokens);
+        totals.output_tokens = totals
+            .output_tokens
+            .saturating_sub(previous.output_tokens)
+            .saturating_add(buckets.output_tokens);
+        totals.cache_read_tokens = totals
+            .cache_read_tokens
+            .saturating_sub(previous.cache_read_tokens)
+            .saturating_add(buckets.cache_read_tokens);
+        totals.cache_write_tokens = totals
+            .cache_write_tokens
+            .saturating_sub(previous.cache_write_tokens)
+            .saturating_add(buckets.cache_write_tokens);
+        last = Some(CompatUsageSample {
+            turn,
+            step,
+            buckets,
+        });
+    }
+    json!({
+        "uncachedInputTokens": totals.uncached_input_tokens,
+        "outputTokens": totals.output_tokens,
+        "cacheReadTokens": totals.cache_read_tokens,
+        "cacheWriteTokens": totals.cache_write_tokens,
+    })
+}
+fn compat_context_pressure(events: &[SessionEvent]) -> Value {
+    let context_window = events.iter().rev().find_map(|event| {
+        (event.event_type == "request/context")
+            .then(|| event.data.get("contextWindow").and_then(Value::as_u64))
+            .flatten()
+    });
+    let pressure_tokens = events.iter().rev().find_map(|event| {
+        compat_token_usage_sample(event).map(|(_, _, buckets)| {
+            buckets
+                .uncached_input_tokens
+                .saturating_add(buckets.cache_read_tokens)
+                .saturating_add(buckets.cache_write_tokens)
+        })
+    });
+    let mut value = Map::new();
+    if let Some(context_window) = context_window {
+        value.insert("contextWindow".into(), Value::from(context_window));
+    }
+    if let Some(pressure_tokens) = pressure_tokens {
+        value.insert("pressureTokens".into(), Value::from(pressure_tokens));
+    }
+    Value::Object(value)
+}
+
+fn compat_token_usage_sample(event: &SessionEvent) -> Option<(u64, u64, CompatTokenBuckets)> {
+    let (turn, step) = compat_turn_step(event)?;
+    let usage = match event.event_type.as_str() {
+        "assistant/chunk"
+            if event.data.pointer("/chunk/type").and_then(Value::as_str) == Some("usage") =>
+        {
+            event.data.pointer("/chunk/usage")
+        }
+        "assistant/message" => event.data.get("usage"),
+        _ => None,
+    }?;
+    Some((
+        turn,
+        step,
+        CompatTokenBuckets {
+            uncached_input_tokens: usage.get("inputTokens")?.as_u64()?,
+            output_tokens: usage.get("outputTokens")?.as_u64()?,
+            cache_read_tokens: usage
+                .get("cacheReadTokens")
+                .map_or(Some(0), Value::as_u64)?,
+            cache_write_tokens: usage
+                .get("cacheWriteTokens")
+                .map_or(Some(0), Value::as_u64)?,
+        },
+    ))
+}
+
+fn compat_session_stats(events: &[SessionEvent]) -> Value {
+    let mut stats = CompatSessionStats::default();
+    for event in events {
+        match event.event_type.as_str() {
+            "step/start" => {
+                if let Some((turn, step)) = compat_turn_step(event) {
+                    stats.open_step = Some(CompatOpenStep {
+                        turn,
+                        step,
+                        start_time: event.time,
+                        first_token_time: None,
+                    });
+                }
+            }
+            "assistant/chunk" => {
+                if !compat_chunk_is_token_delta(event) {
+                    continue;
+                }
+                let Some((turn, step)) = compat_turn_step(event) else {
+                    continue;
+                };
+                if let Some(open) = stats.open_step.as_mut() {
+                    if open.turn == turn && open.step == step && open.first_token_time.is_none() {
+                        open.first_token_time = Some(event.time);
+                    }
+                }
+            }
+            "assistant/message" => {
+                let Some((turn, step)) = compat_turn_step(event) else {
+                    continue;
+                };
+                let Some(open) = stats.open_step else {
+                    continue;
+                };
+                if open.turn != turn || open.step != step {
+                    continue;
+                }
+                stats.llm_ms = stats
+                    .llm_ms
+                    .saturating_add(event.time.saturating_sub(open.start_time));
+                stats.open_step = None;
+                if let Some(first_token_time) = open.first_token_time {
+                    stats.ttft_ms = stats
+                        .ttft_ms
+                        .saturating_add(first_token_time.saturating_sub(open.start_time));
+                    stats.ttft_steps = stats.ttft_steps.saturating_add(1);
+                    if let Some(output_tokens) = event
+                        .data
+                        .get("usage")
+                        .and_then(|usage| usage.get("outputTokens"))
+                        .and_then(Value::as_u64)
+                    {
+                        stats.decode_ms = stats
+                            .decode_ms
+                            .saturating_add(event.time.saturating_sub(first_token_time));
+                        stats.decode_tokens = stats.decode_tokens.saturating_add(output_tokens);
+                    }
+                }
+            }
+            "tool/call" => {
+                if let Some(call_id) = event.data.get("callId").and_then(Value::as_str) {
+                    stats.pending_calls.insert(call_id.to_owned(), event.time);
+                }
+            }
+            "tool/result" => {
+                if let Some(call_id) = compat_tool_result_call_id(event) {
+                    if let Some(dispatched) = stats.pending_calls.remove(call_id) {
+                        stats.tool_ms = stats
+                            .tool_ms
+                            .saturating_add(event.time.saturating_sub(dispatched));
+                    }
+                }
+            }
+            "step/end" => {
+                let Some((turn, _)) = compat_turn_step(event) else {
+                    continue;
+                };
+                stats.turns = stats
+                    .turns
+                    .saturating_add(u64::from(stats.last_turn != Some(turn)));
+                stats.steps = stats.steps.saturating_add(1);
+                stats.last_turn = Some(turn);
+                stats.open_step = None;
+            }
+            "turn/end" => stats.pending_calls.clear(),
+            _ => {}
+        }
+    }
+    json!({
+        "turns": stats.turns,
+        "steps": stats.steps,
+        "llmMs": stats.llm_ms,
+        "toolMs": stats.tool_ms,
+        "ttftMs": stats.ttft_ms,
+        "ttftSteps": stats.ttft_steps,
+        "decodeMs": stats.decode_ms,
+        "decodeTokens": stats.decode_tokens,
+    })
+}
+
+fn compat_turn_step(event: &SessionEvent) -> Option<(u64, u64)> {
+    Some((
+        event.data.get("turn")?.as_u64()?,
+        event.data.get("step")?.as_u64()?,
+    ))
+}
+
+fn compat_chunk_is_token_delta(event: &SessionEvent) -> bool {
+    let Some(chunk) = event.data.get("chunk") else {
+        return false;
+    };
+    match chunk.get("type").and_then(Value::as_str) {
+        Some("text-delta") | Some("reasoning-delta") => chunk
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Some("tool-call-delta") => {
+            chunk
+                .get("argumentsDelta")
+                .and_then(Value::as_str)
+                .is_some_and(|arguments| !arguments.is_empty())
+                || chunk.get("name").is_some_and(|name| !name.is_null())
+        }
+        _ => false,
+    }
+}
+
+fn compat_subagent_error(
+    error: TessivumError,
+    parent_session_id: &SessionId,
+    child_session_id: &SessionId,
+) -> CompatError {
+    let details = json!({
+        "parentSessionId": parent_session_id,
+        "childSessionId": child_session_id,
+    });
+    match error.code.as_str() {
+        "CANCELLED" => CompatError {
+            code: "cancelled".into(),
+            message: error.message,
+            details: json!({}),
+        },
+        "SESSION_NOT_FOUND" | "SUBAGENT_MODE_MISMATCH" => CompatError {
+            code: "subagent-not-found".into(),
+            message: "subagent is not a direct child with the requested mode".into(),
+            details,
+        },
+        "SUBAGENT_PARENT_MISMATCH" => CompatError {
+            code: "subagent-unauthorized".into(),
+            message: "subagent does not belong to this parent".into(),
+            details: json!({"childSessionId": child_session_id}),
+        },
+        "SUBAGENT_PARENT_REQUIRED" => CompatError {
+            code: "subagent-parent-unavailable".into(),
+            message: format!("parent session {parent_session_id:?} is not live"),
+            details: json!({"parentSessionId": parent_session_id}),
+        },
+        "SUBAGENT_NOT_RESUMABLE" => CompatError {
+            code: "subagent-not-resumable".into(),
+            message: "subagent cannot be resumed".into(),
+            details: json!({"childSessionId": child_session_id}),
+        },
+        "SUBAGENT_DELIVERY_UNAVAILABLE" | "AGENT_BUSY" => CompatError {
+            code: "subagent-delivery-unavailable".into(),
+            message: "subagent follow-up is temporarily unavailable".into(),
+            details: json!({"childSessionId": child_session_id}),
+        },
+        "SUBAGENT_DELETE_ACTIVE" => CompatError {
+            code: "subagent-active".into(),
+            message: "subagent is still active".into(),
+            details,
+        },
+        "SUBAGENT_DELETE_HAS_CHILDREN" => CompatError {
+            code: "subagent-has-children".into(),
+            message: "subagent has descendants; delete them first".into(),
+            details,
+        },
+        "SUBAGENT_DELETE_UNAVAILABLE" => CompatError {
+            code: "subagent-delete-unavailable".into(),
+            message: "subagent is not a deletable direct child".into(),
+            details,
+        },
+        _ => CompatError::internal(error.message),
+    }
+}
+
+async fn compat_subagent_history(
+    state: &ApiState,
+    args: CompatSubagentHistory,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.parent_session_id)?;
+    compat_require_session(&args.child_session_id)?;
+    if let Some(before_seq) = args.before_seq {
+        if before_seq > MAX_SAFE_INTEGER {
+            return Err(CompatError::invalid(
+                "beforeSeq exceeds the supported range",
+            ));
+        }
+    }
+    let max_messages = args
+        .max_messages
+        .map(|max_messages| {
+            if max_messages == 0 || max_messages > MAX_SAFE_INTEGER {
+                return Err(CompatError::invalid(
+                    "maxMessages must be a positive supported integer",
+                ));
+            }
+            usize::try_from(max_messages)
+                .map_err(|_| CompatError::invalid("maxMessages exceeds the platform size limit"))
+        })
+        .transpose()?;
+    let parent_session_id = args.parent_session_id.clone();
+    let child_session_id = args.child_session_id.clone();
+    let tail = args.before_seq.is_none();
+    let mut result = state
+        .host
+        .subagent_history(SubagentHistoryRequest {
+            parent_session_id: args.parent_session_id,
+            child_session_id: args.child_session_id,
+            mode: args.mode,
+            before_seq: args.before_seq,
+            max_messages,
+        })
+        .await
+        .map_err(|error| compat_subagent_error(error, &parent_session_id, &child_session_id))?;
+    if tail {
+        let events = state
+            .host
+            .events(child_session_id.clone(), 0)
+            .await
+            .map_err(compat_host_error)?;
+        let mut values = compat_derived_projection_values(&events, &state.host.attachment_limits());
+        for projection in state
+            .host
+            .session_projections(child_session_id)
+            .await
+            .map_err(compat_host_error)?
+        {
+            values.insert(projection.key, projection.value);
+        }
+        result.projections = Some(SessionProjectionsBlock {
+            as_of_seq: events.last().map_or(-1, |event| event.seq as i64),
+            values,
+        });
+    }
+    serde_json::to_value(result).map_err(|error| CompatError::internal(error.to_string()))
+}
+
+async fn compat_subagent_prompt(
+    state: &ApiState,
+    args: CompatSubagentPrompt,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.parent_session_id)?;
+    compat_require_session(&args.child_session_id)?;
+    for block in &args.content {
+        block
+            .validate()
+            .map_err(|error| CompatError::invalid(error.to_string()))?;
+    }
+    let client_time_zone = args.client_time_zone.as_deref().map_or(Ok(None), |value| {
+        canonical_client_time_zone(value)
+            .map(Some)
+            .ok_or_else(|| CompatError {
+                code: "invalid-time-zone".into(),
+                message: "clientTimeZone must be UTC or a valid IANA Area/Location name".into(),
+                details: json!({"value": value}),
+            })
+    })?;
+    let parent_session_id = args.parent_session_id.clone();
+    let child_session_id = args.child_session_id.clone();
+    let mode = match args.mode {
+        ContinuableMode::Continuable => SubagentMode::Continuable,
+    };
+    let result = state
+        .host
+        .subagent_prompt(SubagentPromptRequest {
+            parent_session_id: args.parent_session_id,
+            child_session_id: args.child_session_id,
+            mode,
+            content: args.content,
+            client_time_zone,
+        })
+        .await
+        .map_err(|error| compat_subagent_error(error, &parent_session_id, &child_session_id))?;
+    serde_json::to_value(result).map_err(|error| CompatError::internal(error.to_string()))
+}
+
+async fn compat_subagent_interrupt(
+    state: &ApiState,
+    args: CompatSubagentInterrupt,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.parent_session_id)?;
+    compat_require_session(&args.child_session_id)?;
+    let parent_session_id = args.parent_session_id.clone();
+    let child_session_id = args.child_session_id.clone();
+    let mode = match args.mode {
+        ContinuableMode::Continuable => SubagentMode::Continuable,
+    };
+    let result = state
+        .host
+        .subagent_interrupt(SubagentInterruptRequest {
+            parent_session_id: args.parent_session_id,
+            child_session_id: args.child_session_id,
+            mode,
+        })
+        .await
+        .map_err(|error| compat_subagent_error(error, &parent_session_id, &child_session_id))?;
+    serde_json::to_value(result).map_err(|error| CompatError::internal(error.to_string()))
+}
+async fn compat_subagent_delete(
+    state: &ApiState,
+    args: CompatSubagentDelete,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.parent_session_id)?;
+    compat_require_session(&args.child_session_id)?;
+    let parent_session_id = args.parent_session_id.clone();
+    let child_session_id = args.child_session_id.clone();
+    let result = state
+        .host
+        .subagent_delete(SubagentDeleteRequest {
+            parent_session_id: args.parent_session_id,
+            child_session_id: args.child_session_id,
+        })
+        .await
+        .map_err(|error| compat_subagent_error(error, &parent_session_id, &child_session_id))?;
+    serde_json::to_value(result).map_err(|error| CompatError::internal(error.to_string()))
+}
+
 async fn compat_session_models(
     state: &ApiState,
     session_id: SessionId,
@@ -2041,15 +4715,18 @@ async fn compat_session_models(
         .session_models(session_id)
         .await
         .map_err(compat_host_error)?;
+    let active = state
+        .host
+        .provider_directory()
+        .into_iter()
+        .filter(|entry| entry.active)
+        .map(|entry| entry.route.id)
+        .collect::<BTreeSet<_>>();
     Ok(json!({
         "current": models.current,
         "routable": models.routable,
-        "groups": models.groups.into_iter().map(compat_model_group).collect::<Vec<_>>(),
-        "failures": models
-            .failures
-            .into_iter()
-            .map(|failure| compat_route_failure(failure, None))
-            .collect::<Vec<_>>(),
+        "groups": models.groups.into_iter().filter(|group| active.contains(&group.provider)).map(compat_model_group).collect::<Vec<_>>(),
+        "failures": [],
     }))
 }
 
@@ -2102,7 +4779,6 @@ fn compat_provider(entry: HostProviderDirectoryEntry) -> Value {
         "settingsPath": entry.settings_path,
         "active": entry.active,
         "declared": entry.declared,
-        "credentialConfigured": entry.credential_configured,
     })
 }
 
@@ -2113,80 +4789,37 @@ fn compat_model_info(info: HostModelInfo) -> Value {
             "name".into(),
             Value::String(info.name.unwrap_or_else(|| info.id.clone())),
         ),
-        ("provider".into(), Value::String(info.provider)),
-        ("inputModalities".into(), json!(info.input_modalities)),
-        ("routable".into(), Value::Bool(info.routable)),
     ]);
-    if let Some(context_window) = info.context_window {
-        model.insert("contextWindow".into(), Value::from(context_window));
+    if let Some(description) = info.description {
+        model.insert("description".into(), Value::String(description));
     }
-    if let Some(max_tokens) = info.max_tokens {
-        model.insert("maxTokens".into(), Value::from(max_tokens));
+    if let Some(reasoning) = info.reasoning {
+        model.insert(
+            "reasoning".into(),
+            serde_json::to_value(reasoning).expect("reasoning metadata serializes"),
+        );
     }
     Value::Object(model)
 }
 
-fn compat_route_failure(failure: HostRouteFailure, display_name: Option<&str>) -> Value {
-    let name = display_name.unwrap_or(&failure.provider);
+fn compat_model_group(group: HostModelGroup) -> Value {
     json!({
-        "id": failure.provider,
-        "name": name,
-        "message": failure.message,
+        "id": group.provider,
+        "name": group.display_name,
+        "models": group.models.into_iter().map(compat_model_info).collect::<Vec<_>>(),
     })
 }
 
-fn compat_model_group(group: HostModelGroup) -> Value {
-    let failure = group.failure.clone();
-    let display_name = group.display_name.clone();
-    let mut value = Map::from_iter([
-        ("id".into(), Value::String(group.provider)),
-        ("name".into(), Value::String(group.display_name)),
-        (
-            "models".into(),
-            Value::Array(group.models.into_iter().map(compat_model_info).collect()),
-        ),
-        ("routable".into(), Value::Bool(group.routable)),
-        (
-            "credentialConfigured".into(),
-            Value::Bool(group.credential_configured),
-        ),
-    ]);
-    if let Some(failure) = failure {
-        value.insert(
-            "failure".into(),
-            compat_route_failure(failure, Some(&display_name)),
-        );
-    }
-    Value::Object(value)
-}
-
-async fn compat_llm_models(state: &ApiState, args: CompatLlmModels) -> Result<Value, CompatError> {
-    let entries = state.host.provider_directory();
-    let provider_filter = args.provider;
-    let providers = if let Some(provider) = provider_filter.clone() {
-        compat_require_nonblank("provider", &provider)?;
-        vec![provider]
-    } else {
-        entries
-            .iter()
-            .map(|entry| entry.route.id.clone())
-            .collect::<Vec<_>>()
-    };
-    let mut groups = Vec::new();
-    let mut failures = Vec::new();
-    for provider in providers {
-        for group in state.host.model_groups(&provider) {
-            let display_name = group.display_name.clone();
-            if let Some(failure) = group.failure.clone() {
-                failures.push(compat_route_failure(failure, Some(&display_name)));
-            }
-            groups.push(compat_model_group(group));
-        }
-    }
-    if provider_filter.is_some() && groups.is_empty() {
-        return Err(CompatError::invalid("provider is not available"));
-    }
-    Ok(json!({"groups": groups, "failures": failures}))
+async fn compat_llm_models(state: &ApiState, _args: CompatLlmModels) -> Result<Value, CompatError> {
+    let groups = state
+        .host
+        .provider_directory()
+        .into_iter()
+        .filter(|entry| entry.active)
+        .flat_map(|entry| state.host.model_groups(&entry.route.id))
+        .map(compat_model_group)
+        .collect::<Vec<_>>();
+    Ok(json!({"groups": groups, "failures": []}))
 }
 fn compat_discovery_error(code: &str, message: &str) -> CompatError {
     CompatError {
@@ -2269,13 +4902,17 @@ async fn compat_discover_models(
         Some(api_key)
     } else if !base_override || route_matches {
         if let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
-            let reference =
-                CredentialRef::new(entry.route.credential_ref.clone()).map_err(|_| {
+            if entry.route.credential_ref.is_empty() {
+                None
+            } else {
+                let reference =
+                    CredentialRef::new(entry.route.credential_ref.clone()).map_err(|_| {
+                        compat_discovery_error("credential-rejected", "credential is unavailable")
+                    })?;
+                credentials.resolve(&reference).await.map_err(|_| {
                     compat_discovery_error("credential-rejected", "credential is unavailable")
-                })?;
-            credentials.resolve(&reference).await.map_err(|_| {
-                compat_discovery_error("credential-rejected", "credential is unavailable")
-            })?
+                })?
+            }
         } else {
             None
         }
@@ -2415,23 +5052,56 @@ async fn compat_session_prompt(state: &ApiState, args: CompatPrompt) -> Result<V
         session_id,
         mode,
         content,
-        _client_time_zone: _,
+        client_time_zone,
     } = args;
     compat_require_session(&session_id)?;
+    let client_time_zone = client_time_zone.as_deref().map_or(Ok(None), |value| {
+        canonical_client_time_zone(value)
+            .map(Some)
+            .ok_or_else(|| CompatError {
+                code: "invalid-time-zone".into(),
+                message: "clientTimeZone must be UTC or a valid IANA Area/Location name".into(),
+                details: json!({"value": value}),
+            })
+    })?;
     let params = SessionPromptParams {
         session_id: session_id.clone(),
         content_blocks: compat_prompt_blocks(content)?,
+        client_time_zone,
     };
     match mode {
         CompatPromptMode::Queue => state.host.prompt(params).await,
         CompatPromptMode::Steer => state.host.steer(params).await,
     }
-    .map_err(compat_host_error)?;
+    .map_err(|error| compat_session_rpc_error(error, &session_id))?;
     if let Some(session) = compat_data(&state.compat).sessions.get_mut(&session_id) {
         session.blank = false;
         session.updated_at = compat_updated_at();
     }
     Ok(json!({"accepted": true}))
+}
+
+async fn compat_session_update_queue(
+    state: &ApiState,
+    args: CompatUpdateQueue,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.session_id)?;
+    compat_require_nonblank("itemId", args.item_id.as_str())?;
+    let action = match args.action {
+        CompatQueueAction::Edit { content } => SessionQueueAction::Edit { content },
+        CompatQueueAction::Remove {} => SessionQueueAction::Remove,
+        CompatQueueAction::Steer {} => SessionQueueAction::Steer,
+    };
+    let receipt = state
+        .host
+        .update_queue(SessionUpdateQueueParams {
+            session_id: args.session_id,
+            item_id: args.item_id,
+            action,
+        })
+        .await
+        .map_err(compat_host_error)?;
+    Ok(json!({"accepted": receipt.accepted}))
 }
 
 async fn compat_session_cancel(
@@ -2452,6 +5122,123 @@ async fn compat_session_cancel(
         session.updated_at = compat_updated_at();
     }
     Ok(json!({"accepted": true}))
+}
+
+async fn compat_session_search(
+    state: &ApiState,
+    args: CompatSessionSearch,
+) -> Result<Value, CompatError> {
+    let query = args.query.trim();
+    if query.is_empty()
+        || query.contains('\0')
+        || query.encode_utf16().count() > SESSION_SEARCH_QUERY_MAX_CHARS
+    {
+        return Err(CompatError::invalid("query is invalid"));
+    }
+    let result = state
+        .host
+        .search_sessions(query.to_owned())
+        .await
+        .map_err(compat_host_error)?;
+    Ok(json!({
+        "items": result.items.into_iter().map(|item| json!({
+            "sessionId": item.session_id,
+            "snippet": item.snippet,
+        })).collect::<Vec<_>>(),
+        "hasMore": result.has_more,
+    }))
+}
+
+async fn compat_session_rename(
+    state: &ApiState,
+    args: CompatSessionRename,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.session_id)?;
+    if args.title.is_empty() {
+        return Err(CompatError::invalid("title must not be empty"));
+    }
+    let renamed = state
+        .host
+        .rename_session(args.session_id.clone(), args.title)
+        .await
+        .map_err(|error| compat_session_rpc_error(error, &args.session_id))?;
+    Ok(json!({"title": renamed.title, "seq": renamed.seq}))
+}
+
+async fn compat_session_fork(
+    state: &ApiState,
+    args: CompatSessionFork,
+) -> Result<Value, CompatError> {
+    compat_require_session(&args.session_id)?;
+    if args
+        .at_seq
+        .is_some_and(|sequence| sequence > MAX_SAFE_INTEGER)
+    {
+        return Err(CompatError::invalid("atSeq exceeds the safe integer range"));
+    }
+    let session_id = state
+        .host
+        .fork_session(args.session_id.clone(), args.at_seq)
+        .await
+        .map_err(|error| compat_session_rpc_error(error, &args.session_id))?;
+    if compat_sync_sessions(state).await.is_ok() {
+        let session = compat_data(&state.compat)
+            .sessions
+            .get(&session_id)
+            .cloned();
+        if let Some(session) = session {
+            let workspace_id = session.workspace_id.clone();
+            let payload = compat_session_added_payload(&session);
+            broadcast_compat(&state.compat, CompatStream::Host, payload);
+            if let (Some(registry), Some(workspace_id)) =
+                (state.host.workspace_registry(), workspace_id)
+            {
+                if let Some(workspace) = registry
+                    .list()
+                    .into_iter()
+                    .find(|workspace| workspace.workspace_id == workspace_id)
+                {
+                    broadcast_compat(
+                        &state.compat,
+                        CompatStream::Host,
+                        json!({"type": "host/workspace-changed", "workspace": workspace}),
+                    );
+                }
+            }
+        }
+    }
+    Ok(json!({"sessionId": session_id}))
+}
+
+fn compat_session_rpc_error(error: TessivumError, session_id: &SessionId) -> CompatError {
+    match error.code.as_str() {
+        "SESSION_NOT_FOUND" => CompatError {
+            code: "session-not-found".into(),
+            message: error.message,
+            details: json!({"sessionId": session_id}),
+        },
+        "TITLE_INVALID" => CompatError {
+            code: "title-invalid".into(),
+            message: error.message,
+            details: json!({"sessionId": session_id}),
+        },
+        "FORK_UNAVAILABLE" => CompatError {
+            code: "fork-unavailable".into(),
+            message: error.message,
+            details: json!({"sessionId": session_id}),
+        },
+        "AGENT_BUSY" => CompatError {
+            code: "agent-busy".into(),
+            message: error.message,
+            details: json!({"sessionId": session_id}),
+        },
+        "LLM_PROVIDER_NOT_FOUND" | "LLM_MODEL_NOT_FOUND" | "MISSING_CREDENTIAL" => CompatError {
+            code: "model-unavailable".into(),
+            message: error.message,
+            details: json!({"sessionId": session_id}),
+        },
+        _ => compat_host_error(error),
+    }
 }
 
 async fn compat_events_mux(State(state): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
@@ -2496,6 +5283,23 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
                 }
             }
         }
+        if let Some(registry) = state.host.question_registry() {
+            for requested in registry.snapshots() {
+                if !replayed_approvals.insert(requested.rpc_id.clone()) {
+                    continue;
+                }
+                let message = match compat_ws_message(
+                    question_requested_payload(&requested),
+                    Some(&requested.rpc_id),
+                ) {
+                    Ok(message) => message,
+                    Err(_) => return,
+                };
+                if !compat_socket_send(&mut socket, message).await {
+                    return;
+                }
+            }
+        }
     }
     loop {
         tokio::select! {
@@ -2519,9 +5323,7 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                    let message = compat_ws_message(compat_stream_error_payload(format!(
-                        "{dropped} compatibility frames were dropped"
-                    )), None).expect("stream error frame is bounded");
+                    let message = compat_ws_message(compat_stream_error_payload(format!("{dropped} compatibility frames were dropped")), None).expect("stream error frame is bounded");
                     let _ = compat_socket_send(&mut socket, message).await;
                     return;
                 }
@@ -2529,32 +5331,42 @@ async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: C
             },
             notification = notifications.recv() => match notification {
                 Ok(notification) => {
-                    match &notification {
-                        HostNotification::ApprovalRequested(requested) if stream_kind == CompatStream::Mux => {
-                            if !replayed_approvals.insert(requested.rpc_id.clone()) {
-                                continue;
-                            }
-                        }
-                        HostNotification::ApprovalResolved(resolved) if stream_kind == CompatStream::Mux => {
-                            replayed_approvals.remove(&resolved.rpc_id);
-                        }
-                        _ => {}
+                    if compat_notification_stream(&notification) != Some(stream_kind) {
+                        continue;
                     }
-                    if let Some(frame) = compat_notification(&state, notification) {
-                        if frame.stream == stream_kind {
-                            let message = match compat_ws_message(frame.payload, frame.rpc_id.as_deref()) {
-                                Ok(message) => message,
-                                Err(message) => compat_ws_message(compat_stream_error_payload(message), None)
-                                    .expect("stream error frame is bounded"),
-                            };
-                            if !compat_socket_send(&mut socket, message).await { return; }
+                    let duplicate = match &notification {
+                        HostNotification::ApprovalRequested(requested) => {
+                            !replayed_approvals.insert(requested.rpc_id.clone())
+                        }
+                        HostNotification::QuestionRequested(requested) => {
+                            !replayed_approvals.insert(requested.rpc_id.clone())
+                        }
+                        HostNotification::ApprovalResolved(resolved) => {
+                            replayed_approvals.remove(&resolved.rpc_id);
+                            false
+                        }
+                        HostNotification::QuestionResolved(resolved) => {
+                            replayed_approvals.remove(&resolved.rpc_id);
+                            false
+                        }
+                        _ => false,
+                    };
+                    if duplicate {
+                        continue;
+                    }
+                    for frame in compat_notifications(&state, notification).await {
+                        let message = match compat_ws_message(frame.payload, frame.rpc_id.as_deref()) {
+                            Ok(message) => message,
+                            Err(message) => compat_ws_message(compat_stream_error_payload(message), None)
+                                .expect("stream error frame is bounded"),
+                        };
+                        if !compat_socket_send(&mut socket, message).await {
+                            return;
                         }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                    let message = compat_ws_message(compat_stream_error_payload(format!(
-                        "{dropped} host notifications were dropped"
-                    )), None).expect("stream error frame is bounded");
+                    let message = compat_ws_message(compat_stream_error_payload(format!("{dropped} host notifications were dropped")), None).expect("stream error frame is bounded");
                     let _ = compat_socket_send(&mut socket, message).await;
                     return;
                 }
@@ -2570,17 +5382,62 @@ async fn compat_socket_send(socket: &mut WebSocket, message: WsMessage) -> bool 
         .is_ok_and(|result| result.is_ok())
 }
 
-fn compat_notification(state: &ApiState, notification: HostNotification) -> Option<CompatFrame> {
+fn compat_notification_stream(notification: &HostNotification) -> Option<CompatStream> {
     match notification {
-        HostNotification::SessionEvent(notification) => Some(CompatFrame {
-            stream: CompatStream::Mux,
-            rpc_id: None,
-            payload: json!({
+        HostNotification::SessionEvent(_)
+        | HostNotification::SessionQueue(_)
+        | HostNotification::SessionJobs(_)
+        | HostNotification::ApprovalRequested(_)
+        | HostNotification::ApprovalResolved(_)
+        | HostNotification::QuestionRequested(_)
+        | HostNotification::SessionProjection(_)
+        | HostNotification::QuestionResolved(_) => Some(CompatStream::Mux),
+        HostNotification::SessionStatus(_)
+        | HostNotification::RemoteEvent(_)
+        | HostNotification::SettingsChanged(_)
+        | HostNotification::CredentialsChanged(_)
+        | HostNotification::ModelsChanged
+        | HostNotification::AdaptersUpdated
+        | HostNotification::SubagentStarted(_) => Some(CompatStream::Host),
+        HostNotification::SubagentFinished(_) => None,
+    }
+}
+
+async fn compat_notifications(
+    state: &ApiState,
+    notification: HostNotification,
+) -> Vec<CompatFrame> {
+    match notification {
+        HostNotification::SessionEvent(notification) => {
+            let view =
+                compat_live_tool_view(state, &notification.session_id, &notification.event).await;
+            let mut payload = json!({
                 "type": "session/event",
                 "sessionId": notification.session_id,
                 "event": notification.event,
+            });
+            if let Some(view) = view {
+                payload["view"] = view;
+            }
+            let mut frames = vec![CompatFrame {
+                stream: CompatStream::Mux,
+                rpc_id: None,
+                payload,
+            }];
+            frames.extend(compat_projection_frames(state, &notification).await);
+            frames
+        }
+        HostNotification::SessionProjection(notification) => vec![CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": notification.key,
+                "value": notification.value,
+                "seq": notification.seq,
             }),
-        }),
+        }],
         HostNotification::SessionStatus(notification) => {
             if let Some(session) = compat_data(&state.compat)
                 .sessions
@@ -2589,7 +5446,7 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
                 session.running = notification.status == crate::protocol::SessionStatus::Running;
                 session.updated_at = compat_updated_at();
             }
-            Some(CompatFrame {
+            vec![CompatFrame {
                 stream: CompatStream::Host,
                 rpc_id: None,
                 payload: json!({
@@ -2597,14 +5454,24 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
                     "sessionId": notification.session_id,
                     "running": notification.status == crate::protocol::SessionStatus::Running,
                 }),
-            })
+            }]
         }
-        HostNotification::ApprovalRequested(requested) => Some(CompatFrame {
+        HostNotification::SessionQueue(notification) => vec![CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({"type": "session/queue", "sessionId": notification.session_id, "items": notification.items}),
+        }],
+        HostNotification::SessionJobs(notification) => vec![CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({"type": "session/jobs", "sessionId": notification.session_id, "jobs": notification.jobs}),
+        }],
+        HostNotification::ApprovalRequested(requested) => vec![CompatFrame {
             stream: CompatStream::Mux,
             rpc_id: Some(requested.rpc_id.clone()),
             payload: approval_requested_payload(&requested),
-        }),
-        HostNotification::ApprovalResolved(resolved) => Some(CompatFrame {
+        }],
+        HostNotification::ApprovalResolved(resolved) => vec![CompatFrame {
             stream: CompatStream::Mux,
             rpc_id: None,
             payload: json!({
@@ -2613,24 +5480,368 @@ fn compat_notification(state: &ApiState, notification: HostNotification) -> Opti
                 "approvalId": resolved.approval_id,
                 "outcome": resolved.outcome,
             }),
-        }),
-        HostNotification::SettingsChanged(event) => Some(CompatFrame {
+        }],
+        HostNotification::QuestionRequested(requested) => vec![CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: Some(requested.rpc_id.clone()),
+            payload: question_requested_payload(&requested),
+        }],
+        HostNotification::QuestionResolved(resolved) => vec![CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "question/resolved",
+                "sessionId": resolved.session_id,
+                "questionRpcId": resolved.rpc_id,
+                "outcome": resolved.outcome,
+            }),
+        }],
+        HostNotification::RemoteEvent(event) => vec![CompatFrame {
             stream: CompatStream::Host,
             rpc_id: None,
-            payload: json!({"type": "host/settings-changed", "ns": event.namespace}),
-        }),
-        HostNotification::CredentialsChanged(event) => Some(CompatFrame {
+            payload: json!({"type": "host/remote-event", "event": event.event, "args": event.args}),
+        }],
+        HostNotification::SettingsChanged(event) => vec![CompatFrame {
             stream: CompatStream::Host,
             rpc_id: None,
-            payload: json!({"type": "host/credentials-changed", "ref": event.reference}),
-        }),
-        HostNotification::ModelsChanged => Some(CompatFrame {
+            payload: json!({"type": "host/remote-event", "event": "settings/document-updated", "args": [event.namespace, event.revision]}),
+        }],
+        HostNotification::CredentialsChanged(event) => vec![CompatFrame {
             stream: CompatStream::Host,
             rpc_id: None,
-            payload: json!({"type": "host/models-changed"}),
-        }),
-        HostNotification::SubagentStarted(_) | HostNotification::SubagentFinished(_) => None,
+            payload: json!({"type": "host/remote-event", "event": "credentials/updated", "args": [event.reference]}),
+        }],
+        HostNotification::ModelsChanged | HostNotification::AdaptersUpdated => vec![CompatFrame {
+            stream: CompatStream::Host,
+            rpc_id: None,
+            payload: json!({"type": "host/remote-event", "event": "llm/adapters-updated", "args": []}),
+        }],
+        HostNotification::SubagentStarted(notification) => vec![CompatFrame {
+            stream: CompatStream::Host,
+            rpc_id: None,
+            payload: json!({
+                "type": "host/session-added",
+                "sessionId": notification.child_session_id,
+                "blank": false,
+                "parentSessionId": notification.parent_session_id,
+                "origin": "subagent",
+            }),
+        }],
+        HostNotification::SubagentFinished(_) => Vec::new(),
     }
+}
+
+async fn compat_projection_frames(
+    state: &ApiState,
+    notification: &SessionEventNotification,
+) -> Vec<CompatFrame> {
+    let permission_changed = compat_permission_changed(&notification.event);
+    let metrics_changed = compat_metrics_changed(&notification.event);
+    let timing_boundary = matches!(
+        notification.event.event_type.as_str(),
+        "turn/start" | "turn/end" | "subagent/descriptor"
+    );
+    let mut frames = compat_projection_frame(state, notification)
+        .into_iter()
+        .collect();
+    if !permission_changed && !metrics_changed && !timing_boundary {
+        return frames;
+    }
+    let Ok(events) = state.host.events(notification.session_id.clone(), 0).await else {
+        return frames;
+    };
+    let events = events
+        .into_iter()
+        .filter(|event| event.seq <= notification.event.seq)
+        .collect::<Vec<_>>();
+    let seq = notification.event.seq;
+    let timing = compat_subagent_timing(&events);
+    if timing != compat_subagent_timing(&events[..events.len().saturating_sub(1)]) {
+        frames.push(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "subagentTiming",
+                "value": timing,
+                "seq": seq,
+            }),
+        });
+    }
+    if permission_changed {
+        frames.push(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "permissions",
+                "value": permission_select(&fold_permission_events(&events)),
+                "seq": seq,
+            }),
+        });
+    }
+    if metrics_changed {
+        frames.push(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "sessionStats",
+                "value": compat_session_stats(&events),
+                "seq": seq,
+            }),
+        });
+        if compat_token_usage_sample(&notification.event).is_some() {
+            frames.push(CompatFrame {
+                stream: CompatStream::Mux,
+                rpc_id: None,
+                payload: json!({
+                    "type": "session/projection",
+                    "sessionId": notification.session_id,
+                    "key": "tokenUsage",
+                    "value": compat_token_usage(&events),
+                    "seq": seq,
+                }),
+            });
+        }
+    }
+    if notification.event.event_type == "request/context"
+        || compat_token_usage_sample(&notification.event).is_some()
+    {
+        frames.push(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "contextPressure",
+                "value": compat_context_pressure(&events),
+                "seq": seq,
+            }),
+        });
+    }
+    frames
+}
+
+fn compat_metrics_changed(event: &SessionEvent) -> bool {
+    matches!(
+        event.event_type.as_str(),
+        "step/start"
+            | "assistant/chunk"
+            | "assistant/message"
+            | "tool/call"
+            | "tool/result"
+            | "step/end"
+            | "turn/end"
+    )
+}
+
+fn compat_permission_changed(event: &SessionEvent) -> bool {
+    matches!(
+        event.event_type.as_str(),
+        "permission/preset" | "sandbox/mode" | "approval/policy"
+    )
+}
+
+fn compat_projection_frame(
+    state: &ApiState,
+    notification: &SessionEventNotification,
+) -> Option<CompatFrame> {
+    if notification.event.event_type == "session/title" {
+        let title = notification.event.data.get("title")?.as_str()?.to_owned();
+        let projection = CompatSessionProjections {
+            as_of_seq: notification.event.seq,
+            values: BTreeMap::from([("title".to_owned(), Value::String(title.clone()))]),
+        };
+        if let Some(session) = compat_data(&state.compat)
+            .sessions
+            .get_mut(&notification.session_id)
+        {
+            session.projections = Some(projection);
+        }
+        return Some(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "title",
+                "value": title,
+                "seq": notification.event.seq,
+            }),
+        });
+    }
+    if notification.event.event_type == "plan/mode" {
+        let active = notification.event.data.get("active")?.as_bool()?;
+        let value = json!({"active": active, "pending": false});
+        return Some(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "plan",
+                "value": value,
+                "seq": notification.event.seq,
+            }),
+        });
+    }
+    if matches!(
+        notification.event.event_type.as_str(),
+        "todo/write" | "turn/start"
+    ) {
+        let value = if notification.event.event_type == "todo/write" {
+            notification.event.data.get("todos")?.clone()
+        } else {
+            Value::Null
+        };
+        return Some(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "todos",
+                "value": value,
+                "seq": notification.event.seq,
+            }),
+        });
+    }
+    if let Some(goal) = compat_goal_projection_value(&notification.event) {
+        return Some(CompatFrame {
+            stream: CompatStream::Mux,
+            rpc_id: None,
+            payload: json!({
+                "type": "session/projection",
+                "sessionId": notification.session_id,
+                "key": "goal",
+                "value": goal,
+                "seq": notification.event.seq,
+            }),
+        });
+    }
+    None
+}
+
+fn compat_goal_projection_value(event: &SessionEvent) -> Option<Value> {
+    if event.event_type != "goal/change" {
+        return None;
+    }
+    if event.data.get("operation").and_then(Value::as_str) == Some("clear") {
+        return Some(Value::Null);
+    }
+    Some(json!({
+        "goal": event.data.get("goal")?.clone(),
+        "roundsStarted": event.data.get("roundsStarted")?.clone(),
+        "createdAt": event.data.get("createdAt")?.clone(),
+        "updatedAt": event.data.get("updatedAt")?.clone(),
+    }))
+}
+fn compat_subagent_timing(events: &[SessionEvent]) -> Value {
+    let mut settled_ms = 0_u64;
+    let mut active = None::<(u64, u64)>;
+    for event in events {
+        match event.event_type.as_str() {
+            "turn/start" => active = Some((event.time, event.time)),
+            "subagent/descriptor" => {
+                settled_ms = 0;
+                active = active.map(|(since, _)| (since, event.time));
+            }
+            "turn/end" => {
+                if let Some((since, _)) = active.take() {
+                    settled_ms = settled_ms.saturating_add(event.time.saturating_sub(since));
+                }
+            }
+            _ => {
+                if let Some((_, through)) = active.as_mut() {
+                    *through = event.time;
+                }
+            }
+        }
+    }
+    match active {
+        Some((since, through)) => {
+            json!({"settledMs": settled_ms, "active": {"since": since, "through": through}})
+        }
+        None => json!({"settledMs": settled_ms}),
+    }
+}
+
+fn compat_derived_projection_values(
+    events: &[SessionEvent],
+    attachment_limits: &AttachmentLimits,
+) -> BTreeMap<String, Value> {
+    let permission = fold_permission_events(events);
+    let mut values = BTreeMap::from([
+        (
+            "imageLimits".to_owned(),
+            json!({
+                "maxImageBytes": attachment_limits.max_image_bytes,
+                "maxImagesPerMessage": attachment_limits.max_images_per_message,
+                "maxMessageImageBytes": attachment_limits.max_message_image_bytes,
+                "maxImagePixels": attachment_limits.max_image_pixels,
+                "mediaTypes": attachment_limits.media_types.iter().map(|media_type| media_type.as_str()).collect::<Vec<_>>(),
+            }),
+        ),
+        ("permissions".to_owned(), permission_select(&permission)),
+        ("sessionStats".to_owned(), compat_session_stats(events)),
+        ("tokenUsage".to_owned(), compat_token_usage(events)),
+        ("subagentTiming".to_owned(), compat_subagent_timing(events)),
+        (
+            "contextPressure".to_owned(),
+            compat_context_pressure(events),
+        ),
+    ]);
+    if let Some(projection) = compat_title_projection(events) {
+        values.extend(projection.values);
+    }
+    if let Some(goal) = events.iter().rev().find_map(compat_goal_projection_value) {
+        values.insert("goal".to_owned(), goal);
+    }
+    values
+}
+
+fn compat_title_projection(events: &[SessionEvent]) -> Option<CompatSessionProjections> {
+    let mut values = BTreeMap::new();
+    if let Some(title) = events.iter().rev().find_map(|event| {
+        (event.event_type == "session/title")
+            .then(|| event.data.get("title").and_then(Value::as_str))
+            .flatten()
+    }) {
+        values.insert("title".to_owned(), Value::String(title.to_owned()));
+    }
+    let active = events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            (event.event_type == "plan/mode")
+                .then(|| event.data.get("active").and_then(Value::as_bool))
+                .flatten()
+        })
+        .unwrap_or(false);
+    values.insert(
+        "plan".to_owned(),
+        json!({"active": active, "pending": false}),
+    );
+    let mut todos = Value::Null;
+    for event in events {
+        match event.event_type.as_str() {
+            "todo/write" => todos = event.data.get("todos").cloned().unwrap_or(Value::Null),
+            "turn/start" => todos = Value::Null,
+            _ => {}
+        }
+    }
+    values.insert("todos".to_owned(), todos);
+    if let Some(goal) = events.iter().rev().find_map(compat_goal_projection_value) {
+        values.insert("goal".to_owned(), goal);
+    }
+    (!values.is_empty()).then(|| CompatSessionProjections {
+        as_of_seq: events.last().map_or(0, |event| event.seq),
+        values,
+    })
 }
 
 fn approval_requested_payload(requested: &ApprovalRequested) -> Value {
@@ -2659,6 +5870,14 @@ fn approval_requested_payload(requested: &ApprovalRequested) -> Value {
         payload.insert("reason".into(), Value::String(reason.clone()));
     }
     Value::Object(payload)
+}
+
+fn question_requested_payload(requested: &crate::question::QuestionRequested) -> Value {
+    json!({
+        "type": "question/requested",
+        "sessionId": requested.session_id,
+        "questions": requested.questions,
+    })
 }
 
 fn compat_ws_message(payload: Value, rpc_id: Option<&str>) -> Result<WsMessage, String> {
@@ -2817,6 +6036,9 @@ fn is_known_method(namespace: &str, method: &str) -> bool {
             | ("session", "events")
             | ("session", "status")
             | ("session", "cancel")
+            | ("subagent", "history")
+            | ("subagent", "prompt")
+            | ("subagent", "interrupt")
             | ("host", "shutdown")
     )
 }
@@ -2847,6 +6069,7 @@ async fn dispatch(
             let params = SessionPromptParams {
                 session_id: args.session_id,
                 content_blocks: args.content_blocks,
+                client_time_zone: args.client_time_zone,
             };
             require_session(&params.session_id)?;
             params.validate().map_err(protocol_error)?;
@@ -2875,6 +6098,83 @@ async fn dispatch(
                 host.cancel(args.session, args.cause)
                     .await
                     .map_err(host_error)?,
+            )
+        }
+        ("subagent", "history") => {
+            let args: SubagentHistoryArgs = decode(args)?;
+            require_session(&args.parent_session_id)?;
+            require_session(&args.child_session_id)?;
+            if let Some(before_seq) = args.before_seq {
+                require_safe_integer("beforeSeq", before_seq)?;
+            }
+            let max_messages = args
+                .max_messages
+                .map(|max_messages| {
+                    require_safe_integer("maxMessages", max_messages)?;
+                    if max_messages == 0 {
+                        return Err(ApiError::bad_request("maxMessages must be positive"));
+                    }
+                    usize::try_from(max_messages).map_err(|_| {
+                        ApiError::bad_request("maxMessages exceeds the platform size limit")
+                    })
+                })
+                .transpose()?;
+            serializable(
+                host.subagent_history(SubagentHistoryRequest {
+                    parent_session_id: args.parent_session_id,
+                    child_session_id: args.child_session_id,
+                    mode: args.mode,
+                    before_seq: args.before_seq,
+                    max_messages,
+                })
+                .await
+                .map_err(host_error)?,
+            )
+        }
+        ("subagent", "prompt") => {
+            let args: SubagentPromptArgs = decode(args)?;
+            require_session(&args.parent_session_id)?;
+            require_session(&args.child_session_id)?;
+            let mode = match args.mode {
+                ContinuableMode::Continuable => SubagentMode::Continuable,
+            };
+            for block in &args.content {
+                block.validate().map_err(protocol_error)?;
+            }
+            let client_time_zone = args.client_time_zone.as_deref().map_or(Ok(None), |value| {
+                canonical_client_time_zone(value).map(Some).ok_or_else(|| {
+                    ApiError::bad_request(
+                        "clientTimeZone must be UTC or a valid IANA Area/Location name",
+                    )
+                })
+            })?;
+            serializable(
+                host.subagent_prompt(SubagentPromptRequest {
+                    parent_session_id: args.parent_session_id,
+                    child_session_id: args.child_session_id,
+                    mode,
+                    content: args.content,
+                    client_time_zone,
+                })
+                .await
+                .map_err(host_error)?,
+            )
+        }
+        ("subagent", "interrupt") => {
+            let args: SubagentInterruptArgs = decode(args)?;
+            require_session(&args.parent_session_id)?;
+            require_session(&args.child_session_id)?;
+            let mode = match args.mode {
+                ContinuableMode::Continuable => SubagentMode::Continuable,
+            };
+            serializable(
+                host.subagent_interrupt(SubagentInterruptRequest {
+                    parent_session_id: args.parent_session_id,
+                    child_session_id: args.child_session_id,
+                    mode,
+                })
+                .await
+                .map_err(host_error)?,
             )
         }
         ("host", "shutdown") => {
@@ -2944,6 +6244,8 @@ struct InitializeArgs {
 struct PromptArgs {
     session_id: SessionId,
     content_blocks: Vec<crate::protocol::ContentBlock>,
+    #[serde(default)]
+    client_time_zone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2964,6 +6266,40 @@ struct SessionArgs {
 struct CancelArgs {
     session: SessionId,
     cause: AgentCancelCause,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubagentHistoryArgs {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    mode: SubagentMode,
+    before_seq: Option<u64>,
+    max_messages: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubagentPromptArgs {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    mode: ContinuableMode,
+    content: Vec<crate::protocol::ContentBlock>,
+    client_time_zone: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubagentInterruptArgs {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    mode: ContinuableMode,
+}
+
+#[derive(Deserialize)]
+enum ContinuableMode {
+    #[serde(rename = "continuable")]
+    Continuable,
 }
 
 #[derive(Deserialize)]
@@ -3048,6 +6384,15 @@ async fn sse_events(
                             }
                         }
                     }
+                    Ok(HostNotification::SessionProjection(notification)) if notification.session_id == session => {
+                        match sse_event("session.projection", Some(notification.seq), &notification) {
+                            Ok(event) => yield Ok(event),
+                            Err(error) => {
+                                yield Ok(sse_error_event("oversize", error));
+                                return;
+                            }
+                        }
+                    }
                     Ok(HostNotification::SessionStatus(notification)) if notification.session_id == session => {
                         match sse_event("session.status", None, &notification) {
                             Ok(event) => yield Ok(event),
@@ -3077,7 +6422,22 @@ async fn sse_events(
                             }
                         }
                     }
-                    Ok(_) => {}
+                    Ok(HostNotification::SessionEvent(_))
+                    | Ok(HostNotification::SessionProjection(_))
+                    | Ok(HostNotification::SessionStatus(_))
+                    | Ok(HostNotification::SessionQueue(_))
+                    | Ok(HostNotification::SessionJobs(_))
+                    | Ok(HostNotification::ApprovalRequested(_))
+                    | Ok(HostNotification::ApprovalResolved(_))
+                    | Ok(HostNotification::QuestionRequested(_))
+                    | Ok(HostNotification::QuestionResolved(_))
+                    | Ok(HostNotification::SettingsChanged(_))
+                    | Ok(HostNotification::CredentialsChanged(_))
+                    | Ok(HostNotification::ModelsChanged)
+                    | Ok(HostNotification::AdaptersUpdated)
+                    | Ok(HostNotification::RemoteEvent(_))
+                    | Ok(HostNotification::SubagentStarted(_))
+                    | Ok(HostNotification::SubagentFinished(_)) => {}
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         yield Ok(sse_error_event("lag", ApiError {
                             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -3277,6 +6637,7 @@ fn prompt_session(namespace: &str, method: &str, args: &Value) -> Option<Session
     let params = SessionPromptParams {
         session_id: args.session_id,
         content_blocks: args.content_blocks,
+        client_time_zone: args.client_time_zone,
     };
     require_session(&params.session_id).ok()?;
     params.validate().ok()?;
@@ -3286,6 +6647,9 @@ fn prompt_session(namespace: &str, method: &str, args: &Value) -> Option<Session
 fn ws_notification(notification: &HostNotification) -> Result<WsMessage, ApiError> {
     let notification = match notification {
         HostNotification::SessionEvent(value) => json!({"kind": "session-event", "payload": value}),
+        HostNotification::SessionProjection(value) => {
+            json!({"kind": "session-projection", "payload": value})
+        }
         HostNotification::SessionStatus(value) => {
             json!({"kind": "session-status", "payload": value})
         }
@@ -3310,13 +6674,31 @@ fn ws_notification(notification: &HostNotification) -> Result<WsMessage, ApiErro
                 "outcome": value.outcome,
             }})
         }
+        HostNotification::QuestionRequested(value) => {
+            json!({"kind": "question-requested", "payload": value})
+        }
+        HostNotification::QuestionResolved(value) => {
+            json!({"kind": "question-resolved", "payload": value})
+        }
+        HostNotification::RemoteEvent(value) => {
+            json!({"kind": "remote-event", "payload": value})
+        }
         HostNotification::SettingsChanged(value) => {
             json!({"kind": "settings-changed", "payload": value})
         }
         HostNotification::CredentialsChanged(value) => {
             json!({"kind": "credentials-changed", "payload": value})
         }
+        HostNotification::SessionQueue(value) => {
+            json!({"kind": "session-queue", "payload": value})
+        }
+        HostNotification::SessionJobs(value) => {
+            json!({"kind": "session-jobs", "payload": value})
+        }
         HostNotification::ModelsChanged => json!({"kind": "models-changed", "payload": {}}),
+        HostNotification::AdaptersUpdated => {
+            json!({"kind": "adapters-updated", "payload": {}})
+        }
     };
     ws_json(json!({"type": "notification", "notification": notification}))
 }
@@ -3381,5 +6763,93 @@ mod tests {
             .await
             .expect("bounded response body");
         assert!(body.len() > MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn history_pagination_counts_messages_and_keeps_turn_boundary() {
+        let event = |seq, event_type: &str, source_event_seqs, surface_op| SessionEvent {
+            event_type: event_type.into(),
+            seq,
+            time: 0,
+            data: json!({}),
+            ignorable: None,
+            source_event_seqs,
+            surface_op,
+        };
+        let events = vec![
+            event(0, "session/header", None, None),
+            event(1, "user/message", None, Some(SurfaceOp::Append)),
+            event(2, "assistant/chunk", None, None),
+            event(
+                3,
+                "assistant/message",
+                Some(vec![2]),
+                Some(SurfaceOp::Append),
+            ),
+            event(4, "turn/end", None, None),
+            event(5, "turn/start", None, None),
+            event(6, "user/message", None, Some(SurfaceOp::Append)),
+            event(7, "assistant/chunk", None, None),
+            event(
+                8,
+                "assistant/message",
+                Some(vec![7]),
+                Some(SurfaceOp::Append),
+            ),
+            event(9, "turn/end", None, None),
+        ];
+
+        let (page, has_more) = compat_paginate_history(events, 1);
+
+        assert!(has_more);
+        assert_eq!(
+            page.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![5, 6, 7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn feedback_put_requires_present_nullable_version() {
+        let base = json!({
+            "sessionId": "session",
+            "messageId": "message",
+            "rating": "positive",
+            "note": null,
+        });
+        assert!(serde_json::from_value::<CompatMessageFeedbackPut>(base.clone()).is_err());
+
+        let mut with_null = base;
+        with_null["ifVersion"] = Value::Null;
+        assert!(serde_json::from_value::<CompatMessageFeedbackPut>(with_null).is_ok());
+    }
+
+    #[test]
+    fn terminal_view_prefers_signal_metadata_to_exit_code() {
+        let call = CompatToolCall {
+            name: "bash".into(),
+            arguments: json!({"command": "kill -TERM $$"}).to_string(),
+        };
+        let event = SessionEvent {
+            event_type: "tool/result".into(),
+            seq: 0,
+            time: 0,
+            data: json!({
+                "meta": {"exitCode": 143, "signal": "SIGTERM"},
+                "message": {
+                    "content": [{
+                        "type": "tool-result",
+                        "content": [{"type": "text", "text": "(no output)"}],
+                    }],
+                },
+            }),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        };
+
+        assert_eq!(
+            compat_present_tool_result(&call, &event),
+            Some(json!({"card": "terminal", "output": "(no output)", "signal": "SIGTERM"})),
+        );
     }
 }

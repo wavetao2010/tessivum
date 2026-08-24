@@ -151,6 +151,13 @@ impl Sandbox {
     pub fn new(provider: Option<Arc<dyn SandboxProvider>>) -> Self {
         Self { provider }
     }
+    /// Uses the host's native file-effect sandbox when one is available.
+    pub fn local() -> Self {
+        Self {
+            provider: LocalSandboxProvider::detect()
+                .map(|provider| Arc::new(provider) as Arc<dyn SandboxProvider>),
+        }
+    }
 
     pub fn publish(&self, context: &ContextHandle) -> Result<ServiceHandle<Sandbox>, CoreError> {
         context.provide(sandbox_service_key(), self.clone())
@@ -330,6 +337,127 @@ fn canonical_roots(roots: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Tessi
         }
     }
     Ok(canonical)
+}
+
+#[derive(Clone, Debug)]
+struct LocalSandboxProvider {
+    runner: String,
+}
+
+impl LocalSandboxProvider {
+    fn detect() -> Option<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            let runner = Path::new("/usr/bin/sandbox-exec");
+            return runner.is_file().then(|| Self {
+                runner: runner.display().to_string(),
+            });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return executable("bwrap").map(|runner| Self { runner });
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+}
+
+impl SandboxProvider for LocalSandboxProvider {
+    fn confine(
+        &self,
+        request: &EffectiveSandboxRequest,
+        argv: &[String],
+    ) -> Result<SandboxPlan, TessivumError> {
+        #[cfg(target_os = "macos")]
+        let wrapped = {
+            let mut forms = vec![
+                "(version 1)".to_owned(),
+                "(allow default)".to_owned(),
+                "(deny file-write*)".to_owned(),
+                format!(
+                    "(allow file-write* (literal {}))",
+                    sbpl_string(Path::new("/dev/null"))
+                ),
+            ];
+            if request.mode == SandboxMode::WorkspaceWrite {
+                forms.push(format!(
+                    "(allow file-write* {})",
+                    request
+                        .write_roots
+                        .iter()
+                        .map(|root| format!("(subpath {})", sbpl_string(root)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+                forms.push(format!(
+                    "(allow file-write* (subpath {}) (subpath {}))",
+                    sbpl_string(Path::new("/private/tmp")),
+                    sbpl_string(&std::env::temp_dir()),
+                ));
+            }
+            let mut wrapped = vec![
+                self.runner.clone(),
+                "-p".into(),
+                forms.join(" "),
+                "--".into(),
+            ];
+            wrapped.extend_from_slice(argv);
+            wrapped
+        };
+        #[cfg(target_os = "linux")]
+        let wrapped = {
+            let mut wrapped = vec![
+                self.runner.clone(),
+                "--ro-bind".into(),
+                "/".into(),
+                "/".into(),
+                "--dev".into(),
+                "/dev".into(),
+                "--proc".into(),
+                "/proc".into(),
+                "--die-with-parent".into(),
+            ];
+            if request.mode == SandboxMode::WorkspaceWrite {
+                wrapped.extend(["--tmpfs".into(), "/tmp".into()]);
+                for root in &request.write_roots {
+                    let root = root.display().to_string();
+                    wrapped.extend(["--bind".into(), root.clone(), root]);
+                }
+            }
+            wrapped.push("--".into());
+            wrapped.extend_from_slice(argv);
+            wrapped
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let wrapped = argv.to_vec();
+        Ok(SandboxPlan {
+            argv: wrapped,
+            enforcement: SandboxEnforcement::Full,
+            denial: None,
+            runner_rules: RunnerRules::default(),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sbpl_string(path: &Path) -> String {
+    format!(
+        "\"{}\"",
+        path.display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('\"', "\\\"")
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn executable(name: &str) -> Option<String> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.display().to_string())
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, TessivumError> {

@@ -13,25 +13,30 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tessivum::{
     agent::{
-        AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry, AgentRuntime,
-        AgentStatus, Inbox,
+        AgentCancelCause, AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry,
+        AgentRuntime, AgentStatus, Inbox,
     },
+    persistence_jsonl::JsonlSessionPersistence,
     protocol::{
-        Message, SessionEvent, SessionHeader, SessionId, SessionOrigin, SESSION_FORMAT_VERSION,
+        ContentBlock, Message, SessionEvent, SessionHeader, SessionId, SessionOrigin, SurfaceOp,
+        SESSION_FORMAT_VERSION,
     },
     session::{
-        MemorySessionPersistence, SessionError, SessionInspection, SessionPersistence, SessionStore,
+        MemorySessionPersistence, RestoreMode, SessionError, SessionInspection, SessionPersistence,
+        SessionStore,
     },
     subagent::{
-        NativeSubagentProvider, SubagentError, SubagentProvider, SubagentRunStatus,
-        SubagentService, SubagentStartRequest,
+        NativeSubagentProvider, SubagentDeleteRequest, SubagentError, SubagentHistoryRequest,
+        SubagentInterruptRequest, SubagentMode, SubagentProvider, SubagentRunStatus,
+        SubagentService, SubagentStartRequest, SubagentStatus, SubagentTools,
     },
+    tools::{ToolRunContext, ToolRuntime},
     workflow::{
-        WorkflowContext, WorkflowEngine, WorkflowError, WorkflowRequest, WorkflowRun,
-        WorkflowRunStatus, WorkflowRuntime,
+        NativeWorkflowEngine, WorkflowContext, WorkflowEngine, WorkflowError, WorkflowRequest,
+        WorkflowRun, WorkflowRunStatus, WorkflowRuntime,
     },
     workspace::{WorkspaceError, WorkspaceRegistry},
-    TessivumError,
+    TessivumError, ToolCallId,
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::{oneshot, Notify};
@@ -59,6 +64,7 @@ fn options() -> AgentOptions {
     AgentOptions {
         provider: "fake".into(),
         model: "fake".into(),
+        reasoning_effort: None,
         max_tokens: Some(8),
     }
 }
@@ -75,6 +81,7 @@ fn request(id: &str) -> SubagentStartRequest {
         provider: "native".into(),
         agent_id: "scout".into(),
         child_session_id: SessionId::from(id),
+        mode: SubagentMode::OneShot,
         capabilities: vec!["scout".into()],
         options: options(),
         created_at: 0,
@@ -102,6 +109,42 @@ impl AgentRuntime for Idle {
     }
 }
 
+struct Running;
+
+#[async_trait]
+impl AgentRuntime for Running {
+    fn status(&self) -> AgentStatus {
+        AgentStatus::Running
+    }
+    async fn wake(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn when_idle(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn dispose(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+}
+struct LifecycleFactory;
+
+#[async_trait]
+impl AgentFactory for LifecycleFactory {
+    async fn create(
+        &self,
+        session: Arc<tessivum::session::Session>,
+        _: AgentOptions,
+        _: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        if matches!(session.id().as_str(), "parent" | "a-running") {
+            Ok(Arc::new(Running))
+        } else {
+            Ok(Arc::new(Idle))
+        }
+    }
+}
+
 struct Factory;
 
 #[async_trait]
@@ -114,6 +157,97 @@ impl AgentFactory for Factory {
         _: CancellationToken,
     ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
         Ok(Arc::new(Idle))
+    }
+}
+
+struct StatusRuntime(AgentStatus);
+
+#[async_trait]
+impl AgentRuntime for StatusRuntime {
+    fn status(&self) -> AgentStatus {
+        self.0
+    }
+    async fn wake(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn when_idle(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn dispose(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+}
+
+struct MixedFactory;
+
+#[async_trait]
+impl AgentFactory for MixedFactory {
+    async fn create(
+        &self,
+        session: Arc<tessivum::session::Session>,
+        _: AgentOptions,
+        _: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        let status = if session.id().as_str() == "running-child" {
+            AgentStatus::Running
+        } else {
+            AgentStatus::Idle
+        };
+        Ok(Arc::new(StatusRuntime(status)))
+    }
+}
+
+struct DurablePromptRuntime {
+    session: Arc<tessivum::session::Session>,
+    inbox: Inbox,
+}
+
+#[async_trait]
+impl AgentRuntime for DurablePromptRuntime {
+    fn status(&self) -> AgentStatus {
+        AgentStatus::Idle
+    }
+    async fn wake(&self) -> Result<(), AgentError> {
+        if let Some(message) = self.inbox.take_next_turn() {
+            self.session
+                .append(
+                    SessionEvent {
+                        event_type: "user/message".into(),
+                        seq: self.session.next_seq()?,
+                        time: 0,
+                        data: serde_json::to_value(message)
+                            .map_err(|error| AgentError::Runtime(error.to_string()))?,
+                        ignorable: None,
+                        source_event_seqs: None,
+                        surface_op: Some(SurfaceOp::Append),
+                    },
+                    cancellation(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    async fn when_idle(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn dispose(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+}
+
+struct DurablePromptFactory;
+
+#[async_trait]
+impl AgentFactory for DurablePromptFactory {
+    async fn create(
+        &self,
+        session: Arc<tessivum::session::Session>,
+        _: AgentOptions,
+        inbox: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        Ok(Arc::new(DurablePromptRuntime { session, inbox }))
     }
 }
 
@@ -186,6 +320,198 @@ async fn setup_with_parent_header(
 
 async fn setup() -> Harness {
     setup_with(Arc::new(MemorySessionPersistence::new()), Arc::new(Factory)).await
+}
+
+#[tokio::test]
+async fn operator_catalog_sorts_status_and_deletes_only_inactive_leaves() {
+    let root = TempDir::new("operator-delete");
+    let persistence = Arc::new(JsonlSessionPersistence::new(root.path().join("data")));
+    let harness = setup_with(persistence, Arc::new(LifecycleFactory)).await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+
+    let (_, z) = parent
+        .start(request("z-ready"), cancellation())
+        .await
+        .unwrap();
+    z.run().await.unwrap();
+    let (_, b) = parent
+        .start(request("b-ready"), cancellation())
+        .await
+        .unwrap();
+    let nested_parent = harness
+        .service
+        .attach(
+            harness
+                .agents
+                .get(&SessionId::from("b-ready"))
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+    let (_, grandchild) = nested_parent
+        .start(request("grandchild"), cancellation())
+        .await
+        .unwrap();
+    grandchild.run().await.unwrap();
+    b.run().await.unwrap();
+    let _ = parent
+        .start(request("a-running"), cancellation())
+        .await
+        .unwrap();
+
+    let _ = parent
+        .start(request("c-idle"), cancellation())
+        .await
+        .unwrap();
+    let _ = parent
+        .start(request("a-idle"), cancellation())
+        .await
+        .unwrap();
+    let entries = harness
+        .service
+        .list(SessionId::from("parent"), cancellation())
+        .await
+        .unwrap();
+    let listed = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            tessivum::subagent::SubagentListEntry::Child { id, status, .. } => {
+                Some((id.as_str(), *status))
+            }
+            tessivum::subagent::SubagentListEntry::Diagnostic { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        vec![
+            ("a-running", SubagentStatus::Running),
+            ("a-idle", SubagentStatus::Idle),
+            ("c-idle", SubagentStatus::Idle),
+            ("b-ready", SubagentStatus::Ready),
+            ("z-ready", SubagentStatus::Ready),
+        ]
+    );
+
+    assert!(matches!(
+        harness
+            .service
+            .delete(
+                SubagentDeleteRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("a-running"),
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DeleteActive)
+    ));
+    assert!(matches!(
+        harness
+            .service
+            .delete(
+                SubagentDeleteRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("a-idle"),
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DeleteActive)
+    ));
+    assert!(matches!(
+        harness
+            .service
+            .delete(
+                SubagentDeleteRequest {
+                    parent_session_id: SessionId::from("foreign"),
+                    child_session_id: SessionId::from("z-ready"),
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DirectParentMismatch)
+    ));
+    assert!(matches!(
+        harness
+            .service
+            .delete(
+                SubagentDeleteRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("parent"),
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DirectParentMismatch)
+    ));
+    assert!(matches!(
+        harness
+            .service
+            .delete(
+                SubagentDeleteRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("b-ready"),
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DeleteHasChildren)
+    ));
+
+    harness
+        .service
+        .delete(
+            SubagentDeleteRequest {
+                parent_session_id: SessionId::from("b-ready"),
+                child_session_id: SessionId::from("grandchild"),
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert!(harness
+        .persistence
+        .inspect(&SessionId::from("grandchild"), cancellation())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        harness
+            .service
+            .delete(
+                SubagentDeleteRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("b-ready"),
+                },
+                cancellation(),
+            )
+            .await
+            .unwrap()
+            .deleted
+    );
+    assert!(harness
+        .persistence
+        .inspect(&SessionId::from("b-ready"), cancellation())
+        .await
+        .unwrap()
+        .is_none());
+    let remaining = harness
+        .service
+        .list(SessionId::from("parent"), cancellation())
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining
+            .iter()
+            .filter_map(|entry| match entry {
+                tessivum::subagent::SubagentListEntry::Child { id, .. } => {
+                    Some(id.as_str())
+                }
+                tessivum::subagent::SubagentListEntry::Diagnostic { .. } => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["a-running", "a-idle", "c-idle", "z-ready"]
+    );
 }
 
 struct TempDir(PathBuf);
@@ -283,6 +609,335 @@ async fn setup_workspace() -> WorkspaceHarness {
         workspace,
         root,
     }
+}
+
+#[tokio::test]
+async fn direct_child_history_stays_cold_and_interrupt_preserves_fifo() {
+    let harness = setup().await;
+    let mut cold_header = header("cold-child", Some("parent"));
+    cold_header.origin = Some(SessionOrigin::Subagent);
+    harness
+        .persistence
+        .create(&cold_header, cancellation())
+        .await
+        .unwrap();
+    harness
+        .persistence
+        .append(
+            &cold_header.id,
+            &SessionEvent {
+                event_type: "turn/start".into(),
+                seq: 0,
+                time: 0,
+                data: json!({"turn": 0}),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let history = harness
+        .service
+        .history(
+            SubagentHistoryRequest {
+                parent_session_id: SessionId::from("parent"),
+                child_session_id: cold_header.id.clone(),
+                mode: SubagentMode::OneShot,
+                before_seq: None,
+                max_messages: Some(1),
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(history.events.len(), 1);
+    assert_eq!(history.projections.unwrap().as_of_seq, 0);
+    assert!(harness.sessions.get(&cold_header.id).is_none());
+    assert!(harness.agents.get(&cold_header.id).is_none());
+    assert!(matches!(
+        harness
+            .service
+            .history(
+                SubagentHistoryRequest {
+                    parent_session_id: SessionId::from("forged-parent"),
+                    child_session_id: cold_header.id,
+                    mode: SubagentMode::OneShot,
+                    before_seq: None,
+                    max_messages: None,
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DirectParentMismatch)
+    ));
+
+    let mut live_header = header("live-child", Some("parent"));
+    live_header.origin = Some(SessionOrigin::Subagent);
+    let child = harness
+        .agents
+        .create(live_header, options(), cancellation())
+        .await
+        .unwrap();
+    child.followup(message("queued")).await.unwrap();
+    let interrupted = harness
+        .service
+        .interrupt(
+            SubagentInterruptRequest {
+                parent_session_id: SessionId::from("parent"),
+                child_session_id: SessionId::from("live-child"),
+                mode: SubagentMode::Continuable,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert!(interrupted.accepted);
+    assert_eq!(child.inbox().len(), 1);
+    assert_eq!(
+        child.cancel_options().unwrap().cause,
+        AgentCancelCause::Parent
+    );
+
+    assert!(
+        harness
+            .service
+            .interrupt(
+                SubagentInterruptRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("unknown-child"),
+                    mode: SubagentMode::Continuable,
+                },
+                cancellation(),
+            )
+            .await
+            .unwrap()
+            .accepted
+    );
+    assert!(matches!(
+        harness
+            .service
+            .interrupt(
+                SubagentInterruptRequest {
+                    parent_session_id: SessionId::from("forged-parent"),
+                    child_session_id: SessionId::from("live-child"),
+                    mode: SubagentMode::Continuable,
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::DirectParentMismatch)
+    ));
+    assert!(matches!(
+        harness
+            .service
+            .interrupt(
+                SubagentInterruptRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("live-child"),
+                    mode: SubagentMode::OneShot,
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::ContinuableRequired)
+    ));
+}
+
+#[tokio::test]
+async fn model_subagent_tools_register_and_enforce_parent_authority() {
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(MixedFactory),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let mut running = request("running-child");
+    running.mode = SubagentMode::Continuable;
+    parent.start(running, cancellation()).await.unwrap();
+    let running_child = Arc::new(
+        harness
+            .agents
+            .get(&SessionId::from("running-child"))
+            .unwrap(),
+    );
+    let child_parent = harness.service.attach(running_child.clone()).unwrap();
+    let mut inactive = request("inactive-grandchild");
+    inactive.mode = SubagentMode::Continuable;
+    child_parent.start(inactive, cancellation()).await.unwrap();
+
+    let tools = ToolRuntime::new();
+    let _subagent_tools = SubagentTools::install(&tools, harness.service.clone()).unwrap();
+    assert_eq!(
+        tools
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<Vec<_>>(),
+        ["interrupt_agent", "list_agents", "send_message"]
+    );
+    let context = |session: &str, call: &str| ToolRunContext {
+        session: SessionId::from(session),
+        call: ToolCallId::from(call),
+        cancellation: cancellation(),
+    };
+    let listed = tools
+        .execute(
+            context("parent", "list"),
+            "list_agents",
+            json!({"scope": "descendants"}),
+        )
+        .await;
+    assert!(!listed.is_error);
+    assert_eq!(
+        listed.meta,
+        json!([
+            {
+                "kind": "child",
+                "id": "running-child",
+                "label": "scout",
+                "status": "running",
+                "activity": "running",
+                "mode": "continuable",
+                "hasChildren": true,
+                "parent": "parent",
+                "depth": 1
+            },
+            {
+                "kind": "child",
+                "id": "inactive-grandchild",
+                "label": "scout",
+                "status": "idle",
+                "activity": "inactive",
+                "mode": "continuable",
+                "hasChildren": false,
+                "parent": "running-child",
+                "depth": 2
+            }
+        ])
+    );
+
+    let _unrelated = harness
+        .agents
+        .create(header("unrelated", None), options(), cancellation())
+        .await
+        .unwrap();
+    let unrelated_list = tools
+        .execute(context("unrelated", "list"), "list_agents", json!({}))
+        .await;
+    assert!(!unrelated_list.is_error);
+    assert_eq!(unrelated_list.meta, json!([]));
+    let undelivered = tools
+        .execute(
+            context("unrelated", "send"),
+            "send_message",
+            json!({"subagent_id": "running-child", "message": "forged"}),
+        )
+        .await;
+    assert!(undelivered.is_error);
+    assert_eq!(undelivered.meta["code"], "SUBAGENT_PARENT_MISMATCH");
+    let interrupted = tools
+        .execute(
+            context("unrelated", "interrupt"),
+            "interrupt_agent",
+            json!({"agent_id": "running-child"}),
+        )
+        .await;
+    assert!(interrupted.is_error);
+    assert_eq!(interrupted.meta["code"], "SUBAGENT_PARENT_MISMATCH");
+    assert!(running_child.cancel_options().is_none());
+}
+
+#[tokio::test]
+async fn continuable_prompt_returns_only_after_fifo_message_persists() {
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(DurablePromptFactory),
+    )
+    .await;
+    let mut child_header = header("prompt-child", Some("parent"));
+    child_header.origin = Some(SessionOrigin::Subagent);
+    let child = harness
+        .agents
+        .create(child_header, options(), cancellation())
+        .await
+        .unwrap();
+    let first = harness
+        .service
+        .prompt(
+            tessivum::subagent::SubagentPromptRequest {
+                parent_session_id: SessionId::from("parent"),
+                child_session_id: SessionId::from("prompt-child"),
+                mode: SubagentMode::Continuable,
+                content: vec![ContentBlock::Text {
+                    text: "first".into(),
+                }],
+                client_time_zone: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let second = harness
+        .service
+        .prompt(
+            tessivum::subagent::SubagentPromptRequest {
+                parent_session_id: SessionId::from("parent"),
+                child_session_id: SessionId::from("prompt-child"),
+                mode: SubagentMode::Continuable,
+                content: vec![ContentBlock::Text {
+                    text: "second".into(),
+                }],
+                client_time_zone: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(first.message_id, second.message_id);
+    let messages = child
+        .session()
+        .events()
+        .into_iter()
+        .filter(|event| event.event_type == "user/message")
+        .map(|event| event.data["content"][0]["text"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(messages, vec![json!("first"), json!("second")]);
+
+    assert!(
+        harness
+            .service
+            .interrupt(
+                SubagentInterruptRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("prompt-child"),
+                    mode: SubagentMode::Continuable,
+                },
+                cancellation(),
+            )
+            .await
+            .unwrap()
+            .accepted
+    );
+    assert!(matches!(
+        harness
+            .service
+            .prompt(
+                tessivum::subagent::SubagentPromptRequest {
+                    parent_session_id: SessionId::from("parent"),
+                    child_session_id: SessionId::from("prompt-child"),
+                    mode: SubagentMode::Continuable,
+                    content: vec![ContentBlock::Text {
+                        text: "resumed".into(),
+                    }],
+                    client_time_zone: None,
+                },
+                cancellation(),
+            )
+            .await,
+        Err(SubagentError::AlreadyRun)
+    ));
 }
 
 #[tokio::test]
@@ -874,7 +1529,7 @@ async fn workflow_failure_is_a_result_and_durable_prefixes_are_legal() {
         .run(
             WorkflowRequest {
                 script: json!({"parallel": true}),
-                meta: Value::Null,
+                meta: json!({"name": "failing-workflow"}),
                 args: Value::Null,
             },
             cancellation(),
@@ -883,25 +1538,126 @@ async fn workflow_failure_is_a_result_and_durable_prefixes_are_legal() {
         .unwrap();
     assert_eq!(result.status, WorkflowRunStatus::Error);
     let events = harness.parent.session().events();
-    let event_types = events
-        .into_iter()
-        .map(|event| event.event_type)
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        ["tool-workflow/run-start", "tool-workflow/run-end"]
+    );
+    assert_eq!(
+        events[0].data,
+        json!({"runId": result.run_id.as_str(), "name": "failing-workflow"})
+    );
+    assert_eq!(
+        events[1].data,
+        json!({"runId": result.run_id.as_str(), "stopReason": "error"})
+    );
+    assert!(events
+        .iter()
+        .all(|event| event.ignorable.is_none() && event.validate().is_ok()));
+}
+
+struct RecordingEngine;
+
+#[async_trait]
+impl WorkflowEngine for RecordingEngine {
+    async fn run(
+        &self,
+        context: WorkflowContext,
+        _: WorkflowRequest,
+        _: CancellationToken,
+    ) -> Result<Value, TessivumError> {
+        context.phase_start("Research", Value::Null).await;
+        let activation = context
+            .start_agent(request("workflow-child"))
+            .await
+            .unwrap();
+        let child_result = activation.run().await.unwrap();
+        context.end_agent(&activation, &child_result).await;
+        context.phase_end("Research", Value::Null).await;
+        Ok(json!({"answer": "complete"}))
+    }
+}
+
+#[tokio::test]
+async fn workflow_records_canonical_member_lifecycle_that_reloads() {
+    let harness = setup().await;
+    let workflow = WorkflowRuntime::new(
+        harness.sessions,
+        harness.service,
+        Arc::new(RecordingEngine),
+        1,
+    )
+    .unwrap();
+    let result = workflow
+        .attach(harness.parent.clone())
+        .unwrap()
+        .run(
+            WorkflowRequest {
+                script: Value::Null,
+                meta: json!({"name": "research"}),
+                args: Value::Null,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, WorkflowRunStatus::Completed);
+    assert_eq!(result.value, Some(json!({"answer": "complete"})));
+
+    let events = harness.parent.session().events();
+    let records = events
+        .iter()
+        .filter(|event| event.event_type.starts_with("tool-workflow/"))
         .collect::<Vec<_>>();
     assert_eq!(
-        event_types,
+        records
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
         [
-            "workflow/run",
-            "workflow/member",
-            "workflow/member",
-            "workflow/run-end"
+            "tool-workflow/run-start",
+            "tool-workflow/agent-start",
+            "tool-workflow/agent-end",
+            "tool-workflow/run-end",
         ]
     );
-    assert!(harness
-        .parent
-        .session()
-        .events()
+    assert_eq!(
+        records[0].data,
+        json!({"runId": result.run_id.as_str(), "name": "research"})
+    );
+    assert_eq!(
+        records[1].data,
+        json!({
+            "runId": result.run_id.as_str(),
+            "seq": 1,
+            "label": "scout",
+            "phase": "Research",
+            "childId": "workflow-child",
+        })
+    );
+    assert_eq!(
+        records[2].data,
+        json!({"runId": result.run_id.as_str(), "seq": 1, "outcome": "completed"})
+    );
+    assert_eq!(
+        records[3].data,
+        json!({"runId": result.run_id.as_str(), "stopReason": "completed"})
+    );
+    assert!(records
         .iter()
-        .all(|event| event.validate().is_ok()));
+        .all(|event| event.ignorable.is_none() && event.validate().is_ok()));
+
+    let reloaded = SessionStore::new(harness.persistence.clone())
+        .restore(
+            &SessionId::from("parent"),
+            RestoreMode::Metadata,
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reloaded.events(), events);
 }
 
 struct CompleteEngine;
@@ -916,6 +1672,34 @@ impl WorkflowEngine for CompleteEngine {
     ) -> Result<Value, TessivumError> {
         Ok(json!({"ok": true}))
     }
+}
+
+#[tokio::test]
+async fn workflow_rejects_missing_canonical_name_before_recording() {
+    let harness = setup().await;
+    let workflow = WorkflowRuntime::new(
+        harness.sessions,
+        harness.service,
+        Arc::new(CompleteEngine),
+        1,
+    )
+    .unwrap();
+    assert!(matches!(
+        workflow
+            .attach(harness.parent.clone())
+            .unwrap()
+            .run(
+                WorkflowRequest {
+                    script: Value::Null,
+                    meta: Value::Null,
+                    args: Value::Null,
+                },
+                cancellation(),
+            )
+            .await,
+        Err(WorkflowError::InvalidWorkflowName)
+    ));
+    assert!(harness.parent.session().events().is_empty());
 }
 
 #[tokio::test]
@@ -935,7 +1719,7 @@ async fn successful_workflow_only_cancels_its_owned_token() {
         .run(
             WorkflowRequest {
                 script: Value::Null,
-                meta: Value::Null,
+                meta: json!({"name": "workflow"}),
                 args: Value::Null,
             },
             caller.clone(),
@@ -1004,7 +1788,7 @@ async fn parent_handle_disposal_cancels_and_joins_workflow_children() {
             .run(
                 WorkflowRequest {
                     script: Value::Null,
-                    meta: Value::Null,
+                    meta: json!({"name": "workflow"}),
                     args: Value::Null,
                 },
                 cancellation(),
@@ -1193,7 +1977,7 @@ async fn workflow_dispose_waits_for_late_child_admission_to_quiesce() {
             .run(
                 WorkflowRequest {
                     script: Value::Null,
-                    meta: Value::Null,
+                    meta: json!({"name": "workflow"}),
                     args: Value::Null,
                 },
                 cancellation(),
@@ -1253,10 +2037,12 @@ impl SessionPersistence for FailOneMember {
         event: &SessionEvent,
         cancellation: CancellationToken,
     ) -> Result<(), SessionError> {
-        if event.event_type == "workflow/member" && !self.failed.swap(true, Ordering::AcqRel) {
+        if event.event_type == "tool-workflow/agent-start"
+            && !self.failed.swap(true, Ordering::AcqRel)
+        {
             return Err(SessionError::Cancelled);
         }
-        if event.event_type == "workflow/run-end" {
+        if event.event_type == "tool-workflow/run-end" {
             self.run_end_attempts.fetch_add(1, Ordering::AcqRel);
         }
         self.inner.append(session_id, event, cancellation).await
@@ -1316,12 +2102,15 @@ impl WorkflowEngine for MemberEngine {
         _: CancellationToken,
     ) -> Result<Value, TessivumError> {
         context.phase_start("member", Value::Null).await;
+        let activation = context.start_agent(request("member-child")).await.unwrap();
+        let result = activation.run().await.unwrap();
+        context.end_agent(&activation, &result).await;
         Ok(Value::Null)
     }
 }
 
 #[tokio::test]
-async fn workflow_attempts_run_end_after_member_write_failure() {
+async fn workflow_stops_recording_after_member_write_failure() {
     let persistence = Arc::new(FailOneMember::new());
     let harness = setup_with(persistence.clone(), Arc::new(Factory)).await;
     let workflow =
@@ -1332,21 +2121,102 @@ async fn workflow_attempts_run_end_after_member_write_failure() {
         .run(
             WorkflowRequest {
                 script: Value::Null,
-                meta: Value::Null,
+                meta: json!({"name": "workflow"}),
                 args: Value::Null,
             },
             cancellation(),
         )
         .await
         .unwrap();
-    assert_eq!(result.status, WorkflowRunStatus::Error);
-    assert_eq!(persistence.run_end_attempts.load(Ordering::Acquire), 1);
-    let events = harness.parent.session().events();
+    assert_eq!(result.status, WorkflowRunStatus::Completed);
+    assert_eq!(persistence.run_end_attempts.load(Ordering::Acquire), 0);
     assert_eq!(
-        events
+        harness
+            .parent
+            .session()
+            .events()
             .into_iter()
+            .filter(|event| event.event_type.starts_with("tool-workflow/"))
             .map(|event| event.event_type)
             .collect::<Vec<_>>(),
-        ["workflow/run", "workflow/run-end"]
+        ["tool-workflow/run-start"]
     );
+}
+
+#[tokio::test]
+async fn native_workflow_rejects_unsupported_scripts_before_starting_children() {
+    let harness = setup().await;
+    let engine = NativeWorkflowEngine::from_recording(Some(
+        r#"{"type":"tool/call","data":{"callId":"workflow-call","name":"workflow"}}
+{"type":"tool/result","data":{"message":{"source":{"kind":"tool","callId":"workflow-call"},"content":[{"type":"tool-result","toolCallId":"workflow-call","content":[{"type":"text","text":"workflow \"recorded\" completed (1 agent).\nReturn value:\n{\"reply\":\"DURABLE_REPLY\"}"}],"isError":false}]}}}"#,
+    ))
+    .unwrap();
+    let workflow = WorkflowRuntime::new(
+        harness.sessions.clone(),
+        harness.service.clone(),
+        Arc::new(engine),
+        2,
+    )
+    .unwrap();
+    for script in [
+        "// const reply = await agent('must not run')\nphase('Run')\nconst reply = await agent('also must not run')\nreturn { reply }",
+        "if (false) { const reply = await agent('must not run') }\nreturn { reply }",
+        "phase('Run')\nconst reply = await agent(args.prompt)\nreturn { reply }",
+        "phase('Run')\nconst reply = await agent('must not run')\nconst unused = await agent('must not run')\nreturn { reply }",
+        "phase('Run)\nconst reply = await agent('must not run')\nreturn { reply }",
+    ] {
+        let result = workflow
+            .attach(harness.parent.clone())
+            .unwrap()
+            .run(
+                WorkflowRequest {
+                    script: json!(script),
+                    meta: json!({"name": "rejected"}),
+                    args: Value::Null,
+                },
+                cancellation(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, WorkflowRunStatus::Error);
+    }
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn native_workflow_replays_durable_result_bindings_exactly() {
+    let harness = setup().await;
+    let engine = NativeWorkflowEngine::from_recording(Some(
+        r#"{"type":"tool/call","data":{"callId":"workflow-call","name":"workflow"}}
+{"type":"tool/result","data":{"message":{"source":{"kind":"tool","callId":"workflow-call"},"content":[{"type":"tool-result","toolCallId":"workflow-call","content":[{"type":"text","text":"workflow \"recorded\" completed (1 agent).\nReturn value:\n{\"reply\":\"DURABLE_REPLY\"}"}],"isError":false}]}}}"#,
+    ))
+    .unwrap();
+    let workflow =
+        WorkflowRuntime::new(harness.sessions, harness.service, Arc::new(engine), 1).unwrap();
+    let result = workflow
+        .attach(harness.parent)
+        .unwrap()
+        .run(
+            WorkflowRequest {
+                script: json!(
+                    "phase('Run')\nconst reply = await agent('Reply with exactly the word PROMPT_WORD and nothing else.')\nreturn { reply }"
+                ),
+                meta: json!({"name": "recorded"}),
+                args: Value::Null,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, WorkflowRunStatus::Completed);
+    assert_eq!(result.value, Some(json!({"reply": "DURABLE_REPLY"})));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn native_workflow_rejects_incomplete_recordings() {
+    assert!(NativeWorkflowEngine::from_recording(Some(
+        r#"{"type":"tool/call","data":{"callId":"workflow-call","name":"workflow"}}"#,
+    ))
+    .is_err());
 }

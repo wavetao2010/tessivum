@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::FutureExt;
@@ -28,7 +28,7 @@ use crate::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
     },
-    ContentBlock, SessionEvent, SessionId, TessivumError,
+    ContentBlock, SessionEvent, SessionId, TessivumError, MAX_SAFE_INTEGER,
 };
 
 const MAX_OUTPUT_LIMIT: usize = 1_048_576;
@@ -36,6 +36,14 @@ const MAX_READ_BYTES: usize = 65_536;
 const MAX_LIST_JOBS: usize = 128;
 const MAX_WAIT: Duration = Duration::from_secs(60);
 const MAX_TEXT_BYTES: usize = 16_384;
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(MAX_SAFE_INTEGER as u128) as u64
+}
 
 tokio::task_local! {
     static RUNNING_JOB: Arc<Job>;
@@ -109,6 +117,16 @@ impl JobStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Killed | Self::Failed)
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Completed => "completed",
+            Self::Killed => "killed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// The terminal result returned by a job's run hook.
@@ -123,6 +141,7 @@ pub struct JobStart {
     pub kind: String,
     pub label: String,
     pub output_limit: usize,
+    pub cancel_detail: Option<String>,
     pub run: JobRunHook,
 }
 
@@ -152,8 +171,14 @@ impl JobStart {
             kind: kind.into(),
             label: label.into(),
             output_limit,
+            cancel_detail: None,
             run: Arc::new(move |control| Box::pin(run(control))),
         }
+    }
+
+    pub fn with_cancel_detail(mut self, detail: impl Into<String>) -> Self {
+        self.cancel_detail = Some(detail.into());
+        self
     }
 
     fn validate(&self) -> Result<(), JobError> {
@@ -179,6 +204,11 @@ pub struct JobSnapshot {
     pub kind: String,
     pub label: String,
     pub status: JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub started_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
     pub total_output_bytes: u64,
     pub output_available_from: u64,
     pub reported: bool,
@@ -273,6 +303,7 @@ struct JobState {
     total_output_bytes: u64,
     settlement: Option<Settlement>,
     settled: bool,
+    finished_at: Option<u64>,
     reported: bool,
     result: Option<Value>,
     error: Option<String>,
@@ -284,6 +315,8 @@ struct Job {
     owner_generation: u64,
     kind: String,
     label: String,
+    cancel_detail: Option<String>,
+    started_at: u64,
     output_limit: usize,
     cancellation: CancellationToken,
     state: Mutex<JobState>,
@@ -298,7 +331,12 @@ impl Job {
             owner: self.owner.clone(),
             kind: self.kind.clone(),
             label: self.label.clone(),
+            started_at: self.started_at,
+            finished_at: state.finished_at,
             status: state.status,
+            detail: (state.status == JobStatus::Killed)
+                .then(|| self.cancel_detail.clone())
+                .flatten(),
             total_output_bytes: state.total_output_bytes,
             output_available_from: state
                 .total_output_bytes
@@ -371,6 +409,7 @@ impl Job {
                 state.error = Some(trim_text(error));
             }
         }
+        state.finished_at = Some(now_millis());
         state.settled = true;
         true
     }
@@ -650,24 +689,7 @@ impl LocalJobRegistry {
         owner: JobOwner,
         runtime: &ToolRuntime,
     ) -> Result<JobTools, TessivumError> {
-        let mut registrations = Vec::with_capacity(4);
-        for action in [
-            JobToolAction::List,
-            JobToolAction::Read,
-            JobToolAction::Kill,
-            JobToolAction::Wait,
-        ] {
-            registrations.push(runtime.register(ToolDefinition::new(
-                action.name(),
-                action.description(),
-                action.schema(),
-                JobTool {
-                    owner: owner.clone(),
-                    action,
-                },
-            ))?);
-        }
-        Ok(JobTools { registrations })
+        JobTools::install(runtime, JobToolOwner::Exact(owner))
     }
 
     fn start(&self, owner: &JobOwner, start: JobStart) -> Result<JobSnapshot, JobError> {
@@ -686,6 +708,8 @@ impl LocalJobRegistry {
                 owner_generation: owner.generation,
                 kind: start.kind,
                 label: start.label,
+                cancel_detail: start.cancel_detail,
+                started_at: now_millis(),
                 output_limit: start.output_limit,
                 cancellation,
                 state: Mutex::new(JobState {
@@ -697,6 +721,7 @@ impl LocalJobRegistry {
                     reported: false,
                     result: None,
                     error: None,
+                    finished_at: None,
                 }),
                 done: Notify::new(),
             });
@@ -729,6 +754,17 @@ impl LocalJobRegistry {
                 .collect()
         };
         Ok(jobs.into_iter().map(|job| job.snapshot()).collect())
+    }
+
+    pub(crate) fn list_session(&self, owner: &SessionId) -> Vec<JobSnapshot> {
+        let jobs: Vec<_> = lock(&self.inner.state)
+            .jobs
+            .values()
+            .filter(|job| &job.owner == owner)
+            .take(MAX_LIST_JOBS)
+            .cloned()
+            .collect();
+        jobs.into_iter().map(|job| job.snapshot()).collect()
     }
 
     fn read(
@@ -1107,6 +1143,10 @@ impl JobOwner {
         self.registry.install_tools(self.clone(), runtime)
     }
 
+    pub(crate) fn matches_authority(&self, authority: &AgentAuthority) -> bool {
+        self.authority.same_authority(authority)
+    }
+
     pub async fn dispose(&self) {
         self.registry.dispose_owner(self).await;
     }
@@ -1154,6 +1194,36 @@ pub struct JobTools {
 }
 
 impl JobTools {
+    /// Registers session-dispatched job tools once for a host-wide tool runtime.
+    /// The owner map is populated only while the matching agent attachment is live.
+    pub fn install_for_owners(
+        runtime: &ToolRuntime,
+        owners: Arc<Mutex<BTreeMap<SessionId, JobOwner>>>,
+    ) -> Result<Self, TessivumError> {
+        Self::install(runtime, JobToolOwner::Owners(owners))
+    }
+
+    fn install(runtime: &ToolRuntime, owner: JobToolOwner) -> Result<Self, TessivumError> {
+        let mut registrations = Vec::with_capacity(4);
+        for action in [
+            JobToolAction::List,
+            JobToolAction::Read,
+            JobToolAction::Kill,
+            JobToolAction::Wait,
+        ] {
+            registrations.push(runtime.register(ToolDefinition::new(
+                action.name(),
+                action.description(),
+                action.schema(),
+                JobTool {
+                    owner: owner.clone(),
+                    action,
+                },
+            ))?);
+        }
+        Ok(Self { registrations })
+    }
+
     pub fn len(&self) -> usize {
         self.registrations.len()
     }
@@ -1215,18 +1285,34 @@ impl JobToolAction {
     }
 }
 
+#[derive(Clone)]
+enum JobToolOwner {
+    Exact(JobOwner),
+    Owners(Arc<Mutex<BTreeMap<SessionId, JobOwner>>>),
+}
+
+impl JobToolOwner {
+    fn resolve(&self, session: &SessionId) -> Result<JobOwner, JobError> {
+        match self {
+            Self::Exact(owner) if &owner.owner == session => Ok(owner.clone()),
+            Self::Exact(_) => Err(JobError::NotFound),
+            Self::Owners(owners) => lock(owners).get(session).cloned().ok_or(JobError::NotFound),
+        }
+    }
+}
+
 struct JobTool {
-    owner: JobOwner,
+    owner: JobToolOwner,
     action: JobToolAction,
 }
 
 #[async_trait::async_trait]
 impl ToolHandler for JobTool {
     async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
-        if context.session != self.owner.owner {
-            return Err(job_tool_error(JobError::NotFound));
-        }
-        let owner = &self.owner;
+        let owner = self
+            .owner
+            .resolve(&context.session)
+            .map_err(job_tool_error)?;
         let output = match self.action {
             JobToolAction::List => serde_json::to_value(owner.list().map_err(job_tool_error)?)
                 .expect("job snapshots are serializable"),

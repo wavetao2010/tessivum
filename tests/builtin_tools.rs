@@ -70,13 +70,16 @@ fn bash_config(cwd: &Path) -> BuiltinToolsConfig {
 async fn echo_is_model_visible_and_returns_the_exact_text() {
     let runtime = ToolRuntime::new();
     let builtins =
-        BuiltinTools::new(&runtime, BuiltinToolsConfig::default()).expect("echo registers");
+        BuiltinTools::new(&runtime, BuiltinToolsConfig::default()).expect("builtins register");
     let root = ContextHandle::root();
 
     let schemas = runtime.schemas();
-    assert_eq!(schemas.len(), 1);
-    assert_eq!(schemas[0].name, "echo");
-    assert_eq!(schemas[0].parameters["required"], json!(["text"]));
+    assert_eq!(schemas.len(), 2);
+    let echo = schemas
+        .iter()
+        .find(|schema| schema.name == "echo")
+        .expect("echo schema");
+    assert_eq!(echo.parameters["required"], json!(["text"]));
     let output = runtime
         .execute(
             context(&root, "echo"),
@@ -95,14 +98,14 @@ async fn echo_is_model_visible_and_returns_the_exact_text() {
 async fn bash_is_absent_by_default_and_opt_in_executes_the_fixture_once() {
     let runtime = ToolRuntime::new();
     let default_builtins =
-        BuiltinTools::new(&runtime, BuiltinToolsConfig::default()).expect("echo registers");
+        BuiltinTools::new(&runtime, BuiltinToolsConfig::default()).expect("builtins register");
     assert_eq!(
         runtime
             .schemas()
             .iter()
             .map(|schema| schema.name.as_str())
             .collect::<Vec<_>>(),
-        ["echo"]
+        ["echo", "read"]
     );
     drop(default_builtins);
 
@@ -150,9 +153,31 @@ async fn bash_uses_configured_cwd_and_captures_stdout_stderr_and_nonzero_status(
         )
         .await;
     assert!(output.is_error);
-    assert_eq!(text(&output), "stdoutstderr");
+    assert_eq!(text(&output), "stdout\n[stderr]\nstderr\n[exit code: 7]");
     assert_eq!(output.meta["exitCode"], json!(7));
     assert_eq!(output.meta["truncated"], Value::Bool(false));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_reports_self_termination_as_a_signal() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let _builtins =
+        BuiltinTools::new(&runtime, bash_config(directory.path())).expect("bash registers");
+    let root = ContextHandle::root();
+
+    let output = runtime
+        .execute(
+            context(&root, "signal"),
+            "bash",
+            json!({"command": "kill -TERM $$"}),
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert_eq!(output.meta["signal"], json!("SIGTERM"));
+    assert_eq!(output.meta["exitCode"], Value::Null);
 }
 
 #[tokio::test]

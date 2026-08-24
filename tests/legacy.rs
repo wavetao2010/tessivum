@@ -212,6 +212,19 @@ async fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
     }
     panic!("timed out waiting for {label}");
 }
+async fn wait_for_pid(path: &Path) -> u32 {
+    for _ in 0..200 {
+        if let Ok(pid) = fs::read_to_string(path).and_then(|value| {
+            value
+                .parse()
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        }) {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for child pid");
+}
 
 #[cfg(unix)]
 async fn assert_process_gone(pid: u32) {
@@ -262,11 +275,7 @@ async fn crash_cleans_generation_restarts_cleanly_and_shutdown_reaps_tree() {
         .await
         .expect("scripted plugin loads");
     assert_eq!(tools.schemas().len(), 1, "Node tool proxy is live");
-    wait_until("child process start", || child_marker.exists()).await;
-    let first_child = fs::read_to_string(&child_marker)
-        .expect("first host child marker")
-        .parse::<u32>()
-        .expect("first host child pid");
+    let first_child = wait_for_pid(&child_marker).await;
     assert!(
         profile
             .runtime()
@@ -366,11 +375,7 @@ async fn crash_cleans_generation_restarts_cleanly_and_shutdown_reaps_tree() {
         .load(original)
         .await
         .expect("Loader reconstructs the profile tree");
-    wait_until("restarted child process start", || child_marker.exists()).await;
-    let second_child = fs::read_to_string(&child_marker)
-        .expect("restarted host child marker")
-        .parse::<u32>()
-        .expect("restarted host child pid");
+    let second_child = wait_for_pid(&child_marker).await;
     assert_ne!(second_child, first_child, "restart spawns a distinct child");
     fresh_loader.unload().await.expect("plugin disposes");
     profile.shutdown().await.expect("shutdown drains host");

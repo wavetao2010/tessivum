@@ -29,6 +29,14 @@ const DEFAULT_ROUTE_ID: &str = "openai-responses";
 pub const RESPONSES_TEXT_MODALITY: &str = "text";
 pub const RESPONSES_IMAGE_MODALITY: &str = "image";
 
+/// One selectable reasoning level and its provider wire spelling.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsesReasoningEffort {
+    pub id: String,
+    pub wire: Option<String>,
+}
+
 /// The smallest model descriptor needed to validate a Responses request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,12 +44,18 @@ pub struct ResponsesModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default, alias = "inputModalities")]
     pub input: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<ResponsesReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
 }
 
 impl ResponsesModel {
@@ -49,9 +63,12 @@ impl ResponsesModel {
         Self {
             id: id.into(),
             name: None,
+            description: None,
             input: vec![RESPONSES_TEXT_MODALITY.into()],
             context_window: None,
             max_tokens: None,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
         }
     }
 
@@ -88,6 +105,22 @@ impl ResponsesModel {
             return Err(adapter_error(
                 "INVALID_OPENAI_MODEL",
                 "OpenAI Responses model limits must be positive when present",
+                Value::Null,
+            ));
+        }
+        if self
+            .default_reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| {
+                !self
+                    .reasoning_efforts
+                    .iter()
+                    .any(|candidate| candidate.id == *effort)
+            })
+        {
+            return Err(adapter_error(
+                "INVALID_OPENAI_MODEL",
+                "defaultReasoningEffort must be declared by reasoningEfforts",
                 Value::Null,
             ));
         }
@@ -470,7 +503,7 @@ impl OpenAiResponsesAdapter {
         let response = tokio::select! {
             _ = cancellation.cancelled() => return Err(cancelled_error()),
             response = pending => response.map_err(|error| adapter_error(
-                "OPENAI_TRANSPORT",
+                "TRANSPORT",
                 "OpenAI Responses request failed before a response was received",
                 json!({"endpoint": endpoint.as_str(), "error": error.to_string()}),
             ))?,
@@ -502,7 +535,7 @@ impl LlmAdapter for OpenAiResponsesAdapter {
                     next = bytes.next() => match next {
                         Some(Ok(bytes)) => Ok(Some(bytes)),
                         Some(Err(error)) => Err(adapter_error(
-                            "OPENAI_TRANSPORT",
+                            "TRANSPORT",
                             "OpenAI Responses stream read failed",
                             json!({"error": error.to_string()}),
                         )),
@@ -525,7 +558,7 @@ impl LlmAdapter for OpenAiResponsesAdapter {
             decoder.finish()?;
             if !state.terminal {
                 Err(adapter_error(
-                    "OPENAI_STREAM_ENDED_EARLY",
+                    "TRANSPORT",
                     "OpenAI Responses stream ended before a terminal response event",
                     Value::Null,
                 ))?;
@@ -586,12 +619,26 @@ async fn request_body(
     if let Some(effort) = request
         .reasoning_effort
         .as_ref()
-        .filter(|effort| !effort.is_empty() && effort.as_str() != "off")
+        .filter(|effort| !effort.is_empty())
     {
-        body.insert(
-            "reasoning".into(),
-            json!({"effort": effort, "summary": "auto"}),
-        );
+        let candidate = snapshot
+            .model
+            .reasoning_efforts
+            .iter()
+            .find(|candidate| candidate.id == *effort)
+            .ok_or_else(|| {
+                adapter_error(
+                    "INVALID_REASONING_EFFORT",
+                    "reasoning effort is not declared by the selected model",
+                    json!({"provider": request.provider.as_str(), "model": request.model.as_str(), "reasoningEffort": effort.as_str()}),
+                )
+            })?;
+        if let Some(wire) = candidate.wire.as_deref() {
+            body.insert(
+                "reasoning".into(),
+                json!({"effort": wire, "summary": "auto"}),
+            );
+        }
     }
     Ok(Value::Object(body))
 }
@@ -903,7 +950,7 @@ impl SseDecoder {
             Ok(())
         } else {
             Err(adapter_error(
-                "OPENAI_SSE_TRUNCATED",
+                "TRANSPORT",
                 "OpenAI Responses SSE stream ended inside an event",
                 Value::Null,
             ))

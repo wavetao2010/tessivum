@@ -37,7 +37,6 @@ pub fn approval_service_key() -> ServiceKey {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ApprovalPolicy {
-    Allow,
     #[default]
     Ask,
     Never,
@@ -111,13 +110,11 @@ where
     .serialize(serializer)
 }
 
-/// Durable policy payload. `next_step` records a single-use override.
+/// Durable whole-value approval policy payload.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApprovalPolicyChange {
     pub policy: ApprovalPolicy,
-    #[serde(default)]
-    pub next_step: bool,
 }
 
 /// Durable audit event emitted before answerers are called.
@@ -207,7 +204,6 @@ pub enum ApprovalError {
 #[derive(Default)]
 struct ApprovalState {
     policy: ApprovalPolicy,
-    next_step: Option<ApprovalPolicy>,
     next_id: u64,
     pending_decisions: BTreeSet<u64>,
     answerers: BTreeMap<u64, Arc<dyn ApprovalAnswerer>>,
@@ -230,7 +226,7 @@ pub struct ApprovalService {
 }
 
 impl ApprovalService {
-    /// Restores the persistent policy and, when present, the single next-step override.
+    /// Restores the persistent fail-closed policy.
     pub fn new(agent: AgentHandle) -> Result<Self, ApprovalError> {
         let authority = agent.authority();
         let session = agent.session();
@@ -239,22 +235,10 @@ impl ApprovalService {
         }
         let mut state = ApprovalState::default();
         for event in session.events() {
-            match event.event_type.as_str() {
-                "approval/policy" => {
-                    let change: ApprovalPolicyChange = serde_json::from_value(event.data)
-                        .map_err(|_| ApprovalError::InvalidReplay)?;
-                    if change.next_step {
-                        state.next_step = Some(change.policy);
-                    } else {
-                        state.policy = change.policy;
-                    }
-                }
-                "approval/asked" => {
-                    let _: ApprovalAsked = serde_json::from_value(event.data)
-                        .map_err(|_| ApprovalError::InvalidReplay)?;
-                    state.next_step = None;
-                }
-                _ => {}
+            if event.event_type == "approval/policy" {
+                let change: ApprovalPolicyChange =
+                    serde_json::from_value(event.data).map_err(|_| ApprovalError::InvalidReplay)?;
+                state.policy = change.policy;
             }
         }
         Ok(Self {
@@ -295,42 +279,12 @@ impl ApprovalService {
         append(
             &self.inner.session,
             "approval/policy",
-            serde_json::to_value(ApprovalPolicyChange {
-                policy,
-                next_step: false,
-            })
-            .expect("approval policy is serializable"),
+            serde_json::to_value(ApprovalPolicyChange { policy })
+                .expect("approval policy is serializable"),
             cancellation,
         )
         .await?;
         lock(&self.inner.state).policy = policy;
-
-        Ok(())
-    }
-
-    /// Sets one durable override that is consumed by the next active-turn decision.
-    pub async fn override_next_step(
-        &self,
-        policy: ApprovalPolicy,
-        cancellation: CancellationToken,
-    ) -> Result<(), ApprovalError> {
-        self.require_live()?;
-        check_cancellation(&cancellation)?;
-        let _gate = self.inner.write_gate.lock().await;
-        check_cancellation(&cancellation)?;
-        self.require_live()?;
-        append(
-            &self.inner.session,
-            "approval/policy",
-            serde_json::to_value(ApprovalPolicyChange {
-                policy,
-                next_step: true,
-            })
-            .expect("approval policy is serializable"),
-            cancellation,
-        )
-        .await?;
-        lock(&self.inner.state).next_step = Some(policy);
 
         Ok(())
     }
@@ -417,11 +371,10 @@ impl ApprovalService {
                 return ApprovalOutcome::Rejected;
             }
 
-            let (generation, policy, consumes_next_step, hooks, answerers) = {
+            let (generation, policy, hooks, answerers) = {
                 let mut state = lock(&self.inner.state);
                 let generation = next_id(&mut state);
-                let consumes_next_step = state.next_step.is_some();
-                let policy = state.next_step.unwrap_or(state.policy);
+                let policy = state.policy;
                 let hooks = state.hooks.values().cloned().collect::<Vec<_>>();
                 let answerers = state
                     .answerers
@@ -429,7 +382,7 @@ impl ApprovalService {
                     .chain(state.host_answerers.values())
                     .cloned()
                     .collect::<Vec<_>>();
-                (generation, policy, consumes_next_step, hooks, answerers)
+                (generation, policy, hooks, answerers)
             };
             let asked = ApprovalAsked {
                 approval_id: approval_id.clone(),
@@ -453,9 +406,6 @@ impl ApprovalService {
                 return ApprovalOutcome::Rejected;
             }
             let mut state = lock(&self.inner.state);
-            if consumes_next_step {
-                state.next_step = None;
-            }
             state.pending_decisions.insert(generation);
             (generation, policy, hooks, answerers, asked)
         };
@@ -470,7 +420,6 @@ impl ApprovalService {
             ApprovalOutcome::Rejected
         } else {
             match policy {
-                ApprovalPolicy::Allow => ApprovalOutcome::AllowedOnce,
                 ApprovalPolicy::Never => ApprovalOutcome::Rejected,
                 ApprovalPolicy::Ask => {
                     tokio::select! {
@@ -679,7 +628,7 @@ pub struct RpcReceipt {
 }
 
 impl RpcReceipt {
-    fn accepted() -> Self {
+    pub(crate) fn accepted() -> Self {
         Self {
             accepted: true,
             reason: None,
@@ -850,6 +799,14 @@ impl HostApprovalRegistry {
             .filter(|entry| !entry.claimed && entry.deadline > now)
             .map(|entry| entry.requested.clone())
             .collect()
+    }
+
+    /// Whether an rpc id is still eligible for an approval response.
+    pub fn is_pending(&self, rpc_id: &str) -> bool {
+        lock(&self.inner.pending)
+            .entries
+            .get(rpc_id)
+            .is_some_and(|entry| !entry.claimed && entry.deadline > Instant::now())
     }
 
     /// First valid browser response wins. Mismatches never disclose or mutate a pending request.

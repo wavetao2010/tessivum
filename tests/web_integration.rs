@@ -66,7 +66,7 @@ fn install_web_half(fixture: &Fixture) -> (PathBuf, PathBuf) {
     );
     fixture.write(
         "packages/clock/package.json",
-        r#"{"name":"clock-package","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web","id":"clock","name":"<Clock>","inject":["logger"],"immediately":true}}}"#,
+        r#"{"name":"@fixture/clock","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web","inject":["logger","<Clock>"],"immediately":true}}}"#,
     );
     fixture.write(
         "packages/clock/dist/client.js",
@@ -325,10 +325,13 @@ async fn web_command_explicit_packages_override_discovery_and_log_the_bound_url(
         .as_str()
         .expect("plugin revision")
         .to_owned();
-    assert_eq!(graph["entries"][0]["url"], "/plugins/clock/client.js");
+    assert_eq!(
+        graph["entries"][0]["url"],
+        format!("/plugins/@fixture/clock/client.js?rev={rev}")
+    );
     assert_eq!(
         client
-            .get(format!("{base}/plugins/clock/client.js?rev={rev}"))
+            .get(format!("{base}/plugins/@fixture/clock/client.js?rev={rev}"))
             .send()
             .await
             .expect("plugin is served")
@@ -454,10 +457,11 @@ async fn web_environment_route_remains_dynamic_after_settings_mutation() {
 
     let client = reqwest::Client::new();
     let providers = browser_rpc(&client, &base, "llm.providers", "providers", json!({})).await;
-    assert_eq!(
-        providers["result"]["value"]["providers"][0]["provider"],
-        "openai-responses"
-    );
+    assert!(providers["result"]["value"]["providers"]
+        .as_array()
+        .is_some_and(|providers| providers
+            .iter()
+            .any(|provider| provider["provider"] == "openai-responses")));
     let address = base
         .strip_prefix("http://")
         .expect("bound URL is HTTP")
@@ -484,18 +488,24 @@ async fn web_environment_route_remains_dynamic_after_settings_mutation() {
         }),
     )
     .await;
-    assert_eq!(updated["result"]["ok"], true);
+    assert_eq!(updated["result"]["ok"], true, "{updated}");
     let models = browser_rpc(&client, &base, "llm.models", "models", json!({})).await;
-    assert_eq!(
-        models["result"]["value"]["groups"][0]["models"][0]["id"],
-        "updated-model"
-    );
+    assert!(models["result"]["value"]["groups"]
+        .as_array()
+        .is_some_and(|groups| groups.iter().any(|group| {
+            group["id"] == "openai-responses"
+                && group["models"]
+                    .as_array()
+                    .is_some_and(|models| models.iter().any(|model| model["id"] == "updated-model"))
+        })));
 
     let models_changed = timeout(Duration::from_secs(1), async {
         loop {
             let frame: Value = serde_json::from_str(&websocket_text(&mut events).await)
                 .expect("host event is JSON");
-            if frame["payload"]["type"] == "host/models-changed" {
+            if frame["payload"]["type"] == "host/remote-event"
+                && frame["payload"]["event"] == "llm/adapters-updated"
+            {
                 return frame;
             }
         }
@@ -504,7 +514,7 @@ async fn web_environment_route_remains_dynamic_after_settings_mutation() {
     .expect("committed route invalidation arrives");
     assert_eq!(
         models_changed["payload"],
-        json!({"type": "host/models-changed"})
+        json!({"type": "host/remote-event", "event": "llm/adapters-updated", "args": []})
     );
 
     #[cfg(unix)]
@@ -607,12 +617,12 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
     assert!(index.contains("id=\"root\""));
     assert!(index.contains("\\u003cClock>"), "boot JSON escapes HTML");
     let boot = boot_graph(&index);
-    assert_eq!(boot["entries"][0]["id"], "clock");
-    assert_eq!(boot["entries"][0]["inject"], json!(["logger"]));
+    assert_eq!(boot["entries"][0]["id"], "@fixture/clock");
+    assert_eq!(boot["entries"][0]["inject"], json!(["logger", "<Clock>"]));
     let rev = boot["entries"][0]["rev"].as_str().expect("plugin revision");
     assert_eq!(
         client
-            .get(format!("{base}/plugins/clock/client.js?rev={rev}"))
+            .get(format!("{base}/plugins/@fixture/clock/client.js?rev={rev}"))
             .send()
             .await
             .expect("plugin response")
@@ -725,7 +735,7 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
     assert_eq!(
         client
             .get(format!(
-                "{base}/plugins/clock/client.js?rev={}",
+                "{base}/plugins/@fixture/clock/client.js?rev={}",
                 updated.entries[0].rev
             ))
             .send()

@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::{
-    protocol::{Message, SessionHeader, SessionId},
+    protocol::{ContentBlock, Message, MessageId, SessionHeader, SessionId},
     session::{RestoreMode, Session, SessionError, SessionStore},
     TessivumError,
 };
@@ -48,12 +48,125 @@ pub enum InboxTarget {
     Inject,
 }
 
+/// One bounded, id-addressed pending inbox mutation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InboxUpdate {
+    Edit { content: Vec<ContentBlock> },
+    Remove,
+    Steer,
+}
+
+/// The committed result of one [`InboxUpdate`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum InboxUpdateResult {
+    Updated {
+        target: InboxTarget,
+        message: Message,
+    },
+    NotPending,
+    SteerUnavailable,
+}
+
+/// A claimed inbox batch held until its durable deletion splice commits.
+pub(crate) struct InboxClaimReservation {
+    inbox: Inbox,
+    target: &'static str,
+    entries: Vec<(InboxTarget, MessageId)>,
+    messages: Vec<Message>,
+    active: bool,
+}
+
+impl InboxClaimReservation {
+    pub(crate) fn target(&self) -> &'static str {
+        self.target
+    }
+
+    pub(crate) fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    pub(crate) fn commit(mut self) -> Option<Vec<Message>> {
+        if !self.inbox.commit_claim(&self) {
+            return None;
+        }
+        self.active = false;
+        Some(std::mem::take(&mut self.messages))
+    }
+}
+
+impl Drop for InboxClaimReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.inbox.abort_claim(&self.entries);
+        }
+    }
+}
+
+/// A pending queue mutation held out of agent consumption until its durable event commits.
+pub(crate) struct InboxUpdateReservation {
+    inbox: Inbox,
+    item_id: MessageId,
+    update: InboxUpdate,
+    target: InboxTarget,
+    message: Message,
+    source_target: InboxTarget,
+    start: usize,
+    destination_start: Option<usize>,
+    wakes: bool,
+    active: bool,
+}
+
+impl InboxUpdateReservation {
+    pub(crate) fn message(&self) -> &Message {
+        &self.message
+    }
+
+    pub(crate) fn source_target(&self) -> InboxTarget {
+        self.source_target
+    }
+
+    pub(crate) fn start(&self) -> usize {
+        self.start
+    }
+
+    pub(crate) fn destination_start(&self) -> Option<usize> {
+        self.destination_start
+    }
+
+    fn commits_wake(&self) -> bool {
+        self.wakes
+    }
+
+    fn commit(mut self) -> bool {
+        let committed = self.inbox.commit_reservation(&self);
+        self.active = false;
+        committed
+    }
+}
+
+impl Drop for InboxUpdateReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.inbox.abort_reservation(&self.item_id);
+        }
+    }
+}
+
+// Boxing the one-shot reservation would add a heap allocation to every successful update.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum InboxReservationResult {
+    Reserved(InboxUpdateReservation),
+    NotPending,
+    SteerUnavailable,
+}
 /// Model route options owned by an agent, never a separate session identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOptions {
     pub provider: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
 }
@@ -65,6 +178,15 @@ impl AgentOptions {
         }
         if self.model.trim().is_empty() {
             return Err(AgentError::InvalidOptions("model must not be empty"));
+        }
+        if self
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|effort| effort.trim().is_empty())
+        {
+            return Err(AgentError::InvalidOptions(
+                "reasoning_effort must not be blank when present",
+            ));
         }
         if self.max_tokens == Some(0) {
             return Err(AgentError::InvalidOptions(
@@ -90,10 +212,10 @@ pub enum AgentError {
     DuplicateFactory,
     #[error("no agent factory is registered")]
     FactoryNotRegistered,
-    #[error("an agent is already live or starting for session {0}")]
-    DuplicateLive(SessionId),
     #[error("agent is not live for session {0}")]
     NotFound(SessionId),
+    #[error("an inbox message id is already pending: {0}")]
+    DuplicateInboxMessage(MessageId),
     #[error("agent setup was cancelled")]
     Cancelled,
     #[error("agent is disposed")]
@@ -115,6 +237,8 @@ struct InboxState {
     followups: VecDeque<Message>,
     steers: VecDeque<Message>,
     injections: VecDeque<Message>,
+    reservations: BTreeSet<MessageId>,
+    step_order: VecDeque<(InboxTarget, MessageId)>,
     changes: u64,
     wakes: u64,
 }
@@ -167,10 +291,19 @@ impl Inbox {
     ) -> Result<(), AgentError> {
         message.validate()?;
         let mut state = lock(&self.inner.state);
+        if pending_contains(&state, &message.id) {
+            return Err(AgentError::DuplicateInboxMessage(message.id));
+        }
         match target {
             InboxTarget::Followup => state.followups.push_back(message),
-            InboxTarget::Steer => state.steers.push_back(message),
-            InboxTarget::Inject => state.injections.push_back(message),
+            InboxTarget::Steer => {
+                state.step_order.push_back((target, message.id.clone()));
+                state.steers.push_back(message);
+            }
+            InboxTarget::Inject => {
+                state.step_order.push_back((target, message.id.clone()));
+                state.injections.push_back(message);
+            }
         }
         bump(&mut state.changes);
         if wakeup {
@@ -196,14 +329,32 @@ impl Inbox {
         self.send(message, InboxTarget::Inject, false)
     }
 
-    /// Removes the next message for `target`, preserving that target's FIFO order.
+    /// Removes the next unreserved message for `target`, preserving that target's FIFO order.
     pub fn take(&self, target: InboxTarget) -> Option<Message> {
         let mut state = lock(&self.inner.state);
-        match target {
+        let blocked = match target {
+            InboxTarget::Followup => state.followups.front(),
+            InboxTarget::Steer => state.steers.front(),
+            InboxTarget::Inject => state.injections.front(),
+        }
+        .is_some_and(|message| state.reservations.contains(&message.id));
+        if blocked {
+            return None;
+        }
+        let message = match target {
             InboxTarget::Followup => state.followups.pop_front(),
             InboxTarget::Steer => state.steers.pop_front(),
             InboxTarget::Inject => state.injections.pop_front(),
+        }?;
+        if target != InboxTarget::Followup {
+            state
+                .step_order
+                .retain(|(queued_target, id)| *queued_target != target || *id != message.id);
         }
+        bump(&mut state.changes);
+        drop(state);
+        self.inner.changed.notify_waiters();
+        Some(message)
     }
 
     pub fn take_pre_step(&self) -> Option<Message> {
@@ -214,8 +365,363 @@ impl Inbox {
         self.take(InboxTarget::Steer)
     }
 
+    pub fn has_next_step(&self) -> bool {
+        !lock(&self.inner.state).step_order.is_empty()
+    }
+
+    /// Claims all next-step work in original arrival order, regardless of source.
+    pub fn take_step_batch(&self) -> Vec<Message> {
+        let mut state = lock(&self.inner.state);
+        let mut messages = Vec::with_capacity(state.step_order.len());
+        while let Some((target, id)) = state.step_order.pop_front() {
+            let queue = match target {
+                InboxTarget::Steer => &mut state.steers,
+                InboxTarget::Inject => &mut state.injections,
+                InboxTarget::Followup => continue,
+            };
+            if let Some(index) = pending_index(queue, &id) {
+                messages.push(
+                    queue
+                        .remove(index)
+                        .expect("step inbox index remains valid while the inbox lock is held"),
+                );
+            }
+        }
+        if messages.is_empty() {
+            return messages;
+        }
+        bump(&mut state.changes);
+        drop(state);
+        self.inner.changed.notify_waiters();
+        messages
+    }
+
     pub fn take_next_turn(&self) -> Option<Message> {
         self.take(InboxTarget::Followup)
+    }
+
+    /// Reserves one next-turn message until its durable claim event commits.
+    pub(crate) fn reserve_next_turn_claim(&self) -> Option<InboxClaimReservation> {
+        let mut state = lock(&self.inner.state);
+        let message = state.followups.front()?.clone();
+        if state.reservations.contains(&message.id) {
+            return None;
+        }
+        state.reservations.insert(message.id.clone());
+        Some(InboxClaimReservation {
+            inbox: self.clone(),
+            target: "next-turn",
+            entries: vec![(InboxTarget::Followup, message.id.clone())],
+            messages: vec![message],
+            active: true,
+        })
+    }
+
+    /// Reserves all next-step work in original arrival order until its durable claim commits.
+    pub(crate) fn reserve_step_batch_claim(&self) -> Option<InboxClaimReservation> {
+        let mut state = lock(&self.inner.state);
+        if state.step_order.is_empty()
+            || state
+                .step_order
+                .iter()
+                .any(|(_, item_id)| state.reservations.contains(item_id))
+        {
+            return None;
+        }
+        let mut entries = Vec::with_capacity(state.step_order.len());
+        let mut messages = Vec::with_capacity(state.step_order.len());
+        for (target, item_id) in &state.step_order {
+            let queue = match target {
+                InboxTarget::Steer => &state.steers,
+                InboxTarget::Inject => &state.injections,
+                InboxTarget::Followup => return None,
+            };
+            let message = queue.iter().find(|message| message.id == *item_id)?.clone();
+            entries.push((*target, item_id.clone()));
+            messages.push(message);
+        }
+        for (_, item_id) in &entries {
+            state.reservations.insert(item_id.clone());
+        }
+        Some(InboxClaimReservation {
+            inbox: self.clone(),
+            target: "next-step",
+            entries,
+            messages,
+            active: true,
+        })
+    }
+
+    /// Returns every pending occurrence, preserving next-step source order.
+    pub fn pending(&self) -> Vec<(InboxTarget, Message)> {
+        let state = lock(&self.inner.state);
+        let mut messages =
+            Vec::with_capacity(state.followups.len() + state.steers.len() + state.injections.len());
+        messages.extend(
+            state
+                .followups
+                .iter()
+                .cloned()
+                .map(|message| (InboxTarget::Followup, message)),
+        );
+        for (target, id) in &state.step_order {
+            let queue = match target {
+                InboxTarget::Steer => &state.steers,
+                InboxTarget::Inject => &state.injections,
+                InboxTarget::Followup => continue,
+            };
+            if let Some(message) = queue.iter().find(|message| message.id == *id) {
+                messages.push((*target, message.clone()));
+            }
+        }
+        messages
+    }
+
+    /// Reserves a pending user queue entry until the caller commits or drops the reservation.
+    fn reserve_update(
+        &self,
+        item_id: &MessageId,
+        update: InboxUpdate,
+        steer_enabled: bool,
+    ) -> InboxReservationResult {
+        let mut state = lock(&self.inner.state);
+        if state.reservations.contains(item_id) {
+            return InboxReservationResult::NotPending;
+        }
+        let (target, start, original) = if let Some((index, message)) = state
+            .followups
+            .iter()
+            .enumerate()
+            .find(|(_, message)| &message.id == item_id)
+        {
+            (InboxTarget::Followup, index, message.clone())
+        } else if let Some(message) = state.steers.iter().find(|message| &message.id == item_id) {
+            let start = state
+                .step_order
+                .iter()
+                .position(|(_, queued_id)| queued_id == item_id)
+                .expect("pending steer remains in step order");
+            (InboxTarget::Steer, start, message.clone())
+        } else {
+            return InboxReservationResult::NotPending;
+        };
+        let source_target = target;
+        let (target, message, wakes) = match &update {
+            InboxUpdate::Edit { content } => {
+                let mut message = original;
+                message.content = content.clone();
+                if message.validate().is_err() {
+                    return InboxReservationResult::NotPending;
+                }
+                (target, message, false)
+            }
+            InboxUpdate::Remove => (target, original, false),
+            InboxUpdate::Steer if target == InboxTarget::Followup && steer_enabled => {
+                (InboxTarget::Steer, original, true)
+            }
+            InboxUpdate::Steer => return InboxReservationResult::SteerUnavailable,
+        };
+        let destination_start =
+            matches!(update, InboxUpdate::Steer).then_some(state.step_order.len());
+        state.reservations.insert(item_id.clone());
+        InboxReservationResult::Reserved(InboxUpdateReservation {
+            inbox: self.clone(),
+            item_id: item_id.clone(),
+            update,
+            target,
+            message,
+            source_target,
+            start,
+            destination_start,
+            wakes,
+            active: true,
+        })
+    }
+
+    fn commit_reservation(&self, reservation: &InboxUpdateReservation) -> bool {
+        let mut state = lock(&self.inner.state);
+        if !state.reservations.remove(&reservation.item_id) {
+            return false;
+        }
+        let queue = match &reservation.update {
+            InboxUpdate::Edit { .. } | InboxUpdate::Remove => reservation.target,
+            InboxUpdate::Steer => InboxTarget::Followup,
+        };
+        let index = match queue {
+            InboxTarget::Followup => pending_index(&state.followups, &reservation.item_id),
+            InboxTarget::Steer => pending_index(&state.steers, &reservation.item_id),
+            InboxTarget::Inject => None,
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        match &reservation.update {
+            InboxUpdate::Edit { .. } => match queue {
+                InboxTarget::Followup => state.followups[index] = reservation.message.clone(),
+                InboxTarget::Steer => state.steers[index] = reservation.message.clone(),
+                InboxTarget::Inject => unreachable!("injected messages cannot be reserved"),
+            },
+            InboxUpdate::Remove => match queue {
+                InboxTarget::Followup => {
+                    state.followups.remove(index);
+                }
+                InboxTarget::Steer => {
+                    let message = state
+                        .steers
+                        .remove(index)
+                        .expect("reserved steer remains pending");
+                    state
+                        .step_order
+                        .retain(|(_, item_id)| *item_id != message.id);
+                }
+                InboxTarget::Inject => unreachable!("injected messages cannot be reserved"),
+            },
+            InboxUpdate::Steer => {
+                let message = state
+                    .followups
+                    .remove(index)
+                    .expect("reserved followup remains pending");
+                state
+                    .step_order
+                    .push_back((InboxTarget::Steer, message.id.clone()));
+                state.steers.push_back(message);
+            }
+        }
+        bump(&mut state.changes);
+        if reservation.wakes {
+            bump(&mut state.wakes);
+        }
+        drop(state);
+        self.inner.changed.notify_waiters();
+        if reservation.wakes {
+            self.inner.woke.notify_waiters();
+        }
+        true
+    }
+
+    fn commit_claim(&self, reservation: &InboxClaimReservation) -> bool {
+        let mut state = lock(&self.inner.state);
+        if !reservation
+            .entries
+            .iter()
+            .all(|(_, item_id)| state.reservations.contains(item_id))
+        {
+            return false;
+        }
+        for (target, item_id) in &reservation.entries {
+            let queue = match target {
+                InboxTarget::Followup => &state.followups,
+                InboxTarget::Steer => &state.steers,
+                InboxTarget::Inject => &state.injections,
+            };
+            if pending_index(queue, item_id).is_none() {
+                return false;
+            }
+        }
+        for (target, item_id) in &reservation.entries {
+            let queue = match target {
+                InboxTarget::Followup => &mut state.followups,
+                InboxTarget::Steer => &mut state.steers,
+                InboxTarget::Inject => &mut state.injections,
+            };
+            let index = pending_index(queue, item_id).expect("reserved inbox item remains pending");
+            queue.remove(index);
+            state.reservations.remove(item_id);
+        }
+        if reservation.target == "next-step" {
+            state.step_order.retain(|(_, item_id)| {
+                !reservation
+                    .entries
+                    .iter()
+                    .any(|(_, claimed_id)| claimed_id == item_id)
+            });
+        }
+        bump(&mut state.changes);
+        drop(state);
+        self.inner.changed.notify_waiters();
+        true
+    }
+
+    fn abort_claim(&self, entries: &[(InboxTarget, MessageId)]) {
+        let mut state = lock(&self.inner.state);
+        for (_, item_id) in entries {
+            state.reservations.remove(item_id);
+        }
+    }
+
+    fn abort_reservation(&self, item_id: &MessageId) {
+        let mut state = lock(&self.inner.state);
+        if !state.reservations.remove(item_id) || !pending_contains(&state, item_id) {
+            return;
+        }
+        bump(&mut state.wakes);
+        drop(state);
+        self.inner.woke.notify_waiters();
+    }
+
+    /// Mutates one pending next-turn or next-step user message by its stable id.
+    /// Injected pre-step context remains intentionally outside this user queue verb.
+    pub fn update(&self, item_id: &MessageId, update: InboxUpdate) -> InboxUpdateResult {
+        let mut state = lock(&self.inner.state);
+        if state.reservations.contains(item_id) {
+            return InboxUpdateResult::NotPending;
+        }
+        let (target, queue) = if let Some(index) = pending_index(&state.followups, item_id) {
+            (InboxTarget::Followup, QueueRef::Followup(index))
+        } else if let Some(index) = pending_index(&state.steers, item_id) {
+            (InboxTarget::Steer, QueueRef::Steer(index))
+        } else {
+            return InboxUpdateResult::NotPending;
+        };
+
+        let wakes = matches!(&update, InboxUpdate::Steer);
+        let result = match update {
+            InboxUpdate::Edit { content } => {
+                let mut updated = queue.message(&state).clone();
+                updated.content = content;
+                if updated.validate().is_err() {
+                    return InboxUpdateResult::NotPending;
+                }
+                *queue.message_mut(&mut state) = updated.clone();
+                InboxUpdateResult::Updated {
+                    target,
+                    message: updated,
+                }
+            }
+            InboxUpdate::Remove => {
+                let message = queue.remove(&mut state);
+                if target != InboxTarget::Followup {
+                    state.step_order.retain(|(queued_target, id)| {
+                        *queued_target != target || *id != message.id
+                    });
+                }
+                InboxUpdateResult::Updated { target, message }
+            }
+            InboxUpdate::Steer => {
+                if target != InboxTarget::Followup {
+                    return InboxUpdateResult::SteerUnavailable;
+                }
+                let message = queue.remove(&mut state);
+                state
+                    .step_order
+                    .push_back((InboxTarget::Steer, message.id.clone()));
+                state.steers.push_back(message.clone());
+                InboxUpdateResult::Updated {
+                    target: InboxTarget::Steer,
+                    message,
+                }
+            }
+        };
+        bump(&mut state.changes);
+        if wakes {
+            bump(&mut state.wakes);
+        }
+        drop(state);
+        self.inner.changed.notify_waiters();
+        if wakes {
+            self.inner.woke.notify_waiters();
+        }
+        result
     }
 
     pub fn len(&self) -> usize {
@@ -226,7 +732,6 @@ impl Inbox {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
     pub fn clear(&self) {
         let mut state = lock(&self.inner.state);
         if state.followups.is_empty() && state.steers.is_empty() && state.injections.is_empty() {
@@ -235,6 +740,8 @@ impl Inbox {
         state.followups.clear();
         state.steers.clear();
         state.injections.clear();
+        state.reservations.clear();
+        state.step_order.clear();
         bump(&mut state.changes);
         drop(state);
         self.inner.changed.notify_waiters();
@@ -286,6 +793,8 @@ pub trait AgentRuntime: Send + Sync {
     /// Resolves only after current driver work is idle.
     async fn when_idle(&self) -> Result<(), AgentError>;
 
+    /// Records the first explicit cancellation cause before shared cancellation fires.
+    fn cancel(&self, _cause: AgentCancelCause) {}
     /// Stops and awaits all driver-owned work.
     async fn dispose(&self) -> Result<(), AgentError>;
 }
@@ -448,6 +957,7 @@ impl AgentRegistry {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
         let id = header.id.clone();
+        let agent_preset = header.agent_preset.clone();
         let factory = self.reserve(&id)?;
         let session = match self
             .inner
@@ -461,8 +971,15 @@ impl AgentRegistry {
                 return Err(error.into());
             }
         };
-        self.finish_setup(id, session, options, factory, setup_cancellation)
-            .await
+        self.finish_setup(
+            id,
+            session,
+            options,
+            factory,
+            agent_preset,
+            setup_cancellation,
+        )
+        .await
     }
 
     /// Resumes a durable session using its existing session identity.
@@ -490,8 +1007,16 @@ impl AgentRegistry {
                 }
             },
         };
-        self.finish_setup(session_id, session, options, factory, setup_cancellation)
-            .await
+        let agent_preset = session.header().agent_preset;
+        self.finish_setup(
+            session_id,
+            session,
+            options,
+            factory,
+            agent_preset,
+            setup_cancellation,
+        )
+        .await
     }
 
     /// Uses the already-live or durable session when present; otherwise creates `header`.
@@ -504,6 +1029,7 @@ impl AgentRegistry {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
         let id = header.id.clone();
+        let agent_preset = header.agent_preset.clone();
         let factory = self.reserve(&id)?;
         let session = match self.inner.sessions.get(&id) {
             Some(session) => Ok(session),
@@ -530,8 +1056,15 @@ impl AgentRegistry {
                 return Err(error.into());
             }
         };
-        self.finish_setup(id, session, options, factory, setup_cancellation)
-            .await
+        self.finish_setup(
+            id,
+            session,
+            options,
+            factory,
+            agent_preset,
+            setup_cancellation,
+        )
+        .await
     }
 
     pub fn get(&self, session_id: &SessionId) -> Option<AgentHandle> {
@@ -623,7 +1156,9 @@ impl AgentRegistry {
             .map(|slot| Arc::clone(&slot.factory))
             .ok_or(AgentError::FactoryNotRegistered)?;
         if state.live.contains_key(session_id) || state.starting.contains(session_id) {
-            return Err(AgentError::DuplicateLive(session_id.clone()));
+            return Err(AgentError::Session(SessionError::DuplicateLive(
+                session_id.clone(),
+            )));
         }
         state.starting.insert(session_id.clone());
         Ok(factory)
@@ -639,9 +1174,13 @@ impl AgentRegistry {
         session: Arc<Session>,
         options: AgentOptions,
         factory: Arc<dyn AgentFactory>,
+        agent_preset: Option<String>,
         setup_cancellation: CancellationToken,
     ) -> Result<AgentHandle, AgentError> {
         let inbox = Inbox::new();
+        for message in session.pending_next_turn_inbox()? {
+            inbox.send(message, InboxTarget::Followup, false)?;
+        }
         let cancellation = ContextHandle::root().scope().cancellation();
         let runtime = match factory
             .create(
@@ -666,6 +1205,7 @@ impl AgentRegistry {
 
         let inner = Arc::new(AgentInner {
             id: session_id.clone(),
+            agent_preset,
             session,
             options,
             inbox,
@@ -718,6 +1258,7 @@ struct AgentState {
 
 struct AgentInner {
     id: SessionId,
+    agent_preset: Option<String>,
     session: Arc<Session>,
     options: AgentOptions,
     inbox: Inbox,
@@ -731,6 +1272,14 @@ struct AgentInner {
 
 impl AgentInner {
     fn cancel(&self, options: AgentCancelOptions) -> bool {
+        if self.runtime.status() == AgentStatus::Idle {
+            return false;
+        }
+        self.cancel_including_idle(options)
+    }
+
+    fn cancel_including_idle(&self, options: AgentCancelOptions) -> bool {
+        let cause = options.cause.clone();
         let clear_inbox = {
             let mut state = lock(&self.state);
             if state.disposed || state.cancellation.is_some() {
@@ -743,6 +1292,7 @@ impl AgentInner {
         if clear_inbox {
             self.inbox.clear();
         }
+        self.runtime.cancel(cause);
         self.cancellation.cancel()
     }
 
@@ -766,6 +1316,62 @@ impl AgentInner {
             self.runtime.wake().await?;
         }
         Ok(())
+    }
+
+    async fn update_inbox(
+        &self,
+        item_id: &MessageId,
+        update: InboxUpdate,
+    ) -> Result<InboxUpdateResult, AgentError> {
+        let wakes = matches!(&update, InboxUpdate::Steer);
+        let result = {
+            let state = lock(&self.state);
+            if state.disposed {
+                return Err(AgentError::Disposed);
+            }
+            if state.cancellation.is_some() {
+                return Err(AgentError::Cancelled);
+            }
+            if wakes && self.runtime.status() != AgentStatus::Running {
+                return Ok(InboxUpdateResult::SteerUnavailable);
+            }
+            self.inbox.update(item_id, update)
+        };
+        if wakes && matches!(&result, InboxUpdateResult::Updated { .. }) {
+            self.runtime.wake().await?;
+        }
+        Ok(result)
+    }
+
+    async fn reserve_inbox_update(
+        &self,
+        item_id: &MessageId,
+        update: InboxUpdate,
+    ) -> Result<InboxReservationResult, AgentError> {
+        let state = lock(&self.state);
+        if state.disposed {
+            return Err(AgentError::Disposed);
+        }
+        if state.cancellation.is_some() {
+            return Err(AgentError::Cancelled);
+        }
+        Ok(self.inbox.reserve_update(
+            item_id,
+            update,
+            self.runtime.status() == AgentStatus::Running,
+        ))
+    }
+
+    async fn commit_inbox_update(
+        &self,
+        reservation: InboxUpdateReservation,
+    ) -> Result<bool, AgentError> {
+        let wakes = reservation.commits_wake();
+        let committed = reservation.commit();
+        if committed && wakes {
+            self.runtime.wake().await?;
+        }
+        Ok(committed)
     }
 
     async fn when_idle(&self) -> Result<(), AgentError> {
@@ -801,6 +1407,7 @@ impl AgentInner {
         };
         if clear_inbox {
             self.inbox.clear();
+            self.runtime.cancel(AgentCancelCause::Disposed);
         }
         self.cancellation.cancel();
         let result = self.runtime.dispose().await;
@@ -923,6 +1530,10 @@ impl AgentHandle {
         Arc::clone(&self.inner.session)
     }
 
+    pub fn agent_preset(&self) -> Option<String> {
+        self.inner.agent_preset.clone()
+    }
+
     pub fn options(&self) -> AgentOptions {
         self.inner.options.clone()
     }
@@ -973,6 +1584,37 @@ impl AgentHandle {
         self.inner.cancel(AgentCancelOptions { cause, keep_inbox })
     }
 
+    pub(crate) fn cancel_including_idle(&self, cause: AgentCancelCause, keep_inbox: bool) -> bool {
+        self.inner
+            .cancel_including_idle(AgentCancelOptions { cause, keep_inbox })
+    }
+
+    /// Applies one id-addressed mutation to this agent's pending user inbox.
+    pub async fn update_inbox(
+        &self,
+        item_id: &MessageId,
+        update: InboxUpdate,
+    ) -> Result<InboxUpdateResult, AgentError> {
+        self.inner.update_inbox(item_id, update).await
+    }
+
+    /// Reserves one pending queue mutation until the caller durably records it.
+    pub(crate) async fn reserve_inbox_update(
+        &self,
+        item_id: &MessageId,
+        update: InboxUpdate,
+    ) -> Result<InboxReservationResult, AgentError> {
+        self.inner.reserve_inbox_update(item_id, update).await
+    }
+
+    /// Publishes a queue mutation after its durable journal append commits.
+    pub(crate) async fn commit_inbox_update(
+        &self,
+        reservation: InboxUpdateReservation,
+    ) -> Result<bool, AgentError> {
+        self.inner.commit_inbox_update(reservation).await
+    }
+
     /// Waits through replacement wakeups until the driver reaches quiescence.
     pub async fn when_idle(&self) -> Result<(), AgentError> {
         self.inner.when_idle().await
@@ -1012,6 +1654,132 @@ fn bump(value: &mut u64) {
     *value = value.checked_add(1).unwrap_or(1);
 }
 
+#[derive(Clone, Copy)]
+enum QueueRef {
+    Followup(usize),
+    Steer(usize),
+}
+
+impl QueueRef {
+    fn message(self, state: &InboxState) -> &Message {
+        match self {
+            Self::Followup(index) => &state.followups[index],
+            Self::Steer(index) => &state.steers[index],
+        }
+    }
+
+    fn message_mut(self, state: &mut InboxState) -> &mut Message {
+        match self {
+            Self::Followup(index) => &mut state.followups[index],
+            Self::Steer(index) => &mut state.steers[index],
+        }
+    }
+
+    fn remove(self, state: &mut InboxState) -> Message {
+        match self {
+            Self::Followup(index) => state.followups.remove(index),
+            Self::Steer(index) => state.steers.remove(index),
+        }
+        .expect("pending inbox index remains valid while the inbox lock is held")
+    }
+}
+
+fn pending_contains(state: &InboxState, item_id: &MessageId) -> bool {
+    pending_index(&state.followups, item_id).is_some()
+        || pending_index(&state.steers, item_id).is_some()
+        || pending_index(&state.injections, item_id).is_some()
+}
+
+fn pending_index(queue: &VecDeque<Message>, item_id: &MessageId) -> Option<usize> {
+    queue.iter().position(|message| &message.id == item_id)
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{MessageRole, MessageSource};
+
+    fn message(id: &str) -> Message {
+        Message {
+            id: MessageId::from(id),
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text { text: id.into() }],
+            source: MessageSource::User {
+                client_time_zone: None,
+            },
+        }
+    }
+
+    #[test]
+    fn steer_updates_use_combined_step_order_and_remove_entries() {
+        let inbox = Inbox::new();
+        let injection = message("injection");
+        let steer = message("steer");
+        let trailing_steer = message("trailing-steer");
+        let edited = vec![ContentBlock::Text {
+            text: "edited".into(),
+        }];
+        inbox.inject(injection.clone()).unwrap();
+        inbox.steer(steer.clone()).unwrap();
+        inbox.steer(trailing_steer.clone()).unwrap();
+
+        let edit = match inbox.reserve_update(
+            &steer.id,
+            InboxUpdate::Edit {
+                content: edited.clone(),
+            },
+            true,
+        ) {
+            InboxReservationResult::Reserved(reservation) => reservation,
+            _ => panic!("steer remains pending"),
+        };
+        assert_eq!(edit.start(), 1);
+        assert!(edit.commit());
+        let pending = inbox.pending();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|(target, message)| (*target, message.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (InboxTarget::Inject, "injection"),
+                (InboxTarget::Steer, "steer"),
+                (InboxTarget::Steer, "trailing-steer"),
+            ]
+        );
+        assert_eq!(pending[1].1.content, edited);
+
+        let remove = match inbox.reserve_update(&steer.id, InboxUpdate::Remove, true) {
+            InboxReservationResult::Reserved(reservation) => reservation,
+            _ => panic!("edited steer remains pending"),
+        };
+        assert_eq!(remove.start(), 1);
+        assert!(remove.commit());
+        assert_eq!(
+            lock(&inbox.inner.state)
+                .step_order
+                .iter()
+                .map(|(target, item_id)| (*target, item_id.as_str().to_owned()))
+                .collect::<Vec<_>>(),
+            vec![
+                (InboxTarget::Inject, "injection".to_owned()),
+                (InboxTarget::Steer, "trailing-steer".to_owned()),
+            ]
+        );
+        assert_eq!(
+            inbox
+                .pending()
+                .iter()
+                .map(|(target, message)| (*target, message.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (InboxTarget::Inject, "injection"),
+                (InboxTarget::Steer, "trailing-steer"),
+            ]
+        );
+    }
 }

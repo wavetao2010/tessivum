@@ -659,9 +659,24 @@ async fn send_notification(
             "method": "session.event",
             "params": payload,
         }),
+        HostNotification::SessionProjection(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "session.projection",
+            "params": payload,
+        }),
         HostNotification::SessionStatus(payload) => json!({
             "jsonrpc": "2.0",
             "method": "session.status",
+            "params": payload,
+        }),
+        HostNotification::SessionQueue(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "session.queue",
+            "params": payload,
+        }),
+        HostNotification::SessionJobs(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "session.jobs",
             "params": payload,
         }),
         HostNotification::ApprovalRequested(payload) => json!({
@@ -672,6 +687,21 @@ async fn send_notification(
         HostNotification::ApprovalResolved(payload) => json!({
             "jsonrpc": "2.0",
             "method": "approval.resolved",
+            "params": payload,
+        }),
+        HostNotification::QuestionRequested(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "question.requested",
+            "params": payload,
+        }),
+        HostNotification::QuestionResolved(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "question.resolved",
+            "params": payload,
+        }),
+        HostNotification::RemoteEvent(payload) => json!({
+            "jsonrpc": "2.0",
+            "method": "host.remote-event",
             "params": payload,
         }),
         HostNotification::SettingsChanged(payload) => json!({
@@ -687,6 +717,11 @@ async fn send_notification(
         HostNotification::ModelsChanged => json!({
             "jsonrpc": "2.0",
             "method": "models.changed",
+            "params": {},
+        }),
+        HostNotification::AdaptersUpdated => json!({
+            "jsonrpc": "2.0",
+            "method": "llm.adapters-updated",
             "params": {},
         }),
         HostNotification::SubagentStarted(payload) => json!({

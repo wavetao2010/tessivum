@@ -22,6 +22,10 @@
   - status: 已保存 minimax-cn。
   - list:
     - listitem:
+      - text: DeepSeek
+      - img "API 密钥缺失"
+      - button "编辑 DeepSeek (deepseek-official)": 编辑
+    - listitem:
       - text: minimax-cn
       - img "API 密钥已配置"
       - button "编辑 minimax-cn": 编辑

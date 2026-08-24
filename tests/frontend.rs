@@ -60,9 +60,9 @@ fn dist() -> Fixture {
     fixture
 }
 
-fn client_manifest(name: &str, id: &str, display_name: &str) -> String {
+fn client_manifest(name: &str) -> String {
     format!(
-        r#"{{"name":"{name}","exports":{{"./client":"./dist/client.js"}},"dsh":{{"client":{{"platform":"web","id":"{id}","name":"{display_name}","inject":["logger"],"immediately":true}}}}}}"#
+        r#"{{"name":"{name}","exports":{{"./client":"./dist/client.js"}},"dsh":{{"client":{{"platform":"web","inject":["logger"],"immediately":true}}}}}}"#
     )
 }
 
@@ -108,15 +108,9 @@ async fn static_responses_have_exact_statuses_mime_head_and_spa_behavior() {
 async fn packages_produce_a_deterministic_hashed_graph_and_exact_plugin_route() {
     let dist = dist();
     let packages = Fixture::new("packages");
-    packages.write(
-        "alpha/package.json",
-        &client_manifest("alpha-package", "alpha", "Alpha"),
-    );
+    packages.write("alpha/package.json", &client_manifest("@scope/alpha"));
     packages.write("alpha/dist/client.js", "export const alpha = 1");
-    packages.write(
-        "beta/package.json",
-        &client_manifest("beta-package", "beta", "Beta"),
-    );
+    packages.write("beta/package.json", &client_manifest("beta-package"));
     packages.write("beta/dist/client.js", "export const beta = 1");
     let frontend = FrontendStatic::new(dist.path()).unwrap();
 
@@ -131,22 +125,24 @@ async fn packages_produce_a_deterministic_hashed_graph_and_exact_plugin_route() 
             .iter()
             .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>(),
-        ["alpha", "beta"]
+        ["@scope/alpha", "beta-package"]
     );
     let entry = &graph.entries[0];
-    assert_eq!(entry.package, "alpha-package");
     assert_eq!(entry.inject, Some(vec![String::from("logger")]));
-    assert_eq!(entry.name, "Alpha");
-    assert_eq!(entry.url, "/plugins/alpha/client.js");
+    assert_eq!(
+        entry.url,
+        format!("/plugins/@scope/alpha/client.js?rev={}", entry.rev)
+    );
     assert_eq!(entry.immediately, Some(true));
-    assert!(entry.rev.starts_with("sha256:"));
+    assert_eq!(entry.rev.len(), 12);
+    assert!(entry.rev.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     let reordering = frontend
         .scan_packages([alpha.as_path(), beta.as_path()])
         .unwrap();
     assert_eq!(graph, reordering);
 
-    let plugin = frontend.serve(Method::GET, "/plugins/alpha/client.js");
+    let plugin = frontend.serve(Method::GET, "/plugins/@scope/alpha/client.js");
     assert_eq!(plugin.status(), StatusCode::OK);
     assert_eq!(plugin.headers()[header::CONTENT_TYPE], "text/javascript");
     assert_eq!(plugin.headers()[header::CACHE_CONTROL], "no-cache");
@@ -202,7 +198,7 @@ fn ordered_taps_precede_nothing_before_escaped_boot_script() {
     let packages = Fixture::new("escaped-boot");
     packages.write(
         "plugin/package.json",
-        &client_manifest("evil-package", "evil", "<evil"),
+        r#"{"name":"evil-package","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web","inject":["<evil"]}}}"#,
     );
     packages.write("plugin/dist/client.js", "export {};");
     let frontend = FrontendStatic::new(dist.path()).unwrap();
@@ -238,10 +234,7 @@ async fn hmr_is_opt_in_bounded_and_publishes_rebuilt_graphs() {
     }
 
     let packages = Fixture::new("hmr");
-    packages.write(
-        "plugin/package.json",
-        &client_manifest("hmr-package", "hmr", "HMR"),
-    );
+    packages.write("plugin/package.json", &client_manifest("hmr-package"));
     packages.write("plugin/dist/client.js", "export const version = 1");
     let frontend = FrontendStatic::new_with_hmr(dist.path(), 1).unwrap();
     let mut updates = frontend

@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     error::TessivumError,
     protocol::{SessionEvent, SessionHeader, SessionId},
-    session::{SessionError, SessionInspection, SessionPersistence},
+    session::{SessionError, SessionInspection, SessionPersistence, SessionRawArtifact},
 };
 
 const RAW_SUFFIX: &str = ".jsonl";
@@ -262,6 +262,41 @@ impl SessionPersistence for JsonlSessionPersistence {
             .map_err(|error| io_error("sync appended log", &path, error))
     }
 
+    fn supports_raw_artifacts(&self) -> bool {
+        true
+    }
+
+    async fn read_raw(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<SessionRawArtifact>, SessionError> {
+        check_cancellation(&cancellation)?;
+        let gate = self.gate(session_id);
+        let _guard = gate.lock().await;
+        check_cancellation(&cancellation)?;
+        let Some((path, format)) = self.existing_path(session_id).await? else {
+            return Ok(None);
+        };
+        let stored = fs::read(&path)
+            .await
+            .map_err(|error| io_error("read", &path, error))?;
+        check_cancellation(&cancellation)?;
+        parse_session(&stored, format, Some(session_id))
+            .map_err(|error| log_error(&path, error))?;
+        let bytes = match format {
+            JsonlStorageFormat::Raw => committed_raw_bytes(stored),
+            JsonlStorageFormat::Zstd => {
+                decode_zstd_raw(&stored).map_err(|error| log_error(&path, error))?
+            }
+        };
+        check_cancellation(&cancellation)?;
+        Ok(Some(SessionRawArtifact {
+            filename: "session.jsonl".into(),
+            bytes,
+        }))
+    }
+
     async fn load(
         &self,
         session_id: &SessionId,
@@ -337,6 +372,39 @@ impl SessionPersistence for JsonlSessionPersistence {
         *count = count
             .checked_add(1)
             .ok_or(SessionError::SequenceExhausted)?;
+        Ok(())
+    }
+    async fn delete(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        check_cancellation(&cancellation)?;
+        let gate = self.gate(session_id);
+        let _guard = gate.lock().await;
+        check_cancellation(&cancellation)?;
+        let mut deleted = false;
+        for path in [self.raw_path(session_id), self.compressed_path(session_id)] {
+            match fs::remove_file(&path).await {
+                Ok(()) => deleted = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error("delete session log", &path, error)),
+            }
+        }
+        if !deleted {
+            return Err(SessionError::NotFound(session_id.clone()));
+        }
+        #[cfg(unix)]
+        {
+            let directory = fs::File::open(&self.root)
+                .await
+                .map_err(|error| io_error("open log directory", &self.root, error))?;
+            directory
+                .sync_all()
+                .await
+                .map_err(|error| io_error("sync log directory", &self.root, error))?;
+        }
+        lock(&self.flush_counts).remove(session_id);
         Ok(())
     }
 
@@ -482,6 +550,46 @@ fn parse_zstd_records(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         records.push(record.to_vec());
     }
     Ok(records)
+}
+
+fn committed_raw_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
+    let start = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if start < bytes.len() && serde_json::from_slice::<Value>(&bytes[start..]).is_err() {
+        bytes.truncate(start);
+    }
+    bytes
+}
+
+fn decode_zstd_raw(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut raw = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes.len() - offset < FRAME_HEADER_LEN {
+            break;
+        }
+        let checksum = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let compressed_len =
+            u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        offset += FRAME_HEADER_LEN;
+        if bytes.len() - offset < compressed_len {
+            break;
+        }
+        let compressed = &bytes[offset..offset + compressed_len];
+        offset += compressed_len;
+        if crc32(compressed) != checksum {
+            return Err("compressed frame checksum mismatch".into());
+        }
+        let record = zstd::stream::decode_all(Cursor::new(compressed))
+            .map_err(|error| format!("invalid compressed frame: {error}"))?;
+        if record.last() != Some(&b'\n') || record[..record.len() - 1].contains(&b'\n') {
+            return Err("compressed frame does not contain exactly one JSONL record".into());
+        }
+        raw.extend_from_slice(&record);
+    }
+    Ok(raw)
 }
 
 fn parse_header(record: &[u8]) -> Result<SessionHeader, String> {
