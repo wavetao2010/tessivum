@@ -62,8 +62,13 @@ function scrollGeometry(harness: RustWebHarness): Promise<{ distanceFromBottom: 
 
 async function nextPaint(harness: RustWebHarness): Promise<void> {
   await harness.page.evaluate(async () => {
-    await document.fonts.ready
-    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    await Promise.race([
+      (async () => {
+        await document.fonts.ready
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      })(),
+      new Promise<void>(resolve => setTimeout(resolve, 500)),
+    ])
   })
 }
 

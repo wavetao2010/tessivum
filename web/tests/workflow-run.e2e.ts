@@ -23,7 +23,7 @@ test('workflow run exposes its child, settles beside the tool row, and rebuilds 
     if (await workflow.getAttribute('data-run-status') !== 'running') {
       await workflow.getByRole('button', { name: /^snapshot-flow / }).click()
     }
-    const disclosures = workflow.locator('[data-disclosure-row]')
+    const disclosures = workflow.locator('[data-disclosure-row][role="button"]')
     await disclosures.nth(1).waitFor({ timeout: 15_000 })
     for (const disclosure of [disclosures.nth(0), disclosures.nth(1)]) {
       expect(await disclosure.getAttribute('role')).toBe('button')
