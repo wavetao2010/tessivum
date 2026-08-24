@@ -132,8 +132,18 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
 
     await harness.page.setViewportSize({ width: 640, height: 1000 })
-    const queueBox = await harness.page.locator('[data-queue-dock]').boundingBox()
-    const composerBox = await harness.page.locator('[data-composer-card]').boundingBox()
+    const [queueBox, composerBox] = await waitUntil(
+      () => Promise.all([
+        harness.page.locator('[data-queue-dock]').boundingBox(),
+        harness.page.locator('[data-composer-card]').boundingBox(),
+      ]),
+      ([queue, composer]) => {
+        if (queue === null || composer === null) return false
+        const left = queue.x - composer.x
+        const right = composer.x + composer.width - queue.x - queue.width
+        return Math.abs(left - right) < 0.05
+      },
+    )
     expect(queueBox).not.toBeNull()
     expect(composerBox).not.toBeNull()
     expect(queueBox!.x).toBeGreaterThanOrEqual(composerBox!.x)
