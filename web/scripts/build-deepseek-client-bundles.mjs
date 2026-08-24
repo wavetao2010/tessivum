@@ -19,7 +19,7 @@ applyDeepSeekPatch(upstreamRoot)
 const outputRoot = resolve(webRoot, 'client-packages')
 const source = createDeepSeekSourceResolver(upstreamRoot)
 
-execFileSync('npm', ['run', 'build:lib:client'], { cwd: source.root, stdio: 'inherit' })
+execFileSync('npm', ['run', 'build:lib'], { cwd: source.root, stdio: 'inherit' })
 
 const profile = readFileSync(join(source.root, 'packages/bundle/web-app/cordis.patch.yml'), 'utf8')
 const selected = new Set(
