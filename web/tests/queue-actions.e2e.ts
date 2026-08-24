@@ -243,9 +243,19 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
     expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(LAYOUT_EXPECTED, 'utf8'))
 
     const aligned = async (): Promise<void> => {
-      const queueBox = await harness.page.locator('[data-queue-dock] > div').boundingBox()
-      const todoBox = await harness.page.locator('[data-testid="todo-panel"]').boundingBox()
-      const goalBox = await harness.page.locator('[data-goal-bar] > div').boundingBox()
+      const [queueBox, todoBox, goalBox] = await waitUntil(
+        () => Promise.all([
+          harness.page.locator('[data-queue-dock] > div').boundingBox(),
+          harness.page.locator('[data-testid="todo-panel"]').boundingBox(),
+          harness.page.locator('[data-goal-bar] > div').boundingBox(),
+        ]),
+        ([queue, todo, goal]) => queue !== null && todo !== null && goal !== null
+          && todo.y < goal.y && goal.y < queue.y
+          && Math.abs(todo.x - goal.x) < 0.05
+          && Math.abs(todo.x - queue.x) < 0.05
+          && Math.abs(todo.width - goal.width) < 0.05
+          && Math.abs(todo.width - queue.width) < 0.05,
+      )
       expect(queueBox).not.toBeNull()
       expect(todoBox).not.toBeNull()
       expect(goalBox).not.toBeNull()
