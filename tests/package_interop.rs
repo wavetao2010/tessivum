@@ -118,9 +118,13 @@ fn wasm_entry() -> Entry {
 
 fn node_command() -> HostCommand {
     let root = core_source();
+    let vendor = std::env::var_os("TESSIVUM_DEEPSEEK_VENDOR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| deepseek_source().join("vendor"));
     HostCommand::new("bun")
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
+        .env("CORDIS_VENDOR_ROOT", vendor)
         .current_dir(root.join("node/compat-host"))
 }
 
