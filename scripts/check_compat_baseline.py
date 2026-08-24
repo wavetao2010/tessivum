@@ -145,8 +145,9 @@ def main() -> int:
     web_lock = (PROJECT / "web/bun.lock").read_text()
     binary = (PROJECT / "src/bin/tessivum.rs").read_text()
     asset_builder = (PROJECT / "build.rs").read_text()
-    check("selected.size !== 38" in bundle_builder and "build:lib:client" in bundle_builder,
-          "pinned source client bundle builder or 38-package gate is missing", failures)
+    check("selected.size !== 38" in bundle_builder and "build:lib" in bundle_builder
+          and "applyDeepSeekPatch" in bundle_builder,
+          "pinned source contract build, compatibility patch, or 38-package gate is missing", failures)
     check("window.__ModuleLoader__" in bundle_builder and "createHash('sha1')" in bundle_builder,
           "source bundle handoff or content hash gate is missing", failures)
     check("EmbeddedWebAssets" in binary and "TESSIVUM_WEB_DIST" in binary
