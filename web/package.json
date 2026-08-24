@@ -11,7 +11,7 @@
     "test": "bun run test:source-client && bun run test:e2e",
     "test:e2e": "bun run build && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 120000",
     "test:source-client": "../../upstream/deepseek-harness/node_modules/.bin/vitest run --root ../../upstream/deepseek-harness packages/client",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun run scripts/typecheck.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
