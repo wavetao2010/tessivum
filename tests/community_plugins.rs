@@ -113,30 +113,13 @@ fn community_packages_are_published_and_routed_without_source_rewrites() {
         "HTTP report identifies its Node module/network client boundary: {http_report}",
     );
 }
-fn write_module_alias(directory: &Path, name: &str, target: &Path) {
-    fs::create_dir_all(directory).expect("test-local package alias directory exists");
-    fs::write(
-        directory.join("package.json"),
-        json!({ "name": name, "type": "module", "exports": "./index.mjs" }).to_string(),
-    )
-    .expect("test-local package alias manifest is written");
-    fs::write(
-        directory.join("index.mjs"),
-        format!(
-            "export * from {};\n",
-            serde_json::to_string(target.to_str().expect("pinned vendor entry is valid UTF-8"),)
-                .expect("vendor entry is a valid JavaScript specifier"),
-        ),
-    )
-    .expect("test-local package alias re-exports the pinned vendor entry");
-}
 
 struct TemporaryTimerPackage {
     root: PathBuf,
 }
 
 impl TemporaryTimerPackage {
-    fn new(vendor: &Path) -> Self {
+    fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "tessivum-community-timer-{}-{}",
             std::process::id(),
@@ -160,18 +143,6 @@ impl TemporaryTimerPackage {
         assert_published_file(timer.join("package.json"), TIMER_PACKAGE_HASH);
         assert_published_file(timer.join("lib/index.js"), TIMER_INDEX_HASH);
 
-        let node_modules = root.join("node_modules");
-        write_module_alias(
-            &node_modules.join("cordis"),
-            "cordis",
-            &vendor.join("cordis/src/index.ts"),
-        );
-        write_module_alias(
-            &node_modules.join("@deepseek-ai/cosmokit"),
-            "@deepseek-ai/cosmokit",
-            &vendor.join("cosmokit/src/index.ts"),
-        );
-
         Self { root }
     }
 
@@ -187,6 +158,10 @@ impl Drop for TemporaryTimerPackage {
 }
 
 fn core_root() -> PathBuf {
+    let local = scharness_root().join("tessivum-core");
+    if local.join("node/compat-host/src/index.ts").is_file() {
+        return local;
+    }
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
@@ -253,7 +228,7 @@ fn bridge_services() -> BridgeServices {
 async fn vendored_timer_loads_unchanged_through_the_legacy_profile_and_reaps_after_disconnect() {
     let core = core_root();
     let vendor = vendor_root();
-    let package = TemporaryTimerPackage::new(&vendor);
+    let package = TemporaryTimerPackage::new();
     let command = HostCommand::new("bun")
         .arg("run")
         .arg(core.join("node/compat-host/src/index.ts"))

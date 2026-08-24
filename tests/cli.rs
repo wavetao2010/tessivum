@@ -4,7 +4,7 @@ mod cli;
 use std::{num::NonZeroU64, path::PathBuf};
 
 use clap::error::ErrorKind;
-use cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand};
+use cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand, PluginAction};
 
 fn headless(args: &[&str]) -> HeadlessCommand {
     let cli = parse_cli(args.iter().copied()).expect("headless invocation should parse");
@@ -138,6 +138,31 @@ fn web_patch_overlays_keep_argv_order_for_both_web_spellings() {
             command => panic!("expected Web, got {command:?}"),
         }
     }
+}
+
+#[test]
+fn plugin_commands_own_their_profile_and_mutation() {
+    let add = parse_cli([
+        "tessivum",
+        "plugin",
+        "--data-dir",
+        "state",
+        "add",
+        "@scope/plugin@1.2.3",
+    ])
+    .unwrap();
+    let CliCommand::Plugin(add) = add.command else {
+        panic!("expected plugin command")
+    };
+    assert_eq!(add.data_dir, PathBuf::from("state"));
+    assert_eq!(add.action, PluginAction::Add("@scope/plugin@1.2.3".into()));
+
+    let remove = parse_cli(["tessivum", "plugin", "remove", "@scope/plugin"]).unwrap();
+    let CliCommand::Plugin(remove) = remove.command else {
+        panic!("expected plugin command")
+    };
+    assert_eq!(remove.data_dir, PathBuf::from(".tessivum"));
+    assert_eq!(remove.action, PluginAction::Remove("@scope/plugin".into()));
 }
 
 #[test]

@@ -142,6 +142,8 @@ impl ResponsesModel {
 #[serde(rename_all = "camelCase")]
 pub struct ResponsesRoute {
     pub id: String,
+    #[serde(default = "default_responses_api")]
+    pub api: String,
     pub display_name: String,
     pub base_url: String,
     pub credential_ref: String,
@@ -149,6 +151,10 @@ pub struct ResponsesRoute {
     pub models: Vec<ResponsesModel>,
     #[serde(default)]
     pub generation: u64,
+}
+
+fn default_responses_api() -> String {
+    "openai-responses".into()
 }
 
 impl ResponsesRoute {
@@ -161,6 +167,7 @@ impl ResponsesRoute {
     ) -> Self {
         Self {
             id: id.into(),
+            api: default_responses_api(),
             display_name: display_name.into(),
             base_url: base_url.into(),
             credential_ref: credential_ref.into(),
@@ -169,7 +176,22 @@ impl ResponsesRoute {
         }
     }
 
+    pub fn with_api(mut self, api: impl Into<String>) -> Self {
+        self.api = api.into();
+        self
+    }
+
     pub fn validate(&self) -> Result<Url, TessivumError> {
+        if !matches!(
+            self.api.as_str(),
+            "openai-completions" | "openai-responses" | "anthropic-messages"
+        ) {
+            return Err(adapter_error(
+                "INVALID_LLM_PROTOCOL",
+                "provider route uses an unsupported API protocol",
+                json!({"api": self.api}),
+            ));
+        }
         if self.id.trim().is_empty() || self.display_name.trim().is_empty() {
             return Err(adapter_error(
                 "INVALID_OPENAI_ROUTE",
@@ -290,11 +312,15 @@ impl ProviderSnapshot {
         })
     }
 
-    fn api_key(&self) -> Option<&str> {
+    pub(crate) fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref().filter(|key| !key.is_empty())
     }
 
-    fn validate_request(&self, provider: &str, model: &str) -> Result<(), TessivumError> {
+    pub(crate) fn validate_request(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), TessivumError> {
         if self.route.id != provider {
             return Err(adapter_error(
                 "INVALID_OPENAI_ROUTE",
@@ -577,13 +603,13 @@ impl LlmAdapter for OpenAiResponsesAdapter {
     }
 }
 #[derive(Default)]
-struct ToolNames {
+pub(crate) struct ToolNames {
     wire_by_logical: BTreeMap<String, String>,
     logical_by_wire: BTreeMap<String, String>,
 }
 
 impl ToolNames {
-    fn from_request(request: &GenerateRequest) -> Result<Self, TessivumError> {
+    pub(crate) fn from_request(request: &GenerateRequest) -> Result<Self, TessivumError> {
         let mut names = Self::default();
         if let Some(tools) = &request.tools {
             for tool in tools {
@@ -629,14 +655,14 @@ impl ToolNames {
         Ok(())
     }
 
-    fn wire<'a>(&'a self, logical: &'a str) -> &'a str {
+    pub(crate) fn wire<'a>(&'a self, logical: &'a str) -> &'a str {
         self.wire_by_logical
             .get(logical)
             .map(String::as_str)
             .unwrap_or(logical)
     }
 
-    fn logical<'a>(&'a self, wire: &'a str) -> &'a str {
+    pub(crate) fn logical<'a>(&'a self, wire: &'a str) -> &'a str {
         self.logical_by_wire
             .get(wire)
             .map(String::as_str)
@@ -882,7 +908,7 @@ async fn append_message_input(
     Ok(())
 }
 
-async fn image_input(
+pub(crate) async fn image_input(
     attachment: &Value,
     model: &ResponsesModel,
     attachment_store: Option<&AttachmentStore>,
@@ -1001,12 +1027,12 @@ fn tool_output_text(blocks: &[ContentBlock]) -> String {
 }
 
 #[derive(Default)]
-struct SseDecoder {
+pub(crate) struct SseDecoder {
     buffer: Vec<u8>,
 }
 
 impl SseDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, TessivumError> {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, TessivumError> {
         self.buffer.extend_from_slice(bytes);
         let mut events = Vec::new();
         while let Some((at, delimiter)) = event_boundary(&self.buffer) {
@@ -1033,7 +1059,7 @@ impl SseDecoder {
         Ok(events)
     }
 
-    fn finish(&self) -> Result<(), TessivumError> {
+    pub(crate) fn finish(&self) -> Result<(), TessivumError> {
         if self.buffer.iter().all(u8::is_ascii_whitespace) {
             Ok(())
         } else {

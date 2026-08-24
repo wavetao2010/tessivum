@@ -2420,12 +2420,19 @@ async fn compat_dispatch(
         }
         "pluginInventory/list" => {
             let _: CompatRemotePayload<CompatEmptyPayload> = compat_decode(payload)?;
-            let entries = state.frontend.as_ref().map_or_else(Vec::new, |frontend| {
-                frontend
-                    .graph()
-                    .entries
-                    .into_iter()
-                    .map(|entry| {
+            let mut entries = state
+                .host
+                .plugin_inventory()
+                .await
+                .map_err(compat_host_error)?;
+            let mut ids = entries
+                .iter()
+                .filter_map(|entry| entry.get("entryId").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            if let Some(frontend) = &state.frontend {
+                entries.extend(frontend.graph().entries.into_iter().filter_map(|entry| {
+                    ids.insert(entry.id.clone()).then(|| {
                         json!({
                             "entryId": entry.id,
                             "moduleName": entry.id,
@@ -2433,8 +2440,8 @@ async fn compat_dispatch(
                             "fiberPhase": "active",
                         })
                     })
-                    .collect()
-            });
+                }));
+            }
             Ok(json!({"entries": entries}))
         }
         "dynamicCordisRunner/syncInspectManifest" => {
@@ -4865,10 +4872,10 @@ async fn compat_discover_models(
         ));
     }
     if let Some(api) = args.api.as_deref() {
-        if api != "openai-responses" {
+        if !matches!(api, "openai-completions" | "openai-responses") {
             return Err(compat_discovery_error(
                 "discovery-unsupported",
-                "model discovery only supports openai-responses",
+                "model discovery supports only OpenAI-compatible protocols",
             ));
         }
     }

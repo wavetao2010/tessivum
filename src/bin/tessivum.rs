@@ -17,13 +17,14 @@ use serde_json::Value;
 use tessivum::{
     agent_preset::AgentPresetTrust,
     boot_theme::inject_boot_theme,
-    cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand},
+    cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand, PluginAction, PluginCommand},
     code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     frontend::{FrontendHtmlTap, FrontendStatic, FrontendTapRegistration},
     headless::{run_headless, run_headless_with_adapter, HeadlessConfig},
     host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
     llm::LlmAdapter,
     openai_responses::OpenAiResponsesAdapter,
+    plugin_manager::{configure_host_plugins, mutate_plugins, PluginMutation},
     settings::Settings,
     SessionId,
 };
@@ -169,6 +170,7 @@ async fn run() -> Result<(), Diagnostic> {
     match command {
         CliCommand::Headless(command) => run_headless_command(command).await,
         CliCommand::Web(command) => run_web(command).await,
+        CliCommand::Plugin(command) => run_plugin_command(command),
         CliCommand::Sdk => run_sdk().await,
         // Keep plugin inspection isolated in the existing dedicated binary.
         CliCommand::PluginReport => Err(Diagnostic::runtime(
@@ -176,6 +178,15 @@ async fn run() -> Result<(), Diagnostic> {
             "run the existing plugin_report binary for package inspection",
         )),
     }
+}
+
+fn run_plugin_command(command: PluginCommand) -> Result<(), Diagnostic> {
+    let mutation = match command.action {
+        PluginAction::Add(specifier) => PluginMutation::Add(specifier),
+        PluginAction::Remove(package) => PluginMutation::Remove(package),
+    };
+    mutate_plugins(command.data_dir, mutation)
+        .map_err(|error| Diagnostic::runtime("PLUGIN_MANAGEMENT_FAILED", error))
 }
 
 async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic> {
@@ -356,7 +367,7 @@ fn web_frontend(
             },
         ))
         .map_err(|error| Diagnostic::runtime("WEB_FRONTEND_FAILED", error))?;
-    let package_roots = package_override.map_or_else(
+    let mut package_roots = package_override.map_or_else(
         || {
             vec![embedded
                 .as_ref()
@@ -365,6 +376,10 @@ fn web_frontend(
         },
         |paths| env::split_paths(&paths).collect(),
     );
+    let installed = PathBuf::from(".tessivum/plugins/node_modules");
+    if installed.is_dir() {
+        package_roots.push(installed);
+    }
     frontend
         .scan_packages(package_roots)
         .map_err(|error| Diagnostic::runtime("WEB_CLIENT_PACKAGES_FAILED", error))?;
@@ -494,6 +509,8 @@ async fn boot_host(
         config.provider = "openai-responses".into();
         config.model = "unconfigured".into();
     }
+    configure_host_plugins(&mut config)
+        .map_err(|error| Diagnostic::runtime("PLUGIN_PROFILE_FAILED", error))?;
     HostRuntime::boot(config)
         .await
         .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))

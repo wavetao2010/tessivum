@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tessivum_core::{ContextHandle, CoreError, EntryTree, Loader, PackageResolver, ServiceHandle};
 use tessivum_extism::{Capability, CapabilityHandler, CapabilityRegistry, ResourceLimits};
+use tessivum_node_bridge::{ClientConfig, HostCommand};
 use thiserror::Error;
 use tokio::{
     fs::{self, OpenOptions},
@@ -47,6 +48,7 @@ use crate::{
     builtin_tools::{BashJobOwners, BuiltinTools, BuiltinToolsConfig, HostToolServices},
     code_runtime::{register_code_tool, CodeRuntime, ProcessCodeRuntime},
     compaction::{CompactionConfig, CompactionService},
+    compatible_api::CompatibleApiAdapter,
     credentials::{
         credentials_service_key, CredentialEvent, CredentialRef, Credentials, YamlCredentialFile,
     },
@@ -59,8 +61,8 @@ use crate::{
         LlmStream, RecordedLlmAdapter,
     },
     openai_responses::{
-        OpenAiResponsesAdapter, ProviderSnapshot, ResponsesModel, ResponsesReasoningEffort,
-        ResponsesRoute, ResponsesRouteResolver, RESPONSES_IMAGE_MODALITY, RESPONSES_TEXT_MODALITY,
+        ProviderSnapshot, ResponsesModel, ResponsesReasoningEffort, ResponsesRoute,
+        ResponsesRouteResolver, RESPONSES_IMAGE_MODALITY, RESPONSES_TEXT_MODALITY,
     },
     permissions::{
         current as current_permission, fold as permission_knobs, preset as permission_preset,
@@ -817,6 +819,12 @@ pub struct HostIdentity {
     pub profile: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct LegacyHostConfig {
+    pub command: HostCommand,
+    pub client: ClientConfig,
+}
+
 /// Boot inputs. JSON patches are applied bundle → profile → home → CLI → telemetry.
 #[derive(Clone)]
 pub struct HostConfig {
@@ -851,6 +859,7 @@ pub struct HostConfig {
     pub max_live_sessions: usize,
     pub entries: Option<EntryTree>,
     pub legacy_profile: Option<LegacyProfile>,
+    pub legacy_host: Option<LegacyHostConfig>,
     pub package_resolver: Option<Arc<dyn PackageResolver>>,
     pub wasm_limits: ResourceLimits,
     pub telemetry: Option<TelemetryCoordinator>,
@@ -928,6 +937,7 @@ impl HostConfig {
             entries: None,
             legacy_profile: None,
             package_resolver: None,
+            legacy_host: None,
             wasm_limits: ResourceLimits::default(),
             telemetry: None,
             code_runtime: None,
@@ -1464,6 +1474,9 @@ pub trait HostApi: Send + Sync {
             "host",
             Value::Null,
         ))
+    }
+    async fn plugin_inventory(&self) -> Result<Vec<Value>, TessivumError> {
+        Ok(Vec::new())
     }
 
     async fn goal_service(&self, _session: SessionId) -> Result<GoalService, TessivumError> {
@@ -2671,7 +2684,7 @@ impl HostRuntime {
 
         let llm = LlmRuntime::new();
         let adapter: Arc<dyn LlmAdapter> = if dynamic_routes {
-            Arc::new(OpenAiResponsesAdapter::with_resolver_and_store(
+            Arc::new(CompatibleApiAdapter::with_resolver_and_store(
                 (*route_resolver).clone(),
                 Arc::clone(&attachments),
             ))
@@ -2893,7 +2906,30 @@ impl HostRuntime {
                 .iter()
                 .any(|entry| entry.options.runtime == tessivum_core::RuntimeKind::LegacyNode)
         });
-        let legacy = config.legacy_profile.clone().filter(|_| needs_legacy);
+        let legacy = if needs_legacy {
+            match (&config.legacy_profile, &config.legacy_host) {
+                (Some(profile), _) => Some(profile.clone()),
+                (None, Some(host)) => Some(
+                    LegacyProfile::new(
+                        host.command.clone(),
+                        host.client.clone(),
+                        BridgeServices::new(
+                            tools.clone(),
+                            prompt.clone(),
+                            llm.clone(),
+                            sessions.clone(),
+                            registry.clone(),
+                        )
+                        .with_settings(Arc::clone(&settings))
+                        .with_credentials(Arc::clone(&credentials)),
+                    )
+                    .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+                ),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
         let loader = if let Some(entries) = config.entries.clone() {
             let resolver: Arc<dyn PackageResolver> = match &config.package_resolver {
                 Some(value) => Arc::clone(value),
@@ -6437,6 +6473,25 @@ fn replace_image_plans(
 
 #[async_trait]
 impl HostApi for HostHandle {
+    async fn plugin_inventory(&self) -> Result<Vec<Value>, TessivumError> {
+        let loader = self.inner.loader.lock().await;
+        Ok(loader.as_ref().map_or_else(Vec::new, |loader| {
+            loader
+                .tree()
+                .entries()
+                .into_iter()
+                .map(|entry| {
+                    json!({
+                        "entryId": entry.options.id.as_str(),
+                        "moduleName": entry.options.name.as_deref().unwrap_or(&entry.package),
+                        "enabled": !entry.options.disabled,
+                        "fiberPhase": if entry.options.disabled { "disabled" } else { "active" },
+                    })
+                })
+                .collect()
+        }))
+    }
+
     async fn initialize(
         &self,
         params: InitializeParams,
@@ -7898,7 +7953,8 @@ fn parse_routes(value: &Value, revision: u64) -> Result<ParsedRoutes, TessivumEr
                 TessivumError::new(error.code, error.message, "host", json!({"provider": id}))
             })?;
         let mut route =
-            ResponsesRoute::new(id.clone(), display_name, base_url, credential_ref, models);
+            ResponsesRoute::new(id.clone(), display_name, base_url, credential_ref, models)
+                .with_api(raw_route.api);
         route.generation = revision;
         route.validate()?;
         retry_policies.insert(id.clone(), retry_policy);
@@ -8006,7 +8062,8 @@ fn parse_deepseek_route(value: &Value, revision: u64) -> Result<ResponsesRoute, 
         raw.base_url,
         credential.as_str(),
         models,
-    );
+    )
+    .with_api("openai-completions");
     route.generation = revision;
     route.validate()?;
     Ok(route)
@@ -8758,7 +8815,7 @@ fn validate_config(config: &HostConfig) -> Result<(), HostError> {
             .iter()
             .any(|entry| entry.options.runtime == tessivum_core::RuntimeKind::LegacyNode)
     });
-    if needs_legacy && config.legacy_profile.is_none() {
+    if needs_legacy && config.legacy_profile.is_none() && config.legacy_host.is_none() {
         return Err(HostError::InvalidConfiguration(
             "legacy-node entries require a Legacy profile".into(),
         ));

@@ -54,7 +54,8 @@ Supported cross-runtime operations use the bounded, versioned DomainBridge contr
 ## Requirements
 
 - Rust stable toolchain with `rustfmt` and `clippy`;
-- Bun 1.3.14 or newer for the Browser shell and Legacy Node compatibility tests;
+- Bun 1.3.14 or newer for the Browser shell and Legacy Node compatibility host;
+- npm for `tessivum plugin add/remove`;
 - Git and network access for the pinned `tessivum-core` dependencies.
 
 ## Quick start
@@ -99,7 +100,21 @@ cargo run --release -- \
   "inspect this repository"
 ```
 
-The adapter sends `store: false`, streams text/reasoning/function calls, persists encrypted reasoning items for stateless tool-call continuation, and materializes validated AttachmentRef images as Responses data URLs. This is the API-key-based `openai-responses` protocol, not ChatGPT's OAuth-only `openai-codex-responses` transport; a Codex relay must expose the standard `/responses` contract.
+The Responses adapter sends `store: false`, streams text/reasoning/function calls, persists encrypted reasoning items for stateless tool-call continuation, and materializes validated AttachmentRef images as Responses data URLs. Custom provider routes also dispatch `openai-completions` to `/chat/completions` and `anthropic-messages` to `/messages`; the selected protocol is no longer treated as Responses. `openai-codex-responses` remains out of scope because it is an OAuth transport rather than the API-key Responses contract.
+
+### Community plugins
+
+Install npm, Git, tarball, or local Cordis packages into the deployment-owned profile, then start Web normally:
+
+```bash
+cargo run --release -- plugin add @scope/package
+cargo run --release -- plugin remove @scope/package
+cargo run --release -- web
+```
+
+The default profile is `.tessivum/plugins`. `--data-dir <dir>` selects another profile for the management command. Installs disable npm lifecycle scripts and copy local packages into the confined profile. On Web/SDK startup, ordinary Cordis packages run in the Legacy Node host, Extism declarations run as WASM, `dsh.bundle.patch` insertions are composed into the Host entry tree, and published `dsh.client` bundles join the Browser graph. The plugin inventory reports both Host and Browser entries.
+
+Legacy plugins are trusted code, not a sandbox. The source checkout resolves the compatibility host from `../tessivum-core/node/compat-host` and the pinned Cordis vendor from `../upstream/deepseek-harness/vendor`; packaged deployments can set `TESSIVUM_COMPAT_HOST` and `CORDIS_VENDOR_ROOT` explicitly.
 
 ### Browser shell
 

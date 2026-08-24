@@ -14,6 +14,7 @@ pub enum CliCommand {
     Headless(HeadlessCommand),
     Sdk,
     Web(WebCommand),
+    Plugin(PluginCommand),
     PluginReport,
 }
 
@@ -21,6 +22,18 @@ pub enum CliCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebCommand {
     pub patches: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginCommand {
+    pub data_dir: PathBuf,
+    pub action: PluginAction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PluginAction {
+    Add(String),
+    Remove(String),
 }
 
 /// Inputs owned by the headless launcher, independent of service internals.
@@ -79,8 +92,23 @@ struct RawCli {
 enum RawCommand {
     Sdk,
     Web,
+    Plugin(RawPluginCommand),
     #[command(name = "plugin-report")]
     PluginReport,
+}
+
+#[derive(Debug, Args)]
+struct RawPluginCommand {
+    #[arg(long, value_name = "DIR", default_value = ".tessivum")]
+    data_dir: PathBuf,
+    #[command(subcommand)]
+    action: RawPluginAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum RawPluginAction {
+    Add { specifier: String },
+    Remove { package: String },
 }
 
 #[derive(Debug, Args)]
@@ -117,7 +145,7 @@ where
     if let Some(command) = raw.command {
         if raw.profile.is_some() || raw.headless.is_set() {
             return Err(usage_error(
-                "commands sdk, web, and plugin-report do not accept headless launcher options",
+                "commands sdk, web, plugin, and plugin-report do not accept headless launcher options",
             ));
         }
         let command = match command {
@@ -129,6 +157,18 @@ where
                     return Err(usage_error("the sdk command does not accept --patch"));
                 }
                 CliCommand::Sdk
+            }
+            RawCommand::Plugin(plugin) => {
+                if !raw.patches.is_empty() {
+                    return Err(usage_error("the plugin command does not accept --patch"));
+                }
+                CliCommand::Plugin(PluginCommand {
+                    data_dir: plugin.data_dir,
+                    action: match plugin.action {
+                        RawPluginAction::Add { specifier } => PluginAction::Add(specifier),
+                        RawPluginAction::Remove { package } => PluginAction::Remove(package),
+                    },
+                })
             }
             RawCommand::PluginReport => {
                 if !raw.patches.is_empty() {
