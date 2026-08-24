@@ -452,7 +452,8 @@ fn sbpl_string(path: &Path) -> String {
 
 #[cfg(target_os = "linux")]
 fn executable(name: &str) -> Option<String> {
-    std::env::var_os("PATH")
+    let path = std::env::var_os("PATH");
+    path.as_deref()
         .into_iter()
         .flat_map(std::env::split_paths)
         .map(|directory| directory.join(name))
