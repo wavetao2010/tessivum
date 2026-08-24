@@ -475,7 +475,7 @@ export async function openSeededSession(harness: RustWebHarness, done: string): 
 export function stableAria(snapshot: string): string {
   return snapshot
     .replace(
-      /~\d+(?:y(?: \d+mo)?|mo(?: \d+d)?)|\b(?:\d+d(?: \d+h(?: \d+m \d+s)?)?|\d+h \d+m \d+s|\d+m ?\d+s|\d+(?:\.\d+)?s|\d+(?:\.\d+)?ms)\b/g,
+      /~\d+(?:y(?: \d+mo)?|mo(?: \d+d)?)|(?<![0-9A-Za-z-])(?:\d+y(?: \d+mo)?|\d+mo(?: \d+d)?|\d+d(?: \d+h(?: \d+m \d+s)?)?|\d+h \d+m \d+s|\d+m ?\d+s|\d+(?:\.\d+)?s|\d+(?:\.\d+)?ms)(?![0-9A-Za-z-])/g,
       duration => duration.startsWith('~') ? duration : '{{duration}}',
     )
     .replace(/\d+(?:\.\d+)?(?= tok\/s(?!\w))/g, '{{throughput}}')

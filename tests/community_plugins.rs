@@ -158,6 +158,13 @@ impl Drop for TemporaryTimerPackage {
 }
 
 fn core_root() -> PathBuf {
+    if let Some(configured) = env::var_os("TESSIVUM_CORE_SOURCE").map(PathBuf::from) {
+        assert!(
+            configured.join("node/compat-host/src/index.ts").is_file(),
+            "TESSIVUM_CORE_SOURCE must expose the Bun compatibility host"
+        );
+        return configured;
+    }
     let local = scharness_root().join("tessivum-core");
     if local.join("node/compat-host/src/index.ts").is_file() {
         return local;

@@ -2858,8 +2858,8 @@ dependencies = [
 
 [[package]]
 name = "tessivum-core"
-version = "0.1.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=1dce6fbda364c98a964d4875ef86d897ea322ca1#1dce6fbda364c98a964d4875ef86d897ea322ca1"
+version = "0.1.1"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=8923eb29694cd284c4a3c01ba16c68a01d7402a3#8923eb29694cd284c4a3c01ba16c68a01d7402a3"
 dependencies = [
  "serde",
  "serde_json",
@@ -2869,8 +2869,8 @@ dependencies = [
 
 [[package]]
 name = "tessivum-extism"
-version = "0.1.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=1dce6fbda364c98a964d4875ef86d897ea322ca1#1dce6fbda364c98a964d4875ef86d897ea322ca1"
+version = "0.1.1"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=8923eb29694cd284c4a3c01ba16c68a01d7402a3#8923eb29694cd284c4a3c01ba16c68a01d7402a3"
 dependencies = [
  "extism",
  "libc",
@@ -2881,8 +2881,8 @@ dependencies = [
 
 [[package]]
 name = "tessivum-node-bridge"
-version = "0.1.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=1dce6fbda364c98a964d4875ef86d897ea322ca1#1dce6fbda364c98a964d4875ef86d897ea322ca1"
+version = "0.1.1"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=8923eb29694cd284c4a3c01ba16c68a01d7402a3#8923eb29694cd284c4a3c01ba16c68a01d7402a3"
 dependencies = [
  "serde",
  "serde_json",
