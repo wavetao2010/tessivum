@@ -199,3 +199,13 @@ index b54e56e..51b3517 100644
      }
    }
  }
+diff --git a/packages/client/ui-trajectory/tests/table.client.spec.tsx b/packages/client/ui-trajectory/tests/table.client.spec.tsx
+index 467da80..49f7d2f 100644
+--- a/packages/client/ui-trajectory/tests/table.client.spec.tsx
++++ b/packages/client/ui-trajectory/tests/table.client.spec.tsx
+@@ -664,4 +664,5 @@ describe('TrajectoryTable', () => {
+     await waitFor(() => {
+       expect(view.container.querySelector('tr[data-virtual-position="201"]')).toBeTruthy()
+     })
++    await new Promise(resolve => window.setTimeout(resolve, 200))
+   })

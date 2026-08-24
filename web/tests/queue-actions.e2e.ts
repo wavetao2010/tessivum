@@ -226,12 +226,13 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
   })
   try {
     const input = harness.page.locator('textarea').first()
-    const settled = harness.whenTurnSettled()
     await input.fill('/goal Keep the composer context panels aligned')
     await input.press('Enter')
     await expect(waitUntil(async () => existsSync(readyFile), Boolean, 15_000)).resolves.toBe(true)
     await harness.page.locator('[data-goal-bar]').waitFor({ timeout: 10_000 })
     await harness.page.locator('[data-testid="todo-panel"]').waitFor({ timeout: 10_000 })
+    const sessionId = (await harness.sessions()).find(item => item.running)?.sessionId
+    if (sessionId === undefined) throw new Error('layout scenario has no active session')
 
     for (const text of ['Layout queue first', 'Layout queue second']) {
       await input.fill(text)
@@ -270,7 +271,10 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
     await harness.page.getByRole('button', { name: 'Clear goal' }).click()
     await expect(waitUntil(() => harness.page.locator('[data-goal-bar]').count(), count => count === 0)).resolves.toBe(0)
     await harness.page.getByRole('button', { name: 'Stop generating' }).click()
-    const sessionId = await settled
+    await waitUntil(
+      () => harness.sessions(),
+      sessions => sessions.some(session => session.sessionId === sessionId && !session.running),
+    )
     expect(turnEndReasons(await sessionEvents(harness, sessionId))).toEqual(['aborted'])
     harness.assertClean()
   } finally {
