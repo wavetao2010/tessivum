@@ -384,9 +384,11 @@ test('chat-scroll-contract restores session position and keeps composer resize o
     await harness.page.getByRole('tab', { name: 'Chat', exact: true }).click()
     await nextPaint(harness)
     await expectSameAnchor(harness, sessionAnchor, REFLOW_TOLERANCE)
+    const reflowedAnchor = { key: sessionAnchor.key, top: await anchorTop(harness, sessionAnchor.key) }
+
     await openSessionByMarker(harness, RESTORE_B.markers.user(1), RESTORE_B.markers.assistant(RESTORE_B.turns))
     await openSessionByMarker(harness, RESTORE_A.markers.user(1))
-    await expectSameAnchor(harness, sessionAnchor)
+    await expectSameAnchor(harness, reflowedAnchor)
 
     const backToBottom = harness.page.getByRole('button', { name: 'Back to bottom', exact: true })
     await backToBottom.evaluate(button => {

@@ -1121,7 +1121,6 @@ impl GoalService {
     ) -> Result<GoalSnapshot, GoalError> {
         check_cancellation(&cancellation)?;
         snapshot.validate()?;
-        validate_goal_operation(&state.goals, operation, &snapshot)?;
         let blocked_reason = match snapshot.phase {
             GoalPhase::Blocked => reason
                 .or_else(|| state.blocked_reasons.get(&snapshot.reference.id).cloned())
@@ -1130,43 +1129,59 @@ impl GoalService {
                 .map(Some)?,
             _ => None,
         };
-        let mut candidate = state.goals.clone();
-        apply_snapshot(&mut candidate, expected.as_ref(), snapshot.clone(), false)?;
-        let old_times = state.times.get(&snapshot.reference.id).copied();
-        let updated_at = old_times.map_or_else(now, |times| now().max(times.updated_at));
-        let times = GoalTimes {
-            created_at: old_times.map_or(updated_at, |times| times.created_at),
-            updated_at,
-            rounds_started: old_times.map_or(0, |times| times.rounds_started),
-        };
-        let change = if operation == GoalOperation::Clear {
-            GoalChange::clear(snapshot.reference.clone(), updated_at)
-        } else {
-            GoalChange::snapshot(operation, snapshot.clone(), times, blocked_reason.clone())
-        };
-        append(
-            &self.inner.session,
-            "goal/change",
-            serde_json::to_value(change).expect("goal change is serializable"),
-            cancellation,
-        )
-        .await?;
-        state.goals = candidate;
-        if operation == GoalOperation::Clear {
-            state.times.remove(&snapshot.reference.id);
-            state.blocked_reasons.remove(&snapshot.reference.id);
-        } else {
-            state.times.insert(snapshot.reference.id.clone(), times);
-            if let Some(reason) = blocked_reason {
-                state
-                    .blocked_reasons
-                    .insert(snapshot.reference.id.clone(), reason);
+        loop {
+            validate_goal_operation(&state.goals, operation, &snapshot)?;
+            let mut candidate = state.goals.clone();
+            apply_snapshot(&mut candidate, expected.as_ref(), snapshot.clone(), false)?;
+            let old_times = state.times.get(&snapshot.reference.id).copied();
+            let updated_at = old_times.map_or_else(now, |times| now().max(times.updated_at));
+            let times = GoalTimes {
+                created_at: old_times.map_or(updated_at, |times| times.created_at),
+                updated_at,
+                rounds_started: old_times.map_or(0, |times| times.rounds_started),
+            };
+            let change = if operation == GoalOperation::Clear {
+                GoalChange::clear(snapshot.reference.clone(), updated_at)
             } else {
-                state.blocked_reasons.remove(&snapshot.reference.id);
+                GoalChange::snapshot(operation, snapshot.clone(), times, blocked_reason.clone())
+            };
+            match append(
+                &self.inner.session,
+                "goal/change",
+                serde_json::to_value(change).expect("goal change is serializable"),
+                cancellation.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    state.goals = candidate;
+                    if operation == GoalOperation::Clear {
+                        state.times.remove(&snapshot.reference.id);
+                        state.blocked_reasons.remove(&snapshot.reference.id);
+                    } else {
+                        state.times.insert(snapshot.reference.id.clone(), times);
+                        if let Some(reason) = blocked_reason {
+                            state
+                                .blocked_reasons
+                                .insert(snapshot.reference.id.clone(), reason);
+                        } else {
+                            state.blocked_reasons.remove(&snapshot.reference.id);
+                        }
+                    }
+                    state.observed_events = state.observed_events.saturating_add(1);
+                    return Ok(snapshot);
+                }
+                Err(GoalError::Session(error @ SessionError::SequenceGap { expected, actual })) => {
+                    if actual >= expected || self.inner.session.next_seq()? != expected {
+                        return Err(GoalError::Session(error));
+                    }
+                    // Another session writer won after append sampled next_seq; fold it before rebuilding the event.
+                    check_cancellation(&cancellation)?;
+                    self.sync_locked(state)?;
+                }
+                Err(error) => return Err(error),
             }
         }
-        state.observed_events = state.observed_events.saturating_add(1);
-        Ok(snapshot)
     }
 
     fn arm_locked(

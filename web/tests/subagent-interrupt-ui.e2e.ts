@@ -96,6 +96,8 @@ test('the child composer stops through subagent.interrupt, parks work, and resum
       await harness.page.getByRole('treeitem', { name: new RegExp(LABEL) }).click()
       const offlineInput = harness.page.getByRole('textbox', { name: 'Parent session offline; sending is unavailable but you can still stop the run' })
       await offlineInput.waitFor()
+      await harness.page.getByText(INITIAL, { exact: false }).waitFor()
+      await harness.page.getByText('partial', { exact: true }).waitFor()
       expect(await offlineInput.isDisabled()).toBe(true)
       const offlineSend = harness.page.getByRole('button', { name: 'Send message' })
       expect(await offlineSend.isDisabled()).toBe(true)
