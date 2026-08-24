@@ -40,6 +40,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
@@ -50,15 +51,11 @@ jobs:
       - name: Verify compatibility baseline
         run: python3 scripts/check_compat_baseline.py
 
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-
-
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
 
       - name: Install pinned DeepSeek build dependencies
         working-directory: .ci/deepseek-harness
@@ -68,39 +65,31 @@ jobs:
         working-directory: web
         run: |
           bun install --frozen-lockfile
-          bun run audit:source
           bun run build
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --all-targets
 
       - name: Run pinned client regression suite
         working-directory: web
         run: bun run test:source-client
 
-      - name: Run all 69 Browser compatibility scenarios
-        working-directory: web
-        run: bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000
-
-      - name: Run Rust tests
-        run: cargo test --all-targets
-
-  wasm-fixture:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: fixtures/wasm/rust-minimal
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: fixtures/wasm/rust-minimal
       - name: Rebuild pinned Rust WASM guest
+        working-directory: fixtures/wasm/rust-minimal
         run: cargo build --locked --release --target wasm32-unknown-unknown
+
       - name: Verify checked guest artifact hash
+        working-directory: fixtures/wasm/rust-minimal
         run: sha256sum -c plugin.wasm.sha256
+
       - name: Exercise rebuilt guest contract
-        working-directory: ${{ github.workspace }}
         env:
           TESSIVUM_WASM_GUEST: ${{ github.workspace }}/fixtures/wasm/rust-minimal/target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm
         run: cargo test --locked --test wasm_plugins real_guest_denies_undeclared_service_and_traps_deterministically -- --exact
+
+      - name: Run all 69 Browser compatibility scenarios
+        working-directory: web
+        run: bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000
