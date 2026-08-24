@@ -269,7 +269,7 @@ test('schedule-every batches only the latest overdue occurrence for every durabl
 
     await harness.page.locator('textarea:enabled').last().fill(EVERY_TRIGGER)
     await harness.page.getByRole('button', { name: 'Send message', exact: true }).click()
-    await harness.page.getByText(EVERY_REPLY, { exact: true }).waitFor({ timeout: 20_000 })
+    await waitUntil(() => harness.page.getByText(EVERY_REPLY, { exact: true }).count(), count => count === 2, 20_000)
     const events = await waitUntil(
       () => sessionEvents(harness, sessionId),
       value => changes(value, 'dispatch').length === EVERY_PROMPTS.length,
@@ -297,20 +297,15 @@ test('schedule-every batches only the latest overdue occurrence for every durabl
       ).toISOString()
       expect(reminders).toContainEqual({ schedule_id: `schedule-every-${index + 1}`, occurrence_at: occurrenceAt, reminder_prompt: prompt })
     }
-    const listedEvents = await waitUntil(
-      () => sessionEvents(harness, sessionId),
-      value => value.flatMap(event => scheduleListResult(event) ?? []).filter(schedule => (
+    const listed = await waitUntil(async () => {
+      const results = (await sessionEvents(harness, sessionId))
+        .map(event => scheduleListResult(event)).filter(result => result !== undefined)
+      return (results.at(-1) ?? []).filter(schedule => (
         schedule.state === 'scheduled'
         && typeof schedule.scheduledAt === 'string'
         && Date.parse(schedule.scheduledAt) > Date.parse(String(acceptedAt))
-      )).length === EVERY_PROMPTS.length,
-      20_000,
-    )
-    const listed = listedEvents.flatMap(event => scheduleListResult(event) ?? []).filter(schedule => (
-      schedule.state === 'scheduled'
-      && typeof schedule.scheduledAt === 'string'
-      && Date.parse(schedule.scheduledAt) > Date.parse(String(acceptedAt))
-    ))
+      ))
+    }, value => value.length === EVERY_PROMPTS.length, 20_000)
     expect(listed).toHaveLength(EVERY_PROMPTS.length)
     await assertGolden(harness, EVERY_REPLY, EVERY_EXPECTED)
     expect(await harness.page.locator('[data-schedule-reminder]').count()).toBe(0)
