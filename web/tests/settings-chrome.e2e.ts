@@ -195,7 +195,7 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
     await waitUntil(() => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'), value => /ui-theme:\n\s+preference: dark/.test(value), 5_000)
     await harness.page.keyboard.press('Escape')
     const themeWarningStart = harness.warnings.length
-    await harness.page.reload({ waitUntil: 'load' })
+    await harness.page.reload({ waitUntil: 'domcontentloaded' })
     await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
     acknowledgeReloadConnectionLoss(harness, themeWarningStart)
     await harness.page.emulateMedia({ colorScheme: 'light' })
@@ -235,7 +235,7 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
     await waitUntil(() => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'), value => /ui-conversation:\n\s+busyEnter: steer/.test(value), 5_000)
     await harness.page.keyboard.press('Escape')
     const enterWarningStart = harness.warnings.length
-    await harness.page.reload({ waitUntil: 'load' })
+    await harness.page.reload({ waitUntil: 'domcontentloaded' })
     await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
     acknowledgeReloadConnectionLoss(harness, enterWarningStart)
     const reloadedEnter = await openSettings(harness)
@@ -267,7 +267,7 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
     expect(await harness.page.evaluate(() => localStorage.getItem('dsh.locale'))).toBeNull()
     await waitUntil(() => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'), value => /locale:\n\s+preference: en/.test(value), 5_000)
     const languageWarningStart = harness.warnings.length
-    await harness.page.reload({ waitUntil: 'load' })
+    await harness.page.reload({ waitUntil: 'domcontentloaded' })
     await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
     acknowledgeReloadConnectionLoss(harness, languageWarningStart)
     const enTrigger = harness.page.getByRole('button', { name: 'Settings' })

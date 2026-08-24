@@ -269,7 +269,9 @@ export class RustWebHarness {
 
 
   async close(): Promise<void> {
-    await this.browser?.close().catch(() => {})
+    if (this.browser !== undefined) {
+      await Promise.race([this.browser.close().catch(() => {}), Bun.sleep(5_000)])
+    }
     if (this.server !== undefined) {
       this.server.kill('SIGINT')
       await Promise.race([this.server.exited, Bun.sleep(5_000)])

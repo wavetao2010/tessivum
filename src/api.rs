@@ -2613,6 +2613,15 @@ async fn compat_dispatch(
                     "args": [session_id, agent_preset],
                 }),
             );
+            broadcast_compat(
+                &state.compat,
+                CompatStream::Host,
+                json!({
+                    "type": "host/remote-event",
+                    "event": "commands/change",
+                    "args": [],
+                }),
+            );
             Ok(json!({"agentPreset": agent_preset}))
         }
         "llm.providers" => {
