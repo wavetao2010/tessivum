@@ -172,7 +172,6 @@ impl TemporaryTimerPackage {
             &vendor.join("cosmokit/src/index.ts"),
         );
 
-
         Self { root }
     }
 
