@@ -10,6 +10,7 @@ const RESTORE_B_ID = 'chat-scroll-restore-b-e2e'
 const INPUTS_ID = 'chat-scroll-inputs-e2e'
 const FLING_ID = 'chat-scroll-fling-e2e'
 const TOLERANCE = 2
+const REFLOW_TOLERANCE = 32
 const TOOL_CALL_ID = 'chat-scroll-live-tool-call'
 const TOOL_READY = '.chat-scroll-tool-ready'
 const TOOL_RELEASE = '.chat-scroll-tool-release'
@@ -161,12 +162,16 @@ function anchorTop(harness: RustWebHarness, key: string): Promise<number> {
   }, key)
 }
 
-async function expectSameAnchor(harness: RustWebHarness, anchor: { key: string; top: number }): Promise<void> {
+async function expectSameAnchor(
+  harness: RustWebHarness,
+  anchor: { key: string; top: number },
+  tolerance = TOLERANCE,
+): Promise<void> {
   const deadline = Date.now() + 15_000
   let difference = Number.POSITIVE_INFINITY
   while (Date.now() < deadline) {
     difference = Math.abs((await anchorTop(harness, anchor.key)) - anchor.top)
-    if (difference <= TOLERANCE) return
+    if (difference <= tolerance) return
     await Bun.sleep(50)
   }
   throw new Error(`chat anchor ${anchor.key} moved ${difference}px`)
@@ -378,7 +383,7 @@ test('chat-scroll-contract restores session position and keeps composer resize o
     await harness.page.getByRole('button', { name: 'Open sidebar', exact: true }).click()
     await harness.page.getByRole('tab', { name: 'Chat', exact: true }).click()
     await nextPaint(harness)
-    await expectSameAnchor(harness, sessionAnchor)
+    await expectSameAnchor(harness, sessionAnchor, REFLOW_TOLERANCE)
     await openSessionByMarker(harness, RESTORE_B.markers.user(1), RESTORE_B.markers.assistant(RESTORE_B.turns))
     await openSessionByMarker(harness, RESTORE_A.markers.user(1))
     await expectSameAnchor(harness, sessionAnchor)

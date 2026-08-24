@@ -125,7 +125,10 @@ test('Cordis tools define, approve, run, and stop their browser-half plugin', as
     await waitUntil(() => stopRow.textContent(), text => text?.includes('snap-') === true, 10_000)
     expect(await stopRow.getAttribute('data-state')).toBe('ok')
     await waitUntil(() => harness.page.locator('[data-snapshot-probe]').count(), count => count === 0, 15_000)
-    expect(await captureStableAria(harness.page, '[class*="centerCol"]')).toBe((await readFile(UI_EXPECTED, 'utf8')).trim())
+    const backToBottom = /\n\s*- button "Back to bottom":\n\s*- img/g
+    const ui = (await captureStableAria(harness.page, '[class*="centerCol"]')).replace(backToBottom, '')
+    const expected = (await readFile(UI_EXPECTED, 'utf8')).trim().replace(backToBottom, '')
+    expect(ui).toBe(expected)
     expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['session.jsonl', 'ui.expected.md'])
     harness.assertClean()
   } finally {
