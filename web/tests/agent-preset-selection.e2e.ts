@@ -239,7 +239,11 @@ describe('agent preset selection follows the host composition', () => {
 
     const composer = page.locator('textarea:enabled').last()
     await composer.fill('/')
-    await waitUntil(menuOptions, options => !options.some(option =>
+    await waitUntil(async () => {
+      await composer.fill('')
+      await composer.fill('/')
+      return await menuOptions()
+    }, options => !options.some(option =>
       option.includes(SKILL_NAME) || option.startsWith('compact') || option.startsWith('plan')))
     const minimal = await menuOptions()
     expect(minimal.some(option => option.startsWith('compact'))).toBe(false)

@@ -178,8 +178,13 @@ export class RustWebHarness {
       const pageUrl = options.remoteAuthority === undefined
         ? harness.baseUrl
         : `http://${options.remoteAuthority}:${new URL(harness.baseUrl).port}`
-      await harness.page.goto(pageUrl, { waitUntil: 'load' })
-      await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
+      await harness.page.goto(pageUrl, { waitUntil: 'domcontentloaded' })
+      try {
+        await harness.page.locator('[class*="frame"]').waitFor({ timeout: 15_000 })
+      } catch {
+        await harness.page.reload({ waitUntil: 'domcontentloaded' })
+        await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
+      }
       if (options.showWelcomeNotice !== true) {
         const declaration = harness.page.getByRole('dialog', { name: /Internal Testing Notice|内测声明/ })
         try {
