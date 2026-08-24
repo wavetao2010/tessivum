@@ -74,6 +74,18 @@ fn repository_root() -> PathBuf {
     crate_root().parent().unwrap().to_path_buf()
 }
 
+fn core_source() -> PathBuf {
+    std::env::var_os("TESSIVUM_CORE_SOURCE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("tessivum-core"))
+}
+
+fn deepseek_source() -> PathBuf {
+    std::env::var_os("TESSIVUM_DEEPSEEK_SOURCE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("upstream/deepseek-harness"))
+}
+
 fn bridge_services(tools: ToolRuntime) -> BridgeServices {
     let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
     BridgeServices::new(
@@ -105,7 +117,7 @@ fn wasm_entry() -> Entry {
 }
 
 fn node_command() -> HostCommand {
-    let root = repository_root().join("tessivum-core");
+    let root = core_source();
     HostCommand::new("bun")
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
@@ -197,7 +209,7 @@ async fn wasm_runner_loads_deep_interop_package_and_bridges_legacy_node() {
     )
     .unwrap();
     fs::copy(
-        repository_root().join("tessivum-core/fixtures/legacy/function-plugin.ts"),
+        core_source().join("fixtures/legacy/function-plugin.ts"),
         npm.join("index.ts"),
     )
     .unwrap();
@@ -238,10 +250,7 @@ async fn wasm_runner_loads_deep_interop_package_and_bridges_legacy_node() {
     supervisor.shutdown().unwrap();
 
     let browser = PluginRouter::new()
-        .inspect(
-            repository_root().join("upstream/deepseek-harness/packages/client/ui-settings"),
-            None,
-        )
+        .inspect(deepseek_source().join("packages/client/ui-settings"), None)
         .unwrap();
     assert_eq!(browser.selected_runtime, PluginRuntime::Browser);
     assert_eq!(browser.dsh_client.unwrap()["platform"], "web");
