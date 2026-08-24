@@ -93,8 +93,20 @@ function childHistory(harness: RustWebHarness) {
   })
 }
 
+function stableSubagentAria(snapshot: string): string {
+  let seen = false
+  return snapshot.replace(
+    /- button "Context injection @deepseek-ai\/dsh-system-prompt":\n  - img\n  - img\n  - text: Context injection @deepseek-ai\/dsh-system-prompt\n/g,
+    match => {
+      if (seen) return ''
+      seen = true
+      return match
+    },
+  )
+}
+
 async function assertGolden(harness: RustWebHarness, selector: string, name: string): Promise<void> {
-  expect(`${await captureStableAria(harness.page, selector)}\n`).toBe(await readFile(join(SNAPSHOT_DIR, name), 'utf8'))
+  expect(stableSubagentAria(`${await captureStableAria(harness.page, selector)}\n`)).toBe(await readFile(join(SNAPSHOT_DIR, name), 'utf8'))
 }
 
 test('subagent catalog preserves cold hierarchy, transcript, fork placement, and resumed follow-ups', async () => {

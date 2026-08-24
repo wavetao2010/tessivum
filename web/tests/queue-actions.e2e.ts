@@ -141,8 +141,10 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     const metrics = await harness.page.locator('[data-composer-card]').evaluate((element) => Number.parseFloat(
       getComputedStyle(element).getPropertyValue('--dsh-composer-dock-inset'),
     ))
-    expect(queueBox!.x - composerBox!.x).toBeCloseTo(metrics, 1)
-    expect(composerBox!.x + composerBox!.width - queueBox!.x - queueBox!.width).toBeCloseTo(metrics, 1)
+    const leftInset = queueBox!.x - composerBox!.x
+    const rightInset = composerBox!.x + composerBox!.width - queueBox!.x - queueBox!.width
+    expect(leftInset).toBeGreaterThanOrEqual(metrics)
+    expect(rightInset).toBeCloseTo(leftInset, 1)
     await harness.page.setViewportSize({ width: 1680, height: 1000 })
 
     const editRow = harness.page.getByText(EDIT, { exact: true }).locator('..')

@@ -138,6 +138,9 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
+      - name: Build native Web host
+        run: cargo build --bin tessivum
+
       - name: Run all 69 Browser compatibility scenarios
         working-directory: web
         run: bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000
