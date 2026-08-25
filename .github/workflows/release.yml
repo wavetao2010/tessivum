@@ -39,6 +39,19 @@ jobs:
       - name: Install pinned DeepSeek build dependencies
         working-directory: .release/deepseek-harness
         run: npm exec --yes pnpm@11.7.0 -- install --frozen-lockfile
+      - name: Build pinned Cordis runtime
+        working-directory: .release/deepseek-harness
+        run: |
+          npm run build:lib:host
+          tar -czf "$GITHUB_WORKSPACE/cordis-runtime.tar.gz" \
+            vendor/cordis/lib vendor/cosmokit/lib vendor/loader/lib
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: cordis-runtime
+          path: cordis-runtime.tar.gz
+          if-no-files-found: error
+
 
       - name: Build Browser bundle
         working-directory: web
@@ -97,6 +110,14 @@ jobs:
         with:
           name: web-assets
           path: web
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: cordis-runtime
+          path: .release
+
+      - name: Restore compiled Cordis runtime
+        run: tar -xzf .release/cordis-runtime.tar.gz -C .release/deepseek-harness
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
