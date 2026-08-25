@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.7` is a source release and reproducible baseline, not a production-stable API promise.
+`v0.1.0-alpha.8` is a prerelease and reproducible baseline, not a production-stable API promise. GitHub Releases provides native Linux and macOS archives for x86-64 and ARM64.
 
 Current implementation foundation:
 
@@ -53,12 +53,25 @@ Supported cross-runtime operations use the bounded, versioned DomainBridge contr
 
 ## Requirements
 
-- Rust stable toolchain with `rustfmt` and `clippy`;
-- Bun 1.3.14 or newer for the Browser shell and Legacy Node compatibility host;
-- npm for `tessivum plugin add/remove`;
-- Git and network access for the pinned `tessivum-core` dependencies.
+Source builds require Rust stable with `rustfmt` and `clippy`, Bun 1.3.14 or newer, npm, Git, and network access to the pinned `tessivum-core` revision.
 
-## Quick start
+Prebuilt archives do not require Rust or Git. Bun 1.3.14 or newer is needed only when Legacy Node plugins run; npm is needed only by `tessivum plugin add/remove`.
+
+## Prebuilt archives
+
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.8 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.8), verify the checksum, then run the packaged launcher:
+
+```bash
+target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
+sha256sum -c "tessivum-0.1.0-alpha.8-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.8-$target.tar.gz"
+"./tessivum-0.1.0-alpha.8-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.8-$target/bin/tessivum" web
+```
+
+On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
+
+## Source quick start
 
 ### Deterministic Headless smoke
 
@@ -156,7 +169,7 @@ These gates exercise the Rust-native runtime, the pinned DeepSeek client package
 - WASM product permissions currently expose only `logger@1.log`, `tools@1.schemas`, `settings@1.describe`, `credentials@1.describe`, and `systemPrompt@1.assemble`;
 - the native Responses adapter requires the standard API-key `/responses` contract; direct ChatGPT/Codex OAuth and remote image URLs are not wired;
 - image-bearing MCP/tool-result serialization is covered by focused adapter tests; the real Browser E2E currently exercises text tool continuation plus user image input, because no production-configured image-producing tool is exposed;
-- API listeners are loopback-only and this release does not ship prebuilt binaries.
+- API listeners are loopback-only; prebuilt archives are checksum-verified but are not code-signed or notarized.
 
 These are product follow-ups, not work to change or deprecate the official DeepSeek Harness project.
 
@@ -171,4 +184,4 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 
 ## License
 
-No open-source license has been selected for this Alpha baseline. Copyright remains with the repository owner until a license is added explicitly.
+Tessivum is licensed under the [MIT License](LICENSE).

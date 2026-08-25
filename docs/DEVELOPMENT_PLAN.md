@@ -2,7 +2,7 @@
 
 > 状态：两阶段迁移完成；Rust Cordis 内核、Rust-native Harness 与冻结的 source-exact Web 兼容基线均已通过验收
 > 计划校准日期：2026-08-25
-> Tessivum 实现基线：`v0.1.0-alpha.7`
+> Tessivum 实现基线：`v0.1.0-alpha.8`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、插件生态兼容与 Web 模型配置面
 
@@ -593,7 +593,20 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 原 Alpha 阶段只完成了 Rust-native 产品纵向闭环，不能据此关闭两阶段迁移。当前冻结 Core RPC method roster 已达到 52/52，LLM/Agent 的 chunk、prepared request、retry/cancel、queue/steer、durable assistant state 与 JSONL replay 已有 focused/differential Rust 契约；`cordis.node/v1` 保持真实 compat-host 与社区插件回归。上游 `AppWebEntry` 和 38 个 client bundles 现从固定 `0.1.0-rc.5` 源码构建，staging 校验 handoff id、source/staged SHA-1 与 Rust graph revision，且默认 Web 路径不再扫描 registry artifacts。当前固定工作顺序是完成并通过 69 个真实 Chromium 场景，在场景暴露具体 schema/event/Host domain 缺口时修复源契约，并持续保留 Node regression gate。详见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)。
 
-## 14.1 Alpha.7 发布记录
+## 14.1 Alpha.8 发布记录
+
+> 状态：已完成并通过 tag workflow 发布 `v0.1.0-alpha.8`
+> Core 基线：`tessivum-core v0.1.2` / `05882c9ad87f8fa41b0af2787f70aad5e06293fd`
+> 主题：MIT 开源许可与 Linux/macOS 原生二进制发布
+
+Alpha.8 为 Tessivum 与四个 Core runtime crate 增加 MIT License，并将产品固定依赖升级到 `tessivum-core v0.1.2`。运行时契约保持 `cordis.plugin/v1`、`cordis.node/v1` 与 `tessivum.conformance/v1`，不因源码版本变化而隐式升级。
+
+发布 workflow 在原生 x86-64/ARM64 Linux 与 macOS runner 上构建四个目标，打包 Rust 可执行文件、Legacy Node compat-host、固定 Cordis vendor 和依赖许可证，执行归档后 `--version` smoke，并发布相邻 SHA-256 校验文件。二进制未做平台代码签名或 macOS notarization；该边界必须在下载说明中保持明确。
+
+---
+
+## 14.2 Alpha.7 发布记录
+
 
 > 状态：已完成并发布 `v0.1.0-alpha.7`
 > Core 基线：`tessivum-core v0.1.1` / `8923eb29694cd284c4a3c01ba16c68a01d7402a3`
