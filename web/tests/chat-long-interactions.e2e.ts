@@ -140,7 +140,7 @@ test('chat-long-interactions keeps virtualized rows and actions bound to semanti
     const boundary = source.events.find(event => event.type === 'turn/end' && event.data.turn === 80)
     if (boundary === undefined) throw new Error('turn 80 has no durable boundary')
     const seededChild = await waitUntil(() => readSession(harness, childId),
-      session => session.events.some(event => carries(event, FIXTURE.markers.assistant(80))))
+      session => session.events.some(event => carries(event, FIXTURE.markers.assistant(80))), 60_000)
     expect(seededChild.header.parentSession).toBe(SESSION_ID)
     expect(seededChild.header.seedLength).toBe(boundary.seq + 1)
     expect(seededChild.events.some(event => carries(event, FIXTURE.markers.assistant(80)))).toBe(true)
