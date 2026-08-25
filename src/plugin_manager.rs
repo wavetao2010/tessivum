@@ -429,6 +429,46 @@ fn stable_entry_id(package: &str) -> String {
     )
 }
 
+fn install_vendor_aliases(profile: &Path, vendor: &Path) -> Result<(), PluginManagerError> {
+    let modules = profile.join("node_modules");
+    for (name, package) in [
+        ("cordis", "cordis"),
+        ("cosmokit", "cosmokit"),
+        ("@deepseek-ai/cordis", "cordis"),
+        ("@deepseek-ai/cosmokit", "cosmokit"),
+        ("@deepseek-ai/cordis-plugin-loader", "loader"),
+        ("@cordisjs/plugin-loader", "loader"),
+    ] {
+        let source = vendor.join(package);
+        let alias = modules.join(name);
+        if fs::canonicalize(&alias).is_ok_and(|path| path == source) {
+            continue;
+        }
+        match fs::symlink_metadata(&alias) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&alias).map_err(|error| io_error(&alias, error))?;
+            }
+            Ok(_) => fs::remove_file(&alias).map_err(|error| io_error(&alias, error))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&alias, error)),
+        }
+        fs::create_dir_all(alias.parent().expect("module aliases have a parent"))
+            .map_err(|error| io_error(&alias, error))?;
+        symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, alias)
+}
+
+#[cfg(windows)]
+fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(source, alias)
+}
+
 fn legacy_host_config(cwd: &Path, profile: &Path) -> Result<LegacyHostConfig, PluginManagerError> {
     let host = env::var_os("TESSIVUM_COMPAT_HOST")
         .map(PathBuf::from)
@@ -438,6 +478,7 @@ fn legacy_host_config(cwd: &Path, profile: &Path) -> Result<LegacyHostConfig, Pl
         .unwrap_or_else(|| cwd.join("../upstream/deepseek-harness/vendor"));
     let host = fs::canonicalize(&host).map_err(|error| io_error(&host, error))?;
     let vendor = fs::canonicalize(&vendor).map_err(|error| io_error(&vendor, error))?;
+    install_vendor_aliases(profile, &vendor)?;
     let command = HostCommand::new("bun")
         .arg("run")
         .arg(&host)

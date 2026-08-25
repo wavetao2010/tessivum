@@ -103,9 +103,26 @@ fn direct_web_and_profile_web_are_the_same_future_command() {
         ["tessivum", "--profile", "web"].as_slice(),
     ] {
         match parse_cli(args.iter().copied()).unwrap().command {
-            CliCommand::Web(command) => assert!(command.patches.is_empty()),
+            CliCommand::Web(command) => {
+                assert!(command.patches.is_empty());
+                assert!(command.data_dir.is_none());
+            }
             command => panic!("expected Web, got {command:?}"),
         }
+    }
+}
+
+#[test]
+fn web_accepts_one_data_directory_option_in_every_supported_position() {
+    for args in [
+        ["tessivum", "--data-dir", "state", "web"].as_slice(),
+        ["tessivum", "web", "--data-dir", "state"].as_slice(),
+        ["tessivum", "--profile", "web", "--data-dir", "state"].as_slice(),
+    ] {
+        let CliCommand::Web(command) = parse_cli(args.iter().copied()).unwrap().command else {
+            panic!("expected Web")
+        };
+        assert_eq!(command.data_dir, Some(PathBuf::from("state")));
     }
 }
 
@@ -200,6 +217,9 @@ fn invalid_headless_combinations_are_usage_errors() {
 
     let error = parse_cli(["tessivum", "sdk", "--patch", "base.toml"])
         .expect_err("future commands own no headless launcher arguments");
+    assert_eq!(error.exit_code(), 2);
+    let error = parse_cli(["tessivum", "sdk", "--data-dir", "state"])
+        .expect_err("SDK does not own a data directory option");
     assert_eq!(error.exit_code(), 2);
 }
 

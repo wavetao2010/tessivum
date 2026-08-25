@@ -22,6 +22,7 @@ pub enum CliCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebCommand {
     pub patches: Vec<PathBuf>,
+    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +83,8 @@ struct RawCli {
     profile: Option<Profile>,
     #[arg(long = "patch", value_name = "PATCH", global = true)]
     patches: Vec<PathBuf>,
+    #[arg(long, value_name = "DIR", global = true)]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<RawCommand>,
     #[command(flatten)]
@@ -99,8 +102,6 @@ enum RawCommand {
 
 #[derive(Debug, Args)]
 struct RawPluginCommand {
-    #[arg(long, value_name = "DIR", default_value = ".tessivum")]
-    data_dir: PathBuf,
     #[command(subcommand)]
     action: RawPluginAction,
 }
@@ -113,8 +114,6 @@ enum RawPluginAction {
 
 #[derive(Debug, Args)]
 struct RawHeadlessCommand {
-    #[arg(long, value_name = "DIR")]
-    data_dir: Option<PathBuf>,
     #[arg(long, value_name = "SESSION")]
     session: Option<String>,
     #[arg(long)]
@@ -151,10 +150,13 @@ where
         let command = match command {
             RawCommand::Web => CliCommand::Web(WebCommand {
                 patches: raw.patches,
+                data_dir: raw.data_dir,
             }),
             RawCommand::Sdk => {
-                if !raw.patches.is_empty() {
-                    return Err(usage_error("the sdk command does not accept --patch"));
+                if !raw.patches.is_empty() || raw.data_dir.is_some() {
+                    return Err(usage_error(
+                        "the sdk command does not accept --patch or --data-dir",
+                    ));
                 }
                 CliCommand::Sdk
             }
@@ -163,7 +165,7 @@ where
                     return Err(usage_error("the plugin command does not accept --patch"));
                 }
                 CliCommand::Plugin(PluginCommand {
-                    data_dir: plugin.data_dir,
+                    data_dir: raw.data_dir.unwrap_or_else(|| PathBuf::from(".tessivum")),
                     action: match plugin.action {
                         RawPluginAction::Add { specifier } => PluginAction::Add(specifier),
                         RawPluginAction::Remove { package } => PluginAction::Remove(package),
@@ -171,9 +173,9 @@ where
                 })
             }
             RawCommand::PluginReport => {
-                if !raw.patches.is_empty() {
+                if !raw.patches.is_empty() || raw.data_dir.is_some() {
                     return Err(usage_error(
-                        "the plugin-report command does not accept --patch",
+                        "the plugin-report command does not accept --patch or --data-dir",
                     ));
                 }
                 CliCommand::PluginReport
@@ -192,12 +194,13 @@ where
             Ok(Cli {
                 command: CliCommand::Web(WebCommand {
                     patches: raw.patches,
+                    data_dir: raw.data_dir,
                 }),
             })
         }
         Profile::Headless => {
             reject_launcher_options_after_task(&args)?;
-            headless_command(raw.headless, raw.patches).map(|command| Cli {
+            headless_command(raw.headless, raw.patches, raw.data_dir).map(|command| Cli {
                 command: CliCommand::Headless(command),
             })
         }
@@ -206,8 +209,7 @@ where
 
 impl RawHeadlessCommand {
     fn is_set(&self) -> bool {
-        self.data_dir.is_some()
-            || self.session.is_some()
+        self.session.is_some()
             || self.resume
             || self.replay.is_some()
             || self.provider.is_some()
@@ -221,6 +223,7 @@ impl RawHeadlessCommand {
 fn headless_command(
     raw: RawHeadlessCommand,
     patches: Vec<PathBuf>,
+    data_dir: Option<PathBuf>,
 ) -> Result<HeadlessCommand, Error> {
     if raw.resume && raw.session.is_none() {
         return Err(usage_error("--resume requires --session"));
@@ -242,7 +245,7 @@ fn headless_command(
 
     Ok(HeadlessCommand {
         patches,
-        data_dir: raw.data_dir,
+        data_dir,
         session: raw.session,
         resume: raw.resume,
         replay: raw.replay,

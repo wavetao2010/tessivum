@@ -267,9 +267,18 @@ fn web_command_rejects_a_missing_distribution_before_host_boot() {
 }
 
 #[tokio::test]
-async fn web_command_explicit_packages_override_discovery_and_log_the_bound_url() {
+async fn web_command_combines_explicit_and_installed_client_packages() {
     let fixture = Fixture::new("command");
     let (dist, packages) = install_web_half(&fixture);
+    let data_dir = fixture.path().join("state");
+    fixture.write(
+        "state/plugins/node_modules/community-clock/package.json",
+        r#"{"name":"community-clock","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    fixture.write(
+        "state/plugins/node_modules/community-clock/dist/client.js",
+        "export const community = true;",
+    );
     let package_paths = std::env::join_paths([packages]).expect("package path list encodes");
     let mut child = ChildCleanup(Some(
         Command::new(env!("CARGO_BIN_EXE_tessivum"))
@@ -279,6 +288,8 @@ async fn web_command_explicit_packages_override_discovery_and_log_the_bound_url(
             .env("TESSIVUM_REPLAY", WEB_REPLAY)
             .env("TESSIVUM_WEB_ADDR", "127.0.0.1:0")
             .arg("web")
+            .arg("--data-dir")
+            .arg(&data_dir)
             .stderr(Stdio::piped())
             .spawn()
             .expect("web command starts"),
@@ -321,12 +332,14 @@ async fn web_command_explicit_packages_override_discovery_and_log_the_bound_url(
         .await
         .expect("index is text");
     let graph = boot_graph(&index);
-    let rev = graph["entries"][0]["rev"]
-        .as_str()
-        .expect("plugin revision")
-        .to_owned();
+    let entries = graph["entries"].as_array().expect("boot entries");
+    let clock = entries
+        .iter()
+        .find(|entry| entry["id"] == "@fixture/clock")
+        .expect("explicit client package");
+    let rev = clock["rev"].as_str().expect("plugin revision");
     assert_eq!(
-        graph["entries"][0]["url"],
+        clock["url"],
         format!("/plugins/@fixture/clock/client.js?rev={rev}")
     );
     assert_eq!(
@@ -340,6 +353,23 @@ async fn web_command_explicit_packages_override_discovery_and_log_the_bound_url(
             .expect("plugin is text"),
         "export const revision = 1;"
     );
+    let community = entries
+        .iter()
+        .find(|entry| entry["id"] == "community-clock")
+        .expect("installed community client package");
+    assert_eq!(
+        client
+            .get(format!("{base}{}", community["url"].as_str().unwrap()))
+            .send()
+            .await
+            .expect("community plugin is served")
+            .text()
+            .await
+            .expect("community plugin is text"),
+        "export const community = true;"
+    );
+    assert!(data_dir.join(".agent-presets").is_dir());
+    assert!(!fixture.path().join(".tessivum").exists());
 
     let cwd = fixture.path().to_string_lossy().into_owned();
     let initialized = rpc(

@@ -37,7 +37,9 @@ use tessivum::{
     subagent::{SubagentHistoryRequest, SubagentMode},
     SessionId, TessivumError,
 };
-use tessivum_core::{CancellationToken, ContextHandle};
+use tessivum_core::{
+    CancellationToken, ContextHandle, Entry, EntryId, EntryOptions, EntryTree, RuntimeKind,
+};
 use uuid::Uuid;
 
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -404,6 +406,41 @@ fn profile_patches_have_fixed_precedence() {
             "nested":{"bundle":true,"profile":true,"home":true,"cli":true,"telemetry":true,"winner":"telemetry"}
         })
     );
+}
+
+#[tokio::test]
+async fn disabled_plugin_inventory_has_no_live_fiber_phase() {
+    let root = TempDir::new();
+    let mut host = config(&root);
+    host.entries = Some(EntryTree {
+        entries: vec![Entry {
+            package: "disabled-fixture".into(),
+            options: EntryOptions {
+                id: EntryId::new("disabled-fixture").unwrap(),
+                name: Some("disabled-fixture".into()),
+                runtime: RuntimeKind::Native,
+                config: json!({}),
+                inject: Vec::new(),
+                isolate: Vec::new(),
+                intercept: json!({}),
+                disabled: true,
+                group: None,
+            },
+        }],
+        groups: Vec::new(),
+    });
+    let runtime = HostRuntime::boot(host).await.unwrap();
+
+    assert_eq!(
+        runtime.handle().plugin_inventory().await.unwrap(),
+        vec![json!({
+            "entryId": "disabled-fixture",
+            "moduleName": "disabled-fixture",
+            "enabled": false,
+            "fiberPhase": null,
+        })]
+    );
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]

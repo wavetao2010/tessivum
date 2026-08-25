@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 05882c9ad87f8fa41b0af2787f70aad5e06293fd
+          ref: 7bfeeb9600008c66b78f065244dbcd8a64e730cb
           path: .release/tessivum-core
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -89,12 +89,18 @@ jobs:
           repository: deepseek-ai/deepseek-harness
           ref: 47f943859bef60e4160492346772ded9b24f765a
           path: .release/deepseek-harness
-          sparse-checkout: vendor
+          sparse-checkout: |
+            vendor
+            apps/cli/config/agent-presets
 
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           name: web-assets
           path: web
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
@@ -115,10 +121,43 @@ jobs:
             "target/${{ matrix.target }}/release/tessivum" \
             ".release/tessivum-core/node/compat-host" \
             ".release/deepseek-harness/vendor" \
+            ".release/deepseek-harness/apps/cli/config/agent-presets" \
             dist
           mkdir smoke
           tar -xzf "dist/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}.tar.gz" -C smoke
           "smoke/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}/bin/tessivum" --version
+          launcher="smoke/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}/bin/tessivum"
+          "$launcher" --data-dir "$PWD/smoke-state" plugin add "file:$PWD/fixtures/community/timer"
+          log="$PWD/smoke-web.log"
+          TESSIVUM_WEB_ADDR=127.0.0.1:38080 \
+            "$launcher" --data-dir "$PWD/smoke-state" web >"$log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for _ in {1..100}; do
+            if curl -fsS http://127.0.0.1:38080/ >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          if [[ $ready != true ]]; then
+            cat "$log"
+            exit 1
+          fi
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"release-preset-smoke","method":"agentPreset.list","payload":{}}' \
+            http://127.0.0.1:38080/api/agentPreset.list \
+            | jq -e '.result.ok == true and (.result.value.presets | map(.id)) == ["standard", "code", "minimal", "cordis"]'
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"release-plugin-smoke","method":"pluginInventory/list","payload":{"args":[]}}' \
+            http://127.0.0.1:38080/api/pluginInventory/list \
+            | jq -e '.result.ok == true and any(.result.value.entries[]; .moduleName == "@cordisjs/plugin-timer" and .enabled == true and .fiberPhase == "active")'
+          kill "$server_pid"
+          wait "$server_pid"
+          trap - EXIT
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:

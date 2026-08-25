@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.8` is a prerelease and reproducible baseline, not a production-stable API promise. GitHub Releases provides native Linux and macOS archives for x86-64 and ARM64.
+`v0.1.0-alpha.9` is a prerelease and reproducible baseline, not a production-stable API promise. GitHub Releases provides native Linux and macOS archives for x86-64 and ARM64.
 
 Current implementation foundation:
 
@@ -59,14 +59,14 @@ Prebuilt archives do not require Rust or Git. Bun 1.3.14 or newer is needed only
 
 ## Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.8 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.8), verify the checksum, then run the packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.9 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.9), verify the checksum, then run the packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.8-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.8-$target.tar.gz"
-"./tessivum-0.1.0-alpha.8-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.8-$target/bin/tessivum" web
+sha256sum -c "tessivum-0.1.0-alpha.9-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.9-$target.tar.gz"
+"./tessivum-0.1.0-alpha.9-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.9-$target/bin/tessivum" --data-dir "$HOME/.local/share/tessivum" web
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -117,15 +117,16 @@ The Responses adapter sends `store: false`, streams text/reasoning/function call
 
 ### Community plugins
 
-Install npm, Git, tarball, or local Cordis packages into the deployment-owned profile, then start Web normally:
+Install npm, Git, tarball, or local Cordis packages into the deployment-owned profile, then start Web with the same data directory:
 
 ```bash
-cargo run --release -- plugin add @scope/package
-cargo run --release -- plugin remove @scope/package
-cargo run --release -- web
+data_dir="$HOME/.local/share/tessivum"
+cargo run --release -- --data-dir "$data_dir" plugin add @scope/package
+cargo run --release -- --data-dir "$data_dir" plugin remove @scope/package
+cargo run --release -- --data-dir "$data_dir" web
 ```
 
-The default profile is `.tessivum/plugins`. `--data-dir <dir>` selects another profile for the management command. Installs disable npm lifecycle scripts and copy local packages into the confined profile. On Web/SDK startup, ordinary Cordis packages run in the Legacy Node host, Extism declarations run as WASM, `dsh.bundle.patch` insertions are composed into the Host entry tree, and published `dsh.client` bundles join the Browser graph. The plugin inventory reports both Host and Browser entries.
+The default profile is `.tessivum/plugins`; `--data-dir <dir>` selects another profile for both management and Web. Installs disable npm lifecycle scripts and copy local packages into the confined profile. On Web/SDK startup, ordinary Cordis packages run in the Legacy Node host, Extism declarations run as WASM, `dsh.bundle.patch` insertions are composed into the Host entry tree, and published `dsh.client` bundles join the Browser graph. The Settings inventory reports installed Host and Browser entries; it is not a package marketplace and Tessivum does not install community packages without an explicit `plugin add`.
 
 Legacy plugins are trusted code, not a sandbox. The source checkout resolves the compatibility host from `../tessivum-core/node/compat-host` and the pinned Cordis vendor from `../upstream/deepseek-harness/vendor`; packaged deployments can set `TESSIVUM_COMPAT_HOST` and `CORDIS_VENDOR_ROOT` explicitly.
 
@@ -139,7 +140,7 @@ cd ..
 cargo run --release -- web
 ```
 
-Open <http://127.0.0.1:3000>. Alpha7 can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
+Open <http://127.0.0.1:3000>. Web can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
 
 ### SDK mode
 

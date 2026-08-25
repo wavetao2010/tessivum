@@ -2,7 +2,7 @@ use std::{
     env, fs,
     future::Future,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{self, ExitCode},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -227,6 +227,7 @@ async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic
 }
 
 async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
+    let (cwd, data_dir) = host_paths(command.data_dir)?;
     let dynamic_cordis = feature_flag("TESSIVUM_CORDIS_TOOLS")?;
     let address = env::var("TESSIVUM_WEB_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
@@ -242,6 +243,8 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     }
     let patches = load_cli_patches(&command.patches).await?;
     let runtime = boot_host(
+        cwd,
+        data_dir.clone(),
         web_replay().await?,
         dynamic_cordis,
         true,
@@ -254,6 +257,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             .handle()
             .settings()
             .expect("a booted Host always publishes settings"),
+        &data_dir,
     ) {
         Ok(frontend) => frontend,
         Err(error) => {
@@ -320,6 +324,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
 
 fn web_frontend(
     settings: Arc<Settings>,
+    data_dir: &Path,
 ) -> Result<
     (
         FrontendStatic,
@@ -376,7 +381,7 @@ fn web_frontend(
         },
         |paths| env::split_paths(&paths).collect(),
     );
-    let installed = PathBuf::from(".tessivum/plugins/node_modules");
+    let installed = data_dir.join("plugins/node_modules");
     if installed.is_dir() {
         package_roots.push(installed);
     }
@@ -402,7 +407,8 @@ enum SdkOutcome {
 }
 
 async fn run_sdk() -> Result<(), Diagnostic> {
-    let runtime = boot_host(None, false, true, None, Vec::new()).await?;
+    let (cwd, data_dir) = host_paths(None)?;
+    let runtime = boot_host(cwd, data_dir, None, false, true, None, Vec::new()).await?;
     let server = tessivum::sdk::JsonRpcServer::new(Arc::new(runtime.handle()));
     let reader = tokio::io::stdin();
     let writer = tokio::io::stdout();
@@ -440,15 +446,15 @@ async fn run_sdk() -> Result<(), Diagnostic> {
 }
 
 async fn boot_host(
+    cwd: PathBuf,
+    data_dir: PathBuf,
     recorded_replay: Option<WebReplay>,
     dynamic_cordis: bool,
     enable_trusted_bash: bool,
     system_prompt: Option<String>,
     cli_patches: Vec<Value>,
 ) -> Result<HostRuntime, Diagnostic> {
-    let cwd =
-        env::current_dir().map_err(|error| Diagnostic::runtime("CWD_RESOLUTION_FAILED", error))?;
-    let mut config = HostConfig::new(cwd.clone(), cwd.join(".tessivum"));
+    let mut config = HostConfig::new(cwd, data_dir);
     config.enable_trusted_bash = enable_trusted_bash;
     config.system_prompt = system_prompt;
     config.dynamic_cordis = dynamic_cordis;
@@ -690,10 +696,10 @@ async fn load_cli_patches(paths: &[PathBuf]) -> Result<Vec<Value>, Diagnostic> {
     Ok(patches)
 }
 
-async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Diagnostic> {
+fn host_paths(data_dir: Option<PathBuf>) -> Result<(PathBuf, PathBuf), Diagnostic> {
     let cwd =
         env::current_dir().map_err(|error| Diagnostic::runtime("CWD_RESOLUTION_FAILED", error))?;
-    let data_dir = command.data_dir.map_or_else(
+    let data_dir = data_dir.map_or_else(
         || cwd.join(".tessivum"),
         |path| {
             if path.is_absolute() {
@@ -703,6 +709,11 @@ async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Di
             }
         },
     );
+    Ok((cwd, data_dir))
+}
+
+async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Diagnostic> {
+    let (cwd, data_dir) = host_paths(command.data_dir)?;
     let replay_jsonl = match command.replay {
         Some(path) => tokio::fs::read_to_string(path)
             .await

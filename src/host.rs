@@ -6485,7 +6485,7 @@ impl HostApi for HostHandle {
                         "entryId": entry.options.id.as_str(),
                         "moduleName": entry.options.name.as_deref().unwrap_or(&entry.package),
                         "enabled": !entry.options.disabled,
-                        "fiberPhase": if entry.options.disabled { "disabled" } else { "active" },
+                        "fiberPhase": (!entry.options.disabled).then_some("active"),
                     })
                 })
                 .collect()
