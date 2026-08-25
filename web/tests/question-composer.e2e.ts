@@ -152,11 +152,11 @@ test('asks through the composer, answers, and completes with the answer logged',
     expect(await harness.page.locator('[data-question-key]').count()).toBe(0)
     expect(await selectedRow.locator('[data-state="warning"]').count()).toBe(0)
     await expect(waitUntil(() => harness.page.locator('textarea').first().isEnabled(), Boolean)).resolves.toBe(true)
-    await harness.page.locator('[data-conversation-scroll]').evaluate((host) => {
-      host.scrollTop = host.scrollHeight
-      host.dispatchEvent(new Event('scroll'))
-    })
-    await waitUntil(() => harness.page.getByRole('button', { name: 'Back to bottom', exact: true }).count(), count => count === 0)
+    const backToBottom = harness.page.getByRole('button', { name: 'Back to bottom', exact: true })
+    if (await backToBottom.count() !== 0) {
+      await backToBottom.click()
+      await waitUntil(() => backToBottom.count(), count => count === 0)
+    }
     expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(ANSWERED_EXPECTED, 'utf8'))
     expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
       'answered.expected.md', 'composed.expected.md', 'session.jsonl', 'sidebar.expected.md', 'ui.expected.md',
