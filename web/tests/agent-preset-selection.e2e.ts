@@ -207,10 +207,9 @@ beforeAll(async () => {
   await page.goto(baseUrl, { waitUntil: 'load' })
   await page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
   const declaration = page.getByRole('dialog', { name: 'Internal Testing Notice' })
-  if (await declaration.count() !== 0) {
-    await declaration.getByRole('button', { name: 'Continue' }).click()
-    await declaration.waitFor({ state: 'detached' })
-  }
+  await declaration.waitFor({ timeout: 15_000 })
+  await declaration.getByRole('button', { name: 'Continue' }).click()
+  await declaration.waitFor({ state: 'hidden', timeout: 15_000 })
   await connectWorkspace()
 }, 120_000)
 afterAll(async () => {

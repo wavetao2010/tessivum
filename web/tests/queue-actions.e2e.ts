@@ -182,6 +182,8 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     const sessionId = await firstSettled
     await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Stop generating' }).count(), count => count === 0)).resolves.toBe(0)
     await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
+    await harness.page.mouse.move(0, 0)
+    await waitUntil(() => harness.page.getByRole('tooltip', { name: 'Send message' }).count(), count => count === 0)
     expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(PRESERVED_EXPECTED, 'utf8'))
 
     const settled = harness.whenTurnSettled()
