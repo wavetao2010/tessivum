@@ -1,8 +1,8 @@
 # Tessivum 二阶段开发计划
 
 > 状态：两阶段迁移完成；Rust Cordis 内核、Rust-native Harness 与冻结的 source-exact Web 兼容基线均已通过验收
-> 计划校准日期：2026-08-24
-> Tessivum 实现基线：`v0.1.0-alpha.6`
+> 计划校准日期：2026-08-25
+> Tessivum 实现基线：`v0.1.0-alpha.7`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、插件生态兼容与 Web 模型配置面
 
@@ -592,6 +592,16 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 ## 14. 当前后续工作入口
 
 原 Alpha 阶段只完成了 Rust-native 产品纵向闭环，不能据此关闭两阶段迁移。当前冻结 Core RPC method roster 已达到 52/52，LLM/Agent 的 chunk、prepared request、retry/cancel、queue/steer、durable assistant state 与 JSONL replay 已有 focused/differential Rust 契约；`cordis.node/v1` 保持真实 compat-host 与社区插件回归。上游 `AppWebEntry` 和 38 个 client bundles 现从固定 `0.1.0-rc.5` 源码构建，staging 校验 handoff id、source/staged SHA-1 与 Rust graph revision，且默认 Web 路径不再扫描 registry artifacts。当前固定工作顺序是完成并通过 69 个真实 Chromium 场景，在场景暴露具体 schema/event/Host domain 缺口时修复源契约，并持续保留 Node regression gate。详见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)。
+
+## 14.1 Alpha.7 发布记录
+
+> 状态：已完成并发布 `v0.1.0-alpha.7`
+> Core 基线：`tessivum-core v0.1.1` / `8923eb29694cd284c4a3c01ba16c68a01d7402a3`
+> 主题：冻结的 source-exact Web 兼容、完整 Browser RPC 面与社区插件兼容
+
+Alpha.7 将冻结的 DeepSeek Harness `0.1.0-rc.5` Browser 源码作为构建输入，而不是维护第二套仿制 UI。Host 继续由 Rust 掌握会话、模型、工具、权限与持久状态；Browser Cordis 只承担兼容客户端组合。发布门槛由 52/52 Core RPC、38 个 source client bundles、Legacy Node/Extism/Native 插件路径和全部 69 个 Chromium 兼容场景共同定义。
+
+该版本同时切换到独立发布的 `tessivum-core v0.1.1`，补齐社区 Cordis 插件安装与加载、provider-safe 工具名、并发 Goal CAS、队列与 Subagent 生命周期，以及 Linux/macOS CI 的确定性回归门槛。发布物仍为 source prerelease；不包含预编译二进制、直接 ChatGPT/Codex OAuth 或 LAN listener。
 
 ---
 

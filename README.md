@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.6` is a source release and reproducible baseline, not a production-stable API promise.
+`v0.1.0-alpha.7` is a source release and reproducible baseline, not a production-stable API promise.
 
 Current implementation foundation:
 
@@ -126,7 +126,7 @@ cd ..
 cargo run --release -- web
 ```
 
-Open <http://127.0.0.1:3000>. Alpha6 can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
+Open <http://127.0.0.1:3000>. Alpha7 can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
 
 ### SDK mode
 
