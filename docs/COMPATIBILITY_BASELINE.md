@@ -297,14 +297,14 @@ LLM 与 Agent Loop 是独立兼容层，不得以“能生成文本”替代以�
 
 Node 兼容层只服务于显式 `legacy-node` 插件；Rust Host 主路径和原生/WASM 插件不得依赖 Node。
 
-Alpha.11 的 Core 实现基线固定为 `tessivum-core v0.1.5` / `e894744e88cbed359179745e31eed00c1f45201b`。
+Alpha.11 后续兼容实现的 Core 基线固定为 `tessivum-core v0.1.5` / `a1a6d2e5584253391b9962c482f2140263b703bf`。
 
 ### 9.1 Transport 与帧
 
 - Host 启动一个长期 Node compat-host 进程；stdin/stdout 构成唯一双工协议流，stderr 仅作诊断日志，绝不承载协议。
 - 每帧是 `u32` 大端长度 + UTF-8 JSON；默认单帧上限 `1 MiB`，接收端必须先校验长度再分配和解码。
 - 每个 JSON frame 精确包含 `protocolVersion:"cordis.node/v1"`、正数 `connectionGeneration`、`kind`、可选正数 `requestId`、`payload`。未知字段、错误版本、旧 generation 或 request/response 缺失 `requestId` 均为协议错误。
-- request kind 闭集：`exit`、`plugin.load`、`plugin.update`、`plugin.dispose`、`plugin.snapshot`、`service.call`、`service.provide`、`service.remove`、`event.subscribe`、`event.emit`、`event.callback`、`registration.dispose`、`web.route.register`、`web.route.unregister`、`web.route.request`、`pnpm.run`。
+- request kind 闭集：`exit`、`plugin.load`、`plugin.update`、`plugin.dispose`、`plugin.snapshot`、`service.call`、`service.provide`、`service.remove`、`event.subscribe`、`event.emit`、`event.callback`、`registration.dispose`、`web.route.register`、`web.route.unregister`、`web.route.request`、`web.upgrade.register`、`web.upgrade.unregister`、`pnpm.run`。
 - 控制/结果 kind：`hello`、`ready`、`response`、`error`、`cancel`、`heartbeat`、`log`、`pnpm.output`。`response/error/cancel` 回显原 `requestId`；远端错误是 `{ code, message, details? }`，不得降级为无结构字符串。`pnpm.output` 不带 `requestId`，以 `operationId` 关联有界 stdout/stderr 流。
 
 ### 9.2 Handshake、背压与故障

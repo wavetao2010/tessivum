@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.11` is a prerelease, not a production-stable API or data-format promise. It adds Tessivum-owned branding and install channels plus bounded compatibility with `dshmarket@1.29.2`.
+`v0.1.0-alpha.11` is a prerelease, not a production-stable API or data-format promise. It adds Tessivum-owned branding and install channels plus bounded compatibility with `dshmarket@1.29.2` and `dsh-better-sidebar@0.16.1`.
 
 Current implementation foundation:
 
@@ -18,7 +18,7 @@ Current implementation foundation:
 - HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
 - Native/WASM/Browser routing plus a real Legacy Node compat-host over the bounded `cordis.node/v1` bridge and DomainBridge services;
 - Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the frozen upstream `AppWebEntry` source shell;
-- a pnpm-owned plugin profile, bounded `web.route/v1`, packaged Host compatibility modules, and restart-required `dshmarket@1.29.2` activation.
+- a pnpm-owned plugin profile, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, native-backed Legacy settings, and restart-required activation for the verified community-plugin samples.
 
 The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline remains complete:
 
@@ -145,10 +145,10 @@ All package mutations target `${TESSIVUM_HOME:-$HOME/.tessivum}/plugins` and use
 tessivum plugin add @scope/package
 tessivum plugin remove @scope/package
 
-# Frozen market compatibility target
+# Frozen compatibility targets
 tessivum plugin add dshmarket@1.29.2
+tessivum plugin add dsh-better-sidebar@0.16.1
 tessivum web
-```
 
 Plugin changes are restart-required: stop and restart `tessivum web` after add, update, remove, restore, or an allow-builds change. Tessivum does not expose a global `dsh` shim and does not hot-mount a second Node-side loader state.
 
@@ -221,7 +221,7 @@ These gates exercise the Rust-native runtime, the pinned DeepSeek client package
 - the native Responses adapter requires the standard API-key `/responses` contract; direct ChatGPT/Codex OAuth and remote image URLs are not wired;
 - image-bearing MCP/tool-result serialization is covered by focused adapter tests; the real Browser E2E currently exercises text tool continuation plus user image input, because no production-configured image-producing tool is exposed;
 - API listeners are loopback-only; prebuilt archives are checksum-verified but are not code-signed or notarized.
-- dshmarket compatibility is frozen to `1.29.2`; other market versions and hot activation are unsupported until separately verified.
+- community-plugin compatibility is verified only for `dshmarket@1.29.2` and `dsh-better-sidebar@0.16.1`; other versions, other packages, and hot activation remain unsupported until separately verified.
 
 These are product follow-ups, not work to change or deprecate the official DeepSeek Harness project.
 

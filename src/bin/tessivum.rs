@@ -27,7 +27,10 @@ use tessivum::{
     host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
     llm::LlmAdapter,
     openai_responses::OpenAiResponsesAdapter,
-    plugin_manager::{configure_host_plugins, mutate_plugins, PluginMutation},
+    plugin_manager::{
+        configure_host_plugins, installed_plugin_names, mutate_plugins, plugin_profile_root,
+        PluginMutation,
+    },
     settings::Settings,
     SessionId,
 };
@@ -388,14 +391,25 @@ fn web_frontend(
         },
         |paths| env::split_paths(&paths).collect(),
     );
-    let installed = data_dir.join("plugins/node_modules");
-    if installed.is_dir() {
-        package_roots.push(installed);
-    }
+    package_roots.extend(installed_client_package_roots(data_dir)?);
     frontend
         .scan_packages(package_roots)
         .map_err(|error| Diagnostic::runtime("WEB_CLIENT_PACKAGES_FAILED", error))?;
     Ok((frontend, tap, embedded))
+}
+fn installed_client_package_roots(data_dir: &Path) -> Result<Vec<PathBuf>, Diagnostic> {
+    let profile = plugin_profile_root(data_dir);
+    let installed = profile.join("node_modules");
+    if !installed.is_dir() {
+        return Ok(Vec::new());
+    }
+    let names = installed_plugin_names(&profile)
+        .map_err(|error| Diagnostic::runtime("WEB_CLIENT_PACKAGES_FAILED", error))?;
+    Ok(names
+        .into_iter()
+        .map(|name| installed.join(name))
+        .filter(|root| root.is_dir())
+        .collect())
 }
 
 fn feature_flag(name: &str) -> Result<bool, Diagnostic> {
@@ -830,5 +844,24 @@ mod tests {
         assert_eq!(error.class, ExitClass::Usage);
         assert!(error.message.contains("YAML mapping"));
         let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn installed_client_roots_include_only_declared_plugins() {
+        let data = patch_dir("installed-client-roots");
+        let profile = plugin_profile_root(&data);
+        let modules = profile.join("node_modules");
+        fs::create_dir_all(modules.join("plugin-a")).unwrap();
+        fs::create_dir_all(modules.join("dependency-only")).unwrap();
+        fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"plugin-a":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            installed_client_package_roots(&data).unwrap(),
+            vec![modules.join("plugin-a")]
+        );
+        let _ = fs::remove_dir_all(data);
     }
 }

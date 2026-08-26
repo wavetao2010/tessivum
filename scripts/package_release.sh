@@ -17,6 +17,7 @@ output=$8
 version=${tag#v}
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 host_module_manifest="$script_dir/../packaging/host-modules.json"
+compat_modules="$script_dir/../compat/host-modules"
 deepseek_root=$(CDPATH= cd -- "$agent_presets/../../../.." && pwd)
 
 [[ $tag == v?* ]] || { echo "release tag must start with v and include a version: $tag" >&2; exit 2; }
@@ -36,6 +37,10 @@ done
 [[ -f $deepseek_root/LICENSE ]] || { echo "DeepSeek Harness license is missing: $deepseek_root/LICENSE" >&2; exit 2; }
 [[ -f $host_module_manifest ]] || { echo "Host module metadata manifest is missing: $host_module_manifest" >&2; exit 2; }
 python3 "$script_dir/fetch_host_modules.py" "$host_module_manifest" "$host_modules" --verify
+[[ -f $compat_modules/@deepseek-ai/dsh-tools/index.js && -f $compat_modules/@deepseek-ai/dsh-llm/index.js && -f $compat_modules/@deepseek-ai/dsh-subagent/descriptor.js ]] || {
+  echo "Host module compatibility sources are incomplete: $compat_modules" >&2
+  exit 2
+}
 [[ $("$binary" --version) == "tessivum $version" ]] || {
   echo "binary version does not match release tag $tag" >&2
   exit 2
@@ -55,6 +60,7 @@ cp LICENSE "$stage/LICENSE"
 cp "$compat_host/package.json" "$compat_host/bun.lock" "$stage/share/tessivum/compat-host/"
 cp -R "$compat_host/src" "$stage/share/tessivum/compat-host/"
 cp -R "$host_modules"/. "$stage/share/tessivum/host-modules/"
+cp -R "$compat_modules"/. "$stage/share/tessivum/host-modules/"
 cp -R "$vendor"/. "$stage/share/tessivum/vendor/"
 mkdir -p "$stage/share/tessivum/vendor/node_modules/@deepseek-ai"
 ln -s ../../cordis "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cordis"

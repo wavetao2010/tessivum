@@ -1,0 +1,7 @@
+{
+  "name": "@deepseek-ai/dsh-tools",
+  "version": "0.1.0-tessivum.1",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT"
+}

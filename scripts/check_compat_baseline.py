@@ -16,7 +16,7 @@ CORDIS = Path(os.environ.get("TESSIVUM_CORDIS_SOURCE", WORKSPACE / "upstream/cor
 CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
-CORE_SHA = "e894744e88cbed359179745e31eed00c1f45201b"
+CORE_SHA = "a1a6d2e5584253391b9962c482f2140263b703bf"
 BASELINE = PROJECT / "docs/COMPATIBILITY_BASELINE.md"
 CHECKLIST = PROJECT / "docs/WEB_E2E_PORT_CHECKLIST.md"
 README = PROJECT / "README.md"
@@ -45,7 +45,7 @@ EXPECTED_NODE_KINDS = {
     "service.call", "service.provide", "service.remove",
     "event.subscribe", "event.emit", "event.callback", "registration.dispose",
     "web.route.register", "web.route.unregister", "web.route.request",
-    "pnpm.run", "pnpm.output",
+    "web.upgrade.register", "web.upgrade.unregister", "pnpm.run", "pnpm.output",
 }
 
 

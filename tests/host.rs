@@ -94,6 +94,11 @@ impl SettingsProvider for FailingSettingsProvider {
     async fn load(&self, _: &str) -> Result<Option<serde_json::Value>, SettingsError> {
         Ok(None)
     }
+    async fn load_all(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, SettingsError> {
+        Ok(std::collections::BTreeMap::new())
+    }
 
     async fn persist(&self, _: &str, _: &serde_json::Value) -> Result<(), SettingsError> {
         Err(SettingsError::Persistence("write failed".into()))

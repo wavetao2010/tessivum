@@ -41,7 +41,8 @@ use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use tessivum_node_bridge::BridgeError;
 use tokio::{
-    net::TcpListener,
+    io::copy_bidirectional,
+    net::{TcpListener, TcpStream},
     sync::{broadcast, mpsc, oneshot, Mutex as AsyncMutex},
     task::JoinHandle,
 };
@@ -83,6 +84,7 @@ use crate::{
     workspace::{WorkspaceError, WorkspaceId},
     TessivumError,
 };
+use hyper_util::rt::TokioIo;
 use reqwest::redirect::Policy;
 use tessivum_core::ContextHandle;
 use url::Url;
@@ -588,14 +590,81 @@ fn broadcast_compat(state: &CompatibilityState, stream: CompatStream, payload: V
         payload,
     });
 }
+fn is_websocket_upgrade(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::UPGRADE)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
+        && request
+            .headers()
+            .get(header::CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+            })
+}
+
+async fn proxy_websocket_upgrade(
+    mut request: Request,
+    route: crate::bridge::WebUpgradeRoute,
+) -> Response {
+    let browser_upgrade = hyper::upgrade::on(&mut request);
+    let stream = match TcpStream::connect((Ipv4Addr::LOCALHOST, route.port)).await {
+        Ok(stream) => stream,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let (mut sender, connection) =
+        match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await {
+            Ok(parts) => parts,
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        };
+    tokio::spawn(async move {
+        let _ = connection.with_upgrades().await;
+    });
+    let token = match HeaderValue::from_str(&route.token) {
+        Ok(token) => token,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    request
+        .headers_mut()
+        .insert("x-tessivum-upgrade-token", token);
+    let mut backend_response = match sender.send_request(request).await {
+        Ok(response) if response.status() == StatusCode::SWITCHING_PROTOCOLS => response,
+        Ok(_) | Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let backend_upgrade = hyper::upgrade::on(&mut backend_response);
+    let (parts, _) = backend_response.into_parts();
+    tokio::spawn(async move {
+        let (browser, backend) = tokio::join!(browser_upgrade, backend_upgrade);
+        let (Ok(browser), Ok(backend)) = (browser, backend) else {
+            return;
+        };
+        let mut browser = TokioIo::new(browser);
+        let mut backend = TokioIo::new(backend);
+        let _ = copy_bidirectional(&mut browser, &mut backend).await;
+    });
+    Response::from_parts(parts, Body::empty())
+}
 
 async fn api_not_found() -> Response {
     response_error(None, ApiError::not_found())
 }
 
 async fn frontend_fallback(State(state): State<ApiState>, request: Request) -> Response {
+    let path = request.uri().path().to_owned();
+    if is_websocket_upgrade(&request) {
+        if let Some(route) = state
+            .web_routes
+            .as_ref()
+            .and_then(|routes| routes.select_web_upgrade(&path))
+        {
+            return proxy_websocket_upgrade(request, route).await;
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let (parts, body) = request.into_parts();
-    let path = parts.uri.path().to_owned();
     let query = parts.uri.query().unwrap_or_default().to_owned();
     let method = parts.method.clone();
     if path == "/api" || path.starts_with("/api/") {

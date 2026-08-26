@@ -1074,7 +1074,13 @@ fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
 
 fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), PluginManagerError> {
     let modules = profile.join("node_modules");
-    for name in ["@deepseek-ai/dsh-settings", "@deepseek-ai/schemastery"] {
+    for name in [
+        "@deepseek-ai/dsh-settings",
+        "@deepseek-ai/schemastery",
+        "@deepseek-ai/dsh-tools",
+        "@deepseek-ai/dsh-llm",
+        "@deepseek-ai/dsh-subagent",
+    ] {
         let source = root.join(name);
         let manifest = read_json(&source.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
         let entry = manifest

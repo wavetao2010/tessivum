@@ -45,6 +45,7 @@ pub type SettingsValidator = Arc<dyn Fn(&Value) -> Result<(), TessivumError> + S
 #[async_trait]
 pub trait SettingsProvider: Send + Sync {
     async fn load(&self, namespace: &str) -> Result<Option<Value>, SettingsError>;
+    async fn load_all(&self) -> Result<BTreeMap<String, Value>, SettingsError>;
     async fn persist(&self, namespace: &str, user: &Value) -> Result<(), SettingsError>;
     fn writable(&self) -> bool {
         true
@@ -232,6 +233,7 @@ struct NamespaceData {
 pub struct Settings {
     provider: Arc<dyn SettingsProvider>,
     namespaces: Mutex<BTreeMap<String, Arc<NamespaceState>>>,
+    registration_gate: AsyncMutex<()>,
     updates: broadcast::Sender<SettingsEvent>,
     closed: AtomicBool,
 }
@@ -251,6 +253,7 @@ impl Settings {
         Self {
             provider,
             namespaces: Mutex::new(BTreeMap::new()),
+            registration_gate: AsyncMutex::new(()),
             updates,
             closed: AtomicBool::new(false),
         }
@@ -264,6 +267,7 @@ impl Settings {
         if self.closed.load(Ordering::Acquire) {
             return Err(SettingsError::Closed);
         }
+        let _registration = self.registration_gate.lock().await;
         if lock(&self.namespaces).contains_key(&registration.namespace) {
             return Err(SettingsError::DuplicateNamespace(registration.namespace));
         }
@@ -328,6 +332,30 @@ impl Settings {
     pub async fn prepare_document(&self) -> Result<Option<PathBuf>, SettingsError> {
         self.provider.prepare_document().await
     }
+    pub async fn load_document(&self) -> Result<BTreeMap<String, Value>, SettingsError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SettingsError::Closed);
+        }
+        self.provider.load_all().await
+    }
+
+    pub async fn persist_unregistered(
+        &self,
+        namespace: &str,
+        user: &Value,
+    ) -> Result<(), SettingsError> {
+        ensure_namespace(namespace)?;
+        validate_document(user)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SettingsError::Closed);
+        }
+        let _registration = self.registration_gate.lock().await;
+        if lock(&self.namespaces).contains_key(namespace) {
+            return Err(SettingsError::DuplicateNamespace(namespace.to_owned()));
+        }
+        self.provider.persist(namespace, user).await
+    }
+
     pub fn user(&self, namespace: &str) -> Result<Value, SettingsError> {
         Ok(lock(&self.state(namespace)?.data).user.clone())
     }
@@ -668,6 +696,9 @@ impl SettingsProvider for MemorySettingsProvider {
     async fn load(&self, namespace: &str) -> Result<Option<Value>, SettingsError> {
         Ok(lock(&self.sections).get(namespace).cloned())
     }
+    async fn load_all(&self) -> Result<BTreeMap<String, Value>, SettingsError> {
+        Ok(lock(&self.sections).clone())
+    }
     async fn persist(&self, namespace: &str, user: &Value) -> Result<(), SettingsError> {
         if !self.writable() {
             return Err(SettingsError::ReadOnly);
@@ -817,6 +848,20 @@ impl SettingsProvider for YamlSettingsProvider {
                 .cloned()
                 .map(Some)
                 .ok_or(error),
+            Err(error) => Err(error),
+        }
+    }
+    async fn load_all(&self) -> Result<BTreeMap<String, Value>, SettingsError> {
+        match self.read_document().await {
+            Ok(document) => Ok(document),
+            Err(error @ SettingsError::Persistence(_)) => {
+                let fallback = lock(&self.last_good).clone();
+                if fallback.is_empty() {
+                    Err(error)
+                } else {
+                    Ok(fallback)
+                }
+            }
             Err(error) => Err(error),
         }
     }
@@ -1086,4 +1131,29 @@ fn redact(value: &Value, paths: &[SettingPath]) -> Value {
 }
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn compatibility_storage_preserves_unregistered_sections() {
+        let provider = Arc::new(MemorySettingsProvider::new());
+        provider.insert("existing", json!({"kept": true})).unwrap();
+        let settings = Settings::new(provider);
+
+        settings
+            .persist_unregistered("sidebar", &json!({"openByDefault": true}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            settings.load_document().await.unwrap(),
+            BTreeMap::from([
+                ("existing".into(), json!({"kept": true})),
+                ("sidebar".into(), json!({"openByDefault": true})),
+            ])
+        );
+    }
 }

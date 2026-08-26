@@ -4,7 +4,7 @@
 > 关闭日期：2026-08-26
 > 实现基线：`v0.1.0-alpha.11`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`  
-> Core 基线：`tessivum-core v0.1.5` / `e894744e88cbed359179745e31eed00c1f45201b`
+> Core 基线：`tessivum-core v0.1.5` / `a1a6d2e5584253391b9962c482f2140263b703bf`
 > 社区市场基线：`dshmarket@1.29.2`
 
 ## 1. 文档目的
@@ -411,7 +411,7 @@ desktopPnpm.runPlugin(args, invokingDir, signal)
 - `@deepseek-ai/dsh-settings@0.1.0-rc.7`；
 - `@deepseek-ai/schemastery@3.18.1`。
 
-Browser 仍固定 rc.5，不能因为 Host compatibility module 引入 rc.7 Browser bundle。Host settings 模块只用于满足 dshmarket 的公开 Host import；是否发布 `settings` service 由 Tessivum 明确 composition 决定。缺服务时其可选设置卡保持 dormant，不能伪造成功注册。
+Browser 仍固定 rc.5，不能因为 Host compatibility module 引入 rc.7 Browser bundle。Legacy Host 组合一个由 Rust `Settings`/`settings.yaml` 持久化支撑的 `settings` provider；插件命名空间仍由 Node 侧公开 schema 解析和监听，Rust 侧只提供受限的整文档加载与未注册命名空间写入。该边界已由 `dsh-better-sidebar@0.16.1` 的设置读写和重启恢复验证，不伪造未挂载服务。
 
 每个额外包必须进入 release license inventory、hash 和 smoke；禁止构建时从浮动 `latest` 取包。
 
@@ -642,5 +642,6 @@ Phase 4 完成必须同时满足：
 - 四 target installer fixture、checksum 失败、原子升级、幂等卸载以及 Homebrew 实际 install/test/uninstall 通过；
 - 本地 Alpha.11 发布归档完成打包，并从归档 launcher 安装 `dshmarket@1.29.2`；Chromium 中 Tessivum 标题、插件市场 Browser entry 和 `/dsh-market/status` Rust→Bun route 均通过，未观察到 Browser error；
 - 最终集成审查发现 release/CI 使用旧 Core revision；三个 checkout 已统一为 `e894744e88cbed359179745e31eed00c1f45201b`，并由 `check_compat_baseline.py` 固定校验，复审确认关闭。
+- Alpha.11 发布后的兼容跟进把 Core 基线推进到 `a1a6d2e5584253391b9962c482f2140263b703bf`：增加 generation-owned WebSocket upgrade proxy、Bun-native `ws` 后端与 native-backed Legacy settings，并用 `dsh-better-sidebar@0.16.1` 的真实 Browser UI、HTTP、WebSocket、设置写入和重启恢复完成验证。
 
 GitHub [`v0.1.0-alpha.11`](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.11) prerelease 已由 `release.yml` run `32945278216` 发布四平台归档、SHA-256 与 Formula。发布后重新下载并验证 Apple Silicon 归档，从该归档安装 `dshmarket@1.29.2`；真实 Chromium 插件市场与 `/dsh-market/status` 通过且无 Browser error。公共 `wavetao2010/homebrew-tap` 的 install/test/uninstall 也已通过。

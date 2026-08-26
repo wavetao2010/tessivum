@@ -163,6 +163,20 @@ pub struct WebRouteResponse {
     pub headers: Vec<(String, String)>,
     pub body_base64: String,
 }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebUpgradeRegistration {
+    route_id: String,
+    path: String,
+    port: u16,
+    token: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WebUpgradeRoute {
+    pub(crate) port: u16,
+    pub(crate) token: String,
+}
 
 /// A profile-owned package-operation boundary.
 #[async_trait]
@@ -649,6 +663,7 @@ struct BridgeInner {
     callbacks: Arc<Semaphore>,
     generations: Mutex<BTreeMap<u64, GenerationState>>,
     web_routes: Mutex<WebRouteRegistry>,
+    web_upgrades: Mutex<BTreeMap<String, WebUpgradeRoute>>,
     retired_generations: Mutex<BTreeSet<u64>>,
 }
 
@@ -659,8 +674,10 @@ struct GenerationState {
     timers: BTreeMap<String, TimerEntry>,
     next_timer_token: u64,
     routes: BTreeMap<String, WebRouteKey>,
+    upgrades: BTreeMap<String, String>,
 
     web_routes_supported: bool,
+    web_upgrades_supported: bool,
     operations: BTreeMap<u64, PnpmOperation>,
 }
 
@@ -820,6 +837,7 @@ impl DomainBridge {
                 handle,
                 generations: Mutex::new(BTreeMap::new()),
                 web_routes: Mutex::new(WebRouteRegistry::default()),
+                web_upgrades: Mutex::new(BTreeMap::new()),
                 retired_generations: Mutex::new(BTreeSet::new()),
             }),
         })
@@ -834,6 +852,7 @@ impl DomainBridge {
             });
         }
         let web_routes_supported = client.supports_extension("web.route/v1");
+        let web_upgrades_supported = client.supports_extension("web.upgrade/v1");
         let mut states = lock(&self.inner.generations);
         if states.contains_key(&generation)
             || lock(&self.inner.retired_generations).contains(&generation)
@@ -853,7 +872,9 @@ impl DomainBridge {
                 timers: BTreeMap::new(),
                 next_timer_token: 0,
                 routes: BTreeMap::new(),
+                upgrades: BTreeMap::new(),
                 web_routes_supported,
+                web_upgrades_supported,
                 operations: BTreeMap::new(),
             },
         );
@@ -927,6 +948,75 @@ impl DomainBridge {
         };
         lock(&self.inner.web_routes).entries.remove(&key);
         Ok(json!({"removed": true}))
+    }
+    fn register_web_upgrade(
+        &self,
+        generation: u64,
+        request: WebUpgradeRegistration,
+    ) -> BridgeResult<Value> {
+        validate_web_upgrade_registration(&request)?;
+        let mut states = lock(&self.inner.generations);
+        let state = states
+            .get_mut(&generation)
+            .ok_or_else(|| stale_generation(generation))?;
+        if state.cancellation.is_cancelled() {
+            return Err(stale_generation(generation));
+        }
+        if !state.web_upgrades_supported {
+            return Err(remote(
+                "WEB_UPGRADE_UNSUPPORTED",
+                "the connected compatibility host did not negotiate web.upgrade/v1",
+            ));
+        }
+        if state.upgrades.contains_key(&request.route_id) {
+            return Err(remote(
+                "DUPLICATE_ROUTE",
+                "upgrade routeId is already active",
+            ));
+        }
+        let mut routes = lock(&self.inner.web_upgrades);
+        if routes.len() >= MAX_WEB_ROUTES {
+            return Err(remote(
+                "ROUTE_LIMIT",
+                "the bridge upgrade route limit has been reached",
+            ));
+        }
+        if routes.contains_key(&request.path) {
+            return Err(remote(
+                "DUPLICATE_ROUTE",
+                "an identical upgrade route is already active",
+            ));
+        }
+        let path = request.path.clone();
+        routes.insert(
+            path.clone(),
+            WebUpgradeRoute {
+                port: request.port,
+                token: request.token,
+            },
+        );
+        state.upgrades.insert(request.route_id, path);
+        Ok(json!({"registered": true}))
+    }
+
+    fn remove_web_upgrade(&self, generation: u64, route_id: &str) -> BridgeResult<Value> {
+        nonblank("routeId", route_id)?;
+        let mut states = lock(&self.inner.generations);
+        let state = states
+            .get_mut(&generation)
+            .ok_or_else(|| stale_generation(generation))?;
+        if state.cancellation.is_cancelled() {
+            return Err(stale_generation(generation));
+        }
+        let Some(path) = state.upgrades.remove(route_id) else {
+            return Ok(json!({"removed": false}));
+        };
+        lock(&self.inner.web_upgrades).remove(&path);
+        Ok(json!({"removed": true}))
+    }
+
+    pub(crate) fn select_web_upgrade(&self, path: &str) -> Option<WebUpgradeRoute> {
+        lock(&self.inner.web_upgrades).get(path).cloned()
     }
 
     /// Dispatches a bounded HTTP request to a matching live Node route.
@@ -1155,7 +1245,7 @@ impl DomainBridge {
             AGENTS_SERVICE => self.agents(&request.method, request.params).await,
             LOGGER_SERVICE => self.logger(&request.method, request.params),
             TIMERS_SERVICE => self.timers(generation, &request.method, request.params),
-            SETTINGS_SERVICE => self.settings(&request.method, request.params),
+            SETTINGS_SERVICE => self.settings(&request.method, request.params).await,
             CREDENTIALS_SERVICE => self.credentials(&request.method, request.params).await,
             _ => Err(remote(
                 "UNKNOWN_SERVICE",
@@ -1367,6 +1457,20 @@ impl DomainBridge {
                     .ok_or_else(|| remote("SESSION_NOT_FOUND", "session is not live"))?;
                 Ok(json!({"events": session.events()}))
             }
+            "snapshot" => {
+                let request: SessionRead = decode(params)?;
+                let session = self
+                    .inner
+                    .services
+                    .sessions
+                    .get(&request.session)
+                    .ok_or_else(|| remote("SESSION_NOT_FOUND", "session is not live"))?;
+                Ok(json!({"session": {
+                    "id": session.id(),
+                    "header": session.header(),
+                    "events": session.events(),
+                }}))
+            }
             _ => unknown_method(SESSIONS_SERVICE, method),
         }
     }
@@ -1496,8 +1600,11 @@ impl DomainBridge {
             _ => unknown_method(TIMERS_SERVICE, method),
         }
     }
-    fn settings(&self, method: &str, params: Value) -> BridgeResult<Value> {
-        if !matches!(method, "get" | "describe") {
+    async fn settings(&self, method: &str, params: Value) -> BridgeResult<Value> {
+        if !matches!(
+            method,
+            "get" | "describe" | "loadDocument" | "persistUnregistered"
+        ) {
             return unknown_method(SETTINGS_SERVICE, method);
         }
         let settings = self
@@ -1506,24 +1613,41 @@ impl DomainBridge {
             .settings
             .as_ref()
             .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "settings is not configured"))?;
-        let request: SettingsRead = decode(params)?;
         match method {
-            "get" => {
-                let descriptor = settings
-                    .describe(&request.namespace)
-                    .map_err(settings_error)?;
-                Ok(json!({
-                    "namespace": descriptor.namespace,
-                    "revision": descriptor.revision,
-                    "value": descriptor.resolved,
-                }))
+            "get" | "describe" => {
+                let request: SettingsRead = decode(params)?;
+                match method {
+                    "get" => {
+                        let descriptor = settings
+                            .describe(&request.namespace)
+                            .map_err(settings_error)?;
+                        Ok(json!({
+                            "namespace": descriptor.namespace,
+                            "revision": descriptor.revision,
+                            "value": descriptor.resolved,
+                        }))
+                    }
+                    "describe" => serde_json::to_value(
+                        settings
+                            .describe(&request.namespace)
+                            .map_err(settings_error)?,
+                    )
+                    .map_err(serialize_error),
+                    _ => unreachable!(),
+                }
             }
-            "describe" => serde_json::to_value(
+            "loadDocument" => {
+                serde_json::to_value(settings.load_document().await.map_err(settings_error)?)
+                    .map_err(serialize_error)
+            }
+            "persistUnregistered" => {
+                let request: SettingsPersist = decode(params)?;
                 settings
-                    .describe(&request.namespace)
-                    .map_err(settings_error)?,
-            )
-            .map_err(serialize_error),
+                    .persist_unregistered(&request.namespace, &request.value)
+                    .await
+                    .map_err(settings_error)?;
+                Ok(json!({"persisted": true}))
+            }
             _ => unreachable!("settings method was allowlisted"),
         }
     }
@@ -1714,6 +1838,15 @@ impl DomainBridge {
                 self.ensure_generation(frame.connection_generation)?;
                 let request: WebRouteRemove = decode(frame.payload)?;
                 self.remove_web_route(frame.connection_generation, &request.route_id)
+            }
+            FrameKind::WebUpgradeRegister => {
+                self.ensure_generation(frame.connection_generation)?;
+                self.register_web_upgrade(frame.connection_generation, decode(frame.payload)?)
+            }
+            FrameKind::WebUpgradeRemove => {
+                self.ensure_generation(frame.connection_generation)?;
+                let request: WebRouteRemove = decode(frame.payload)?;
+                self.remove_web_upgrade(frame.connection_generation, &request.route_id)
             }
             FrameKind::PnpmRun => {
                 self.ensure_generation(frame.connection_generation)?;
@@ -1955,6 +2088,9 @@ fn cleanup_state(inner: &BridgeInner, mut state: GenerationState) {
     for (_, key) in std::mem::take(&mut state.routes) {
         inner.web_routes.lock().entries.remove(&key);
     }
+    for (_, path) in std::mem::take(&mut state.upgrades) {
+        inner.web_upgrades.lock().remove(&path);
+    }
     for (_, timer) in std::mem::take(&mut state.timers) {
         if let Some(task) = timer.task {
             task.abort();
@@ -2016,6 +2152,20 @@ fn validate_web_route_registration(request: &WebRouteRegistration) -> BridgeResu
     validate_identifier("routeId", &request.route_id, 128)?;
     validate_product_path(&request.path)
 }
+fn validate_web_upgrade_registration(request: &WebUpgradeRegistration) -> BridgeResult<()> {
+    validate_identifier("routeId", &request.route_id, 128)?;
+    validate_product_path(&request.path)?;
+    if request.port == 0
+        || request.token.len() != 64
+        || !request.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(remote(
+            "INVALID_UPGRADE_ROUTE",
+            "upgrade route backend is invalid",
+        ));
+    }
+    Ok(())
+}
 
 fn validate_web_request(request: &WebRouteRequest) -> BridgeResult<()> {
     if request.method.is_empty()
@@ -2055,7 +2205,9 @@ fn validate_web_response(response: &WebRouteResponse) -> BridgeResult<()> {
 }
 fn validate_product_path(path: &str) -> BridgeResult<()> {
     if path.len() > MAX_WEB_PATH_BYTES
-        || (path != "/dsh-market" && !path.starts_with("/dsh-market/"))
+        || !["/dsh-market", "/sidebar"]
+            .iter()
+            .any(|root| path == *root || path.starts_with(&format!("{root}/")))
         || path.contains('\0')
         || path.contains('%')
         || path.contains('?')
@@ -2064,7 +2216,7 @@ fn validate_product_path(path: &str) -> BridgeResult<()> {
     {
         return Err(remote(
             "INVALID_ROUTE_PATH",
-            "routes must stay under /dsh-market without traversal or escapes",
+            "routes must stay under a supported compatibility root without traversal or escapes",
         ));
     }
     Ok(())
@@ -2569,6 +2721,13 @@ struct SettingsRead {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsPersist {
+    namespace: String,
+    value: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CredentialDescribe {
     reference: String,
 }
@@ -2669,10 +2828,10 @@ mod alpha11_tests {
         bridge
             .attach_client(client(generation), generation)
             .expect("test generation attaches");
-        lock(&bridge.inner.generations)
-            .get_mut(&generation)
-            .expect("attached state")
-            .web_routes_supported = true;
+        let mut states = lock(&bridge.inner.generations);
+        let state = states.get_mut(&generation).expect("attached state");
+        state.web_routes_supported = true;
+        state.web_upgrades_supported = true;
     }
 
     fn register(
@@ -2725,6 +2884,48 @@ mod alpha11_tests {
             ),
             "WEB_ROUTE_UNSUPPORTED"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upgrade_routes_are_generation_owned_and_removable() {
+        let bridge = bridge();
+        attach(&bridge, 1);
+        assert_eq!(
+            BridgeHandler::handle(
+                &bridge,
+                Frame::request(
+                    1,
+                    1,
+                    FrameKind::WebUpgradeRegister,
+                    json!({
+                        "routeId": "terminal",
+                        "path": "/sidebar/ws/terminal",
+                        "port": 43123,
+                        "token": "a".repeat(64),
+                    }),
+                ),
+            )
+            .expect("upgrade route registers"),
+            json!({"registered": true})
+        );
+        let route = bridge
+            .select_web_upgrade("/sidebar/ws/terminal")
+            .expect("upgrade route is visible");
+        assert_eq!(route.port, 43123);
+        assert_eq!(
+            BridgeHandler::handle(
+                &bridge,
+                Frame::request(
+                    1,
+                    2,
+                    FrameKind::WebUpgradeRemove,
+                    json!({"routeId": "terminal"}),
+                ),
+            )
+            .expect("upgrade route removes"),
+            json!({"removed": true})
+        );
+        assert!(bridge.select_web_upgrade("/sidebar/ws/terminal").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1,0 +1,10 @@
+{
+  "name": "@deepseek-ai/dsh-subagent",
+  "version": "0.1.0-tessivum.1",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./descriptor": "./descriptor.js"
+  },
+  "license": "MIT"
+}
