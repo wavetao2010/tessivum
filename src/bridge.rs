@@ -2119,42 +2119,25 @@ fn validate_pnpm_run(request: &PnpmRunRequest) -> BridgeResult<()> {
         || request.invoking_dir.len() > MAX_WEB_PATH_BYTES
         || request.invoking_dir.contains('\0')
         || !invoking_dir.is_absolute()
-        || invoking_dir
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        || invoking_dir.components().any(|component| matches!(component, Component::ParentDir | Component::CurDir))
     {
-        return Err(remote(
-            "INVALID_PNPM_REQUEST",
-            "invokingDir must be an absolute traversal-free path",
-        ));
+        return Err(remote("INVALID_PNPM_REQUEST", "invokingDir must be an absolute traversal-free path"));
     }
-    let command = request.args[0].as_str();
-    if !matches!(command, "add" | "remove" | "install") {
-        return Err(remote(
-            "INVALID_PNPM_REQUEST",
-            "only add, remove, and install are permitted",
-        ));
-    }
+    let mut command = None;
     let mut targets = 0usize;
-    let mut ignore_scripts = false;
-    let mut save_exact = false;
-    for argument in &request.args[1..] {
+    for argument in &request.args {
         if argument.is_empty() || argument.len() > 512 || argument.contains('\0') {
             return Err(remote("INVALID_PNPM_REQUEST", "an argument is invalid"));
         }
         match argument.as_str() {
-            "--ignore-scripts" => ignore_scripts = true,
-            "--save-exact" if command == "add" => save_exact = true,
-            value if value.starts_with('-') => {
-                return Err(remote("INVALID_PNPM_REQUEST", "a pnpm flag is not permitted"));
-            }
+            "add" | "remove" | "install" if command.is_none() => command = Some(argument.as_str()),
+            "-w" => {}
+            value if value.starts_with('-') => return Err(remote("INVALID_PNPM_REQUEST", "a pnpm flag is not permitted")),
             value => {
                 let target = Path::new(value);
                 if value.chars().any(char::is_whitespace)
                     || target.is_absolute()
-                    || target.components().any(|component| {
-                        matches!(component, Component::ParentDir | Component::CurDir | Component::RootDir)
-                    })
+                    || target.components().any(|component| matches!(component, Component::ParentDir | Component::CurDir | Component::RootDir))
                 {
                     return Err(remote("INVALID_PNPM_REQUEST", "a package target is invalid"));
                 }
@@ -2162,14 +2145,10 @@ fn validate_pnpm_run(request: &PnpmRunRequest) -> BridgeResult<()> {
             }
         }
     }
-    if !ignore_scripts
-        || (command == "add" && (!save_exact || targets == 0))
-        || (command == "remove" && targets == 0)
-        || (command == "install" && targets != 0)
-    {
-        return Err(remote("INVALID_PNPM_REQUEST", "pnpm command arguments are not permitted"));
+    match (command, targets) {
+        (Some("add" | "remove"), 1) | (Some("install"), 0) => Ok(()),
+        _ => Err(remote("INVALID_PNPM_REQUEST", "pnpm command arguments are not permitted")),
     }
-    Ok(())
 }
 
 fn validate_pnpm_result(result: &PnpmRunResult, limit: usize) -> BridgeResult<()> {
@@ -2874,7 +2853,7 @@ mod alpha11_tests {
         attach(&absent, 1);
         let request = PnpmRunRequest {
             operation_id: "missing".into(),
-            args: vec!["install".into(), "--ignore-scripts".into()],
+            args: vec!["install".into()],
             invoking_dir: "/tmp/profile".into(),
         };
         assert_eq!(

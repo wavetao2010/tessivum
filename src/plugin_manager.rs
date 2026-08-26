@@ -1,18 +1,24 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env, fs, io,
     io::ErrorKind,
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command as TokioCommand,
+    sync::mpsc,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tessivum_core::{Entry, EntryId, EntryOptions, EntryTree, RuntimeKind};
-use tessivum_node_bridge::{ClientConfig, HostCommand};
+use tessivum_core::{CancellationToken, Entry, EntryId, EntryOptions, EntryTree, RuntimeKind};
+use tessivum_node_bridge::{BridgeError, ClientConfig, HostCommand};
 use thiserror::Error;
 
 use crate::{
@@ -44,6 +50,157 @@ pub enum PluginManagerError {
 pub enum PluginMutation {
     Add(String),
     Remove(String),
+}
+
+const PNPM_OPERATION_TIMEOUT: Duration = Duration::from_secs(16 * 60);
+
+/// Executes one compatibility-host package operation inside its owned profile.
+pub struct PnpmProfileBoundary {
+    profile: PathBuf,
+}
+
+impl PnpmProfileBoundary {
+    pub fn new(profile: impl AsRef<Path>) -> Result<Self, PluginManagerError> {
+        let profile = profile.as_ref();
+        fs::create_dir_all(profile).map_err(|error| io_error(profile, error))?;
+        Ok(Self { profile: fs::canonicalize(profile).map_err(|error| io_error(profile, error))? })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
+    async fn run(
+        &self,
+        request: crate::bridge::PnpmRunRequest,
+        cancellation: CancellationToken,
+        sink: crate::bridge::PnpmOutputSink,
+    ) -> Result<crate::bridge::PnpmRunResult, BridgeError> {
+        let profile = self.profile.clone();
+        let _lock = tokio::task::spawn_blocking({
+            let profile = profile.clone();
+            move || ensure_profile(&profile).and_then(|()| ProfileLock::acquire(&profile))
+        })
+        .await
+        .map_err(|error| BridgeError::Process(format!("pnpm lock worker failed: {error}")))?
+        .map_err(|error| BridgeError::Process(error.to_string()))?;
+        let args = route_pnpm_args(&request.args, &profile)?;
+        let mut command = TokioCommand::new("pnpm");
+        command.current_dir(&profile).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        set_process_group(&mut command)?;
+        let mut child = command.spawn().map_err(|error| BridgeError::Process(format!("could not run pnpm: {error}")))?;
+        let (sender, mut receiver) = mpsc::channel(8);
+        let stdout = child.stdout.take().expect("piped stdout exists");
+        let stderr = child.stderr.take().expect("piped stderr exists");
+        let stdout_task = tokio::spawn(pump_pnpm_output(stdout, crate::bridge::PnpmOutputStream::Stdout, sender.clone()));
+        let stderr_task = tokio::spawn(pump_pnpm_output(stderr, crate::bridge::PnpmOutputStream::Stderr, sender));
+        let deadline = tokio::time::sleep(PNPM_OPERATION_TIMEOUT);
+        tokio::pin!(deadline);
+        let mut ended = 0;
+        let mut failure = None;
+        while ended < 2 {
+            tokio::select! {
+                _ = cancellation.cancelled() => { failure = Some(BridgeError::Cancelled); break; }
+                _ = &mut deadline => { failure = Some(BridgeError::Timeout); break; }
+                item = receiver.recv() => match item {
+                    Some(Some((stream, bytes))) => if let Err(error) = sink.emit(stream, &bytes) { failure = Some(error); break; },
+                    Some(None) => ended += 1,
+                    None => break,
+                },
+            }
+        }
+        if failure.is_some() {
+            stop_process_group(&mut child).await;
+        }
+        let status = child.wait().await.map_err(|error| BridgeError::Process(format!("could not wait for pnpm: {error}")))?;
+        for task in [stdout_task, stderr_task] {
+            task.await
+                .map_err(|error| BridgeError::Process(format!("pnpm output worker failed: {error}")))?
+                .map_err(|error| BridgeError::Process(format!("could not read pnpm output: {error}")))?;
+        }
+        tokio::task::spawn_blocking({
+            let profile = profile.clone();
+            move || remove_legacy_package_lock(&profile)
+        })
+        .await
+        .map_err(|error| BridgeError::Process(format!("package-lock cleanup worker failed: {error}")))?
+        .map_err(|error| BridgeError::Process(error.to_string()))?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if !status.success() {
+            return Err(BridgeError::Process(format!("pnpm exited with {}; partial state: {}", status.code().map_or_else(|| "no exit code".into(), |code| code.to_string()), pnpm_state(&profile))));
+        }
+        Ok(crate::bridge::PnpmRunResult { exit_code: status.code(), signal: None, stdout: String::new(), stderr: String::new() })
+    }
+}
+
+async fn pump_pnpm_output<R: AsyncRead + Unpin>(
+    mut reader: R,
+    stream: crate::bridge::PnpmOutputStream,
+    sender: mpsc::Sender<Option<(crate::bridge::PnpmOutputStream, Vec<u8>)>>,
+) -> io::Result<()> {
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let length = reader.read(&mut buffer).await?;
+        if length == 0 {
+            let _ = sender.send(None).await;
+            return Ok(());
+        }
+        if sender.send(Some((stream, buffer[..length].to_vec()))).await.is_err() {
+            return Ok(());
+        }
+    }
+}
+
+fn route_pnpm_args(args: &[String], profile: &Path) -> Result<Vec<String>, BridgeError> {
+    let mut command = None;
+    let mut target = None;
+    let mut workspace = false;
+    for argument in args {
+        match argument.as_str() {
+            "add" | "remove" | "install" if command.is_none() => command = Some(argument.as_str()),
+            "-w" => workspace = true,
+            value if value.is_empty() || value.contains('\0') || value.starts_with('-') || value.chars().any(char::is_whitespace) => return Err(BridgeError::Process("invalid pnpm arguments".into())),
+            value if Path::new(value).is_absolute() || Path::new(value).components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir | std::path::Component::RootDir)) => return Err(BridgeError::Process("invalid pnpm package target".into())),
+            value if target.replace(value).is_some() => return Err(BridgeError::Process("pnpm accepts one target".into())),
+            _ => {}
+        }
+    }
+    let command = command.ok_or_else(|| BridgeError::Process("pnpm command is missing".into()))?;
+    if matches!(command, "add" | "remove") != target.is_some() || (command == "install" && target.is_some()) {
+        return Err(BridgeError::Process("pnpm command arguments are not permitted".into()));
+    }
+    let mut result = Vec::with_capacity(8);
+    if workspace { result.push("-w".into()); }
+    result.push(command.into());
+    if let Some(target) = target { result.push(target.into()); }
+    result.extend(["--reporter=ndjson".into(), "--no-frozen-lockfile".into(), "--config.minimumReleaseAge=0".into(), "--config.fetchTimeout=600000".into(), "--config.auto-install-peers=false".into()]);
+    if !profile_allows_builds(profile)? { result.push("--ignore-scripts".into()); }
+    Ok(result)
+}
+
+fn profile_allows_builds(profile: &Path) -> Result<bool, BridgeError> {
+    let manifest = read_json(&profile.join("package.json"), MAX_PROFILE_MANIFEST_BYTES).map_err(|error| BridgeError::Process(error.to_string()))?;
+    Ok(manifest.pointer("/pnpm/onlyBuiltDependencies").and_then(Value::as_array).is_some_and(|list| !list.is_empty() && list.iter().all(Value::is_string)))
+}
+
+fn pnpm_state(profile: &Path) -> String {
+    format!("package.json={}; pnpm-lock.yaml={}", if profile.join("package.json").is_file() { "present" } else { "missing" }, if profile.join("pnpm-lock.yaml").is_file() { "present" } else { "missing" })
+}
+
+#[cfg(unix)]
+fn set_process_group(command: &mut TokioCommand) -> Result<(), BridgeError> {
+    use std::os::unix::process::CommandExt;
+    unsafe { command.as_std_mut().pre_exec(|| if libc::setpgid(0, 0) == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }); }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn set_process_group(_: &mut TokioCommand) -> Result<(), BridgeError> { Ok(()) }
+
+async fn stop_process_group(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(id) = child.id() { unsafe { libc::kill(-(id as libc::pid_t), libc::SIGTERM); } }
+    let _ = child.kill().await;
 }
 
 #[derive(Deserialize, Serialize)]
@@ -326,7 +483,7 @@ pub fn configure_host_plugins(config: &mut HostConfig) -> Result<(), PluginManag
     ));
     config.entries = Some(entries);
     if needs_legacy {
-        config.legacy_host = Some(legacy_host_config(&config.cwd, &profile)?);
+        config.legacy_host = Some(legacy_host_config(&config.cwd, &profile, &config.profile)?);
     }
     Ok(())
 }
@@ -689,7 +846,30 @@ fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(source, alias)
 }
 
-fn legacy_host_config(cwd: &Path, profile: &Path) -> Result<LegacyHostConfig, PluginManagerError> {
+fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), PluginManagerError> {
+    let modules = profile.join("node_modules");
+    for name in ["@deepseek-ai/dsh-settings", "@deepseek-ai/schemastery"] {
+        let source = root.join(name);
+        let manifest = read_json(&source.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+        let entry = manifest.get("module").or_else(|| manifest.get("main")).and_then(Value::as_str).unwrap_or("index.js");
+        if !source.join(entry.trim_start_matches("./")).is_file() {
+            return Err(PluginManagerError::Invalid(format!("{} has no usable entry", source.display())));
+        }
+        let alias = modules.join(name);
+        if fs::canonicalize(&alias).is_ok_and(|path| path == source) { continue; }
+        match fs::symlink_metadata(&alias) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => fs::remove_dir_all(&alias).map_err(|error| io_error(&alias, error))?,
+            Ok(_) => fs::remove_file(&alias).map_err(|error| io_error(&alias, error))?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&alias, error)),
+        }
+        fs::create_dir_all(alias.parent().expect("scoped alias has a parent")).map_err(|error| io_error(&alias, error))?;
+        symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
+    }
+    Ok(())
+}
+
+fn legacy_host_config(cwd: &Path, profile: &Path, profile_name: &str) -> Result<LegacyHostConfig, PluginManagerError> {
     let host = env::var_os("TESSIVUM_COMPAT_HOST")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join("../tessivum-core/node/compat-host/src/index.ts"));
@@ -698,16 +878,23 @@ fn legacy_host_config(cwd: &Path, profile: &Path) -> Result<LegacyHostConfig, Pl
         .unwrap_or_else(|| cwd.join("../upstream/deepseek-harness/vendor"));
     let host = fs::canonicalize(&host).map_err(|error| io_error(&host, error))?;
     let vendor = fs::canonicalize(&vendor).map_err(|error| io_error(&vendor, error))?;
-    install_vendor_aliases(profile, &vendor)?;
-    let command = HostCommand::new("bun")
+    let profile = fs::canonicalize(profile).map_err(|error| io_error(profile, error))?;
+    install_vendor_aliases(&profile, &vendor)?;
+    let mut command = HostCommand::new("bun")
         .arg("run")
         .arg(&host)
-        .current_dir(profile)
-        .env("CORDIS_VENDOR_ROOT", vendor);
-    Ok(LegacyHostConfig {
-        command,
-        client: ClientConfig::default(),
-    })
+        .current_dir(&profile)
+        .env("CORDIS_VENDOR_ROOT", vendor)
+        .env("TESSIVUM_BRIDGE_MAX_FRAME_SIZE", "12582912")
+        .env("TESSIVUM_PROFILE_NAME", profile_name)
+        .env("TESSIVUM_PROFILE_DIR", &profile);
+    if let Some(root) = env::var_os("TESSIVUM_HOST_MODULE_ROOT") {
+        let root = PathBuf::from(root);
+        let root = fs::canonicalize(&root).map_err(|error| io_error(&root, error))?;
+        install_host_module_aliases(&profile, &root)?;
+        command = command.env("TESSIVUM_HOST_MODULE_ROOT", root);
+    }
+    Ok(LegacyHostConfig { command, client: ClientConfig::default() })
 }
 
 fn io_error(path: impl AsRef<Path>, error: impl std::fmt::Display) -> PluginManagerError {
@@ -816,6 +1003,22 @@ mod tests {
         for package in [".", "..", "../escape", "@scope/../escape"] {
             assert!(package_root(profile, package).is_err(), "{package}");
         }
+    }
+
+    #[test]
+    fn compatibility_pnpm_argv_is_bounded_and_script_safe() {
+        let profile = temporary_profile();
+        fs::write(profile.join("package.json"), br#"{"pnpm":{"onlyBuiltDependencies":[]}}"#).unwrap();
+        assert_eq!(
+            route_pnpm_args(&["-w".into(), "install".into()], &profile).unwrap(),
+            vec![
+                "-w", "install", "--reporter=ndjson", "--no-frozen-lockfile",
+                "--config.minimumReleaseAge=0", "--config.fetchTimeout=600000",
+                "--config.auto-install-peers=false", "--ignore-scripts",
+            ]
+        );
+        assert!(route_pnpm_args(&["add".into(), "../escape".into()], &profile).is_err());
+        fs::remove_dir_all(profile).unwrap();
     }
 
     fn temporary_profile() -> PathBuf {

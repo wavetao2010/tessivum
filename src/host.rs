@@ -71,6 +71,7 @@ use crate::{
         PERMISSION_SETTINGS_NAMESPACE,
     },
     persistence_jsonl::JsonlSessionPersistence,
+    plugin_manager::{plugin_profile_root, PnpmProfileBoundary},
     planning::{PlanMode, PlanningError, PlanningService, PlanningToolRouter, PlanningTools},
     projection::{ProjectionDefinition, ProjectionRegistry},
     protocol::{
@@ -2921,7 +2922,11 @@ impl HostRuntime {
                             registry.clone(),
                         )
                         .with_settings(Arc::clone(&settings))
-                        .with_credentials(Arc::clone(&credentials)),
+                        .with_credentials(Arc::clone(&credentials))
+                        .with_pnpm_boundary(Arc::new(
+                            PnpmProfileBoundary::new(plugin_profile_root(&config.data_dir))
+                                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+                        )),
                     )
                     .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
                 ),
