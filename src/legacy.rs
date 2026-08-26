@@ -29,6 +29,7 @@ use tessivum_node_bridge::{
 };
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
+const MARKET_BRIDGE_MAX_FRAME_SIZE: usize = 12 * 1024 * 1024;
 
 use crate::{
     bridge::{
@@ -124,12 +125,12 @@ impl LegacyProfile {
     /// Validates and owns one restartable Node host command and bridge service set.
     pub fn new(
         command: HostCommand,
-        config: ClientConfig,
+        mut config: ClientConfig,
         services: BridgeServices,
     ) -> Result<Self, LegacyProfileError> {
+        config.max_frame_size = MARKET_BRIDGE_MAX_FRAME_SIZE;
         let command = validate_command(command)?;
         validate_config(&config)?;
-        let request_timeout = config.request_timeout;
         let supervisor = Arc::new(NodeSupervisor::new(command, config)?);
         let bridge = Arc::new(DomainBridge::new(services)?);
         Ok(Self {
@@ -141,6 +142,11 @@ impl LegacyProfile {
                 shutdown_gate: AsyncMutex::new(()),
             }),
         })
+    }
+
+    /// Returns the generation-scoped route registry owned by this profile's bridge.
+    pub fn web_route_registry(&self) -> DomainBridge {
+        self.inner.bridge.as_ref().clone()
     }
 
     /// Starts the host and completes the hello/ready handshake.

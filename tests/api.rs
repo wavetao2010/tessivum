@@ -15,9 +15,11 @@ use futures_util::{stream, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
 use serde_json::{json, Value};
 use tessivum::{
+    agent::AgentRegistry,
     agent_preset::AgentPresetTrust,
-    api::{ApiServer, MAX_FRAME_BYTES},
+    api::{ApiServer, ApiServerConfig, MAX_FRAME_BYTES},
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
+    bridge::{BridgeServices, DomainBridge},
     host::{
         HostApi, HostConfig, HostLlmAdapterFactory, HostModelGroup, HostModelInfo,
         HostModelReasoning, HostModelReasoningEffort, HostNotification, HostPathOpener,
@@ -26,7 +28,7 @@ use tessivum::{
         HostSessionSearchHit, HostSessionSearchResult, SessionQueueAction,
         SessionUpdateQueueParams, SessionUpdateQueueResult,
     },
-    llm::{LlmAdapter, LlmStream},
+    llm::{LlmAdapter, LlmRuntime, LlmStream},
     openai_responses::{ResponsesModel, ResponsesRoute},
     protocol::{
         AgentCancelCause, ContentBlock, FinishReason, GenerateRequest, InitializeParams,
@@ -41,6 +43,9 @@ use tessivum::{
         SubagentInterruptResult, SubagentMode, SubagentPromptRequest, SubagentPromptResult,
     },
     TessivumError,
+    session::{MemorySessionPersistence, SessionStore},
+    system_prompt::SystemPrompt,
+    tools::ToolRuntime,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -556,6 +561,101 @@ async fn raw_http_status(
         .await
         .expect("HTTP status reads");
     status
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_market_route_forwards_through_the_bound_listener() {
+    use std::{os::unix::net::UnixStream, sync::mpsc, thread};
+
+    use tessivum_node_bridge::{BridgeClient, BridgeHandler, ClientConfig, Frame, FrameCodec, FrameKind};
+
+    let (rust, mut node) = UnixStream::pair().expect("duplex pair constructs");
+    let client = BridgeClient::from_io(
+        rust.try_clone().expect("reader clones"),
+        rust,
+        1,
+        ClientConfig::default(),
+    )
+    .expect("client constructs");
+    let (request_tx, request_rx) = mpsc::sync_channel(1);
+    let peer = thread::spawn(move || {
+        let codec = FrameCodec::new(1024 * 1024).expect("codec constructs");
+        assert_eq!(codec.read_frame(&mut node).expect("hello reads").kind, FrameKind::Hello);
+        codec
+            .write_frame(
+                &mut node,
+                &Frame::new(1, FrameKind::Ready, json!({"extensions": ["web.route/v1"]})),
+            )
+            .expect("ready writes");
+        let request = codec.read_frame(&mut node).expect("route request reads");
+        assert_eq!(request.kind, FrameKind::WebRouteInvoke);
+        request_tx.send(request.payload).expect("request reports");
+        codec
+            .write_frame(
+                &mut node,
+                &Frame::response(
+                    1,
+                    request.request_id.expect("route request is correlated"),
+                    json!({"status": 201, "headers": [["content-type", "text/plain"]], "bodyBase64": "b2s="}),
+                ),
+            )
+            .expect("route response writes");
+    });
+    client
+        .handshake(Duration::from_secs(1))
+        .expect("client becomes ready");
+    let tools = ToolRuntime::new();
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let bridge = DomainBridge::new(BridgeServices::new(
+        tools,
+        SystemPrompt::new(),
+        LlmRuntime::new(),
+        sessions.clone(),
+        AgentRegistry::new(sessions),
+    ))
+    .expect("bridge constructs");
+    bridge.attach_client(client, 1).expect("bridge attaches");
+    BridgeHandler::handle(
+        &bridge,
+        Frame::request(
+            1,
+            1,
+            FrameKind::WebRouteRegister,
+            json!({"routeId": "market", "kind": "exact", "path": "/dsh-market/market"}),
+        ),
+    )
+    .expect("route registers");
+    let host = Arc::new(FakeHost::new());
+    let mut server = ApiServer::bind_with_web_routes(
+        host,
+        ApiServerConfig::default(),
+        Vec::new(),
+        Some(bridge),
+    )
+    .await
+    .expect("listener binds");
+    let authority = server.local_addr().to_string();
+    let origin = format!("http://{authority}");
+    assert!(
+        raw_http_status(
+            server.local_addr(),
+            "POST",
+            "/dsh-market/market?page=1",
+            &authority,
+            &[&origin],
+            "body",
+        )
+        .await
+        .contains(" 201 "),
+        "registered route must reach its Node owner"
+    );
+    let request = request_rx.recv().expect("Node receives forwarded request");
+    assert_eq!(request["routeId"], "market");
+    assert_eq!(request["path"], "/dsh-market/market");
+    assert_eq!(request["query"], "page=1");
+    server.shutdown().await.expect("listener stops");
+    peer.join().expect("peer joins");
 }
 
 async fn assert_http_forbidden(

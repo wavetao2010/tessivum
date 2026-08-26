@@ -3509,6 +3509,14 @@ impl HostHandle {
     pub fn profile(&self) -> &Value {
         &self.inner.profile
     }
+
+    /// Returns the active Legacy Node profile's dynamic route registry, if any.
+    pub fn web_route_registry(&self) -> Option<DomainBridge> {
+        self.inner
+            .legacy
+            .as_ref()
+            .map(LegacyProfile::web_route_registry)
+    }
     pub fn in_flight(&self) -> usize {
         lock(&self.inner.admission).count
     }

@@ -48,6 +48,7 @@ use tokio::{
 #[cfg(test)]
 use crate::protocol::SurfaceOp;
 use crate::{
+    bridge::{decode_web_body, encode_web_body, BridgeError, DomainBridge, WebRouteRequest, WEB_REQUEST_BODY_LIMIT},
     agent_preset::composition_contains_plugin,
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
     attachments::{AttachmentId, AttachmentLimits, AttachmentRef},
@@ -146,6 +147,16 @@ impl ApiServer {
         config: ApiServerConfig,
         trusted_authorities: Vec<String>,
     ) -> io::Result<Self> {
+        Self::bind_with_web_routes(host, config, trusted_authorities, None).await
+    }
+
+    /// Binds the existing listener with an optional generation-scoped Node route registry.
+    pub async fn bind_with_web_routes(
+        host: Arc<dyn HostApi>,
+        config: ApiServerConfig,
+        trusted_authorities: Vec<String>,
+        web_routes: Option<DomainBridge>,
+    ) -> io::Result<Self> {
         if !config.bind_addr.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -162,6 +173,7 @@ impl ApiServer {
             config.frontend,
             socket_shutdown.clone(),
             Some(authority_guard),
+            web_routes,
         );
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -215,7 +227,7 @@ impl Drop for ApiServer {
 /// giving static routes any host privileges; network listeners add authority pinning.
 pub fn router(host: Arc<dyn HostApi>, frontend: Option<FrontendStatic>) -> Router {
     let (socket_shutdown, _) = broadcast::channel(1);
-    router_with_shutdown(host, frontend, socket_shutdown, None)
+    router_with_shutdown(host, frontend, socket_shutdown, None, None)
 }
 
 fn router_with_shutdown(
@@ -223,12 +235,14 @@ fn router_with_shutdown(
     frontend: Option<FrontendStatic>,
     socket_shutdown: broadcast::Sender<()>,
     authority_guard: Option<AuthorityGuard>,
+    web_routes: Option<DomainBridge>,
 ) -> Router {
     let compat = Arc::new(CompatibilityState::new(host.descriptor()));
     let state = ApiState {
         host,
         socket_shutdown,
         frontend,
+        web_routes,
         compat,
         workspace_mutation: Arc::new(AsyncMutex::new(())),
     };
@@ -311,6 +325,7 @@ struct ApiState {
     host: Arc<dyn HostApi>,
     socket_shutdown: broadcast::Sender<()>,
     frontend: Option<FrontendStatic>,
+    web_routes: Option<DomainBridge>,
     compat: Arc<CompatibilityState>,
     workspace_mutation: Arc<AsyncMutex<()>>,
 }
@@ -575,13 +590,98 @@ async fn api_not_found() -> Response {
 }
 
 async fn frontend_fallback(State(state): State<ApiState>, request: Request) -> Response {
-    let path = request.uri().path();
+    let (parts, body) = request.into_parts();
+    let path = parts.uri.path().to_owned();
+    let query = parts.uri.query().unwrap_or_default().to_owned();
+    let method = parts.method.clone();
     if path == "/api" || path.starts_with("/api/") {
         return api_not_found().await;
     }
-    match state.frontend {
-        Some(frontend) => frontend.serve(request.method().clone(), path),
-        None => StatusCode::NOT_FOUND.into_response(),
+    let Some(routes) = state
+        .web_routes
+        .as_ref()
+        .filter(|routes| routes.has_web_route(&path))
+    else {
+        return frontend_response(&state, method, &path);
+    };
+    let body = match to_bytes(body, WEB_REQUEST_BODY_LIMIT.saturating_add(1)).await {
+        Ok(body) if body.len() <= WEB_REQUEST_BODY_LIMIT => body,
+        Ok(_) | Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    let headers = match parts
+        .headers
+        .iter()
+        .map(|(name, value)| {
+            value
+                .to_str()
+                .map(|value| (name.as_str().into(), value.into()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(headers) => headers,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let request = WebRouteRequest {
+        route_id: String::new(),
+        method: method.to_string(),
+        path: path.clone(),
+        query,
+        headers,
+        body_base64: encode_web_body(&body),
+    };
+    match routes.dispatch_web_route(request).await {
+        Ok(Some(response)) => web_route_response(response),
+        Ok(None) => frontend_response(&state, method, &path),
+        Err(error) => web_route_failure(error),
+    }
+}
+
+fn frontend_response(
+    state: &ApiState,
+    method: axum::http::Method,
+    path: &str,
+) -> Response {
+    state
+        .frontend
+        .as_ref()
+        .map_or_else(|| StatusCode::NOT_FOUND.into_response(), |frontend| frontend.serve(method, path))
+}
+
+fn web_route_response(response: crate::bridge::WebRouteResponse) -> Response {
+    let body = match decode_web_body(&response.body_base64) {
+        Ok(body) => body,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let mut builder = Response::builder().status(response.status);
+    let headers = builder.headers_mut().expect("response builder has headers");
+    for (name, value) in response.headers {
+        let Ok(name) = axum::http::HeaderName::from_bytes(name.as_bytes()) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        let Ok(value) = HeaderValue::try_from(value.as_str()) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        headers.append(name, value);
+    }
+    builder
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+fn web_route_failure(error: BridgeError) -> Response {
+    match error {
+        BridgeError::Timeout => StatusCode::GATEWAY_TIMEOUT.into_response(),
+        BridgeError::QueueFull => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        BridgeError::Io(_)
+        | BridgeError::FrameTooLarge { .. }
+        | BridgeError::InvalidFrame(_)
+        | BridgeError::ProtocolVersion { .. }
+        | BridgeError::Generation { .. }
+        | BridgeError::Handshake(_)
+        | BridgeError::Disconnected(_)
+        | BridgeError::Cancelled
+        | BridgeError::Remote(_)
+        | BridgeError::Process(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
 

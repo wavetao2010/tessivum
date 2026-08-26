@@ -269,14 +269,17 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             return Err(error);
         }
     };
-    let host: Arc<dyn HostApi> = Arc::new(runtime.handle());
-    let mut server = match tessivum::api::ApiServer::bind_with_trusted_authorities(
+    let host_handle = runtime.handle();
+    let web_routes = host_handle.web_route_registry();
+    let host: Arc<dyn HostApi> = Arc::new(host_handle);
+    let mut server = match tessivum::api::ApiServer::bind_with_web_routes(
         host,
         tessivum::api::ApiServerConfig {
             bind_addr: address,
             frontend: Some(frontend),
         },
         trusted_authorities,
+        web_routes,
     )
     .await
     {
