@@ -164,6 +164,7 @@ struct Bundle {
     root: PathBuf,
     path: PathBuf,
     rev: String,
+    map: Option<(PathBuf, String)>,
 }
 
 struct RegisteredTap {
@@ -402,21 +403,34 @@ impl FrontendStatic {
     }
 
     fn serve_plugin(&self, path: &str, head: bool) -> Response<Body> {
-        let Some(id) = plugin_id(path) else {
+        let Some((id, asset)) = plugin_asset(path) else {
             return empty_response(StatusCode::NOT_FOUND);
         };
         let bundle = lock(&self.inner.state).bundles.get(id).cloned();
-        let Some(bundle) = bundle else {
+        let Some(Bundle {
+            root,
+            path,
+            rev,
+            map,
+        }) = bundle
+        else {
             return empty_response(StatusCode::NOT_FOUND);
         };
-        match canonical_regular_file(&bundle.root, &bundle.path).and_then(|path| {
+        let (path, rev, mime) = match asset {
+            PluginAsset::Client => (path, rev, "text/javascript"),
+            PluginAsset::SourceMap => match map {
+                Some((path, rev)) => (path, rev, "application/json"),
+                None => return empty_response(StatusCode::NOT_FOUND),
+            },
+        };
+        match canonical_regular_file(&root, &path).and_then(|path| {
             read_regular_limited(&path, MAX_BUNDLE_BYTES).map_err(|_| PathAccess::Unreadable)
         }) {
-            Ok(bytes) if digest(&bytes) == bundle.rev => file_response(
+            Ok(bytes) if digest(&bytes) == rev => file_response(
                 StatusCode::OK,
                 bytes,
-                "text/javascript",
-                Some(("no-cache", Some(bundle.rev.as_str()))),
+                mime,
+                Some(("no-cache", Some(rev.as_str()))),
                 head,
             ),
             _ => empty_response(StatusCode::NOT_FOUND),
@@ -506,6 +520,7 @@ fn scan_roots(roots: &[PathBuf]) -> Result<ScannedPackages, FrontendError> {
                     root: row.bundle_root,
                     path: row.bundle_path,
                     rev: row.entry.rev,
+                    map: row.map,
                 },
             )
         })
@@ -565,7 +580,13 @@ fn discover_manifests(
             manifests.push(path);
         } else if file_type.is_dir() {
             let name = entry.file_name();
-            if matches!(name.to_str(), Some(".git" | "node_modules" | "target")) {
+            let is_pnpm_modules = name.to_str() == Some("node_modules")
+                && directory
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|parent| parent.to_str())
+                    == Some(".pnpm");
+            if matches!(name.to_str(), Some(".git" | "target" | "node_modules")) && !is_pnpm_modules {
                 continue;
             }
             discover_manifests(&path, depth + 1, entries, manifests, errors);
@@ -578,6 +599,7 @@ struct ScannedRow {
     entry: WebBootEntry,
     bundle_root: PathBuf,
     bundle_path: PathBuf,
+    map: Option<(PathBuf, String)>,
 }
 
 fn scan_manifest(manifest: &Path) -> Result<Option<ScannedRow>, FrontendManifestError> {
@@ -639,6 +661,7 @@ fn scan_manifest(manifest: &Path) -> Result<Option<ScannedRow>, FrontendManifest
     let bytes = read_regular_limited(&bundle_path, MAX_BUNDLE_BYTES)
         .map_err(|error| manifest_error(manifest, format!("./client is unreadable: {error}")))?;
     let rev = digest(&bytes);
+    let map = optional_source_map(&package_root, &bundle_path);
     Ok(Some(ScannedRow {
         manifest: manifest.to_path_buf(),
         entry: WebBootEntry {
@@ -650,6 +673,7 @@ fn scan_manifest(manifest: &Path) -> Result<Option<ScannedRow>, FrontendManifest
         },
         bundle_root: package_root,
         bundle_path,
+        map,
     }))
 }
 
@@ -721,6 +745,14 @@ fn safe_export_path(root: &Path, export: &str) -> Result<PathBuf, String> {
         PathAccess::Outside => "./client export escapes its package".into(),
         PathAccess::Unreadable => "./client export is unreadable".into(),
     })
+}
+
+fn optional_source_map(root: &Path, bundle_path: &Path) -> Option<(PathBuf, String)> {
+    let mut map_path = bundle_path.as_os_str().to_os_string();
+    map_path.push(".map");
+    let map_path = canonical_regular_file(root, Path::new(&map_path)).ok()?;
+    let bytes = read_regular_limited(&map_path, MAX_BUNDLE_BYTES).ok()?;
+    Some((map_path, digest(&bytes)))
 }
 
 fn required_string(
@@ -936,9 +968,20 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
-fn plugin_id(path: &str) -> Option<&str> {
-    let id = path.strip_prefix("/plugins/")?.strip_suffix("/client.js")?;
-    valid_package_id(id).then_some(id)
+enum PluginAsset {
+    Client,
+    SourceMap,
+}
+
+fn plugin_asset(path: &str) -> Option<(&str, PluginAsset)> {
+    let path = path.strip_prefix("/plugins/")?;
+    let (id, name) = path.rsplit_once('/')?;
+    let asset = match name {
+        "client.js" => PluginAsset::Client,
+        "client.js.map" => PluginAsset::SourceMap,
+        _ => return None,
+    };
+    valid_package_id(id).then_some((id, asset))
 }
 
 fn inject_first_head_script(mut html: String, script: &str) -> Result<String, FrontendError> {

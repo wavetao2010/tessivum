@@ -298,3 +298,118 @@ async fn conditional_client_exports_ignore_types_and_prefer_browser_targets() {
         "export const target = 'browser'"
     );
 }
+
+#[tokio::test]
+async fn pnpm_client_source_maps_are_optional_and_integrity_checked() {
+    let dist = dist();
+    let packages = Fixture::new("pnpm-client");
+    let node_modules = packages.path().join("plugins/node_modules");
+    let package = node_modules.join(".pnpm/dshmarket@1.29.2/node_modules/dshmarket");
+    let bundle = "export const dshmarket = true;\n//# sourceMappingURL=client.js.map\n";
+    let source_map = r#"{"version":3,"file":"client.js","sources":["../src/client.ts"],"sourcesContent":["export const dshmarket = true;"],"names":[],"mappings":"AAAA"}"#;
+
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/package.json",
+        r#"{"name":"dshmarket","exports":{"./client":"./client/client.js"},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/client/client.js",
+        bundle,
+    );
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/client/client.js.map",
+        source_map,
+    );
+    packages.write(
+        "plugins/node_modules/.pnpm/dependency@1.0.0/node_modules/dependency/package.json",
+        r#"{"name":"dependency"}"#,
+    );
+    packages.write(
+        "outside/package.json",
+        r#"{"name":"escaped","exports":{"./client":"./client.js"},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    packages.write("outside/client.js", "export const escaped = true;");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&package, node_modules.join("dshmarket")).unwrap();
+        std::os::unix::fs::symlink(packages.path().join("outside"), node_modules.join("escaped"))
+            .unwrap();
+    }
+
+    let frontend = FrontendStatic::new(dist.path()).unwrap();
+    let graph = frontend.scan_packages([node_modules.as_path()]).unwrap();
+    assert_eq!(graph.entries.len(), 1);
+    let entry = &graph.entries[0];
+    assert_eq!(entry.id, "dshmarket");
+    assert_eq!(
+        entry.url,
+        format!("/plugins/dshmarket/client.js?rev={}", entry.rev)
+    );
+
+    let client = frontend.serve(Method::GET, "/plugins/dshmarket/client.js");
+    assert_eq!(client.status(), StatusCode::OK);
+    assert_eq!(client.headers()[header::CONTENT_TYPE], "text/javascript");
+    assert_eq!(body(client).await, bundle);
+
+    let map = frontend.serve(Method::GET, "/plugins/dshmarket/client.js.map");
+    assert_eq!(map.status(), StatusCode::OK);
+    assert_eq!(map.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(map.headers()[header::CACHE_CONTROL], "no-cache");
+    assert_ne!(
+        map.headers()[header::ETAG].to_str().unwrap(),
+        format!("\"{}\"", entry.rev)
+    );
+    assert_eq!(body(map).await, source_map);
+    assert_eq!(
+        frontend
+            .serve(Method::GET, "/plugins/dshmarket/client.js.map/extra")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        frontend
+            .serve(Method::GET, "/plugins/dshmarket!/client.js.map")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        frontend
+            .serve(Method::GET, "/plugins/dshmarket/%2e%2e/client.js.map")
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/client/client.js.map",
+        r#"{"version":3,"sources":["changed.ts"]}"#,
+    );
+    assert_eq!(
+        frontend
+            .serve(Method::GET, "/plugins/dshmarket/client.js.map")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/client/client.js",
+        "export const dshmarket = false;",
+    );
+    assert_eq!(
+        frontend
+            .serve(Method::GET, "/plugins/dshmarket/client.js")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/client/client.js",
+        bundle,
+    );
+    fs::remove_file(package.join("client/client.js.map")).unwrap();
+    assert_eq!(frontend.rebuild().unwrap(), graph);
+    assert_eq!(
+        frontend
+            .serve(Method::GET, "/plugins/dshmarket/client.js.map")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
