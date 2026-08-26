@@ -10,6 +10,8 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 `v0.1.0-alpha.9` is a prerelease and reproducible baseline, not a production-stable API promise. GitHub Releases provides native Linux and macOS archives for x86-64 and ARM64.
 
+The next productization work—original Tessivum branding, install channels, and bounded `dshmarket@1.29.2` compatibility—is specified as planned work in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md); it is not part of Alpha.9.
+
 Current implementation foundation:
 
 - Rust Host, Agent, Agent Loop, sessions, tools, system prompt, and provider-neutral LLM runtime;

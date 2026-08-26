@@ -16,7 +16,11 @@ output=$7
 version=${tag#v}
 deepseek_root=$(CDPATH= cd -- "$agent_presets/../../../.." && pwd)
 
-[[ $tag == v* ]] || { echo "release tag must start with v: $tag" >&2; exit 2; }
+[[ $tag == v?* ]] || { echo "release tag must start with v and include a version: $tag" >&2; exit 2; }
+case "$target" in
+  x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin) ;;
+  *) echo "unsupported release target: $target" >&2; exit 2 ;;
+esac
 [[ -x $binary ]] || { echo "release binary is not executable: $binary" >&2; exit 2; }
 [[ -f $compat_host/src/index.ts ]] || { echo "compat host entry is missing: $compat_host/src/index.ts" >&2; exit 2; }
 [[ -f $vendor/cordis/lib/index.js && -f $vendor/cosmokit/lib/index.js && -f $vendor/loader/lib/index.js ]] || { echo "compiled Cordis vendor entries are missing under: $vendor" >&2; exit 2; }
@@ -54,7 +58,16 @@ cp "$deepseek_root/LICENSE" "$stage/share/licenses/deepseek-harness/LICENSE"
 cat > "$stage/bin/tessivum" <<'LAUNCHER'
 #!/usr/bin/env sh
 set -eu
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+launcher=$0
+while [ -L "$launcher" ]; do
+  launcher_dir=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd)
+  launcher_link=$(readlink "$launcher")
+  case "$launcher_link" in
+    /*) launcher=$launcher_link ;;
+    *) launcher=$launcher_dir/$launcher_link ;;
+  esac
+done
+root=$(CDPATH= cd -- "$(dirname -- "$launcher")/.." && pwd)
 : "${TESSIVUM_COMPAT_HOST:=$root/share/tessivum/compat-host/src/index.ts}"
 : "${CORDIS_VENDOR_ROOT:=$root/share/tessivum/vendor}"
 : "${TESSIVUM_AGENT_PRESET_ROOT:=$root/share/tessivum/agent-presets}"
@@ -72,7 +85,7 @@ Run from the unpacked archive:
 
 The launcher points Agent Presets, Legacy Node compatibility, and the pinned
 Cordis vendor at the packaged assets. Bun 1.3.14+ is needed only when Legacy
-Node plugins run; npm is needed only by plugin add/remove. The Web shell is
+Node plugins run; pnpm is needed only by plugin add/remove. The Web shell is
 embedded in the executable.
 
 This archive is not code-signed or notarized. Verify its adjacent SHA-256 file

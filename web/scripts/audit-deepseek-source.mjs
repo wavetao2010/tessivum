@@ -55,6 +55,46 @@ for (const [specifier, source] of graph.resolvedDsh) {
   }
 }
 
+const visibleBrandSurfaces = [
+  resolve(webRoot, 'index.html'),
+  resolve(webRoot, 'public/favicon.svg'),
+  resolve(webRoot, 'public/manifest.webmanifest'),
+  resolve(upstreamRoot, 'packages/core/system-prompt/src/index.ts'),
+  resolve(upstreamRoot, 'packages/bundle/web-app/src/index.ts'),
+  resolve(upstreamRoot, 'packages/bundle/web-app/src/startup.ts'),
+  resolve(upstreamRoot, 'packages/client/ui-settings-models/src/onboarding-copy.ts'),
+  resolve(upstreamRoot, 'packages/client/ui-primitives/src/FishLogo.tsx'),
+  resolve(upstreamRoot, 'packages/client/ui-primitives/src/BrandWordmark.tsx'),
+  resolve(upstreamRoot, 'packages/client/ui-primitives/src/TessivumMark.tsx'),
+  resolve(upstreamRoot, 'packages/client/ui-primitives/src/TessivumWordmark.tsx'),
+]
+const visibleBrandSource = visibleBrandSurfaces.map(path => readFileSync(path, 'utf8')).join('\n')
+const legacyVisibleBrand = [
+  'You are an AI agent powered by DeepSeek Harness.',
+  'DeepSeek Harness Web GUI',
+  'Serve the DeepSeek Harness browser UI.',
+  'DeepSeek Harness 0.1 remains',
+  'DeepSeek Harness 目前的 0.1',
+  '"name": "DeepSeek Harness"',
+  '"short_name": "DSH"',
+  'DeepSeek fish logo',
+  'DeepSeek Harness brand wordmark',
+  'dsh-wordmark-whale-clip',
+  'M22.9168 1.43018',
+  'M48.8354 10.0479',
+]
+for (const legacy of legacyVisibleBrand) {
+  if (visibleBrandSource.includes(legacy)) fail(`visible product branding remains: ${legacy}`)
+}
+
+const primitiveExports = readFileSync(
+  resolve(upstreamRoot, 'packages/client/ui-primitives/src/index.ts'),
+  'utf8',
+)
+for (const name of ['TessivumMark', 'TessivumWordmark', 'FishLogo', 'BrandWordmark']) {
+  if (!primitiveExports.includes(`export { ${name} }`)) fail(`missing UI primitive export ${name}`)
+}
+
 console.log(
   `DeepSeek source audit OK: ${graph.packages.length} packages, ${graph.modules.length} modules, ${graph.resolvedDsh.length} DSH exports`,
 )

@@ -443,7 +443,7 @@ Browser Cordis
   └── dynamic client half 与页面生命周期
 ```
 
-Browser 兼容构建直接使用上游 `apps/web/src/main.ts` 的薄入口、`@deepseek-ai/dsh-client-web` 源码和当前 profile 中所有 `dsh.client` 双面包；`web/` 只保存构建适配，不维护自有 bootloader、模块系统或 UI fork。Host 从 Loader entries 动态生成 package-name graph，提供同源 bundle 路由和内容 hash 校验；精确 wire 与完成门槛见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)。
+Browser 兼容构建直接使用上游 `apps/web/src/main.ts` 的薄入口、`@deepseek-ai/dsh-client-web` 源码和当前 profile 中所有 `dsh.client` 双面包；`web/` 只保存构建适配与有界品牌 Overlay，不维护自有 bootloader、模块系统或 UI fork。Host 从 Loader entries 动态生成 package-name graph，提供同源 bundle 路由和内容 hash 校验；精确 wire 与完成门槛见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)，品牌 Overlay 边界见 [`PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
 
 浏览器不直接访问 Rust Context。API 只允许 loopback 监听，WebSocket 校验同源 `Origin`；所有权限和持久事实由 Host 判定。重连通过 `HostApi::list_sessions`、workspace baseline 和 durable SessionEvent 恢复，不把浏览器本地状态当作事实源。
 

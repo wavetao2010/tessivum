@@ -1,10 +1,17 @@
 #[path = "../src/cli.rs"]
 mod cli;
 
-use std::{num::NonZeroU64, path::PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    num::NonZeroU64,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
 
 use clap::error::ErrorKind;
-use cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand, PluginAction};
+use cli::{parse_cli, resolve_data_root, CliCommand, ExitClass, HeadlessCommand, PluginAction};
 
 fn headless(args: &[&str]) -> HeadlessCommand {
     let cli = parse_cli(args.iter().copied()).expect("headless invocation should parse");
@@ -12,6 +19,53 @@ fn headless(args: &[&str]) -> HeadlessCommand {
         CliCommand::Headless(command) => command,
         command => panic!("expected Headless, got {command:?}"),
     }
+}
+static PROCESS_STATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct ProcessState {
+    cwd: PathBuf,
+    home: Option<OsString>,
+    tessivum_home: Option<OsString>,
+}
+
+impl ProcessState {
+    fn capture() -> Self {
+        Self {
+            cwd: env::current_dir().expect("current directory is available"),
+            home: env::var_os("HOME"),
+            tessivum_home: env::var_os("TESSIVUM_HOME"),
+        }
+    }
+}
+
+impl Drop for ProcessState {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.cwd);
+        restore_variable("HOME", self.home.take());
+        restore_variable("TESSIVUM_HOME", self.tessivum_home.take());
+    }
+}
+
+fn restore_variable(name: &str, value: Option<OsString>) {
+    if let Some(value) = value {
+        env::set_var(name, value);
+    } else {
+        env::remove_var(name);
+    }
+}
+
+fn with_process_state(test: impl FnOnce()) {
+    let _lock = PROCESS_STATE
+        .lock()
+        .expect("process state lock is available");
+    let _state = ProcessState::capture();
+    test();
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let root = env::temp_dir().join(format!("tessivum-cli-{name}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).expect("temporary directory creates");
+    root
 }
 
 #[test]
@@ -171,15 +225,114 @@ fn plugin_commands_own_their_profile_and_mutation() {
     let CliCommand::Plugin(add) = add.command else {
         panic!("expected plugin command")
     };
-    assert_eq!(add.data_dir, PathBuf::from("state"));
+    assert_eq!(add.data_dir, Some(PathBuf::from("state")));
     assert_eq!(add.action, PluginAction::Add("@scope/plugin@1.2.3".into()));
 
     let remove = parse_cli(["tessivum", "plugin", "remove", "@scope/plugin"]).unwrap();
     let CliCommand::Plugin(remove) = remove.command else {
         panic!("expected plugin command")
     };
-    assert_eq!(remove.data_dir, PathBuf::from(".tessivum"));
+    assert_eq!(remove.data_dir, None);
     assert_eq!(remove.action, PluginAction::Remove("@scope/plugin".into()));
+}
+
+#[test]
+fn sdk_accepts_a_data_directory() {
+    let CliCommand::Sdk(command) = parse_cli(["tessivum", "sdk", "--data-dir", "state"])
+        .expect("SDK invocation should parse")
+        .command
+    else {
+        panic!("expected SDK command");
+    };
+    assert_eq!(command.data_dir, Some(PathBuf::from("state")));
+}
+
+#[test]
+fn data_root_precedence_resolves_explicit_relative_paths_from_cwd() {
+    let root = temp_dir("data-root-precedence");
+    let cwd = root.join("workspace");
+    let home = root.join("home");
+    let environment_root = root.join("environment");
+    fs::create_dir_all(&cwd).expect("workspace creates");
+    fs::create_dir_all(&home).expect("home creates");
+    let expected_cwd = cwd.canonicalize().expect("workspace canonicalizes");
+
+    with_process_state(|| {
+        env::set_current_dir(&cwd).expect("workspace becomes current");
+        env::set_var("HOME", &home);
+        env::set_var("TESSIVUM_HOME", &environment_root);
+
+        let explicit = resolve_data_root(Some(PathBuf::from("state")))
+            .expect("explicit relative data root resolves");
+        assert_eq!(explicit.cwd, expected_cwd);
+        assert_eq!(explicit.data_dir, expected_cwd.join("state"));
+
+        let environment = resolve_data_root(None).expect("environment data root resolves");
+        assert_eq!(environment.data_dir, environment_root);
+
+        env::remove_var("TESSIVUM_HOME");
+        let home_default = resolve_data_root(None).expect("home data root resolves");
+        assert_eq!(home_default.data_dir, home.join(".tessivum"));
+    });
+
+    fs::remove_dir_all(root).expect("temporary directory removes");
+}
+
+#[test]
+fn data_root_rejects_invalid_environment_and_home() {
+    let root = temp_dir("invalid-data-root");
+    let cwd = root.join("workspace");
+    let home = root.join("home");
+    fs::create_dir_all(&cwd).expect("workspace creates");
+    fs::create_dir_all(&home).expect("home creates");
+
+    with_process_state(|| {
+        env::set_current_dir(&cwd).expect("workspace becomes current");
+        env::set_var("HOME", &home);
+        env::set_var("TESSIVUM_HOME", "relative-state");
+        assert!(resolve_data_root(None)
+            .expect_err("relative TESSIVUM_HOME must fail")
+            .to_string()
+            .contains("TESSIVUM_HOME must be an absolute"));
+
+        env::remove_var("TESSIVUM_HOME");
+        env::set_var("HOME", "relative-home");
+        assert!(resolve_data_root(None)
+            .expect_err("relative HOME must fail")
+            .to_string()
+            .contains("HOME must be an absolute"));
+
+        env::remove_var("HOME");
+        assert!(resolve_data_root(None)
+            .expect_err("missing HOME must fail")
+            .to_string()
+            .contains("HOME is not set"));
+    });
+
+    fs::remove_dir_all(root).expect("temporary directory removes");
+}
+
+#[test]
+fn data_root_detects_an_unmigrated_project_directory_without_copying() {
+    let root = temp_dir("legacy-data-root");
+    let cwd = root.join("workspace");
+    let home = root.join("home");
+    fs::create_dir_all(cwd.join(".tessivum")).expect("legacy data root creates");
+    fs::create_dir_all(&home).expect("home creates");
+
+    with_process_state(|| {
+        env::set_current_dir(&cwd).expect("workspace becomes current");
+        env::set_var("HOME", &home);
+        env::remove_var("TESSIVUM_HOME");
+
+        let error = resolve_data_root(None).expect_err("legacy data root requires migration");
+        let message = error.to_string();
+        assert!(message.contains("--data-dir"));
+        assert!(message.contains("move it"));
+        assert!(!home.join(".tessivum").exists());
+    });
+
+    fs::remove_dir_all(root).expect("temporary directory removes");
 }
 
 #[test]
@@ -217,9 +370,6 @@ fn invalid_headless_combinations_are_usage_errors() {
 
     let error = parse_cli(["tessivum", "sdk", "--patch", "base.toml"])
         .expect_err("future commands own no headless launcher arguments");
-    assert_eq!(error.exit_code(), 2);
-    let error = parse_cli(["tessivum", "sdk", "--data-dir", "state"])
-        .expect_err("SDK does not own a data directory option");
     assert_eq!(error.exit_code(), 2);
 }
 

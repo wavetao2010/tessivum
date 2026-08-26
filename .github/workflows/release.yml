@@ -193,6 +193,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           pattern: tessivum-*
@@ -206,6 +210,14 @@ jobs:
             sha256sum -c "$checksum"
           done
 
+      - name: Run installer and Formula fixture checks
+        run: |
+          sh scripts/test_install.sh
+          python3 scripts/test_homebrew_formula.py
+
+      - name: Generate and validate Homebrew Formula against local release archives
+        run: python3 scripts/generate_homebrew_formula.py "$RELEASE_TAG" dist dist/tessivum.rb
+
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -217,4 +229,4 @@ jobs:
               --title "Tessivum ${RELEASE_TAG#v}" \
               --generate-notes
           fi
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.sha256 --clobber
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.sha256 dist/tessivum.rb --clobber

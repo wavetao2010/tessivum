@@ -4,7 +4,10 @@ use std::{
 };
 
 use serde_json::json;
-use tessivum::plugin_manager::load_plugin_entries;
+use tessivum::{
+    cli::{parse_cli, resolve_data_root, CliCommand},
+    plugin_manager::{load_plugin_entries, plugin_profile_root},
+};
 use tessivum_core::RuntimeKind;
 
 #[test]
@@ -47,6 +50,46 @@ fn plugin_profile_loads_plain_cordis_packages_and_bundle_insertions() {
     assert_eq!(plain.options.runtime, RuntimeKind::LegacyNode);
     assert_eq!(nested.options.runtime, RuntimeKind::LegacyNode);
     assert_eq!(nested.options.config, json!({"answer": 42}));
+}
+
+#[test]
+fn web_and_plugin_resolve_the_same_explicit_data_root() {
+    let temp = TempDir::new();
+    let data_dir = temp.0.join("shared-data");
+    let data_dir_arg = data_dir.to_str().expect("temporary path is UTF-8");
+
+    let CliCommand::Web(web) = parse_cli(["tessivum", "web", "--data-dir", data_dir_arg])
+        .expect("web invocation parses")
+        .command
+    else {
+        panic!("expected web command");
+    };
+    let CliCommand::Plugin(plugin) = parse_cli([
+        "tessivum",
+        "plugin",
+        "--data-dir",
+        data_dir_arg,
+        "add",
+        "example-plugin",
+    ])
+    .expect("plugin invocation parses")
+    .command
+    else {
+        panic!("expected plugin command");
+    };
+
+    let web_root = resolve_data_root(web.data_dir)
+        .expect("web data root resolves")
+        .data_dir;
+    let plugin_root = resolve_data_root(plugin.data_dir)
+        .expect("plugin data root resolves")
+        .data_dir;
+    assert_eq!(web_root, data_dir);
+    assert_eq!(plugin_root, web_root);
+    assert_eq!(
+        plugin_profile_root(plugin_root),
+        plugin_profile_root(web_root)
+    );
 }
 
 fn write_package(profile: &Path, name: &str, extra: serde_json::Value) {

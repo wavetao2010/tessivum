@@ -17,6 +17,7 @@
 - [目标运行时架构](ARCHITECTURE.md)
 - [二阶段开发计划](DEVELOPMENT_PLAN.md)
 - [插件生态兼容方案](PLUGIN_COMPATIBILITY.md)
+- [Phase 4 品牌、分发与社区市场开发计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)：后续独立品牌、安装渠道与 dshmarket 真实兼容边界。
 
 ## 2. 项目定位与明确边界
 

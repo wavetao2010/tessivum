@@ -1,6 +1,6 @@
 # Tessivum 插件生态兼容方案
 
-> 目标：在 Rust 化 Host/Agent Runtime 的同时保留现有 DeepSeek Harness npm 插件生态，并为新插件建立 Extism/WASM 路径。总体顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，运行时细节见[目标运行时架构](ARCHITECTURE.md)。
+> 目标：在 Rust 化 Host/Agent Runtime 的同时保留现有 DeepSeek Harness npm 插件生态，并为新插件建立 Extism/WASM 路径。总体顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，运行时细节见[目标运行时架构](ARCHITECTURE.md)，dshmarket 的版本冻结、HTTP 路由桥和 Profile mutation 门槛见 [Phase 4 计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
 
 ## 1. 结论
 
@@ -451,11 +451,11 @@ Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 
 ## 16. 兼容方案完成定义
 
-- 原 profile 能识别并加载现有 npm 插件；
-- 样本社区插件无需修改地运行；
+- 冻结的样本 profile 能识别并加载被明确声明支持的 npm 插件；
 - Native Agent 能看到 Legacy 插件注册的工具/提示词；
 - Node 崩溃或插件卸载后无残留；
 - 新 WASM 插件 ABI 已冻结；per-plugin manifest permissions 接线前，Host service call 默认拒绝，不能宣称权限生态已完成；
 - 浏览器插件继续工作；
+- dshmarket 只有通过 Phase 4 Alpha.11 的固定版本矩阵、`web.route/v1`、pnpm Profile 和真实 Browser E2E 后才属于兼容范围；
 - 不支持的插件获得具体、可行动的诊断；
 - 文档明确区分 Node 兼容与 WASM 沙箱，不做误导性安全承诺。

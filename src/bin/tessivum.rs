@@ -17,7 +17,10 @@ use serde_json::Value;
 use tessivum::{
     agent_preset::AgentPresetTrust,
     boot_theme::inject_boot_theme,
-    cli::{parse_cli, CliCommand, ExitClass, HeadlessCommand, PluginAction, PluginCommand},
+    cli::{
+        parse_cli, resolve_data_root, CliCommand, DataRootError, ExitClass, HeadlessCommand,
+        PluginAction, PluginCommand, SdkCommand,
+    },
     code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     frontend::{FrontendHtmlTap, FrontendStatic, FrontendTapRegistration},
     headless::{run_headless, run_headless_with_adapter, HeadlessConfig},
@@ -171,7 +174,7 @@ async fn run() -> Result<(), Diagnostic> {
         CliCommand::Headless(command) => run_headless_command(command).await,
         CliCommand::Web(command) => run_web(command).await,
         CliCommand::Plugin(command) => run_plugin_command(command),
-        CliCommand::Sdk => run_sdk().await,
+        CliCommand::Sdk(command) => run_sdk(command).await,
         // Keep plugin inspection isolated in the existing dedicated binary.
         CliCommand::PluginReport => Err(Diagnostic::runtime(
             "PLUGIN_REPORT_BINARY",
@@ -181,11 +184,12 @@ async fn run() -> Result<(), Diagnostic> {
 }
 
 fn run_plugin_command(command: PluginCommand) -> Result<(), Diagnostic> {
+    let (_, data_dir) = host_paths(command.data_dir)?;
     let mutation = match command.action {
         PluginAction::Add(specifier) => PluginMutation::Add(specifier),
         PluginAction::Remove(package) => PluginMutation::Remove(package),
     };
-    mutate_plugins(command.data_dir, mutation)
+    mutate_plugins(data_dir, mutation)
         .map_err(|error| Diagnostic::runtime("PLUGIN_MANAGEMENT_FAILED", error))
 }
 
@@ -406,8 +410,8 @@ enum SdkOutcome {
     Signal(i32),
 }
 
-async fn run_sdk() -> Result<(), Diagnostic> {
-    let (cwd, data_dir) = host_paths(None)?;
+async fn run_sdk(command: SdkCommand) -> Result<(), Diagnostic> {
+    let (cwd, data_dir) = host_paths(command.data_dir)?;
     let runtime = boot_host(cwd, data_dir, None, false, true, None, Vec::new()).await?;
     let server = tessivum::sdk::JsonRpcServer::new(Arc::new(runtime.handle()));
     let reader = tokio::io::stdin();
@@ -697,19 +701,11 @@ async fn load_cli_patches(paths: &[PathBuf]) -> Result<Vec<Value>, Diagnostic> {
 }
 
 fn host_paths(data_dir: Option<PathBuf>) -> Result<(PathBuf, PathBuf), Diagnostic> {
-    let cwd =
-        env::current_dir().map_err(|error| Diagnostic::runtime("CWD_RESOLUTION_FAILED", error))?;
-    let data_dir = data_dir.map_or_else(
-        || cwd.join(".tessivum"),
-        |path| {
-            if path.is_absolute() {
-                path
-            } else {
-                cwd.join(path)
-            }
-        },
-    );
-    Ok((cwd, data_dir))
+    let paths = resolve_data_root(data_dir).map_err(|error| match error {
+        DataRootError::CurrentDir(source) => Diagnostic::runtime("CWD_RESOLUTION_FAILED", source),
+        error => Diagnostic::usage(error.to_string()),
+    })?;
+    Ok((paths.cwd, paths.data_dir))
 }
 
 async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Diagnostic> {

@@ -219,7 +219,8 @@ fn pnpm_arguments(mutation: &PluginMutation) -> &'static [&'static str] {
 fn remove_legacy_package_lock(profile: &Path) -> Result<(), PluginManagerError> {
     let lock = profile.join("package-lock.json");
     match fs::remove_file(&lock) {
-        Ok(()) | Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error(lock, error)),
     }
 }

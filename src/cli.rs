@@ -1,4 +1,4 @@
-use std::{ffi::OsString, num::NonZeroU64, path::PathBuf};
+use std::{env, ffi::OsString, fmt, io, num::NonZeroU64, path::PathBuf};
 
 use clap::{error::ErrorKind, Args, Error, Parser, Subcommand, ValueEnum};
 
@@ -12,7 +12,7 @@ pub struct Cli {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
     Headless(HeadlessCommand),
-    Sdk,
+    Sdk(SdkCommand),
     Web(WebCommand),
     Plugin(PluginCommand),
     PluginReport,
@@ -25,9 +25,15 @@ pub struct WebCommand {
     pub data_dir: Option<PathBuf>,
 }
 
+/// Inputs owned by the SDK launcher profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SdkCommand {
+    pub data_dir: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginCommand {
-    pub data_dir: PathBuf,
+    pub data_dir: Option<PathBuf>,
     pub action: PluginAction,
 }
 
@@ -68,6 +74,103 @@ impl ExitClass {
             Self::Cancelled => 130,
         }
     }
+}
+
+/// The resolved process working directory and persistent data root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataRoot {
+    pub cwd: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+/// Failures while selecting the persistent data root.
+#[derive(Debug)]
+pub enum DataRootError {
+    CurrentDir(io::Error),
+    RelativeTessivumHome(PathBuf),
+    MissingHome,
+    RelativeHome(PathBuf),
+    LegacyCwd { legacy: PathBuf, target: PathBuf },
+}
+
+impl fmt::Display for DataRootError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentDir(error) => write!(formatter, "cannot resolve current directory: {error}"),
+            Self::RelativeTessivumHome(path) => write!(
+                formatter,
+                "TESSIVUM_HOME must be an absolute directory, got {}",
+                path.display()
+            ),
+            Self::MissingHome => write!(
+                formatter,
+                "HOME is not set; set HOME or TESSIVUM_HOME, or pass --data-dir <DIR>"
+            ),
+            Self::RelativeHome(path) => write!(
+                formatter,
+                "HOME must be an absolute directory, got {}",
+                path.display()
+            ),
+            Self::LegacyCwd { legacy, target } => write!(
+                formatter,
+                "default data root {} does not exist but legacy project data root {} exists; use it with --data-dir {} or move it to {}; no files were copied",
+                target.display(),
+                legacy.display(),
+                legacy.display(),
+                target.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DataRootError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CurrentDir(error) => Some(error),
+            Self::RelativeTessivumHome(_)
+            | Self::MissingHome
+            | Self::RelativeHome(_)
+            | Self::LegacyCwd { .. } => None,
+        }
+    }
+}
+
+/// Resolves persistent storage without copying legacy project-local state.
+pub fn resolve_data_root(data_dir: Option<PathBuf>) -> Result<DataRoot, DataRootError> {
+    let cwd = env::current_dir().map_err(DataRootError::CurrentDir)?;
+    if let Some(data_dir) = data_dir {
+        return Ok(DataRoot {
+            data_dir: if data_dir.is_absolute() {
+                data_dir
+            } else {
+                cwd.join(data_dir)
+            },
+            cwd,
+        });
+    }
+
+    if let Some(data_dir) = env::var_os("TESSIVUM_HOME").map(PathBuf::from) {
+        if !data_dir.is_absolute() {
+            return Err(DataRootError::RelativeTessivumHome(data_dir));
+        }
+        return Ok(DataRoot { cwd, data_dir });
+    }
+
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(DataRootError::MissingHome)?;
+    if !home.is_absolute() {
+        return Err(DataRootError::RelativeHome(home));
+    }
+    let data_dir = home.join(".tessivum");
+    let legacy = cwd.join(".tessivum");
+    if !data_dir.exists() && legacy.exists() {
+        return Err(DataRootError::LegacyCwd {
+            legacy,
+            target: data_dir,
+        });
+    }
+    Ok(DataRoot { cwd, data_dir })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -153,19 +256,19 @@ where
                 data_dir: raw.data_dir,
             }),
             RawCommand::Sdk => {
-                if !raw.patches.is_empty() || raw.data_dir.is_some() {
-                    return Err(usage_error(
-                        "the sdk command does not accept --patch or --data-dir",
-                    ));
+                if !raw.patches.is_empty() {
+                    return Err(usage_error("the sdk command does not accept --patch"));
                 }
-                CliCommand::Sdk
+                CliCommand::Sdk(SdkCommand {
+                    data_dir: raw.data_dir,
+                })
             }
             RawCommand::Plugin(plugin) => {
                 if !raw.patches.is_empty() {
                     return Err(usage_error("the plugin command does not accept --patch"));
                 }
                 CliCommand::Plugin(PluginCommand {
-                    data_dir: raw.data_dir.unwrap_or_else(|| PathBuf::from(".tessivum")),
+                    data_dir: raw.data_dir,
                     action: match plugin.action {
                         RawPluginAction::Add { specifier } => PluginAction::Add(specifier),
                         RawPluginAction::Remove { package } => PluginAction::Remove(package),
