@@ -1,6 +1,6 @@
 # Tessivum Phase 4 品牌、分发与社区市场开发计划
 
-> 状态：`v0.1.0-alpha.11` 发布候选已完成
+> 状态：`v0.1.0-alpha.11` 已发布
 > 关闭日期：2026-08-26
 > 实现基线：`v0.1.0-alpha.11`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`  
@@ -634,7 +634,7 @@ Phase 4 完成必须同时满足：
 
 ## 17. 关闭记录
 
-2026-08-26 完成 Alpha.10 与 Alpha.11 的实现和发布前验收：
+2026-08-26 完成 Alpha.10 与 Alpha.11 的实现、验收和公共发布：
 
 - `cargo clippy --all-targets -- -D warnings` 与 `cargo test --all-targets` 通过；Tessivum 共 43 个 suite、409 个测试通过；
 - Tessivum Core workspace 共 33 个 suite、116 个测试通过，Node Compat Host 9 个测试通过；`web.route/v1` framing、cancel 与 generation cleanup conformance 通过；
@@ -643,4 +643,4 @@ Phase 4 完成必须同时满足：
 - 本地 Alpha.11 发布归档完成打包，并从归档 launcher 安装 `dshmarket@1.29.2`；Chromium 中 Tessivum 标题、插件市场 Browser entry 和 `/dsh-market/status` Rust→Bun route 均通过，未观察到 Browser error；
 - 最终集成审查发现 release/CI 使用旧 Core revision；三个 checkout 已统一为 `e894744e88cbed359179745e31eed00c1f45201b`，并由 `check_compat_baseline.py` 固定校验，复审确认关闭。
 
-本文关闭实现与发布前验收。公共发布状态以 GitHub `v0.1.0-alpha.11` Release 为准；发布必须由 `release.yml` 从已审核 tag 构建四平台资产，并在发布后完成下载 smoke。
+GitHub [`v0.1.0-alpha.11`](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.11) prerelease 已由 `release.yml` run `32945278216` 发布四平台归档、SHA-256 与 Formula。发布后重新下载并验证 Apple Silicon 归档，从该归档安装 `dshmarket@1.29.2`；真实 Chromium 插件市场与 `/dsh-market/status` 通过且无 Browser error。公共 `wavetao2010/homebrew-tap` 的 install/test/uninstall 也已通过。
