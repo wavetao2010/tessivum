@@ -1,11 +1,14 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{self, Command, Stdio},
     sync::Arc,
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tessivum_core::{Entry, EntryId, EntryOptions, EntryTree, RuntimeKind};
@@ -19,6 +22,7 @@ use crate::{
 };
 
 const MAX_PROFILE_MANIFEST_BYTES: u64 = 256 * 1024;
+const MAX_PROFILE_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BUNDLE_PATCH_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -27,8 +31,13 @@ pub enum PluginManagerError {
     Io { path: PathBuf, reason: String },
     #[error("plugin profile is invalid: {0}")]
     Invalid(String),
-    #[error("plugin package manager failed with exit code {0}")]
-    PackageManager(i32),
+    #[error("plugin profile is busy: {0}")]
+    Busy(PathBuf),
+    #[error("plugin mutation failed: {reason}; partial state: {partial_state}")]
+    Mutation {
+        reason: String,
+        partial_state: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,41 +46,251 @@ pub enum PluginMutation {
     Remove(String),
 }
 
+#[derive(Deserialize, Serialize)]
+struct ProfileLockOwner {
+    pid: u32,
+    nonce: String,
+}
+
+struct ProfileLock {
+    path: PathBuf,
+    nonce: String,
+}
+
 pub fn mutate_plugins(
     data_dir: impl AsRef<Path>,
     mutation: PluginMutation,
 ) -> Result<(), PluginManagerError> {
     let profile = plugin_profile_root(data_dir);
+    fs::create_dir_all(&profile).map_err(|error| io_error(&profile, error))?;
+    let _lock = ProfileLock::acquire(&profile)?;
     ensure_profile(&profile)?;
     let cwd = env::current_dir().map_err(|error| io_error(".", error))?;
-    let (verb, argument) = match mutation {
-        PluginMutation::Add(specifier) => ("install", anchor_path_spec(&specifier, &cwd)?),
-        PluginMutation::Remove(package) => ("uninstall", package),
+    let arguments = pnpm_arguments(&mutation);
+    let argument: Cow<'_, str> = match &mutation {
+        PluginMutation::Add(specifier) => Cow::Owned(anchor_path_spec(specifier, &cwd)?),
+        PluginMutation::Remove(package) => Cow::Borrowed(package),
     };
-    let status = Command::new("npm")
+    let status = Command::new("pnpm")
         .current_dir(&profile)
-        .args([
-            verb,
-            "--save-exact",
-            "--ignore-scripts",
-            "--install-links",
-            "--",
-        ])
-        .arg(argument)
+        .args(arguments)
+        .arg(argument.as_ref())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|error| PluginManagerError::Io {
-            path: profile.clone(),
-            reason: format!("could not run npm: {error}"),
+        .map_err(|error| {
+            mutation_error(
+                format!("could not run pnpm: {error}"),
+                &profile,
+                &mutation,
+            )
         })?;
-    if status.success() {
-        Ok(())
+    if !status.success() {
+        let reason = status.code().map_or_else(
+            || "pnpm terminated without an exit code".into(),
+            |code| format!("pnpm exited with code {code}"),
+        );
+        return Err(mutation_error(reason, &profile, &mutation));
+    }
+    remove_legacy_package_lock(&profile)
+        .map_err(|error| mutation_error(error.to_string(), &profile, &mutation))
+}
+
+impl ProfileLock {
+    fn acquire(profile: &Path) -> Result<Self, PluginManagerError> {
+        let path = profile.join(".tessivum-profile.lock");
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut stale_locks = Vec::new();
+
+        loop {
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let owner = ProfileLockOwner {
+                        pid: process::id(),
+                        nonce: nonce.clone(),
+                    };
+                    let owner_path = path.join("owner.json");
+                    let owner_json = serde_json::to_vec(&owner).map_err(|error| {
+                        PluginManagerError::Invalid(format!(
+                            "profile lock owner cannot be encoded: {error}"
+                        ))
+                    })?;
+                    if let Err(error) = fs::write(&owner_path, owner_json) {
+                        let _ = fs::remove_dir_all(&path);
+                        return Err(io_error(owner_path, error));
+                    }
+
+                    let lock = Self {
+                        path: path.clone(),
+                        nonce,
+                    };
+                    for stale in stale_locks {
+                        fs::remove_dir_all(&stale).map_err(|error| io_error(stale, error))?;
+                    }
+                    return Ok(lock);
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    let owner_path = path.join("owner.json");
+                    let owner = match fs::metadata(&owner_path) {
+                        Ok(_) => {
+                            let bytes =
+                                read_bounded(&owner_path, MAX_PROFILE_MANIFEST_BYTES)?;
+                            serde_json::from_slice::<ProfileLockOwner>(&bytes).map_err(|error| {
+                                PluginManagerError::Invalid(format!(
+                                    "{} is invalid: {error}",
+                                    owner_path.display()
+                                ))
+                            })?
+                        }
+                        Err(error) if error.kind() == ErrorKind::NotFound => {
+                            return Err(PluginManagerError::Busy(path.clone()));
+                        }
+                        Err(error) => return Err(io_error(owner_path, error)),
+                    };
+                    if profile_lock_owner_is_active(owner.pid) {
+                        return Err(PluginManagerError::Busy(path.clone()));
+                    }
+
+                    let stale = profile.join(format!(
+                        ".tessivum-profile.lock.stale-{}",
+                        owner.nonce
+                    ));
+                    match fs::rename(&path, &stale) {
+                        Ok(()) => stale_locks.push(stale),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::NotFound
+                                    | ErrorKind::AlreadyExists
+                                    | ErrorKind::DirectoryNotEmpty
+                            ) => {}
+                        Err(error) => return Err(io_error(&path, error)),
+                    }
+                }
+                Err(error) => return Err(io_error(&path, error)),
+            }
+        }
+    }
+}
+
+impl Drop for ProfileLock {
+    fn drop(&mut self) {
+        let owner_path = self.path.join("owner.json");
+        let Some(owner) = fs::read(&owner_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ProfileLockOwner>(&bytes).ok())
+        else {
+            return;
+        };
+        if owner.nonce != self.nonce {
+            return;
+        }
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn profile_lock_owner_is_active(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn profile_lock_owner_is_active(pid: u32) -> bool {
+    pid != 0
+}
+
+fn pnpm_arguments(mutation: &PluginMutation) -> &'static [&'static str] {
+    match mutation {
+        PluginMutation::Add(_) => &["add", "--save-exact", "--ignore-scripts"],
+        PluginMutation::Remove(_) => &["remove", "--ignore-scripts"],
+    }
+}
+
+fn remove_legacy_package_lock(profile: &Path) -> Result<(), PluginManagerError> {
+    let lock = profile.join("package-lock.json");
+    match fs::remove_file(&lock) {
+        Ok(()) | Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(lock, error)),
+    }
+}
+
+fn mutation_error(
+    reason: String,
+    profile: &Path,
+    mutation: &PluginMutation,
+) -> PluginManagerError {
+    PluginManagerError::Mutation {
+        reason,
+        partial_state: mutation_partial_state(profile, mutation),
+    }
+}
+
+fn mutation_partial_state(profile: &Path, mutation: &PluginMutation) -> String {
+    let manifest = profile.join("package.json");
+    let manifest_state = match read_json(&manifest, MAX_PROFILE_MANIFEST_BYTES) {
+        Ok(manifest) if manifest.get("dependencies").and_then(Value::as_object).is_some() => {
+            "valid".into()
+        }
+        Ok(_) => "invalid dependencies".into(),
+        Err(error) => format!("invalid ({error})"),
+    };
+    let pnpm_lock = profile.join("pnpm-lock.yaml");
+    let lock_state = match read_bounded(&pnpm_lock, MAX_PROFILE_LOCK_BYTES) {
+        Ok(lock) => match serde_yaml::from_slice::<serde_yaml::Value>(&lock) {
+            Ok(lock) if lock.is_mapping() => "valid".into(),
+            Ok(_) => "invalid root".into(),
+            Err(error) => format!("invalid ({error})"),
+        },
+        Err(error) => format!("invalid ({error})"),
+    };
+    format!(
+        "package.json={manifest_state}; pnpm-lock.yaml={lock_state}; target package entry={}",
+        mutation_target_entry_state(profile, mutation)
+    )
+}
+
+fn mutation_target_entry_state(profile: &Path, mutation: &PluginMutation) -> String {
+    let requested = match mutation {
+        PluginMutation::Add(specifier) => add_package_name(specifier),
+        PluginMutation::Remove(package) => Some(package.as_str()),
+    };
+    let Some(package) = requested else {
+        return "unresolved".into();
+    };
+    let root = match package_root(profile, package) {
+        Ok(root) => root,
+        Err(error) => return format!("invalid ({error})"),
+    };
+    let manifest = root.join("package.json");
+    if !manifest.exists() {
+        return format!("{package}=absent");
+    }
+    match read_json(&manifest, MAX_PROFILE_MANIFEST_BYTES) {
+        Ok(manifest) if manifest.get("name").and_then(Value::as_str) == Some(package) => {
+            format!("{package}=valid")
+        }
+        Ok(_) => format!("{package}=invalid manifest"),
+        Err(error) => format!("{package}=invalid ({error})"),
+    }
+}
+
+fn add_package_name(specifier: &str) -> Option<&str> {
+    if let Some(scoped) = specifier.strip_prefix('@') {
+        let slash = scoped.find('/')? + 1;
+        let version = specifier[slash..].find('@').map(|offset| slash + offset);
+        Some(&specifier[..version.unwrap_or(specifier.len())])
     } else {
-        Err(PluginManagerError::PackageManager(
-            status.code().unwrap_or(1),
-        ))
+        Some(specifier.split('@').next().unwrap_or_default())
     }
 }
 
@@ -519,6 +738,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pnpm_mutation_contract_uses_frozen_argv_and_clears_legacy_lock() {
+        assert_eq!(
+            pnpm_arguments(&PluginMutation::Add("plugin@1.0.0".into())),
+            &["add", "--save-exact", "--ignore-scripts"]
+        );
+        assert_eq!(
+            pnpm_arguments(&PluginMutation::Remove("plugin".into())),
+            &["remove", "--ignore-scripts"]
+        );
+
+        let profile = temporary_profile();
+        let lock = profile.join("package-lock.json");
+        fs::write(&lock, "legacy").unwrap();
+        remove_legacy_package_lock(&profile).unwrap();
+        assert!(!lock.exists());
+        fs::write(
+            profile.join("package.json"),
+            br#"{"dependencies":{"plugin":"1.0.0"}}"#,
+        )
+        .unwrap();
+        fs::write(profile.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        let package = profile.join("node_modules/plugin");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), br#"{"name":"plugin"}"#).unwrap();
+        assert_eq!(
+            mutation_partial_state(&profile, &PluginMutation::Add("plugin@1.0.0".into())),
+            "package.json=valid; pnpm-lock.yaml=valid; target package entry=plugin=valid"
+        );
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn profile_lock_serializes_active_owners_and_preserves_replacement_owner() {
+        let profile = temporary_profile();
+        let active = ProfileLock::acquire(&profile).unwrap();
+        assert!(matches!(
+            ProfileLock::acquire(&profile),
+            Err(PluginManagerError::Busy(_))
+        ));
+        drop(active);
+
+        let lock = profile.join(".tessivum-profile.lock");
+        fs::create_dir(&lock).unwrap();
+        fs::write(
+            lock.join("owner.json"),
+            serde_json::to_vec(&ProfileLockOwner {
+                pid: 0,
+                nonce: "dead".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let recovered = ProfileLock::acquire(&profile).unwrap();
+        fs::write(
+            lock.join("owner.json"),
+            serde_json::to_vec(&ProfileLockOwner {
+                pid: process::id(),
+                nonce: "replacement".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        drop(recovered);
+        assert!(lock.exists());
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
     fn package_names_cannot_escape_the_profile() {
         let profile = Path::new("/profile");
         assert_eq!(
@@ -528,5 +815,11 @@ mod tests {
         for package in [".", "..", "../escape", "@scope/../escape"] {
             assert!(package_root(profile, package).is_err(), "{package}");
         }
+    }
+
+    fn temporary_profile() -> PathBuf {
+        let profile = env::temp_dir().join(format!("tessivum-pnpm-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&profile).unwrap();
+        profile
     }
 }
