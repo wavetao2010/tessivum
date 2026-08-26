@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 7 ]]; then
-  echo "usage: $0 <tag> <target> <binary> <compat-host-dir> <vendor-dir> <agent-presets-dir> <output-dir>" >&2
+if [[ $# -ne 8 ]]; then
+  echo "usage: $0 <tag> <target> <binary> <compat-host-dir> <host-module-root> <vendor-dir> <agent-presets-dir> <output-dir>" >&2
   exit 2
 fi
 
@@ -10,10 +10,13 @@ tag=$1
 target=$2
 binary=$3
 compat_host=$4
-vendor=$5
-agent_presets=$6
-output=$7
+host_modules=$5
+vendor=$6
+agent_presets=$7
+output=$8
 version=${tag#v}
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+host_module_manifest="$script_dir/../packaging/host-modules.json"
 deepseek_root=$(CDPATH= cd -- "$agent_presets/../../../.." && pwd)
 
 [[ $tag == v?* ]] || { echo "release tag must start with v and include a version: $tag" >&2; exit 2; }
@@ -31,6 +34,8 @@ for preset in standard code minimal cordis; do
   }
 done
 [[ -f $deepseek_root/LICENSE ]] || { echo "DeepSeek Harness license is missing: $deepseek_root/LICENSE" >&2; exit 2; }
+[[ -f $host_module_manifest ]] || { echo "Host module metadata manifest is missing: $host_module_manifest" >&2; exit 2; }
+python3 "$script_dir/fetch_host_modules.py" "$host_module_manifest" "$host_modules" --verify
 [[ $("$binary" --version) == "tessivum $version" ]] || {
   echo "binary version does not match release tag $tag" >&2
   exit 2
@@ -40,20 +45,30 @@ name="tessivum-$version-$target"
 stage="$output/$name"
 rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/libexec" "$stage/share/tessivum/compat-host" \
-  "$stage/share/tessivum/vendor" "$stage/share/tessivum/agent-presets" \
-  "$stage/share/licenses/deepseek-harness"
+  "$stage/share/tessivum/host-modules" "$stage/share/tessivum/vendor" \
+  "$stage/share/tessivum/agent-presets" "$stage/share/licenses/deepseek-harness" \
+  "$stage/share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7" \
+  "$stage/share/licenses/@deepseek-ai-schemastery-3.18.1"
 
 cp "$binary" "$stage/libexec/tessivum"
 cp LICENSE "$stage/LICENSE"
 cp "$compat_host/package.json" "$compat_host/bun.lock" "$stage/share/tessivum/compat-host/"
 cp -R "$compat_host/src" "$stage/share/tessivum/compat-host/"
+cp -R "$host_modules"/. "$stage/share/tessivum/host-modules/"
 cp -R "$vendor"/. "$stage/share/tessivum/vendor/"
 mkdir -p "$stage/share/tessivum/vendor/node_modules/@deepseek-ai"
 ln -s ../../cordis "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cordis"
 ln -s ../../cosmokit "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cosmokit"
 ln -s ../../loader "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cordis-plugin-loader"
+mkdir -p "$stage/share/tessivum/host-modules/node_modules/@deepseek-ai"
+ln -s ../../../vendor/cordis "$stage/share/tessivum/host-modules/node_modules/@deepseek-ai/cordis"
+ln -s ../../../vendor/cosmokit "$stage/share/tessivum/host-modules/node_modules/@deepseek-ai/cosmokit"
 cp -R "$agent_presets"/. "$stage/share/tessivum/agent-presets/"
 cp "$deepseek_root/LICENSE" "$stage/share/licenses/deepseek-harness/LICENSE"
+cp "$host_modules/@deepseek-ai/dsh-settings/LICENSE" \
+  "$stage/share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7/LICENSE"
+cp "$host_modules/@deepseek-ai/schemastery/LICENSE" \
+  "$stage/share/licenses/@deepseek-ai-schemastery-3.18.1/LICENSE"
 
 cat > "$stage/bin/tessivum" <<'LAUNCHER'
 #!/usr/bin/env sh
@@ -69,9 +84,10 @@ while [ -L "$launcher" ]; do
 done
 root=$(CDPATH= cd -- "$(dirname -- "$launcher")/.." && pwd)
 : "${TESSIVUM_COMPAT_HOST:=$root/share/tessivum/compat-host/src/index.ts}"
+: "${TESSIVUM_HOST_MODULE_ROOT:=$root/share/tessivum/host-modules}"
 : "${CORDIS_VENDOR_ROOT:=$root/share/tessivum/vendor}"
 : "${TESSIVUM_AGENT_PRESET_ROOT:=$root/share/tessivum/agent-presets}"
-export TESSIVUM_COMPAT_HOST CORDIS_VENDOR_ROOT TESSIVUM_AGENT_PRESET_ROOT
+export TESSIVUM_COMPAT_HOST TESSIVUM_HOST_MODULE_ROOT CORDIS_VENDOR_ROOT TESSIVUM_AGENT_PRESET_ROOT
 exec "$root/libexec/tessivum" "$@"
 LAUNCHER
 chmod +x "$stage/bin/tessivum"
