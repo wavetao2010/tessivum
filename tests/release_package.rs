@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 
 const TAG: &str = "v0.1.0-alpha.11";
 const TARGET: &str = "x86_64-unknown-linux-gnu";
+const DSH_SETTINGS_ENTRIES: &[&str] = &["lib/index.js"];
+const SCHEMASTRY_ENTRIES: &[&str] = &["lib/index.mjs", "lib/index.cjs"];
+
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -81,11 +84,11 @@ impl Fixture {
         write(root.join("deepseek/LICENSE"), "MIT fixture license\n");
 
         let host_modules = root.join("host-modules");
-        for (name, version) in [
-            ("dsh-settings", "0.1.0-rc.7"),
-            ("schemastery", "3.18.1"),
+        for (name, version, runtime_entries) in [
+            ("dsh-settings", "0.1.0-rc.7", DSH_SETTINGS_ENTRIES),
+            ("schemastery", "3.18.1", SCHEMASTRY_ENTRIES),
         ] {
-            write_module(&host_modules, name, version);
+            write_module(&host_modules, name, version, runtime_entries);
         }
         write_inventory(&host_modules);
 
@@ -146,7 +149,7 @@ fn make_executable(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn write_module(root: &Path, name: &str, version: &str) {
+fn write_module(root: &Path, name: &str, version: &str, runtime_entries: &[&str]) {
     let module = root.join("@deepseek-ai").join(name);
     write(
         module.join("package.json"),
@@ -154,11 +157,12 @@ fn write_module(root: &Path, name: &str, version: &str) {
             "name": format!("@deepseek-ai/{name}"),
             "version": version,
             "license": "MIT",
-            "main": "lib/index.js",
         }))
         .unwrap(),
     );
-    write(module.join("lib/index.js"), format!("export const fixture = {name:?};\n"));
+    for entry in runtime_entries {
+        write(module.join(*entry), format!("export const fixture = {name:?};\n"));
+    }
     write(module.join("LICENSE"), "MIT fixture license\n");
 }
 
@@ -166,9 +170,19 @@ fn sha256(path: &Path) -> String {
     format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
 }
 
-fn inventory_row(root: &Path, name: &str, version: &str, url: &str, sri: &str) -> Value {
+fn inventory_row(
+    root: &Path,
+    name: &str,
+    version: &str,
+    url: &str,
+    sri: &str,
+    runtime_entries: &[&str],
+) -> Value {
     let module = root.join("@deepseek-ai").join(name);
-    let files = ["LICENSE", "lib/index.js", "package.json"]
+    let mut paths = vec!["LICENSE", "package.json"];
+    paths.extend_from_slice(runtime_entries);
+    paths.sort_unstable();
+    let files = paths
         .into_iter()
         .map(|path| json!({"path": path, "sha256": sha256(&module.join(path))}))
         .collect::<Vec<_>>();
@@ -179,7 +193,7 @@ fn inventory_row(root: &Path, name: &str, version: &str, url: &str, sri: &str) -
         "sri": sri,
         "license": "MIT",
         "licenseFile": "LICENSE",
-        "runtimeEntries": ["lib/index.js"],
+        "runtimeEntries": runtime_entries,
         "files": files,
     })
 }
@@ -196,6 +210,7 @@ fn write_inventory(root: &Path) {
                     "0.1.0-rc.7",
                     "https://registry.npmjs.org/@deepseek-ai/dsh-settings/-/dsh-settings-0.1.0-rc.7.tgz",
                     "sha512-cS1+StK2xIVykrskw+KrO+hKJxYaVVgY2Jex2we5zASTNLHYCj74WQluPlaFjFgnXoZ1RYz8HNXL5/Ho6h1Ynw==",
+                    DSH_SETTINGS_ENTRIES,
                 ),
                 inventory_row(
                     root,
@@ -203,6 +218,7 @@ fn write_inventory(root: &Path) {
                     "3.18.1",
                     "https://registry.npmjs.org/@deepseek-ai/schemastery/-/schemastery-3.18.1.tgz",
                     "sha512-Qn0FCSwCQnpnj6SB31I6i2sIKgKWnkbJM8O0EU91Gv2UsYVvtZTl6IA0sCwk2e2MZf5S8w5hpq9QkeVvK9qwxg==",
+                    SCHEMASTRY_ENTRIES,
                 ),
             ],
         }))
@@ -236,8 +252,8 @@ fn release_archive_contains_the_verified_host_modules_and_licenses() {
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/package.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/lib/index.js",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/LICENSE",
-        "share/tessivum/host-modules/@deepseek-ai/schemastery/package.json",
-        "share/tessivum/host-modules/@deepseek-ai/schemastery/lib/index.js",
+        "share/tessivum/host-modules/@deepseek-ai/schemastery/lib/index.cjs",
+        "share/tessivum/host-modules/@deepseek-ai/schemastery/lib/index.mjs",
         "share/tessivum/host-modules/@deepseek-ai/schemastery/LICENSE",
         "share/tessivum/host-modules/node_modules/@deepseek-ai/cordis",
         "share/tessivum/host-modules/node_modules/@deepseek-ai/cosmokit",

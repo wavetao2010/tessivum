@@ -20,7 +20,8 @@
       "license": "MIT",
       "licenseFile": "LICENSE",
       "runtimeEntries": [
-        "lib/index.js"
+        "lib/index.mjs",
+        "lib/index.cjs"
       ]
     }
   ]
