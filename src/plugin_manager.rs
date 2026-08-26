@@ -727,6 +727,54 @@ fn ensure_profile(profile: &Path) -> Result<(), PluginManagerError> {
     Ok(())
 }
 
+fn resolve_bundle_expressions(
+    source: &str,
+    entries: &BTreeMap<String, Entry>,
+    patch_path: &Path,
+) -> Result<String, PluginManagerError> {
+    const PREFIX: &str = "[...ctx.loader.entries()].some((e) => e.options.name === '";
+    const MIDDLE: &str = "' && e.options.id !== '";
+    const SUFFIX: &str = "' && !e.disabled)";
+    let unsupported = || {
+        PluginManagerError::Invalid(format!(
+            "{} uses an unsupported legacy !!js configuration expression",
+            patch_path.display()
+        ))
+    };
+    let mut output = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let (body, ending) = line.strip_suffix("\r\n").map_or_else(
+            || (line.strip_suffix('\n').unwrap_or(line), "\n"),
+            |body| (body, "\r\n"),
+        );
+        let trimmed = body.trim_start();
+        if trimmed.starts_with('#') || !trimmed.contains("!!js") {
+            output.push_str(line);
+            continue;
+        }
+        let raw = trimmed
+            .strip_prefix("disabled: !!js")
+            .ok_or_else(&unsupported)?;
+        let expression = serde_yaml::from_str::<String>(raw.trim()).map_err(|_| unsupported())?;
+        let rest = expression.strip_prefix(PREFIX).ok_or_else(&unsupported)?;
+        let (package, rest) = rest.split_once(MIDDLE).ok_or_else(&unsupported)?;
+        let id = rest.strip_suffix(SUFFIX).ok_or_else(&unsupported)?;
+        let disabled = entries.values().any(|entry| {
+            entry.options.name.as_deref() == Some(package)
+                && entry.options.id.as_str() != id
+                && !entry.options.disabled
+        });
+        output.push_str(&body[..body.len() - trimmed.len()]);
+        output.push_str(if disabled {
+            "disabled: true"
+        } else {
+            "disabled: false"
+        });
+        output.push_str(ending);
+    }
+    Ok(output)
+}
+
 fn apply_bundle(
     profile: &Path,
     package_root: &Path,
@@ -740,12 +788,7 @@ fn apply_bundle(
     let source = String::from_utf8(bytes).map_err(|error| {
         PluginManagerError::Invalid(format!("{} is not UTF-8: {error}", patch_path.display()))
     })?;
-    if source.contains("!!js") {
-        return Err(PluginManagerError::Invalid(format!(
-            "{} uses legacy !!js configuration expressions, which Tessivum does not execute",
-            patch_path.display()
-        )));
-    }
+    let source = resolve_bundle_expressions(&source, entries, &patch_path)?;
     let patches: Vec<Value> = serde_yaml::from_str(&source).map_err(|error| {
         PluginManagerError::Invalid(format!("{} is invalid YAML: {error}", patch_path.display()))
     })?;
@@ -1277,6 +1320,27 @@ mod tests {
             assert!(route_pnpm_args(&args, &profile).is_err(), "{args:?}");
         }
         fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn known_duplicate_guard_is_resolved_without_executing_javascript() {
+        let source = r#"# !!js remains inert in comments
+- insert:
+    - id: better-sidebar
+      name: 'dsh-better-sidebar'
+      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === 'dsh-better-sidebar' && e.options.id !== 'better-sidebar' && !e.disabled)"
+"#;
+        let resolved =
+            resolve_bundle_expressions(source, &BTreeMap::new(), Path::new("cordis.patch.yml"))
+                .unwrap();
+        assert!(resolved.contains("disabled: false"));
+        serde_yaml::from_str::<Vec<Value>>(&resolved).unwrap();
+        assert!(resolve_bundle_expressions(
+            "disabled: !!js \"process.env.UNSAFE\"\n",
+            &BTreeMap::new(),
+            Path::new("cordis.patch.yml"),
+        )
+        .is_err());
     }
 
     fn temporary_profile() -> PathBuf {

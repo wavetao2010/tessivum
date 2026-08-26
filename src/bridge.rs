@@ -7,10 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     path::{Component, Path},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Weak,
-    },
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -61,8 +58,6 @@ const MAX_WEB_HEADER_BYTES: usize = 16 * 1024;
 const MAX_WEB_PATH_BYTES: usize = 8 * 1024;
 const MAX_WEB_QUERY_BYTES: usize = 8 * 1024;
 const MAX_PNPM_OUTPUT_CHUNK: usize = 64 * 1024;
-const MAX_PNPM_STDOUT_BYTES: usize = 256 * 1024;
-const MAX_PNPM_STDERR_BYTES: usize = 64 * 1024;
 const MAX_PNPM_RESULT_BYTES: usize = 512 * 1024;
 pub const WEB_REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 pub const WEB_RESPONSE_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -208,14 +203,12 @@ pub struct PnpmRunResult {
     pub stderr: String,
 }
 
-/// A generation-owned, bounded live output notification sink.
+/// A generation-owned live output sink with bounded transport frames.
 #[derive(Clone)]
 pub struct PnpmOutputSink {
     client: BridgeClient,
     operation_id: String,
     cancellation: CancellationToken,
-    stdout: Arc<AtomicUsize>,
-    stderr: Arc<AtomicUsize>,
 }
 
 impl PnpmOutputSink {
@@ -233,23 +226,9 @@ impl PnpmOutputSink {
         if self.cancellation.is_cancelled() {
             return Err(BridgeError::Cancelled);
         }
-        let (counter, limit) = match stream {
-            PnpmOutputStream::Stdout => (&self.stdout, MAX_PNPM_STDOUT_BYTES),
-            PnpmOutputStream::Stderr => (&self.stderr, MAX_PNPM_STDERR_BYTES),
-        };
-        counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(chunk.len()).filter(|next| *next <= limit)
-            })
-            .map_err(|_| {
-                remote(
-                    "PNPM_OUTPUT_LIMIT",
-                    "pnpm output exceeds its configured limit",
-                )
-            })?;
-        if self.cancellation.is_cancelled() {
-            return Err(BridgeError::Cancelled);
-        }
+        // The stream is not accumulated here: dshmarket retains its own rolling
+        // stdout/stderr tails. A cumulative transport cap would abort valid
+        // dependency-heavy installs once pnpm's NDJSON progress exceeds it.
         self.client.notify(
             FrameKind::PnpmOutput,
             json!({
@@ -1059,8 +1038,6 @@ impl DomainBridge {
                 client: state.client.clone(),
                 operation_id: request.operation_id.clone(),
                 cancellation: cancellation.clone(),
-                stdout: Arc::new(AtomicUsize::new(0)),
-                stderr: Arc::new(AtomicUsize::new(0)),
             };
             state.operations.insert(
                 request_id,
@@ -2640,6 +2617,52 @@ mod alpha11_tests {
             ClientConfig::default(),
         )
         .expect("test client constructs")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pnpm_output_stream_does_not_abort_after_its_rolling_tail_size() {
+        use std::{os::unix::net::UnixStream, thread};
+        use tessivum_node_bridge::FrameCodec;
+
+        let (rust, mut node) = UnixStream::pair().expect("duplex pair constructs");
+        let client = BridgeClient::from_io(
+            rust.try_clone().expect("reader clones"),
+            rust,
+            1,
+            ClientConfig::default(),
+        )
+        .expect("client constructs");
+        let peer = thread::spawn(move || {
+            let codec = FrameCodec::new(1024 * 1024).expect("codec constructs");
+            assert_eq!(
+                codec.read_frame(&mut node).expect("hello reads").kind,
+                FrameKind::Hello
+            );
+            codec
+                .write_frame(&mut node, &Frame::ready(1))
+                .expect("ready writes");
+            for _ in 0..20 {
+                assert_eq!(
+                    codec.read_frame(&mut node).expect("output reads").kind,
+                    FrameKind::PnpmOutput
+                );
+            }
+        });
+        client
+            .handshake(Duration::from_secs(1))
+            .expect("client becomes ready");
+        let sink = PnpmOutputSink {
+            client,
+            operation_id: "large-install".into(),
+            cancellation: fresh_cancellation(),
+        };
+        let chunk = [b'x'; 16 * 1024];
+        for _ in 0..20 {
+            sink.emit(PnpmOutputStream::Stdout, &chunk)
+                .expect("streaming more than 256 KiB remains valid");
+        }
+        peer.join().expect("peer joins");
     }
 
     fn attach(bridge: &DomainBridge, generation: u64) {
