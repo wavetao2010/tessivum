@@ -144,7 +144,9 @@ export class RustWebHarness {
         env.DEEPSEEK_SEARCH_API_KEY_ENV = options.deepSeekSearch.apiKeyEnv
       }
       if (options.replayOverride !== undefined) env.TESSIVUM_REPLAY_OVERRIDE_FILE = options.replayOverride
-      harness.server = Bun.spawn([join(CRATE_ROOT, 'target/debug/tessivum'), 'web'], {
+      harness.server = Bun.spawn([
+        join(CRATE_ROOT, 'target/debug/tessivum'), 'web', '--data-dir', harness.dataDir,
+      ], {
         cwd: workspace,
         env,
         stdout: 'inherit',

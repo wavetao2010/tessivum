@@ -29,7 +29,11 @@ fn plugin_profile_loads_plain_cordis_packages_and_bundle_insertions() {
         "plugin-bundle",
         json!({"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}}),
     );
-    write_package(&profile, "nested-plugin", json!({}));
+    write_package(
+        &profile,
+        "nested-plugin",
+        json!({"dsh": {"client": {"platform": "web"}}}),
+    );
     fs::write(
         profile.join("node_modules/plugin-bundle/cordis.patch.yml"),
         "- insert:\n    - id: nested\n      name: nested-plugin\n      config:\n        answer: 42\n",

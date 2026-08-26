@@ -39,6 +39,7 @@ use futures_util::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
+use tessivum_node_bridge::BridgeError;
 use tokio::{
     net::TcpListener,
     sync::{broadcast, mpsc, oneshot, Mutex as AsyncMutex},
@@ -48,10 +49,13 @@ use tokio::{
 #[cfg(test)]
 use crate::protocol::SurfaceOp;
 use crate::{
-    bridge::{decode_web_body, encode_web_body, BridgeError, DomainBridge, WebRouteRequest, WEB_REQUEST_BODY_LIMIT},
     agent_preset::composition_contains_plugin,
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
     attachments::{AttachmentId, AttachmentLimits, AttachmentRef},
+    bridge::{
+        decode_web_body, encode_web_body, is_hop_header, DomainBridge, WebRouteRequest,
+        WEB_REQUEST_BODY_LIMIT,
+    },
     credentials::{CredentialRef, CredentialSource},
     frontend::FrontendStatic,
     goal::{GoalError, GoalRef, GoalService},
@@ -611,6 +615,7 @@ async fn frontend_fallback(State(state): State<ApiState>, request: Request) -> R
     let headers = match parts
         .headers
         .iter()
+        .filter(|(name, _)| !is_hop_header(name.as_str()))
         .map(|(name, value)| {
             value
                 .to_str()
@@ -636,15 +641,11 @@ async fn frontend_fallback(State(state): State<ApiState>, request: Request) -> R
     }
 }
 
-fn frontend_response(
-    state: &ApiState,
-    method: axum::http::Method,
-    path: &str,
-) -> Response {
-    state
-        .frontend
-        .as_ref()
-        .map_or_else(|| StatusCode::NOT_FOUND.into_response(), |frontend| frontend.serve(method, path))
+fn frontend_response(state: &ApiState, method: axum::http::Method, path: &str) -> Response {
+    state.frontend.as_ref().map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |frontend| frontend.serve(method, path),
+    )
 }
 
 fn web_route_response(response: crate::bridge::WebRouteResponse) -> Response {
@@ -669,6 +670,7 @@ fn web_route_response(response: crate::bridge::WebRouteResponse) -> Response {
 }
 
 fn web_route_failure(error: BridgeError) -> Response {
+    eprintln!("Legacy Node route failed: {error}");
     match error {
         BridgeError::Timeout => StatusCode::GATEWAY_TIMEOUT.into_response(),
         BridgeError::QueueFull => StatusCode::SERVICE_UNAVAILABLE.into_response(),

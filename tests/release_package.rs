@@ -14,7 +14,6 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 const DSH_SETTINGS_ENTRIES: &[&str] = &["lib/index.js"];
 const SCHEMASTRY_ENTRIES: &[&str] = &["lib/index.mjs", "lib/index.cjs"];
 
-
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 struct TempDir(PathBuf);
@@ -46,7 +45,7 @@ impl Drop for TempDir {
 }
 
 struct Fixture {
-    temp: TempDir,
+    _temp: TempDir,
     binary: PathBuf,
     compat_host: PathBuf,
     host_modules: PathBuf,
@@ -78,8 +77,14 @@ impl Fixture {
 
         let agent_presets = root.join("deepseek/apps/cli/config/agent-presets");
         for preset in ["standard", "code", "minimal", "cordis"] {
-            write(agent_presets.join(preset).join("agent.cordis.yml"), "plugins: []\n");
-            write(agent_presets.join(preset).join("preset.yml"), "name: fixture\n");
+            write(
+                agent_presets.join(preset).join("agent.cordis.yml"),
+                "plugins: []\n",
+            );
+            write(
+                agent_presets.join(preset).join("preset.yml"),
+                "name: fixture\n",
+            );
         }
         write(root.join("deepseek/LICENSE"), "MIT fixture license\n");
 
@@ -95,7 +100,7 @@ impl Fixture {
         let output = root.join("dist");
         fs::create_dir_all(&output).unwrap();
         Self {
-            temp,
+            _temp: temp,
             binary,
             compat_host,
             host_modules,
@@ -161,7 +166,10 @@ fn write_module(root: &Path, name: &str, version: &str, runtime_entries: &[&str]
         .unwrap(),
     );
     for entry in runtime_entries {
-        write(module.join(*entry), format!("export const fixture = {name:?};\n"));
+        write(
+            module.join(*entry),
+            format!("export const fixture = {name:?};\n"),
+        );
     }
     write(module.join("LICENSE"), "MIT fixture license\n");
 }
@@ -260,7 +268,10 @@ fn release_archive_contains_the_verified_host_modules_and_licenses() {
         "share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7/LICENSE",
         "share/licenses/@deepseek-ai-schemastery-3.18.1/LICENSE",
     ] {
-        assert!(listing.lines().any(|entry| entry.ends_with(path)), "archive is missing {path}");
+        assert!(
+            listing.lines().any(|entry| entry.ends_with(path)),
+            "archive is missing {path}"
+        );
     }
 
     let launcher = fixture.stage().join("bin/tessivum");
@@ -268,18 +279,29 @@ fn release_archive_contains_the_verified_host_modules_and_licenses() {
     assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
     assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
     let host_modules = fixture.stage().join("share/tessivum/host-modules");
-    let launcher_env = Command::new(&launcher).arg("--host-module-root").output().unwrap();
+    let launcher_env = Command::new(&launcher)
+        .arg("--host-module-root")
+        .output()
+        .unwrap();
     assert!(launcher_env.status.success());
     assert_eq!(
         String::from_utf8(launcher_env.stdout).unwrap(),
         format!("{}\n", host_modules.display()),
     );
-    for (package, target) in [("cordis", "../../../vendor/cordis"), ("cosmokit", "../../../vendor/cosmokit")] {
+    for (package, target) in [
+        ("cordis", "../../../vendor/cordis"),
+        ("cosmokit", "../../../vendor/cosmokit"),
+    ] {
         let link = host_modules.join("node_modules/@deepseek-ai").join(package);
         assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from(target));
         assert_eq!(
             link.canonicalize().unwrap(),
-            fixture.stage().join("share/tessivum/vendor").join(package).canonicalize().unwrap(),
+            fixture
+                .stage()
+                .join("share/tessivum/vendor")
+                .join(package)
+                .canonicalize()
+                .unwrap(),
         );
     }
 }

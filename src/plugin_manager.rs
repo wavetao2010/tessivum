@@ -63,7 +63,9 @@ impl PnpmProfileBoundary {
     pub fn new(profile: impl AsRef<Path>) -> Result<Self, PluginManagerError> {
         let profile = profile.as_ref();
         fs::create_dir_all(profile).map_err(|error| io_error(profile, error))?;
-        Ok(Self { profile: fs::canonicalize(profile).map_err(|error| io_error(profile, error))? })
+        Ok(Self {
+            profile: fs::canonicalize(profile).map_err(|error| io_error(profile, error))?,
+        })
     }
 }
 
@@ -82,17 +84,37 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         })
         .await
         .map_err(|error| BridgeError::Process(format!("pnpm lock worker failed: {error}")))?
-        .map_err(|error| BridgeError::Process(error.to_string()))?;
+        .map_err(|error| match error {
+            PluginManagerError::Busy(_) => {
+                BridgeError::Process("another desktop pnpm operation is already running".into())
+            }
+            error => BridgeError::Process(error.to_string()),
+        })?;
         let args = route_pnpm_args(&request.args, &profile)?;
         let mut command = TokioCommand::new("pnpm");
-        command.current_dir(&profile).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .current_dir(&profile)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         set_process_group(&mut command)?;
-        let mut child = command.spawn().map_err(|error| BridgeError::Process(format!("could not run pnpm: {error}")))?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| BridgeError::Process(format!("could not run pnpm: {error}")))?;
         let (sender, mut receiver) = mpsc::channel(8);
         let stdout = child.stdout.take().expect("piped stdout exists");
         let stderr = child.stderr.take().expect("piped stderr exists");
-        let stdout_task = tokio::spawn(pump_pnpm_output(stdout, crate::bridge::PnpmOutputStream::Stdout, sender.clone()));
-        let stderr_task = tokio::spawn(pump_pnpm_output(stderr, crate::bridge::PnpmOutputStream::Stderr, sender));
+        let stdout_task = tokio::spawn(pump_pnpm_output(
+            stdout,
+            crate::bridge::PnpmOutputStream::Stdout,
+            sender.clone(),
+        ));
+        let stderr_task = tokio::spawn(pump_pnpm_output(
+            stderr,
+            crate::bridge::PnpmOutputStream::Stderr,
+            sender,
+        ));
         let deadline = tokio::time::sleep(PNPM_OPERATION_TIMEOUT);
         tokio::pin!(deadline);
         let mut ended = 0;
@@ -111,26 +133,50 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         if failure.is_some() {
             stop_process_group(&mut child).await;
         }
-        let status = child.wait().await.map_err(|error| BridgeError::Process(format!("could not wait for pnpm: {error}")))?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|error| BridgeError::Process(format!("could not wait for pnpm: {error}")))?;
         for task in [stdout_task, stderr_task] {
             task.await
-                .map_err(|error| BridgeError::Process(format!("pnpm output worker failed: {error}")))?
-                .map_err(|error| BridgeError::Process(format!("could not read pnpm output: {error}")))?;
+                .map_err(|error| {
+                    BridgeError::Process(format!("pnpm output worker failed: {error}"))
+                })?
+                .map_err(|error| {
+                    BridgeError::Process(format!("could not read pnpm output: {error}"))
+                })?;
         }
         tokio::task::spawn_blocking({
             let profile = profile.clone();
             move || remove_legacy_package_lock(&profile)
         })
         .await
-        .map_err(|error| BridgeError::Process(format!("package-lock cleanup worker failed: {error}")))?
+        .map_err(|error| {
+            BridgeError::Process(format!("package-lock cleanup worker failed: {error}"))
+        })?
         .map_err(|error| BridgeError::Process(error.to_string()))?;
         if let Some(error) = failure {
             return Err(error);
         }
         if !status.success() {
-            return Err(BridgeError::Process(format!("pnpm exited with {}; partial state: {}", status.code().map_or_else(|| "no exit code".into(), |code| code.to_string()), pnpm_state(&profile))));
+            let diagnostic = format!(
+                "tessivum: pnpm exited with {}; partial state: {}\n",
+                status
+                    .code()
+                    .map_or_else(|| "no exit code".into(), |code| code.to_string(),),
+                pnpm_partial_state(&profile, &request.args),
+            );
+            let _ = sink.emit(
+                crate::bridge::PnpmOutputStream::Stderr,
+                diagnostic.as_bytes(),
+            );
         }
-        Ok(crate::bridge::PnpmRunResult { exit_code: status.code(), signal: None, stdout: String::new(), stderr: String::new() })
+        Ok(crate::bridge::PnpmRunResult {
+            exit_code: status.code(),
+            signal: exit_signal(&status),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
     }
 }
 
@@ -146,60 +192,221 @@ async fn pump_pnpm_output<R: AsyncRead + Unpin>(
             let _ = sender.send(None).await;
             return Ok(());
         }
-        if sender.send(Some((stream, buffer[..length].to_vec()))).await.is_err() {
+        if sender
+            .send(Some((stream, buffer[..length].to_vec())))
+            .await
+            .is_err()
+        {
             return Ok(());
         }
     }
 }
 
-fn route_pnpm_args(args: &[String], profile: &Path) -> Result<Vec<String>, BridgeError> {
+const MARKET_PNPM_FLAGS: [&str; 6] = [
+    "-w",
+    "--reporter=ndjson",
+    "--no-frozen-lockfile",
+    "--config.minimumReleaseAge=0",
+    "--config.fetchTimeout=600000",
+    "--config.auto-install-peers=false",
+];
+
+pub(crate) fn validate_market_pnpm_args(args: &[String]) -> Result<(), &'static str> {
+    if args.is_empty() || args.len() > 64 {
+        return Err("args must contain one bounded command");
+    }
     let mut command = None;
     let mut target = None;
-    let mut workspace = false;
+    let mut flags = BTreeSet::new();
     for argument in args {
         match argument.as_str() {
-            "add" | "remove" | "install" if command.is_none() => command = Some(argument.as_str()),
-            "-w" => workspace = true,
-            value if value.is_empty() || value.contains('\0') || value.starts_with('-') || value.chars().any(char::is_whitespace) => return Err(BridgeError::Process("invalid pnpm arguments".into())),
-            value if Path::new(value).is_absolute() || Path::new(value).components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir | std::path::Component::RootDir)) => return Err(BridgeError::Process("invalid pnpm package target".into())),
-            value if target.replace(value).is_some() => return Err(BridgeError::Process("pnpm accepts one target".into())),
-            _ => {}
+            value @ ("add" | "remove" | "install") if command.is_none() => command = Some(value),
+            value if MARKET_PNPM_FLAGS.contains(&value) => {
+                if !flags.insert(value) {
+                    return Err("pnpm flags must not be duplicated");
+                }
+            }
+            value if value.starts_with('-') => return Err("a pnpm flag is not permitted"),
+            value => {
+                if value.is_empty()
+                    || value.len() > 512
+                    || !value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(
+                                byte,
+                                b'@' | b':'
+                                    | b'.'
+                                    | b'/'
+                                    | b'_'
+                                    | b'#'
+                                    | b'+'
+                                    | b'~'
+                                    | b'^'
+                                    | b'='
+                                    | b'-'
+                            )
+                    })
+                    || Path::new(value).is_absolute()
+                    || Path::new(value).components().any(|part| {
+                        matches!(
+                            part,
+                            std::path::Component::ParentDir
+                                | std::path::Component::CurDir
+                                | std::path::Component::RootDir
+                        )
+                    })
+                    || target.replace(value).is_some()
+                {
+                    return Err("a pnpm package target is invalid");
+                }
+            }
         }
     }
-    let command = command.ok_or_else(|| BridgeError::Process("pnpm command is missing".into()))?;
-    if matches!(command, "add" | "remove") != target.is_some() || (command == "install" && target.is_some()) {
-        return Err(BridgeError::Process("pnpm command arguments are not permitted".into()));
+    let command = command.ok_or("pnpm command is missing")?;
+    if (flags.contains("-w") && !matches!(command, "add" | "remove"))
+        || (matches!(command, "add" | "remove") != target.is_some())
+        || (command == "install" && target.is_some())
+    {
+        return Err("pnpm command arguments are not permitted");
     }
+    Ok(())
+}
+
+fn route_pnpm_args(args: &[String], profile: &Path) -> Result<Vec<String>, BridgeError> {
+    validate_market_pnpm_args(args).map_err(|message| BridgeError::Process(message.into()))?;
+    let command = args
+        .iter()
+        .find(|argument| matches!(argument.as_str(), "add" | "remove" | "install"))
+        .expect("validated pnpm args contain a command");
+    let target = args.iter().find(|argument| {
+        !matches!(argument.as_str(), "add" | "remove" | "install")
+            && !MARKET_PNPM_FLAGS.contains(&argument.as_str())
+    });
     let mut result = Vec::with_capacity(8);
-    if workspace { result.push("-w".into()); }
-    result.push(command.into());
-    if let Some(target) = target { result.push(target.into()); }
-    result.extend(["--reporter=ndjson".into(), "--no-frozen-lockfile".into(), "--config.minimumReleaseAge=0".into(), "--config.fetchTimeout=600000".into(), "--config.auto-install-peers=false".into()]);
-    if !profile_allows_builds(profile)? { result.push("--ignore-scripts".into()); }
+    result.push(command.clone());
+    if args.iter().any(|argument| argument == "-w") {
+        result.push("-w".into());
+    }
+    if let Some(target) = target {
+        result.push((*target).clone());
+    }
+    for flag in &MARKET_PNPM_FLAGS[2..5] {
+        if args.iter().any(|argument| argument == flag) {
+            result.push((*flag).into());
+        }
+    }
+    result.push("--reporter=ndjson".into());
+    result.push("--config.auto-install-peers=false".into());
+    if !profile_allows_builds(profile)? {
+        result.push(if command == "remove" {
+            "--config.ignore-scripts=true".into()
+        } else {
+            "--ignore-scripts".into()
+        });
+    }
     Ok(result)
 }
 
 fn profile_allows_builds(profile: &Path) -> Result<bool, BridgeError> {
-    let manifest = read_json(&profile.join("package.json"), MAX_PROFILE_MANIFEST_BYTES).map_err(|error| BridgeError::Process(error.to_string()))?;
-    Ok(manifest.pointer("/pnpm/onlyBuiltDependencies").and_then(Value::as_array).is_some_and(|list| !list.is_empty() && list.iter().all(Value::is_string)))
+    let manifest = read_json(&profile.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)
+        .map_err(|error| BridgeError::Process(error.to_string()))?;
+    Ok(manifest
+        .pointer("/pnpm/onlyBuiltDependencies")
+        .and_then(Value::as_array)
+        .is_some_and(|list| !list.is_empty() && list.iter().all(Value::is_string)))
 }
 
-fn pnpm_state(profile: &Path) -> String {
-    format!("package.json={}; pnpm-lock.yaml={}", if profile.join("package.json").is_file() { "present" } else { "missing" }, if profile.join("pnpm-lock.yaml").is_file() { "present" } else { "missing" })
+fn pnpm_partial_state(profile: &Path, args: &[String]) -> String {
+    let command = args
+        .iter()
+        .find(|argument| matches!(argument.as_str(), "add" | "remove" | "install"))
+        .map(String::as_str);
+    let target = args.iter().find(|argument| {
+        !matches!(argument.as_str(), "add" | "remove" | "install")
+            && !MARKET_PNPM_FLAGS.contains(&argument.as_str())
+    });
+    match (command, target) {
+        (Some("add"), Some(target)) => {
+            mutation_partial_state(profile, &PluginMutation::Add((*target).clone()))
+        }
+        (Some("remove"), Some(target)) => {
+            mutation_partial_state(profile, &PluginMutation::Remove((*target).clone()))
+        }
+        _ => {
+            let (manifest, lock) = profile_document_state(profile);
+            format!(
+                "package.json={manifest}; pnpm-lock.yaml={lock}; target package entry=not applicable"
+            )
+        }
+    }
+}
+
+fn profile_document_state(profile: &Path) -> (String, String) {
+    let manifest = match read_json(&profile.join("package.json"), MAX_PROFILE_MANIFEST_BYTES) {
+        Ok(manifest)
+            if manifest
+                .get("dependencies")
+                .and_then(Value::as_object)
+                .is_some() =>
+        {
+            "valid".into()
+        }
+        Ok(_) => "invalid dependencies".into(),
+        Err(error) => format!("invalid ({error})"),
+    };
+    let lock = match read_bounded(&profile.join("pnpm-lock.yaml"), MAX_PROFILE_LOCK_BYTES) {
+        Ok(lock) => match serde_yaml::from_slice::<serde_yaml::Value>(&lock) {
+            Ok(lock) if lock.is_mapping() => "valid".into(),
+            Ok(_) => "invalid root".into(),
+            Err(error) => format!("invalid ({error})"),
+        },
+        Err(error) => format!("invalid ({error})"),
+    };
+    (manifest, lock)
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(|signal| signal.to_string())
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_: &std::process::ExitStatus) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]
 fn set_process_group(command: &mut TokioCommand) -> Result<(), BridgeError> {
     use std::os::unix::process::CommandExt;
-    unsafe { command.as_std_mut().pre_exec(|| if libc::setpgid(0, 0) == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }); }
+    unsafe {
+        command.as_std_mut().pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
     Ok(())
 }
 #[cfg(not(unix))]
-fn set_process_group(_: &mut TokioCommand) -> Result<(), BridgeError> { Ok(()) }
+fn set_process_group(_: &mut TokioCommand) -> Result<(), BridgeError> {
+    Ok(())
+}
 
 async fn stop_process_group(child: &mut tokio::process::Child) {
     #[cfg(unix)]
-    if let Some(id) = child.id() { unsafe { libc::kill(-(id as libc::pid_t), libc::SIGTERM); } }
+    if let Some(id) = child.id() {
+        let group = -(id as libc::pid_t);
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+    }
     let _ = child.kill().await;
 }
 
@@ -237,11 +444,7 @@ pub fn mutate_plugins(
         .stderr(Stdio::inherit())
         .status()
         .map_err(|error| {
-            mutation_error(
-                format!("could not run pnpm: {error}"),
-                &profile,
-                &mutation,
-            )
+            mutation_error(format!("could not run pnpm: {error}"), &profile, &mutation)
         })?;
     if !status.success() {
         let reason = status.code().map_or_else(
@@ -291,8 +494,7 @@ impl ProfileLock {
                     let owner_path = path.join("owner.json");
                     let owner = match fs::metadata(&owner_path) {
                         Ok(_) => {
-                            let bytes =
-                                read_bounded(&owner_path, MAX_PROFILE_MANIFEST_BYTES)?;
+                            let bytes = read_bounded(&owner_path, MAX_PROFILE_MANIFEST_BYTES)?;
                             serde_json::from_slice::<ProfileLockOwner>(&bytes).map_err(|error| {
                                 PluginManagerError::Invalid(format!(
                                     "{} is invalid: {error}",
@@ -309,10 +511,8 @@ impl ProfileLock {
                         return Err(PluginManagerError::Busy(path.clone()));
                     }
 
-                    let stale = profile.join(format!(
-                        ".tessivum-profile.lock.stale-{}",
-                        owner.nonce
-                    ));
+                    let stale =
+                        profile.join(format!(".tessivum-profile.lock.stale-{}", owner.nonce));
                     match fs::rename(&path, &stale) {
                         Ok(()) => stale_locks.push(stale),
                         Err(error)
@@ -369,7 +569,7 @@ fn profile_lock_owner_is_active(pid: u32) -> bool {
 fn pnpm_arguments(mutation: &PluginMutation) -> &'static [&'static str] {
     match mutation {
         PluginMutation::Add(_) => &["add", "--save-exact", "--ignore-scripts"],
-        PluginMutation::Remove(_) => &["remove", "--ignore-scripts"],
+        PluginMutation::Remove(_) => &["remove", "--config.ignore-scripts=true"],
     }
 }
 
@@ -382,11 +582,7 @@ fn remove_legacy_package_lock(profile: &Path) -> Result<(), PluginManagerError> 
     }
 }
 
-fn mutation_error(
-    reason: String,
-    profile: &Path,
-    mutation: &PluginMutation,
-) -> PluginManagerError {
+fn mutation_error(reason: String, profile: &Path, mutation: &PluginMutation) -> PluginManagerError {
     PluginManagerError::Mutation {
         reason,
         partial_state: mutation_partial_state(profile, mutation),
@@ -394,23 +590,7 @@ fn mutation_error(
 }
 
 fn mutation_partial_state(profile: &Path, mutation: &PluginMutation) -> String {
-    let manifest = profile.join("package.json");
-    let manifest_state = match read_json(&manifest, MAX_PROFILE_MANIFEST_BYTES) {
-        Ok(manifest) if manifest.get("dependencies").and_then(Value::as_object).is_some() => {
-            "valid".into()
-        }
-        Ok(_) => "invalid dependencies".into(),
-        Err(error) => format!("invalid ({error})"),
-    };
-    let pnpm_lock = profile.join("pnpm-lock.yaml");
-    let lock_state = match read_bounded(&pnpm_lock, MAX_PROFILE_LOCK_BYTES) {
-        Ok(lock) => match serde_yaml::from_slice::<serde_yaml::Value>(&lock) {
-            Ok(lock) if lock.is_mapping() => "valid".into(),
-            Ok(_) => "invalid root".into(),
-            Err(error) => format!("invalid ({error})"),
-        },
-        Err(error) => format!("invalid ({error})"),
-    };
+    let (manifest_state, lock_state) = profile_document_state(profile);
     format!(
         "package.json={manifest_state}; pnpm-lock.yaml={lock_state}; target package entry={}",
         mutation_target_entry_state(profile, mutation)
@@ -613,7 +793,10 @@ fn package_entry(
 ) -> Result<Option<Entry>, PluginManagerError> {
     let root = package_root(profile, package)?;
     let route = router
-        .resolve(&root, None)
+        .resolve(
+            &root,
+            declared.is_some().then_some(PluginRuntime::LegacyNode),
+        )
         .map_err(|error| PluginManagerError::Invalid(format!("{package}: {error}")))?;
     let runtime = match route.runtime {
         PluginRuntime::Browser => return Ok(None),
@@ -851,25 +1034,41 @@ fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), Plugin
     for name in ["@deepseek-ai/dsh-settings", "@deepseek-ai/schemastery"] {
         let source = root.join(name);
         let manifest = read_json(&source.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
-        let entry = manifest.get("module").or_else(|| manifest.get("main")).and_then(Value::as_str).unwrap_or("index.js");
+        let entry = manifest
+            .get("module")
+            .or_else(|| manifest.get("main"))
+            .and_then(Value::as_str)
+            .unwrap_or("index.js");
         if !source.join(entry.trim_start_matches("./")).is_file() {
-            return Err(PluginManagerError::Invalid(format!("{} has no usable entry", source.display())));
+            return Err(PluginManagerError::Invalid(format!(
+                "{} has no usable entry",
+                source.display()
+            )));
         }
         let alias = modules.join(name);
-        if fs::canonicalize(&alias).is_ok_and(|path| path == source) { continue; }
+        if fs::canonicalize(&alias).is_ok_and(|path| path == source) {
+            continue;
+        }
         match fs::symlink_metadata(&alias) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => fs::remove_dir_all(&alias).map_err(|error| io_error(&alias, error))?,
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&alias).map_err(|error| io_error(&alias, error))?
+            }
             Ok(_) => fs::remove_file(&alias).map_err(|error| io_error(&alias, error))?,
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(&alias, error)),
         }
-        fs::create_dir_all(alias.parent().expect("scoped alias has a parent")).map_err(|error| io_error(&alias, error))?;
+        fs::create_dir_all(alias.parent().expect("scoped alias has a parent"))
+            .map_err(|error| io_error(&alias, error))?;
         symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
     }
     Ok(())
 }
 
-fn legacy_host_config(cwd: &Path, profile: &Path, profile_name: &str) -> Result<LegacyHostConfig, PluginManagerError> {
+fn legacy_host_config(
+    cwd: &Path,
+    profile: &Path,
+    profile_name: &str,
+) -> Result<LegacyHostConfig, PluginManagerError> {
     let host = env::var_os("TESSIVUM_COMPAT_HOST")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join("../tessivum-core/node/compat-host/src/index.ts"));
@@ -894,7 +1093,10 @@ fn legacy_host_config(cwd: &Path, profile: &Path, profile_name: &str) -> Result<
         install_host_module_aliases(&profile, &root)?;
         command = command.env("TESSIVUM_HOST_MODULE_ROOT", root);
     }
-    Ok(LegacyHostConfig { command, client: ClientConfig::default() })
+    Ok(LegacyHostConfig {
+        command,
+        client: ClientConfig::default(),
+    })
 }
 
 fn io_error(path: impl AsRef<Path>, error: impl std::fmt::Display) -> PluginManagerError {
@@ -933,7 +1135,7 @@ mod tests {
         );
         assert_eq!(
             pnpm_arguments(&PluginMutation::Remove("plugin".into())),
-            &["remove", "--ignore-scripts"]
+            &["remove", "--config.ignore-scripts=true"]
         );
 
         let profile = temporary_profile();
@@ -1006,18 +1208,74 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_pnpm_argv_is_bounded_and_script_safe() {
+    fn compatibility_pnpm_argv_matches_dshmarket_and_remains_script_safe() {
         let profile = temporary_profile();
-        fs::write(profile.join("package.json"), br#"{"pnpm":{"onlyBuiltDependencies":[]}}"#).unwrap();
+        fs::write(
+            profile.join("package.json"),
+            br#"{"dependencies":{},"pnpm":{"onlyBuiltDependencies":[]}}"#,
+        )
+        .unwrap();
         assert_eq!(
-            route_pnpm_args(&["-w".into(), "install".into()], &profile).unwrap(),
+            route_pnpm_args(
+                &[
+                    "add".into(),
+                    "-w".into(),
+                    "dsh-example@^1.2.3".into(),
+                    "--reporter=ndjson".into(),
+                ],
+                &profile,
+            )
+            .unwrap(),
             vec![
-                "-w", "install", "--reporter=ndjson", "--no-frozen-lockfile",
-                "--config.minimumReleaseAge=0", "--config.fetchTimeout=600000",
-                "--config.auto-install-peers=false", "--ignore-scripts",
+                "add",
+                "-w",
+                "dsh-example@^1.2.3",
+                "--reporter=ndjson",
+                "--config.auto-install-peers=false",
+                "--ignore-scripts",
             ]
         );
-        assert!(route_pnpm_args(&["add".into(), "../escape".into()], &profile).is_err());
+        assert_eq!(
+            route_pnpm_args(
+                &[
+                    "--no-frozen-lockfile".into(),
+                    "--config.minimumReleaseAge=0".into(),
+                    "install".into(),
+                ],
+                &profile,
+            )
+            .unwrap(),
+            vec![
+                "install",
+                "--no-frozen-lockfile",
+                "--config.minimumReleaseAge=0",
+                "--reporter=ndjson",
+                "--config.auto-install-peers=false",
+                "--ignore-scripts",
+            ]
+        );
+        assert_eq!(
+            route_pnpm_args(
+                &["remove".into(), "-w".into(), "dsh-example".into()],
+                &profile,
+            )
+            .unwrap(),
+            vec![
+                "remove",
+                "-w",
+                "dsh-example",
+                "--reporter=ndjson",
+                "--config.auto-install-peers=false",
+                "--config.ignore-scripts=true",
+            ]
+        );
+        for args in [
+            vec!["add".into(), "../escape".into()],
+            vec!["add".into(), "plugin@1".into(), "--force".into()],
+            vec!["install".into(), "-w".into()],
+        ] {
+            assert!(route_pnpm_args(&args, &profile).is_err(), "{args:?}");
+        }
         fs::remove_dir_all(profile).unwrap();
     }
 

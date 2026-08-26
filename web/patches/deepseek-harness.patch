@@ -1,3 +1,276 @@
+diff --git a/apps/cli/config/agent-presets/cordis/agent.cordis.yml b/apps/cli/config/agent-presets/cordis/agent.cordis.yml
+index 598418c..96ee8ec 100644
+--- a/apps/cli/config/agent-presets/cordis/agent.cordis.yml
++++ b/apps/cli/config/agent-presets/cordis/agent.cordis.yml
+@@ -18,7 +18,7 @@
+   name: '@deepseek-ai/dsh-persona'
+   config:
+     text: |-
+-      You are a coding agent powered by the {{model}} model, running on the DeepSeek Harness. Your working directory is {{cwd}}.
++      You are a coding agent powered by the {{model}} model, running on Tessivum. Your working directory is {{cwd}}.
+ 
+       You can read and modify the harness you run on. Its composition is Cordis: every capability is a plugin row in a `cordis.yml`, and an agent preset is one such file mounted for a single session.
+ 
+diff --git a/apps/web/index.html b/apps/web/index.html
+index a14de72..1e114df 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -5,7 +5,7 @@
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+     <link rel="manifest" href="/manifest.webmanifest" />
+     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+-    <title>DeepSeek Harness</title>
++    <title>Tessivum</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/apps/web/public/favicon.svg b/apps/web/public/favicon.svg
+index c92f15d..f93bb90 100644
+--- a/apps/web/public/favicon.svg
++++ b/apps/web/public/favicon.svg
+@@ -1,8 +1,7 @@
+-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="50.000000" height="50.000000" viewBox="0 0 50 50" fill="none">
+-	<style>
+-		@media (prefers-color-scheme: dark) {
+-			path { fill: #fff; }
+-		}
+-	</style>
+-	<path id="path" d="M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z" fill="#000" fill-opacity="1.000000" fill-rule="nonzero"/>
++<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
++  <style>:root { color-scheme: light dark; color: CanvasText; }</style>
++  <path d="M6 3H21V7H10L6 3Z" />
++  <path d="M21 8V21H17V12L21 8Z" />
++  <path d="M16 21H3V17H12L16 21Z" />
++  <path d="M3 16V8H7V12L3 16Z" />
+ </svg>
+diff --git a/apps/web/public/manifest.webmanifest b/apps/web/public/manifest.webmanifest
+index 20a428f..3f0fa41 100644
+--- a/apps/web/public/manifest.webmanifest
++++ b/apps/web/public/manifest.webmanifest
+@@ -1,7 +1,7 @@
+ {
+   "id": "/",
+-  "name": "DeepSeek Harness",
+-  "short_name": "DSH",
++  "name": "Tessivum",
++  "short_name": "Tessivum",
+   "start_url": "/",
+   "scope": "/",
+   "display": "fullscreen",
+diff --git a/apps/web/tests/assembled-boot.ts b/apps/web/tests/assembled-boot.ts
+index 52c0658..9ebb885 100644
+--- a/apps/web/tests/assembled-boot.ts
++++ b/apps/web/tests/assembled-boot.ts
+@@ -82,7 +82,7 @@ export function installAssembledBootEnv(): void {
+     // English here.
+     Object.defineProperty(navigator, 'languages', { value: ['en-US'], configurable: true })
+     Object.defineProperty(navigator, 'language', { value: 'en-US', configurable: true })
+-    document.title = 'DeepSeek Harness'
++    document.title = 'Tessivum'
+     vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+       setTimeout(() => { callback(0) }, 0) as unknown as number)
+diff --git a/apps/web/tests/pwa-manifest.e2e.ts b/apps/web/tests/pwa-manifest.e2e.ts
+index fe97e42..8bc0438 100644
+--- a/apps/web/tests/pwa-manifest.e2e.ts
++++ b/apps/web/tests/pwa-manifest.e2e.ts
+@@ -12,8 +12,8 @@ it('ships install metadata with the built web application', async () => {
+   const manifest: unknown = JSON.parse(await readFile(join(DIST_ROOT, 'manifest.webmanifest'), 'utf8'))
+   expect(manifest).toEqual({
+     id: '/',
+-    name: 'DeepSeek Harness',
+-    short_name: 'DSH',
++    name: 'Tessivum',
++    short_name: 'Tessivum',
+     start_url: '/',
+     scope: '/',
+     display: 'fullscreen',
+@@ -26,10 +26,9 @@ it('ships install metadata with the built web application', async () => {
+   })
+ })
+ 
+-it('ships a favicon that switches to a light mark under dark color scheme', async () => {
++it('ships the Tessivum mark in the current system color', async () => {
+   const favicon = await readFile(join(DIST_ROOT, 'favicon.svg'), 'utf8')
+-  // The light fill must live inside the dark-scheme media query, so the icon
+-  // stays black in light mode and only turns white under a dark scheme.
+-  expect(favicon).toMatch(/@media \(prefers-color-scheme: dark\)\s*{\s*path\s*{[^}]*fill:\s*#fff/i)
+-  expect(favicon).toContain('fill="#000"')
++  expect(favicon).toContain('fill="currentColor"')
++  expect(favicon).toContain('color-scheme: light dark')
++  expect(favicon.match(/<path /g)).toHaveLength(4)
+ })
+diff --git a/apps/web/tests/scaffold.ts b/apps/web/tests/scaffold.ts
+index f1ba62d..9814635 100644
+--- a/apps/web/tests/scaffold.ts
++++ b/apps/web/tests/scaffold.ts
+@@ -73,11 +73,11 @@ import { REPO_ROOT, requireDist } from './support.ts'
+ // } from '@deepseek-ai/dsh-client-ui-settings-models'
+ export const WELCOME_NOTICE_SETTINGS_NAMESPACE = 'ui-onboarding'
+ export const WELCOME_NOTICE_ACK_FIELD = 'welcomeNoticeVersion'
+-export const WELCOME_NOTICE_VERSION = '2026-08-13.1'
++export const WELCOME_NOTICE_VERSION = '2026-08-26.1'
+ export const WELCOME_NOTICE_COPY = {
+   zh: {
+     title: '内测声明',
+-    body: 'DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。',
++    body: 'Tessivum 目前的 0.1 版本仍处在面向开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 Tessivum 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。',
+     continueLabel: '继续',
+   },
+ } as const
+diff --git a/apps/web/tests/smoke-real.e2e.ts b/apps/web/tests/smoke-real.e2e.ts
+index 5d479e9..b3596ba 100644
+--- a/apps/web/tests/smoke-real.e2e.ts
++++ b/apps/web/tests/smoke-real.e2e.ts
+@@ -549,7 +549,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY || notReady.length > 0)('web smoke
+     await page.waitForFunction(() => document.body.innerText.length > 50, undefined, { timeout: 15_000 })
+     expect(pageErrors).toEqual([])
+     await page.waitForFunction(
+-      () => document.title !== 'DeepSeek Harness' && document.title.endsWith(' — DeepSeek Harness'),
++      () => document.title !== 'Tessivum' && document.title.endsWith(' — Tessivum'),
+       undefined,
+       { timeout: 15_000 },
+     )
+@@ -561,7 +561,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY || notReady.length > 0)('web smoke
+     if (sessionId === undefined) throw new Error('created Web session was not listed')
+     const durableTitle = await waitForProviderTitle(baseUrl, sessionId)
+     await page.waitForFunction(
+-      expected => document.title === `${expected} — DeepSeek Harness`,
++      expected => document.title === `${expected} — Tessivum`,
+       durableTitle,
+       { timeout: 15_000 },
+     )
+diff --git a/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md b/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
+index c53567f..2a90a09 100644
+--- a/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
++++ b/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
+@@ -1,7 +1,7 @@
+-You are an AI agent powered by DeepSeek Harness.
++You are an AI agent powered by Tessivum.
+ 
+-The DeepSeek Harness implementation checkout is at {{sourceRoot}}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend DSH itself.
++The Tessivum implementation checkout is at {{sourceRoot}}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend Tessivum itself.
+ 
+-You are interacting with the user through the DeepSeek Harness Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
++You are interacting with the user through the Tessivum Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
+ 
+ You are a coding agent powered by the deepseek-v4-flash model. Your working directory is {{cwd}}.
+diff --git a/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md b/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
+index de65e02..3dd57f6 100644
+--- a/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
++++ b/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
+@@ -1,5 +1,5 @@
+ - dialog "内测声明":
+   - heading "内测声明" [level=2]
+-  - paragraph: DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。
+-  - paragraph: 我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。
++  - paragraph: Tessivum 目前的 0.1 版本仍处在面向开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 Tessivum 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。
++  - paragraph: 我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。
+   - button "继续"
+diff --git a/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md b/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
+index bb37e36..6536d16 100644
+--- a/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
++++ b/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
+@@ -1 +1 @@
+-You are interacting with the user through the DeepSeek Harness Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
++You are interacting with the user through the Tessivum Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
+diff --git a/packages/boot/app-boot/src/index.ts b/packages/boot/app-boot/src/index.ts
+index 9be6694..f493d0e 100644
+--- a/packages/boot/app-boot/src/index.ts
++++ b/packages/boot/app-boot/src/index.ts
+@@ -824,6 +824,6 @@ export function addHarnessSourceSection(ctx: Context, sourceRoot: string): (() =
+   return systemPrompt.section({
+     name: HARNESS_SOURCE_SECTION,
+     order: -99,
+-    text: `The DeepSeek Harness implementation checkout is at ${sourceRoot}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend DSH itself.`,
++    text: `The Tessivum implementation checkout is at ${sourceRoot}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend Tessivum itself.`,
+   })
+ }
+diff --git a/packages/boot/app-boot/tests/app-boot.spec.ts b/packages/boot/app-boot/tests/app-boot.spec.ts
+index 9eec620..da313a5 100644
+--- a/packages/boot/app-boot/tests/app-boot.spec.ts
++++ b/packages/boot/app-boot/tests/app-boot.spec.ts
+@@ -783,7 +783,7 @@ describe('boot', () => {
+ 
+ describe('addHarnessSourceSection', () => {
+   const SOURCE_ROOT = `${sep}opt${sep}harness-src`
+-  const EXPECTED = `The DeepSeek Harness implementation checkout is at ${SOURCE_ROOT}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend DSH itself.`
++  const EXPECTED = `The Tessivum implementation checkout is at ${SOURCE_ROOT}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend Tessivum itself.`
+ 
+   it('distinguishes the source path from the current workdir between identity and persona', async () => {
+     const ctx = new Context()
+@@ -796,7 +796,7 @@ describe('addHarnessSourceSection', () => {
+       expect(rendered).toContain(EXPECTED)
+       // Harness-owned opener (-100) → source (-99) → persona (0). The >= 0 guards
+       // keep a drifted opener/persona string from a false pass through `-1 < n`.
+-      const identityAt = rendered.indexOf('You are an AI agent powered by DeepSeek Harness.')
++      const identityAt = rendered.indexOf('You are an AI agent powered by Tessivum.')
+       const sourceAt = rendered.indexOf(EXPECTED)
+       const personaAt = rendered.indexOf('You are a coding agent.')
+       expect(identityAt).toBeGreaterThanOrEqual(0)
+diff --git a/packages/bundle/web-app/src/index.ts b/packages/bundle/web-app/src/index.ts
+index 9b5207d..a1ce573 100644
+--- a/packages/bundle/web-app/src/index.ts
++++ b/packages/bundle/web-app/src/index.ts
+@@ -96,7 +96,7 @@ function webSurfacePrompt(webUrl: string): string {
+   const updateContract = 'The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while '
+     + '`pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. '
+     + 'Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. '
+-  return `You are interacting with the user through the DeepSeek Harness Web GUI at ${webUrl}. `
++  return `You are interacting with the user through the Tessivum Web GUI at ${webUrl}. `
+     + 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. '
+     + 'The browser provides no implicit DOM, route, or screenshot context. '
+     + updateContract
+@@ -150,7 +150,7 @@ export function apply(ctx: Context, config: Config): void {
+       runtimeCtx.shellEnv.register({
+         name: 'web-runtime',
+         variables: {
+-          [DSH_WEB_URL]: { description: 'Canonical local URL of the DeepSeek Harness Web GUI serving this session.' },
++          [DSH_WEB_URL]: { description: 'Canonical local URL of the Tessivum Web GUI serving this session.' },
+         },
+         resolve: () => ({ [DSH_WEB_URL]: localWebUrl(runtimeCtx) }),
+       })
+diff --git a/packages/bundle/web-app/src/startup.ts b/packages/bundle/web-app/src/startup.ts
+index af6997c..2c3a2d4 100644
+--- a/packages/bundle/web-app/src/startup.ts
++++ b/packages/bundle/web-app/src/startup.ts
+@@ -43,7 +43,7 @@ interface WebOptions {
+ function webCommand(): Command {
+   return new Command()
+     .name('dsh --profile web')
+-    .description('Serve the DeepSeek Harness browser UI.')
++    .description('Serve the Tessivum Web GUI.')
+     .helpOption('-h, --help', 'show this help')
+     .option('--host <host>', 'bind host')
+     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
+diff --git a/packages/bundle/web-app/tests/startup.spec.ts b/packages/bundle/web-app/tests/startup.spec.ts
+index 26e347a..b6ddfc3 100644
+--- a/packages/bundle/web-app/tests/startup.spec.ts
++++ b/packages/bundle/web-app/tests/startup.spec.ts
+@@ -115,6 +115,7 @@ describe('web command-line provider', () => {
+   it('prints its own help and leaves the consumer pending', async () => {
+     const { values, observed } = await bootProvider(['--help'])
+     expect(observed.out).toContain('dsh --profile web')
++    expect(observed.out).toContain('Serve the Tessivum Web GUI.')
+     expect(observed.out).toContain('--trusted-host')
+     expect(values).toBeUndefined()
+     expect(observed.readerConfig).toBeUndefined()
+diff --git a/packages/bundle/web-app/tests/web-app.spec.ts b/packages/bundle/web-app/tests/web-app.spec.ts
+index a4e99e8..a01e385 100644
+--- a/packages/bundle/web-app/tests/web-app.spec.ts
++++ b/packages/bundle/web-app/tests/web-app.spec.ts
+@@ -96,9 +96,9 @@ describe('web-app runtime glue', () => {
+     })
+     expect(log).toHaveBeenCalledWith('dsh web: http://127.0.0.1:4567 (LAN: http://192.168.1.5:4567)')
+     const assembly = await ctx.systemPrompt.assemble()
+-    expect(assembly.sections.find(entry => entry.name === 'harness:source')?.text).toContain('DeepSeek Harness implementation checkout')
++    expect(assembly.sections.find(entry => entry.name === 'harness:source')?.text).toContain('Tessivum implementation checkout')
+     const section = assembly.sections.find(entry => entry.name === 'app:web-surface')
+-    expect(section?.text).toContain('http://127.0.0.1:4567')
++    expect(section?.text).toContain('Tessivum Web GUI at http://127.0.0.1:4567')
+     // The single update contract: the receiver is always on; no-refresh
+     // reloads additionally need the rebuild watcher.
+     expect(section?.text).toContain('pnpm run dev:web')
 diff --git a/packages/client/runtime/src/client/sessions/steering-history.ts b/packages/client/runtime/src/client/sessions/steering-history.ts
 index a28c337..c1f838e 100644
 --- a/packages/client/runtime/src/client/sessions/steering-history.ts
@@ -91,6 +364,372 @@ index d576aa1..9724c93 100644
        className={clsx(css.header, hideChrome && css.headerHidden)}
        aria-hidden={hideChrome || undefined}
      >
+diff --git a/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx b/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
+index 4865cee..fb3ee93 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
+@@ -1,4 +1,4 @@
+-// Hero chrome for the blank-draft phase of ConversationRoot: fish headline,
++// Hero chrome for the blank-draft phase of ConversationRoot: brand-mark headline,
+ // glow backdrop, and the workspace row. Pure presentation — the resident
+ // composer is NOT rendered here (it keeps its own stable tree position in
+ // ConversationRoot so the textarea survives the hero → composer flip); CSS
+@@ -7,7 +7,7 @@
+ import { useId } from 'react'
+ import type { ReactNode, RefObject } from 'react'
+ import {
+-  FishLogo, IconChevronDownOutline14, IconFolderClose16, IconFolderOpen16,
++  TessivumMark, IconChevronDownOutline14, IconFolderClose16, IconFolderOpen16,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { workspaceTitleOf } from '@deepseek-ai/dsh-client-runtime/client'
+ import type { ConversationSlotProps } from '../contract/slots.ts'
+@@ -117,9 +117,9 @@ export function HeroShell({ t, children }: HeroShellProps) {
+     <div className={css.root}>
+       <div className={css.stack}>
+         <div className={css.headline}>
+-          {/* figma 34:10412: fish 34×25 leading the headline, gap 10. */}
++          {/* Tessivum mark leading the headline. */}
+           <span className={css.fishHitbox}>
+-            <FishLogo size={34} className={css.fish} />
++            <TessivumMark size={34} className={css.fish} />
+           </span>
+           <span className={css.headlineText}>{t('hero.headline')}</span>
+           <span className={css.previewBadge}>{t('hero.preview')}</span>
+diff --git a/packages/client/ui-primitives/src/BrandWordmark.tsx b/packages/client/ui-primitives/src/BrandWordmark.tsx
+index 768fcdf..e359cbb 100644
+--- a/packages/client/ui-primitives/src/BrandWordmark.tsx
++++ b/packages/client/ui-primitives/src/BrandWordmark.tsx
+@@ -1,56 +1,7 @@
+-// DeepSeek Harness brand wordmark (figma 356:14644, exact extract): whale +
+-// "deepseek-official" letterforms + HARNESS badge plate in one svg. Native 182x24.
+-// Ink rides currentColor; the badge text is knocked out in the inverted
+-// label color so the plate stays legible in both themes.
+-
+ import type { IconProps } from './icons/props.ts'
++import { TessivumWordmark } from './TessivumWordmark.tsx'
+ 
+-/**
+- * Render the full brand wordmark.
+- * @param props.size - height in px (default 24; width keeps the 182:24 ratio).
+- * @param props.className - extra class for layout placement.
+- * @returns the wordmark svg (aria-hidden decorative brand art).
+- */
+-export function BrandWordmark({ size = 24, className }: IconProps) {
+-  return (
+-    <svg
+-      width={(size * 182) / 24}
+-      height={size}
+-      className={className}
+-      viewBox="0 0 182 24"
+-      fill="none"
+-      aria-hidden="true"
+-    >
+-      <path d="M68.416 18.2447H67.0501V16.1272H68.416C69.2619 16.1272 70.1166 15.9163 70.6671 15.3304C71.2181 14.7444 71.426 13.8455 71.426 12.9471C71.426 12.0487 71.2268 11.1498 70.6671 10.5643C70.1083 9.97831 69.2619 9.76744 68.416 9.76744C67.5701 9.76744 66.7154 9.97831 66.1639 10.5643C65.6129 11.1503 65.4049 12.0487 65.4049 12.9471V21.6435H63.009V7.6582H65.4049V8.54883H65.8442C65.8918 8.49393 65.9394 8.44728 65.9875 8.40064C66.5871 7.85353 67.5049 7.6582 68.4072 7.6582C69.8212 7.6582 71.2341 8.00998 72.1607 8.98662C73.0868 9.96325 73.4143 11.4632 73.4143 12.9558C73.4143 14.4485 73.0785 15.9406 72.1607 16.925C71.2424 17.9094 69.8212 18.2457 68.416 18.2457V18.2447Z" fill="currentColor"/>
+-      <path d="M31.9551 8.03497H33.3204V10.1525H31.9551C31.1087 10.1525 30.2545 10.3633 29.7035 10.9493C29.1525 11.5353 28.945 12.4342 28.945 13.3326C28.945 14.231 29.1447 15.1294 29.7035 15.7154C30.2623 16.3014 31.1087 16.5122 31.9551 16.5122C32.8015 16.5122 33.6562 16.3014 34.2072 15.7154C34.7582 15.1294 34.9657 14.231 34.9657 13.3326V4.62842H37.3611V18.6219H34.9657V17.7313H34.5264C34.4783 17.7857 34.4307 17.8329 34.3826 17.8795C33.7835 18.4261 32.8652 18.6219 31.9629 18.6219C30.5494 18.6219 29.136 18.2707 28.2099 17.294C27.2838 16.3174 26.9563 14.817 26.9563 13.3248C26.9563 11.8327 27.2916 10.34 28.2099 9.35561C29.136 8.37898 30.5494 8.03497 31.9551 8.03497Z" fill="currentColor"/>
+-      <path d="M49.3786 13.1431V13.9948H42.9984V12.2996H47.2305C47.1348 11.6825 46.9113 11.1043 46.5119 10.682C45.9371 10.0727 45.0503 9.85409 44.1723 9.85409C43.2943 9.85409 42.4076 10.0727 41.8328 10.682C41.258 11.2913 41.05 12.2213 41.05 13.1435C41.05 14.0658 41.2575 15.003 41.8328 15.6046C42.4076 16.2061 43.2939 16.433 44.1723 16.433C45.0508 16.433 45.9371 16.2143 46.5119 15.6046C46.5916 15.5186 46.6635 15.4248 46.7354 15.331H49.0992C48.8918 16.0657 48.5643 16.7299 48.0691 17.2454C47.111 18.2531 45.6339 18.6205 44.1723 18.6205C42.7108 18.6205 41.2337 18.2609 40.2755 17.2454C39.3174 16.2299 38.9661 14.6828 38.9661 13.1435C38.9661 11.6043 39.3096 10.0494 40.2755 9.04168C41.242 8.03396 42.7108 7.66663 44.1723 7.66663C45.6339 7.66663 47.111 8.02618 48.0691 9.04168C49.0351 10.0572 49.3786 11.6043 49.3786 13.1435V13.1431Z" fill="currentColor"/>
+-      <path d="M61.4045 13.1431V13.9948H55.0243V12.2996H59.2564C59.1602 11.6825 58.9372 11.1043 58.5378 10.682C57.963 10.0727 57.0762 9.85409 56.1982 9.85409C55.3202 9.85409 54.4335 10.0727 53.8587 10.682C53.2839 11.2913 53.0759 12.2213 53.0759 13.1435C53.0759 14.0658 53.2834 15.003 53.8587 15.6046C54.4335 16.2061 55.3202 16.433 56.1982 16.433C57.0762 16.433 57.963 16.2143 58.5378 15.6046C58.6179 15.5186 58.6894 15.4248 58.7608 15.331H61.1251C60.9171 16.0657 60.5897 16.7299 60.0945 17.2454C59.1364 18.2531 57.6593 18.6205 56.1982 18.6205C54.7372 18.6205 53.2596 18.2609 52.3014 17.2454C51.3432 16.2299 50.9919 14.6828 50.9919 13.1435C50.9919 11.6043 51.3355 10.0494 52.3014 9.04168C53.2678 8.03396 54.7367 7.66663 56.1982 7.66663C57.6598 7.66663 59.1364 8.02618 60.0945 9.04168C61.061 10.0572 61.4045 11.6043 61.4045 13.1435V13.1431Z" fill="currentColor"/>
+-      <path d="M80.242 18.6214C81.7035 18.6214 83.1801 18.4105 84.1383 17.809C85.0965 17.2075 85.4482 16.2931 85.4482 15.3869C85.4482 14.4807 85.1042 13.5585 84.1383 12.9647C83.1801 12.371 81.703 12.1518 80.242 12.1518C79.6186 12.1518 79.0438 12.0658 78.6366 11.8394C78.2294 11.6047 78.0778 11.2534 78.0778 10.9017C78.0778 10.5499 78.2216 10.1908 78.6366 9.9639C79.0438 9.72921 79.6749 9.65147 80.2973 9.65147C80.9198 9.65147 81.5509 9.73747 81.9591 9.9639C82.3663 10.1986 82.5179 10.5499 82.5179 10.9017H84.9531C84.9531 9.99499 84.6421 9.07327 83.7719 8.47951C82.9017 7.88576 81.5679 7.66663 80.2424 7.66663C78.9169 7.66663 77.5837 7.8775 76.713 8.47951C75.8427 9.08104 75.5308 9.99499 75.5308 10.9017C75.5308 11.8083 75.8423 12.73 76.713 13.3238C77.5832 13.9176 78.9165 14.1367 80.2424 14.1367C80.929 14.1367 81.688 14.2227 82.1428 14.4491C82.5985 14.676 82.7579 15.0351 82.7579 15.3869C82.7579 15.7387 82.5985 16.0977 82.1428 16.3246C81.688 16.5511 80.9931 16.6371 80.3066 16.6371C79.62 16.6371 78.9169 16.5511 78.4694 16.3246C78.0224 16.0982 77.8543 15.7387 77.8543 15.3869H75.0435C75.0435 16.2935 75.3865 17.2153 76.3534 17.809C77.3194 18.4028 78.7809 18.6214 80.2424 18.6214H80.242Z" fill="currentColor"/>
+-      <path d="M97.4733 13.1431V13.9948H91.0932V12.2996H95.3252C95.23 11.6825 95.006 11.1043 94.6071 10.682C94.0313 10.0727 93.1456 9.85409 92.2666 9.85409C91.3876 9.85409 90.5018 10.0727 89.927 10.682C89.3522 11.2913 89.1452 12.2213 89.1452 13.1435C89.1452 14.0658 89.3522 15.003 89.927 15.6046C90.5018 16.2061 91.3886 16.433 92.2666 16.433C93.1446 16.433 94.0313 16.2143 94.6071 15.6046C94.6863 15.5186 94.7587 15.4248 94.8301 15.331H97.1935C96.9855 16.0657 96.6585 16.7299 96.1639 17.2454C95.2057 18.2531 93.7281 18.6205 92.2666 18.6205C90.805 18.6205 89.3284 18.2609 88.3703 17.2454C87.4121 16.2299 87.0613 14.6828 87.0613 13.1435C87.0613 11.6043 87.4043 10.0494 88.3703 9.04168C89.3367 8.03396 90.806 7.66663 92.2666 7.66663C93.7272 7.66663 95.2057 8.02618 96.1639 9.04168C97.1298 10.0572 97.4729 11.6043 97.4729 13.1435L97.4733 13.1431Z" fill="currentColor"/>
+-      <path d="M109.499 13.1431V13.9948H103.119V12.2996H107.351C107.256 11.6825 107.032 11.1043 106.632 10.682C106.057 10.0727 105.172 9.85409 104.293 9.85409C103.414 9.85409 102.528 10.0727 101.953 10.682C101.378 11.2913 101.17 12.2213 101.17 13.1435C101.17 14.0658 101.378 15.003 101.953 15.6046C102.528 16.2061 103.415 16.433 104.293 16.433C105.171 16.433 106.057 16.2143 106.632 15.6046C106.712 15.5186 106.784 15.4248 106.856 15.331H109.22C109.012 16.0657 108.685 16.7299 108.19 17.2454C107.231 18.2531 105.754 18.6205 104.293 18.6205C102.831 18.6205 101.355 18.2609 100.396 17.2454C99.4382 16.2299 99.0864 14.6828 99.0864 13.1435C99.0864 11.6043 99.4295 10.0494 100.396 9.04168C101.362 8.03396 102.832 7.66663 104.293 7.66663C105.754 7.66663 107.231 8.02618 108.19 9.04168C109.156 10.0572 109.499 11.6043 109.499 13.1435V13.1431Z" fill="currentColor"/>
+-      <path d="M113.5 4.62817H111.104V18.6217H113.5V4.62817Z" fill="currentColor"/>
+-      <path d="M117.589 12.8154L121.517 18.6208H118.554L114.625 12.8154L118.554 8.15088H121.517L117.589 12.8154Z" fill="currentColor"/>
+-      <g clipPath="url(#dsh-wordmark-whale-clip)">
+-        <path d="M23.0584 4.95203C22.8129 4.83203 22.7074 5.06103 22.5639 5.17704C22.5149 5.21454 22.4734 5.26354 22.4319 5.30854C22.0734 5.69155 21.6543 5.94306 21.1073 5.91306C20.3073 5.86806 19.6243 6.11957 19.0203 6.73158C18.8918 5.97706 18.4652 5.52655 17.8162 5.23754C17.4767 5.08753 17.1332 4.93703 16.8952 4.61052C16.7292 4.37801 16.6837 4.11901 16.6007 3.8635C16.5477 3.70949 16.4952 3.55199 16.3177 3.52549C16.1252 3.49549 16.0497 3.65699 15.9742 3.792C15.6722 4.34401 15.5552 4.95203 15.5667 5.56805C15.5932 6.95359 16.1782 8.05712 17.3407 8.84215C17.4727 8.93215 17.5067 9.02215 17.4652 9.15366C17.3857 9.42416 17.2917 9.68667 17.2087 9.95718C17.1557 10.1297 17.0767 10.1677 16.8917 10.0922C16.2537 9.82568 15.7027 9.43117 15.2156 8.95465C14.3891 8.15513 13.6416 7.2726 12.7096 6.58158C12.4906 6.42007 12.2716 6.27007 12.045 6.12707C11.094 5.20354 12.1696 4.44502 12.4186 4.35501C12.6791 4.26101 12.5091 3.938 11.6675 3.942C10.826 3.9455 10.056 4.22751 9.07446 4.60302C8.93096 4.65952 8.77995 4.70052 8.62545 4.73452C7.73492 4.56552 6.80989 4.52802 5.84386 4.63702C4.02481 4.83953 2.57177 5.69955 1.50373 7.1676C0.220694 8.93215 -0.0813148 10.9372 0.288196 13.0283C0.676708 15.2323 1.80174 17.0569 3.53029 18.4834C5.32285 19.9625 7.38741 20.6875 9.74298 20.5485C11.1735 20.466 12.7661 20.2745 14.5626 18.7539C15.0156 18.9795 15.4912 19.0695 16.2797 19.137C16.8872 19.1935 17.4722 19.107 17.9252 19.013C18.6347 18.8629 18.5857 18.2059 18.3292 18.0854C16.2497 17.1169 16.7062 17.5109 16.2912 17.1919C17.3477 15.9419 18.9618 13.7198 19.4598 10.6942C19.5088 10.3602 19.5713 9.88968 19.5638 9.61917C19.5598 9.45417 19.5978 9.39016 19.7863 9.37116C20.3073 9.31116 20.8128 9.16866 21.2773 8.91315C22.6249 8.17713 23.1684 6.96809 23.2964 5.51905C23.3154 5.29754 23.2924 5.06853 23.0584 4.95203ZM11.3165 17.9954C9.30097 16.4109 8.32344 15.8894 7.91992 15.9119C7.54241 15.9344 7.61042 16.3664 7.69342 16.6479C7.78042 16.9259 7.89342 17.1174 8.05193 17.3614C8.16143 17.5229 8.23694 17.7629 7.94243 17.9434C7.29341 18.3449 6.16487 17.8084 6.11187 17.7819C4.79833 17.0084 3.7003 15.9874 2.92628 14.5908C2.17875 13.2468 1.74474 11.8047 1.67324 10.2657C1.65424 9.89418 1.76374 9.76267 2.13375 9.69517C2.62077 9.60517 3.12278 9.58617 3.6093 9.65767C5.66636 9.95818 7.41741 10.8777 8.88545 12.3348C9.72348 13.1643 10.3575 14.1558 11.0105 15.1243C11.705 16.1529 12.4521 17.1329 13.4036 17.9364C13.7396 18.2179 14.0076 18.4319 14.2641 18.5899C13.4906 18.6764 12.1996 18.6949 11.3165 17.9964V17.9954ZM12.2826 11.7817C12.2826 11.6167 12.4146 11.4852 12.5806 11.4852C12.6181 11.4852 12.6521 11.4927 12.6826 11.5037C12.7241 11.5187 12.7621 11.5412 12.7921 11.5752C12.8451 11.6277 12.8751 11.7027 12.8751 11.7817C12.8751 11.9467 12.7431 12.0782 12.5771 12.0782C12.4111 12.0782 12.2826 11.9467 12.2826 11.7817ZM15.2831 13.3208C15.0906 13.3998 14.8981 13.4673 14.7131 13.4748C14.4261 13.4898 14.1131 13.3733 13.9431 13.2308C13.6791 13.0093 13.4901 12.8853 13.4111 12.4988C13.3771 12.3338 13.3961 12.0782 13.4261 11.9317C13.4941 11.6162 13.4186 11.4137 13.1961 11.2297C13.0151 11.0797 12.7846 11.0382 12.5316 11.0382C12.4371 11.0382 12.3506 10.9967 12.2861 10.9632C12.1806 10.9107 12.0936 10.7792 12.1766 10.6177C12.2031 10.5652 12.3316 10.4377 12.3616 10.4152C12.7051 10.2197 13.1011 10.2837 13.4676 10.4302C13.8071 10.5692 14.0641 10.8242 14.4336 11.1847C14.8111 11.6202 14.8791 11.7402 15.0941 12.0672C15.2641 12.3228 15.4186 12.5853 15.5247 12.8858C15.5887 13.0733 15.5057 13.2268 15.2831 13.3208Z" fill="currentColor"/>
+-      </g>
+-      <rect x="129.348" y="5.5" width="52" height="14" rx="2" fill="currentColor"/>
+-      <g clipPath="url(#dsh-wordmark-badge-clip)">
+-        <path d="M132.848 8.93205H134.08V16.137H132.848V8.93205ZM136.5 8.93205H137.732V16.137H136.5V8.93205ZM133.365 13.024V11.99H137.193V13.024H133.365Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-        <path d="M140.397 14.432L140.672 13.453H143.202L143.532 14.432H140.397ZM140.287 16.137H139.055L141.277 8.93205H142.201L142.146 9.74605L140.947 13.915H140.969L140.287 16.137ZM145.039 16.137H143.741L143.07 13.948L143.081 13.937L141.871 9.74605L141.926 8.93205H142.817L145.039 16.137Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-        <path d="M146.846 8.93205H149.068C149.852 8.93205 150.443 9.11538 150.839 9.48205C151.235 9.84138 151.433 10.3327 151.433 10.956C151.433 11.22 151.396 11.4657 151.323 11.693C151.249 11.9204 151.125 12.1257 150.949 12.309C150.773 12.4924 150.531 12.65 150.223 12.782C149.922 12.9067 149.541 13.0057 149.079 13.079V13.321H146.846V12.639L148.023 12.485C148.631 12.4044 149.09 12.298 149.398 12.166C149.706 12.034 149.915 11.8764 150.025 11.693C150.135 11.5024 150.19 11.2934 150.19 11.066C150.19 10.6994 150.083 10.417 149.871 10.219C149.658 10.021 149.324 9.92205 148.87 9.92205H146.846V8.93205ZM146.395 8.93205H147.627V16.137H146.395V8.93205ZM151.917 16.093V16.137H150.366L149.024 14.322C148.87 14.1094 148.73 13.9407 148.606 13.816C148.481 13.684 148.345 13.5887 148.199 13.53C148.052 13.464 147.872 13.42 147.66 13.398C147.447 13.3687 147.176 13.3504 146.846 13.343V13.145H149.079C149.233 13.211 149.368 13.2844 149.486 13.365C149.61 13.4457 149.735 13.5447 149.86 13.662C149.992 13.7794 150.138 13.937 150.3 14.135L151.917 16.093Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-        <path d="M153.58 9.57005L153.591 8.93205H154.46L157.584 15.51V16.137H156.704L153.58 9.57005ZM158.024 16.137H156.968L156.88 8.93205H158.024V16.137ZM154.24 16.137H153.096V8.93205H154.152L154.24 16.137Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-        <path d="M159.963 8.93205H161.206V16.137H159.963V8.93205ZM160.095 9.96605V8.93205H164.858V9.96605H160.095ZM160.095 16.137V15.103H164.902V16.137H160.095ZM160.095 13.013V11.99H164.374V13.013H160.095Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-        <path d="M169.052 15.257C169.543 15.257 169.895 15.1654 170.108 14.982C170.328 14.7987 170.438 14.5457 170.438 14.223C170.438 14.047 170.405 13.8967 170.339 13.772C170.273 13.6474 170.152 13.5337 169.976 13.431C169.807 13.321 169.558 13.2147 169.228 13.112L168.491 12.881C167.846 12.6757 167.38 12.4044 167.094 12.067C166.808 11.7297 166.665 11.3007 166.665 10.78C166.665 10.428 166.76 10.1017 166.951 9.80105C167.142 9.50038 167.428 9.25838 167.809 9.07505C168.19 8.89172 168.663 8.80005 169.228 8.80005C169.631 8.80005 169.998 8.82938 170.328 8.88805C170.665 8.93938 171.039 9.01638 171.45 9.11905L171.274 10.175C170.834 10.0504 170.442 9.96238 170.097 9.91105C169.76 9.85238 169.463 9.82305 169.206 9.82305C168.737 9.82305 168.403 9.90738 168.205 10.076C168.007 10.2374 167.908 10.439 167.908 10.681C167.908 10.857 167.941 11.0147 168.007 11.154C168.073 11.286 168.19 11.407 168.359 11.517C168.535 11.627 168.784 11.7334 169.107 11.836L169.866 12.078C170.526 12.276 170.995 12.5327 171.274 12.848C171.553 13.156 171.692 13.585 171.692 14.135C171.692 14.5604 171.589 14.9344 171.384 15.257C171.179 15.5797 170.878 15.8327 170.482 16.016C170.093 16.1994 169.609 16.291 169.03 16.291C168.627 16.291 168.212 16.247 167.787 16.159C167.362 16.071 166.9 15.9427 166.401 15.774L166.665 14.718C167.156 14.894 167.6 15.0297 167.996 15.125C168.399 15.213 168.751 15.257 169.052 15.257Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-        <path d="M175.809 15.257C176.3 15.257 176.652 15.1654 176.865 14.982C177.085 14.7987 177.195 14.5457 177.195 14.223C177.195 14.047 177.162 13.8967 177.096 13.772C177.03 13.6474 176.909 13.5337 176.733 13.431C176.564 13.321 176.315 13.2147 175.985 13.112L175.248 12.881C174.603 12.6757 174.137 12.4044 173.851 12.067C173.565 11.7297 173.422 11.3007 173.422 10.78C173.422 10.428 173.517 10.1017 173.708 9.80105C173.899 9.50038 174.185 9.25838 174.566 9.07505C174.947 8.89172 175.42 8.80005 175.985 8.80005C176.388 8.80005 176.755 8.82938 177.085 8.88805C177.422 8.93938 177.796 9.01638 178.207 9.11905L178.031 10.175C177.591 10.0504 177.199 9.96238 176.854 9.91105C176.517 9.85238 176.22 9.82305 175.963 9.82305C175.494 9.82305 175.16 9.90738 174.962 10.076C174.764 10.2374 174.665 10.439 174.665 10.681C174.665 10.857 174.698 11.0147 174.764 11.154C174.83 11.286 174.947 11.407 175.116 11.517C175.292 11.627 175.541 11.7334 175.864 11.836L176.623 12.078C177.283 12.276 177.752 12.5327 178.031 12.848C178.31 13.156 178.449 13.585 178.449 14.135C178.449 14.5604 178.346 14.9344 178.141 15.257C177.936 15.5797 177.635 15.8327 177.239 16.016C176.85 16.1994 176.366 16.291 175.787 16.291C175.384 16.291 174.969 16.247 174.544 16.159C174.119 16.071 173.657 15.9427 173.158 15.774L173.422 14.718C173.913 14.894 174.357 15.0297 174.753 15.125C175.156 15.213 175.508 15.257 175.809 15.257Z" fill="var(--dsw-alias-label-primary-inverted)"/>
+-      </g>
+-      <defs>
+-        <clipPath id="dsh-wordmark-whale-clip">
+-          <rect width="23.16" height="17.0435" fill="white" transform="translate(0.141602 3.52185)"/>
+-        </clipPath>
+-        <clipPath id="dsh-wordmark-badge-clip">
+-          <rect width="46" height="14" fill="white" transform="translate(132.348 5.5)"/>
+-        </clipPath>
+-      </defs>
+-    </svg>
+-  )
++/** Compatibility export for consumers that still import the former wordmark name. */
++export function BrandWordmark(props: IconProps) {
++  return <TessivumWordmark {...props} />
+ }
+diff --git a/packages/client/ui-primitives/src/FishLogo.tsx b/packages/client/ui-primitives/src/FishLogo.tsx
+index 9b882a8..c22c02c 100644
+--- a/packages/client/ui-primitives/src/FishLogo.tsx
++++ b/packages/client/ui-primitives/src/FishLogo.tsx
+@@ -1,27 +1,7 @@
+-// DeepSeek fish logo (figma I39:24057;88:8943 fillGeometry, exact extract;
+-// the full-canvas rectangle path from the raw dump is a background plate and
+-// is intentionally dropped). Native 23.16x17.04, rendered 24x18 by default;
+-// hero usage scales to 34x25. Color rides currentColor (wordmark ink).
+-
+ import type { IconProps } from './icons/props.ts'
++import { TessivumMark } from './TessivumMark.tsx'
+ 
+-/**
+- * Render the fish logo.
+- * @param props.size - width in px (default 24; height keeps the 23.16:17.04 ratio).
+- * @param props.className - extra class for layout placement.
+- * @returns the logo svg (aria-hidden; pair with the wordmark for accessibility).
+- */
+-export function FishLogo({ size = 24, className }: IconProps) {
+-  return (
+-    <svg
+-      width={size}
+-      height={(size * 17.04) / 23.16}
+-      className={className}
+-      viewBox="0 0 23.16 17.04"
+-      fill="none"
+-      aria-hidden="true"
+-    >
+-      <path d="M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z" fill="currentColor"/>
+-    </svg>
+-  )
++/** Compatibility export for consumers that still import the former logo name. */
++export function FishLogo(props: IconProps) {
++  return <TessivumMark {...props} />
+ }
+diff --git a/packages/client/ui-primitives/src/TessivumMark.tsx b/packages/client/ui-primitives/src/TessivumMark.tsx
+new file mode 100644
+index 0000000..5b7058f
+--- /dev/null
++++ b/packages/client/ui-primitives/src/TessivumMark.tsx
+@@ -0,0 +1,20 @@
++import type { IconProps } from './icons/props.ts'
++
++/** Render Tessivum's four-piece open-loop mark. */
++export function TessivumMark({ size = 24, className }: IconProps) {
++  return (
++    <svg
++      width={size}
++      height={size}
++      className={className}
++      viewBox="0 0 24 24"
++      fill="currentColor"
++      aria-hidden="true"
++    >
++      <path d="M6 3H21V7H10L6 3Z" />
++      <path d="M21 8V21H17V12L21 8Z" />
++      <path d="M16 21H3V17H12L16 21Z" />
++      <path d="M3 16V8H7V12L3 16Z" />
++    </svg>
++  )
++}
+diff --git a/packages/client/ui-primitives/src/TessivumWordmark.tsx b/packages/client/ui-primitives/src/TessivumWordmark.tsx
+new file mode 100644
+index 0000000..74ef4ac
+--- /dev/null
++++ b/packages/client/ui-primitives/src/TessivumWordmark.tsx
+@@ -0,0 +1,27 @@
++import type { IconProps } from './icons/props.ts'
++
++/** Render Tessivum's mark and custom vector wordmark. */
++export function TessivumWordmark({ size = 24, className }: IconProps) {
++  return (
++    <svg
++      width={(size * 126) / 24}
++      height={size}
++      className={className}
++      viewBox="0 0 126 24"
++      fill="none"
++      aria-hidden="true"
++    >
++      <path d="M6 3H21V7H10L6 3Z" fill="currentColor" />
++      <path d="M21 8V21H17V12L21 8Z" fill="currentColor" />
++      <path d="M16 21H3V17H12L16 21Z" fill="currentColor" />
++      <path d="M3 16V8H7V12L3 16Z" fill="currentColor" />
++      <path
++        d="M30 6H38M34 6V18 M50 6H42V18H50M42 12H48 M62 6H54V12H62V18H54 M74 6H66V12H74V18H66 M78 6H86M82 6V18M78 18H86 M90 6L94 18L98 6 M102 6V16C102 17.3 102.7 18 104 18H108C109.3 18 110 17.3 110 16V6 M114 18V6L118 12L122 6V18"
++        stroke="currentColor"
++        strokeWidth="2"
++        strokeLinecap="square"
++        strokeLinejoin="miter"
++      />
++    </svg>
++  )
++}
+diff --git a/packages/client/ui-primitives/src/index.ts b/packages/client/ui-primitives/src/index.ts
+index 05baf26..3b4c5c8 100644
+--- a/packages/client/ui-primitives/src/index.ts
++++ b/packages/client/ui-primitives/src/index.ts
+@@ -19,6 +19,8 @@ export { OnboardingSurface } from './OnboardingSurface.tsx'
+ export { RiskConfirmation } from './RiskConfirmation.tsx'
+ export type { RiskConfirmationProps } from './RiskConfirmation.tsx'
+ export { ConnectionBanner } from './ConnectionBanner.tsx'
++export { TessivumMark } from './TessivumMark.tsx'
++export { TessivumWordmark } from './TessivumWordmark.tsx'
+ export { FishLogo } from './FishLogo.tsx'
+ export { BrandWordmark } from './BrandWordmark.tsx'
+ export { Tooltip } from './Tooltip.tsx'
+diff --git a/packages/client/ui-primitives/tests/icons.client.spec.tsx b/packages/client/ui-primitives/tests/icons.client.spec.tsx
+index 469c5aa..34bd596 100644
+--- a/packages/client/ui-primitives/tests/icons.client.spec.tsx
++++ b/packages/client/ui-primitives/tests/icons.client.spec.tsx
+@@ -54,15 +54,27 @@ describe('ic_ds_ icon set', () => {
+   })
+ })
+ 
+-describe('FishLogo', () => {
+-  it('renders the fish path in currentColor at the native ratio', () => {
+-    const { container } = render(<primitives.FishLogo />)
++describe('Tessivum brand assets', () => {
++  it('renders a square four-piece currentColor mark with no embedded presentation', () => {
++    const { container } = render(<primitives.TessivumMark />)
+     const svg = container.querySelector('svg')!
+     expect(svg.getAttribute('width')).toBe('24')
+-    expect(Number(svg.getAttribute('height'))).toBeCloseTo(17.66, 1)
+-    expect(svg.getAttribute('viewBox')).toBe('0 0 23.16 17.04')
+-    expect(container.querySelectorAll('path')).toHaveLength(1)
++    expect(svg.getAttribute('height')).toBe('24')
++    expect(svg.getAttribute('viewBox')).toBe('0 0 24 24')
++    expect(svg.getAttribute('aria-hidden')).toBe('true')
++    expect(container.querySelectorAll('path')).toHaveLength(4)
+     expect(container.innerHTML).toContain('currentColor')
+-    expect(container.innerHTML).not.toContain('M0 0L23.16')
++    expect(container.querySelector('linearGradient, filter, text, image')).toBeNull()
++  })
++
++  it('keeps compatibility exports on the Tessivum artwork', () => {
++    const currentMark = render(<primitives.TessivumMark />)
++    const legacyMark = render(<primitives.FishLogo />)
++    expect(legacyMark.container.innerHTML).toBe(currentMark.container.innerHTML)
++    const currentWordmark = render(<primitives.TessivumWordmark />)
++    const legacyWordmark = render(<primitives.BrandWordmark />)
++    expect(legacyWordmark.container.innerHTML).toBe(currentWordmark.container.innerHTML)
++    expect(currentWordmark.container.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true')
++    expect(currentWordmark.container.querySelector('linearGradient, filter, text, image')).toBeNull()
+   })
+ })
+diff --git a/packages/client/ui-settings-models/src/onboarding-copy.ts b/packages/client/ui-settings-models/src/onboarding-copy.ts
+index d52371a..f7ad102 100644
+--- a/packages/client/ui-settings-models/src/onboarding-copy.ts
++++ b/packages/client/ui-settings-models/src/onboarding-copy.ts
+@@ -8,18 +8,18 @@ export const WELCOME_NOTICE_ACK_FIELD = 'welcomeNoticeVersion'
+  * Bump only when the notice changes materially and every user should see it
+  * again. The acknowledgement is compared for exact equality.
+  */
+-export const WELCOME_NOTICE_VERSION = '2026-08-13.1'
++export const WELCOME_NOTICE_VERSION = '2026-08-26.1'
+ 
+ /** The complete editable internal-testing notice in both supported GUI locales. */
+ export const WELCOME_NOTICE_COPY = {
+   zh: {
+     title: '内测声明',
+-    body: 'DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。',
++    body: 'Tessivum 目前的 0.1 版本仍处在面向开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 Tessivum 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。',
+     continueLabel: '继续',
+   },
+   en: {
+     title: 'Internal Testing Notice',
+-    body: "DeepSeek Harness 0.1 remains in testing for Harness developers. Many areas need further improvement, and we welcome feedback from the developer community. DeepSeek Harness's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome Harness developers everywhere to join the DSH plugin ecosystem.",
++    body: "Tessivum 0.1 remains in testing for developers. Many areas need further improvement, and we welcome feedback from the developer community. Tessivum's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome developers everywhere to join the Tessivum plugin ecosystem.",
+     continueLabel: 'Continue',
+   },
+ } as const
+diff --git a/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx b/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
+index 8b8858c..a84e04a 100644
+--- a/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
++++ b/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
+@@ -64,7 +64,7 @@ describe('WelcomeNotice', () => {
+   it('uses the exact owner copy in both GUI locales', () => {
+     expect(WELCOME_NOTICE_COPY.en).toEqual({
+       title: 'Internal Testing Notice',
+-      body: "DeepSeek Harness 0.1 remains in testing for Harness developers. Many areas need further improvement, and we welcome feedback from the developer community. DeepSeek Harness's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome Harness developers everywhere to join the DSH plugin ecosystem.",
++      body: "Tessivum 0.1 remains in testing for developers. Many areas need further improvement, and we welcome feedback from the developer community. Tessivum's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome developers everywhere to join the Tessivum plugin ecosystem.",
+       continueLabel: 'Continue',
+     })
+     expect(en.welcomeBody).toBe(WELCOME_NOTICE_COPY.en.body)
+diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
+index d3fe6a6..449fa08 100644
+--- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
++++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
+@@ -18,7 +18,7 @@
+ import { useEffect, useRef, useState } from 'react'
+ import clsx from 'clsx'
+ import {
+-  BrandWordmark, FishLogo,
++  TessivumMark, TessivumWordmark,
+   IconNewChatOutline16, IconPanelLeftOutline16,
+   Tooltip,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+@@ -137,10 +137,10 @@ export function SidebarRoot({
+             aria-label={t('session.new.label')}
+             onClick={() => { startSession() }}
+           >
+-            <BrandWordmark />
++            <TessivumWordmark />
+           </button>
+         )}
+-        {/* Rail resting state is the whale mark; hovering swaps in the panel
++        {/* Rail resting state is the Tessivum mark; hovering swaps in the panel
+             icon (the expand affordance, figma sidebar-hover flow). */}
+         <Tooltip label={collapsed ? t('toggle.open') : t('toggle.collapse')} delayMs={500}>
+           <button
+@@ -149,7 +149,7 @@ export function SidebarRoot({
+             aria-label={collapsed ? t('toggle.open') : t('toggle.collapse')}
+             onClick={() => { toggleSidebar() }}
+           >
+-            {!wide && <FishLogo className={css.railFish} size={24} />}
++            {!wide && <TessivumMark className={css.railFish} size={24} />}
+             {/* Rail icons render at 18 (figma rail spec); expanded keeps the glyph-native sizes. */}
+             <IconPanelLeftOutline16 className={css.panelIcon} size={wide ? 16 : 18} />
+           </button>
+diff --git a/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap b/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
+index f82fbc1..c29f927 100644
+--- a/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
++++ b/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
+@@ -20,10 +20,10 @@ exports[`sidebar shell snapshots > renders the collapsed rail after the crossfad
+         <svg
+           aria-hidden="true"
+           class="railFish"
+-          data-content="965fe321"
+-          fill="none"
+-          height="17.6580310880829"
+-          viewBox="0 0 23.16 17.04"
++          data-content="a98028be"
++          fill="currentColor"
++          height="24"
++          viewBox="0 0 24 24"
+           width="24"
+         />
+         <svg
+@@ -102,11 +102,11 @@ exports[`sidebar shell snapshots > renders the expanded column (wordmark, capsul
+       >
+         <svg
+           aria-hidden="true"
+-          data-content="951274b9"
++          data-content="7730480d"
+           fill="none"
+           height="24"
+-          viewBox="0 0 182 24"
+-          width="182"
++          viewBox="0 0 126 24"
++          width="126"
+         />
+       </button>
+       <button
+@@ -195,11 +195,11 @@ exports[`sidebar shell snapshots > renders the expanded column in the default lo
+       >
+         <svg
+           aria-hidden="true"
+-          data-content="951274b9"
++          data-content="7730480d"
+           fill="none"
+           height="24"
+-          viewBox="0 0 182 24"
+-          width="182"
++          viewBox="0 0 126 24"
++          width="126"
+         />
+       </button>
+       <button
 diff --git a/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts b/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
 index 4139a31..7832766 100644
 --- a/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
@@ -117,6 +756,18 @@ index 4139a31..7832766 100644
    const removed = pending.splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
    for (const identity of splice.inserted) claimed.delete(identity.id)
    if (splice.outcome !== 'canceled') {
+diff --git a/packages/client/ui-trajectory/tests/table.client.spec.tsx b/packages/client/ui-trajectory/tests/table.client.spec.tsx
+index 467da80..49f7d2f 100644
+--- a/packages/client/ui-trajectory/tests/table.client.spec.tsx
++++ b/packages/client/ui-trajectory/tests/table.client.spec.tsx
+@@ -664,6 +664,7 @@ describe('TrajectoryTable', () => {
+     await waitFor(() => {
+       expect(view.container.querySelector('tr[data-virtual-position="201"]')).toBeTruthy()
+     })
++    await new Promise(resolve => window.setTimeout(resolve, 200))
+   })
+ 
+   it('keeps running and failure semantics distinct from record roles', () => {
 diff --git a/packages/client/web-react/src/scoped-slots.tsx b/packages/client/web-react/src/scoped-slots.tsx
 index dea0511..f8d380c 100644
 --- a/packages/client/web-react/src/scoped-slots.tsx
@@ -185,458 +836,11 @@ index dea0511..f8d380c 100644
  
  function RootEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext }: {
    entry: StoredEntry
-diff --git a/packages/core/agent/src/types.ts b/packages/core/agent/src/types.ts
-index b54e56e..51b3517 100644
---- a/packages/core/agent/src/types.ts
-+++ b/packages/core/agent/src/types.ts
-@@ -22,6 +22,9 @@ declare module '@deepseek-ai/dsh-session/types' {
-       removedCount?: number
-       inserted: UserMessage[]
-       outcome?: 'canceled'
-+      itemId?: UserMessage['id']
-+      action?: 'steer'
-+      message?: UserMessage
-     }
-   }
- }
-diff --git a/packages/client/ui-trajectory/tests/table.client.spec.tsx b/packages/client/ui-trajectory/tests/table.client.spec.tsx
-index 467da80..49f7d2f 100644
---- a/packages/client/ui-trajectory/tests/table.client.spec.tsx
-+++ b/packages/client/ui-trajectory/tests/table.client.spec.tsx
-@@ -664,4 +664,5 @@ describe('TrajectoryTable', () => {
-     await waitFor(() => {
-       expect(view.container.querySelector('tr[data-virtual-position="201"]')).toBeTruthy()
-     })
-+    await new Promise(resolve => window.setTimeout(resolve, 200))
-   })
-diff --git a/apps/web/tests/scaffold.ts b/apps/web/tests/scaffold.ts
---- a/apps/web/tests/scaffold.ts
-+++ b/apps/web/tests/scaffold.ts
-@@ -73,11 +73,11 @@
- // } from '@deepseek-ai/dsh-client-ui-settings-models'
- export const WELCOME_NOTICE_SETTINGS_NAMESPACE = 'ui-onboarding'
- export const WELCOME_NOTICE_ACK_FIELD = 'welcomeNoticeVersion'
--export const WELCOME_NOTICE_VERSION = '2026-08-13.1'
-+export const WELCOME_NOTICE_VERSION = '2026-08-26.1'
- export const WELCOME_NOTICE_COPY = {
-   zh: {
-     title: '内测声明',
--    body: 'DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。',
-+    body: 'Tessivum 目前的 0.1 版本仍处在面向开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 Tessivum 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。',
-     continueLabel: '继续',
-   },
- } as const
-diff --git a/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md b/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
---- a/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
-+++ b/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
-@@ -1,7 +1,7 @@
--You are an AI agent powered by DeepSeek Harness.
-+You are an AI agent powered by Tessivum.
- 
- The DeepSeek Harness implementation checkout is at {{sourceRoot}}. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend DSH itself.
- 
--You are interacting with the user through the DeepSeek Harness Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
-+You are interacting with the user through the Tessivum Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
- 
- You are a coding agent powered by the deepseek-v4-flash model. Your working directory is {{cwd}}.
-diff --git a/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md b/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
---- a/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
-+++ b/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
-@@ -1,5 +1,5 @@
- - dialog "内测声明":
-   - heading "内测声明" [level=2]
--  - paragraph: DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。
--  - paragraph: 我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。
-+  - paragraph: Tessivum 目前的 0.1 版本仍处在面向开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 Tessivum 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。
-+  - paragraph: 我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。
-   - button "继续"
-diff --git a/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md b/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
---- a/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
-+++ b/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
-@@ -1 +1 @@
--You are interacting with the user through the DeepSeek Harness Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
-+You are interacting with the user through the Tessivum Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
-diff --git a/packages/boot/app-boot/tests/app-boot.spec.ts b/packages/boot/app-boot/tests/app-boot.spec.ts
---- a/packages/boot/app-boot/tests/app-boot.spec.ts
-+++ b/packages/boot/app-boot/tests/app-boot.spec.ts
-@@ -796,7 +796,7 @@
-       expect(rendered).toContain(EXPECTED)
-       // Harness-owned opener (-100) → source (-99) → persona (0). The >= 0 guards
-       // keep a drifted opener/persona string from a false pass through `-1 < n`.
--      const identityAt = rendered.indexOf('You are an AI agent powered by DeepSeek Harness.')
-+      const identityAt = rendered.indexOf('You are an AI agent powered by Tessivum.')
-       const sourceAt = rendered.indexOf(EXPECTED)
-       const personaAt = rendered.indexOf('You are a coding agent.')
-       expect(identityAt).toBeGreaterThanOrEqual(0)
-diff --git a/packages/bundle/web-app/src/index.ts b/packages/bundle/web-app/src/index.ts
---- a/packages/bundle/web-app/src/index.ts
-+++ b/packages/bundle/web-app/src/index.ts
-@@ -96,7 +96,7 @@
-   const updateContract = 'The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while '
-     + '`pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. '
-     + 'Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. '
--  return `You are interacting with the user through the DeepSeek Harness Web GUI at ${webUrl}. `
-+  return `You are interacting with the user through the Tessivum Web GUI at ${webUrl}. `
-     + 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. '
-     + 'The browser provides no implicit DOM, route, or screenshot context. '
-     + updateContract
-@@ -150,7 +150,7 @@
-       runtimeCtx.shellEnv.register({
-         name: 'web-runtime',
-         variables: {
--          [DSH_WEB_URL]: { description: 'Canonical local URL of the DeepSeek Harness Web GUI serving this session.' },
-+          [DSH_WEB_URL]: { description: 'Canonical local URL of the Tessivum Web GUI serving this session.' },
-         },
-         resolve: () => ({ [DSH_WEB_URL]: localWebUrl(runtimeCtx) }),
-       })
-diff --git a/packages/bundle/web-app/src/startup.ts b/packages/bundle/web-app/src/startup.ts
---- a/packages/bundle/web-app/src/startup.ts
-+++ b/packages/bundle/web-app/src/startup.ts
-@@ -43,7 +43,7 @@
- function webCommand(): Command {
-   return new Command()
-     .name('dsh --profile web')
--    .description('Serve the DeepSeek Harness browser UI.')
-+    .description('Serve the Tessivum Web GUI.')
-     .helpOption('-h, --help', 'show this help')
-     .option('--host <host>', 'bind host')
-     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
-diff --git a/packages/bundle/web-app/tests/startup.spec.ts b/packages/bundle/web-app/tests/startup.spec.ts
---- a/packages/bundle/web-app/tests/startup.spec.ts
-+++ b/packages/bundle/web-app/tests/startup.spec.ts
-@@ -115,6 +115,7 @@
-   it('prints its own help and leaves the consumer pending', async () => {
-     const { values, observed } = await bootProvider(['--help'])
-     expect(observed.out).toContain('dsh --profile web')
-+    expect(observed.out).toContain('Serve the Tessivum Web GUI.')
-     expect(observed.out).toContain('--trusted-host')
-     expect(values).toBeUndefined()
-     expect(observed.readerConfig).toBeUndefined()
-diff --git a/packages/bundle/web-app/tests/web-app.spec.ts b/packages/bundle/web-app/tests/web-app.spec.ts
---- a/packages/bundle/web-app/tests/web-app.spec.ts
-+++ b/packages/bundle/web-app/tests/web-app.spec.ts
-@@ -98,7 +98,7 @@
-     const assembly = await ctx.systemPrompt.assemble()
-     expect(assembly.sections.find(entry => entry.name === 'harness:source')?.text).toContain('DeepSeek Harness implementation checkout')
-     const section = assembly.sections.find(entry => entry.name === 'app:web-surface')
--    expect(section?.text).toContain('http://127.0.0.1:4567')
-+    expect(section?.text).toContain('Tessivum Web GUI at http://127.0.0.1:4567')
-     // The single update contract: the receiver is always on; no-refresh
-     // reloads additionally need the rebuild watcher.
-     expect(section?.text).toContain('pnpm run dev:web')
-diff --git a/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx b/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
---- a/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
-+++ b/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
-@@ -1,4 +1,4 @@
--// Hero chrome for the blank-draft phase of ConversationRoot: fish headline,
-+// Hero chrome for the blank-draft phase of ConversationRoot: brand-mark headline,
- // glow backdrop, and the workspace row. Pure presentation — the resident
- // composer is NOT rendered here (it keeps its own stable tree position in
- // ConversationRoot so the textarea survives the hero → composer flip); CSS
-@@ -7,7 +7,7 @@
- import { useId } from 'react'
- import type { ReactNode, RefObject } from 'react'
- import {
--  FishLogo, IconChevronDownOutline14, IconFolderClose16, IconFolderOpen16,
-+  TessivumMark, IconChevronDownOutline14, IconFolderClose16, IconFolderOpen16,
- } from '@deepseek-ai/dsh-client-ui-primitives'
- import { workspaceTitleOf } from '@deepseek-ai/dsh-client-runtime/client'
- import type { ConversationSlotProps } from '../contract/slots.ts'
-@@ -117,9 +117,9 @@
-     <div className={css.root}>
-       <div className={css.stack}>
-         <div className={css.headline}>
--          {/* figma 34:10412: fish 34×25 leading the headline, gap 10. */}
-+          {/* Tessivum mark leading the headline. */}
-           <span className={css.fishHitbox}>
--            <FishLogo size={34} className={css.fish} />
-+            <TessivumMark size={34} className={css.fish} />
-           </span>
-           <span className={css.headlineText}>{t('hero.headline')}</span>
-           <span className={css.previewBadge}>{t('hero.preview')}</span>
-diff --git a/packages/client/ui-primitives/src/BrandWordmark.tsx b/packages/client/ui-primitives/src/BrandWordmark.tsx
---- a/packages/client/ui-primitives/src/BrandWordmark.tsx
-+++ b/packages/client/ui-primitives/src/BrandWordmark.tsx
-@@ -1,56 +1,7 @@
--// DeepSeek Harness brand wordmark (figma 356:14644, exact extract): whale +
--// "deepseek-official" letterforms + HARNESS badge plate in one svg. Native 182x24.
--// Ink rides currentColor; the badge text is knocked out in the inverted
--// label color so the plate stays legible in both themes.
-+import type { IconProps } from './icons/props.ts'
-+import { TessivumWordmark } from './TessivumWordmark.tsx'
- 
--import type { IconProps } from './icons/props.ts'
--
--/**
-- * Render the full brand wordmark.
-- * @param props.size - height in px (default 24; width keeps the 182:24 ratio).
-- * @param props.className - extra class for layout placement.
-- * @returns the wordmark svg (aria-hidden decorative brand art).
-- */
--export function BrandWordmark({ size = 24, className }: IconProps) {
--  return (
--    <svg
--      width={(size * 182) / 24}
--      height={size}
--      className={className}
--      viewBox="0 0 182 24"
--      fill="none"
--      aria-hidden="true"
--    >
--      <path d="M68.416 18.2447H67.0501V16.1272H68.416C69.2619 16.1272 70.1166 15.9163 70.6671 15.3304C71.2181 14.7444 71.426 13.8455 71.426 12.9471C71.426 12.0487 71.2268 11.1498 70.6671 10.5643C70.1083 9.97831 69.2619 9.76744 68.416 9.76744C67.5701 9.76744 66.7154 9.97831 66.1639 10.5643C65.6129 11.1503 65.4049 12.0487 65.4049 12.9471V21.6435H63.009V7.6582H65.4049V8.54883H65.8442C65.8918 8.49393 65.9394 8.44728 65.9875 8.40064C66.5871 7.85353 67.5049 7.6582 68.4072 7.6582C69.8212 7.6582 71.2341 8.00998 72.1607 8.98662C73.0868 9.96325 73.4143 11.4632 73.4143 12.9558C73.4143 14.4485 73.0785 15.9406 72.1607 16.925C71.2424 17.9094 69.8212 18.2457 68.416 18.2457V18.2447Z" fill="currentColor"/>
--      <path d="M31.9551 8.03497H33.3204V10.1525H31.9551C31.1087 10.1525 30.2545 10.3633 29.7035 10.9493C29.1525 11.5353 28.945 12.4342 28.945 13.3326C28.945 14.231 29.1447 15.1294 29.7035 15.7154C30.2623 16.3014 31.1087 16.5122 31.9551 16.5122C32.8015 16.5122 33.6562 16.3014 34.2072 15.7154C34.7582 15.1294 34.9657 14.231 34.9657 13.3326V4.62842H37.3611V18.6219H34.9657V17.7313H34.5264C34.4783 17.7857 34.4307 17.8329 34.3826 17.8795C33.7835 18.4261 32.8652 18.6219 31.9629 18.6219C30.5494 18.6219 29.136 18.2707 28.2099 17.294C27.2838 16.3174 26.9563 14.817 26.9563 13.3248C26.9563 11.8327 27.2916 10.34 28.2099 9.35561C29.136 8.37898 30.5494 8.03497 31.9551 8.03497Z" fill="currentColor"/>
--      <path d="M49.3786 13.1431V13.9948H42.9984V12.2996H47.2305C47.1348 11.6825 46.9113 11.1043 46.5119 10.682C45.9371 10.0727 45.0503 9.85409 44.1723 9.85409C43.2943 9.85409 42.4076 10.0727 41.8328 10.682C41.258 11.2913 41.05 12.2213 41.05 13.1435C41.05 14.0658 41.2575 15.003 41.8328 15.6046C42.4076 16.2061 43.2939 16.433 44.1723 16.433C45.0508 16.433 45.9371 16.2143 46.5119 15.6046C46.5916 15.5186 46.6635 15.4248 46.7354 15.331H49.0992C48.8918 16.0657 48.5643 16.7299 48.0691 17.2454C47.111 18.2531 45.6339 18.6205 44.1723 18.6205C42.7108 18.6205 41.2337 18.2609 40.2755 17.2454C39.3174 16.2299 38.9661 14.6828 38.9661 13.1435C38.9661 11.6043 39.3096 10.0494 40.2755 9.04168C41.242 8.03396 42.7108 7.66663 44.1723 7.66663C45.6339 7.66663 47.111 8.02618 48.0691 9.04168C49.0351 10.0572 49.3786 11.6043 49.3786 13.1435V13.1431Z" fill="currentColor"/>
--      <path d="M61.4045 13.1431V13.9948H55.0243V12.2996H59.2564C59.1602 11.6825 58.9372 11.1043 58.5378 10.682C57.963 10.0727 57.0762 9.85409 56.1982 9.85409C55.3202 9.85409 54.4335 10.0727 53.8587 10.682C53.2839 11.2913 53.0759 12.2213 53.0759 13.1435C53.0759 14.0658 53.2834 15.003 53.8587 15.6046C54.4335 16.2061 55.3202 16.433 56.1982 16.433C57.0762 16.433 57.963 16.2143 58.5378 15.6046C58.6179 15.5186 58.6894 15.4248 58.7608 15.331H61.1251C60.9171 16.0657 60.5897 16.7299 60.0945 17.2454C59.1364 18.2531 57.6593 18.6205 56.1982 18.6205C54.7372 18.6205 53.2596 18.2609 52.3014 17.2454C51.3432 16.2299 50.9919 14.6828 50.9919 13.1435C50.9919 11.6043 51.3355 10.0494 52.3014 9.04168C53.2678 8.03396 54.7367 7.66663 56.1982 7.66663C57.6598 7.66663 59.1364 8.02618 60.0945 9.04168C61.061 10.0572 61.4045 11.6043 61.4045 13.1435V13.1431Z" fill="currentColor"/>
--      <path d="M80.242 18.6214C81.7035 18.6214 83.1801 18.4105 84.1383 17.809C85.0965 17.2075 85.4482 16.2931 85.4482 15.3869C85.4482 14.4807 85.1042 13.5585 84.1383 12.9647C83.1801 12.371 81.703 12.1518 80.242 12.1518C79.6186 12.1518 79.0438 12.0658 78.6366 11.8394C78.2294 11.6047 78.0778 11.2534 78.0778 10.9017C78.0778 10.5499 78.2216 10.1908 78.6366 9.9639C79.0438 9.72921 79.6749 9.65147 80.2973 9.65147C80.9198 9.65147 81.5509 9.73747 81.9591 9.9639C82.3663 10.1986 82.5179 10.5499 82.5179 10.9017H84.9531C84.9531 9.99499 84.6421 9.07327 83.7719 8.47951C82.9017 7.88576 81.5679 7.66663 80.2424 7.66663C78.9169 7.66663 77.5837 7.8775 76.713 8.47951C75.8427 9.08104 75.5308 9.99499 75.5308 10.9017C75.5308 11.8083 75.8423 12.73 76.713 13.3238C77.5832 13.9176 78.9165 14.1367 80.2424 14.1367C80.929 14.1367 81.688 14.2227 82.1428 14.4491C82.5985 14.676 82.7579 15.0351 82.7579 15.3869C82.7579 15.7387 82.5985 16.0977 82.1428 16.3246C81.688 16.5511 80.9931 16.6371 80.3066 16.6371C79.62 16.6371 78.9169 16.5511 78.4694 16.3246C78.0224 16.0982 77.8543 15.7387 77.8543 15.3869H75.0435C75.0435 16.2935 75.3865 17.2153 76.3534 17.809C77.3194 18.4028 78.7809 18.6214 80.2424 18.6214H80.242Z" fill="currentColor"/>
--      <path d="M97.4733 13.1431V13.9948H91.0932V12.2996H95.3252C95.23 11.6825 95.006 11.1043 94.6071 10.682C94.0313 10.0727 93.1456 9.85409 92.2666 9.85409C91.3876 9.85409 90.5018 10.0727 89.927 10.682C89.3522 11.2913 89.1452 12.2213 89.1452 13.1435C89.1452 14.0658 89.3522 15.003 89.927 15.6046C90.5018 16.2061 91.3886 16.433 92.2666 16.433C93.1446 16.433 94.0313 16.2143 94.6071 15.6046C94.6863 15.5186 94.7587 15.4248 94.8301 15.331H97.1935C96.9855 16.0657 96.6585 16.7299 96.1639 17.2454C95.2057 18.2531 93.7281 18.6205 92.2666 18.6205C90.805 18.6205 89.3284 18.2609 88.3703 17.2454C87.4121 16.2299 87.0613 14.6828 87.0613 13.1435C87.0613 11.6043 87.4043 10.0494 88.3703 9.04168C89.3367 8.03396 90.806 7.66663 92.2666 7.66663C93.7272 7.66663 95.2057 8.02618 96.1639 9.04168C97.1298 10.0572 97.4729 11.6043 97.4729 13.1435L97.4733 13.1431Z" fill="currentColor"/>
--      <path d="M109.499 13.1431V13.9948H103.119V12.2996H107.351C107.256 11.6825 107.032 11.1043 106.632 10.682C106.057 10.0727 105.172 9.85409 104.293 9.85409C103.414 9.85409 102.528 10.0727 101.953 10.682C101.378 11.2913 101.17 12.2213 101.17 13.1435C101.17 14.0658 101.378 15.003 101.953 15.6046C102.528 16.2061 103.415 16.433 104.293 16.433C105.171 16.433 106.057 16.2143 106.632 15.6046C106.712 15.5186 106.784 15.4248 106.856 15.331H109.22C109.012 16.0657 108.685 16.7299 108.19 17.2454C107.231 18.2531 105.754 18.6205 104.293 18.6205C102.831 18.6205 101.355 18.2609 100.396 17.2454C99.4382 16.2299 99.0864 14.6828 99.0864 13.1435C99.0864 11.6043 99.4295 10.0494 100.396 9.04168C101.362 8.03396 102.832 7.66663 104.293 7.66663C105.754 7.66663 107.231 8.02618 108.19 9.04168C109.156 10.0572 109.499 11.6043 109.499 13.1435V13.1431Z" fill="currentColor"/>
--      <path d="M113.5 4.62817H111.104V18.6217H113.5V4.62817Z" fill="currentColor"/>
--      <path d="M117.589 12.8154L121.517 18.6208H118.554L114.625 12.8154L118.554 8.15088H121.517L117.589 12.8154Z" fill="currentColor"/>
--      <g clipPath="url(#dsh-wordmark-whale-clip)">
--        <path d="M23.0584 4.95203C22.8129 4.83203 22.7074 5.06103 22.5639 5.17704C22.5149 5.21454 22.4734 5.26354 22.4319 5.30854C22.0734 5.69155 21.6543 5.94306 21.1073 5.91306C20.3073 5.86806 19.6243 6.11957 19.0203 6.73158C18.8918 5.97706 18.4652 5.52655 17.8162 5.23754C17.4767 5.08753 17.1332 4.93703 16.8952 4.61052C16.7292 4.37801 16.6837 4.11901 16.6007 3.8635C16.5477 3.70949 16.4952 3.55199 16.3177 3.52549C16.1252 3.49549 16.0497 3.65699 15.9742 3.792C15.6722 4.34401 15.5552 4.95203 15.5667 5.56805C15.5932 6.95359 16.1782 8.05712 17.3407 8.84215C17.4727 8.93215 17.5067 9.02215 17.4652 9.15366C17.3857 9.42416 17.2917 9.68667 17.2087 9.95718C17.1557 10.1297 17.0767 10.1677 16.8917 10.0922C16.2537 9.82568 15.7027 9.43117 15.2156 8.95465C14.3891 8.15513 13.6416 7.2726 12.7096 6.58158C12.4906 6.42007 12.2716 6.27007 12.045 6.12707C11.094 5.20354 12.1696 4.44502 12.4186 4.35501C12.6791 4.26101 12.5091 3.938 11.6675 3.942C10.826 3.9455 10.056 4.22751 9.07446 4.60302C8.93096 4.65952 8.77995 4.70052 8.62545 4.73452C7.73492 4.56552 6.80989 4.52802 5.84386 4.63702C4.02481 4.83953 2.57177 5.69955 1.50373 7.1676C0.220694 8.93215 -0.0813148 10.9372 0.288196 13.0283C0.676708 15.2323 1.80174 17.0569 3.53029 18.4834C5.32285 19.9625 7.38741 20.6875 9.74298 20.5485C11.1735 20.466 12.7661 20.2745 14.5626 18.7539C15.0156 18.9795 15.4912 19.0695 16.2797 19.137C16.8872 19.1935 17.4722 19.107 17.9252 19.013C18.6347 18.8629 18.5857 18.2059 18.3292 18.0854C16.2497 17.1169 16.7062 17.5109 16.2912 17.1919C17.3477 15.9419 18.9618 13.7198 19.4598 10.6942C19.5088 10.3602 19.5713 9.88968 19.5638 9.61917C19.5598 9.45417 19.5978 9.39016 19.7863 9.37116C20.3073 9.31116 20.8128 9.16866 21.2773 8.91315C22.6249 8.17713 23.1684 6.96809 23.2964 5.51905C23.3154 5.29754 23.2924 5.06853 23.0584 4.95203ZM11.3165 17.9954C9.30097 16.4109 8.32344 15.8894 7.91992 15.9119C7.54241 15.9344 7.61042 16.3664 7.69342 16.6479C7.78042 16.9259 7.89342 17.1174 8.05193 17.3614C8.16143 17.5229 8.23694 17.7629 7.94243 17.9434C7.29341 18.3449 6.16487 17.8084 6.11187 17.7819C4.79833 17.0084 3.7003 15.9874 2.92628 14.5908C2.17875 13.2468 1.74474 11.8047 1.67324 10.2657C1.65424 9.89418 1.76374 9.76267 2.13375 9.69517C2.62077 9.60517 3.12278 9.58617 3.6093 9.65767C5.66636 9.95818 7.41741 10.8777 8.88545 12.3348C9.72348 13.1643 10.3575 14.1558 11.0105 15.1243C11.705 16.1529 12.4521 17.1329 13.4036 17.9364C13.7396 18.2179 14.0076 18.4319 14.2641 18.5899C13.4906 18.6764 12.1996 18.6949 11.3165 17.9964V17.9954ZM12.2826 11.7817C12.2826 11.6167 12.4146 11.4852 12.5806 11.4852C12.6181 11.4852 12.6521 11.4927 12.6826 11.5037C12.7241 11.5187 12.7621 11.5412 12.7921 11.5752C12.8451 11.6277 12.8751 11.7027 12.8751 11.7817C12.8751 11.9467 12.7431 12.0782 12.5771 12.0782C12.4111 12.0782 12.2826 11.9467 12.2826 11.7817ZM15.2831 13.3208C15.0906 13.3998 14.8981 13.4673 14.7131 13.4748C14.4261 13.4898 14.1131 13.3733 13.9431 13.2308C13.6791 13.0093 13.4901 12.8853 13.4111 12.4988C13.3771 12.3338 13.3961 12.0782 13.4261 11.9317C13.4941 11.6162 13.4186 11.4137 13.1961 11.2297C13.0151 11.0797 12.7846 11.0382 12.5316 11.0382C12.4371 11.0382 12.3506 10.9967 12.2861 10.9632C12.1806 10.9107 12.0936 10.7792 12.1766 10.6177C12.2031 10.5652 12.3316 10.4377 12.3616 10.4152C12.7051 10.2197 13.1011 10.2837 13.4676 10.4302C13.8071 10.5692 14.0641 10.8242 14.4336 11.1847C14.8111 11.6202 14.8791 11.7402 15.0941 12.0672C15.2641 12.3228 15.4186 12.5853 15.5247 12.8858C15.5887 13.0733 15.5057 13.2268 15.2831 13.3208Z" fill="currentColor"/>
--      </g>
--      <rect x="129.348" y="5.5" width="52" height="14" rx="2" fill="currentColor"/>
--      <g clipPath="url(#dsh-wordmark-badge-clip)">
--        <path d="M132.848 8.93205H134.08V16.137H132.848V8.93205ZM136.5 8.93205H137.732V16.137H136.5V8.93205ZM133.365 13.024V11.99H137.193V13.024H133.365Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--        <path d="M140.397 14.432L140.672 13.453H143.202L143.532 14.432H140.397ZM140.287 16.137H139.055L141.277 8.93205H142.201L142.146 9.74605L140.947 13.915H140.969L140.287 16.137ZM145.039 16.137H143.741L143.07 13.948L143.081 13.937L141.871 9.74605L141.926 8.93205H142.817L145.039 16.137Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--        <path d="M146.846 8.93205H149.068C149.852 8.93205 150.443 9.11538 150.839 9.48205C151.235 9.84138 151.433 10.3327 151.433 10.956C151.433 11.22 151.396 11.4657 151.323 11.693C151.249 11.9204 151.125 12.1257 150.949 12.309C150.773 12.4924 150.531 12.65 150.223 12.782C149.922 12.9067 149.541 13.0057 149.079 13.079V13.321H146.846V12.639L148.023 12.485C148.631 12.4044 149.09 12.298 149.398 12.166C149.706 12.034 149.915 11.8764 150.025 11.693C150.135 11.5024 150.19 11.2934 150.19 11.066C150.19 10.6994 150.083 10.417 149.871 10.219C149.658 10.021 149.324 9.92205 148.87 9.92205H146.846V8.93205ZM146.395 8.93205H147.627V16.137H146.395V8.93205ZM151.917 16.093V16.137H150.366L149.024 14.322C148.87 14.1094 148.73 13.9407 148.606 13.816C148.481 13.684 148.345 13.5887 148.199 13.53C148.052 13.464 147.872 13.42 147.66 13.398C147.447 13.3687 147.176 13.3504 146.846 13.343V13.145H149.079C149.233 13.211 149.368 13.2844 149.486 13.365C149.61 13.4457 149.735 13.5447 149.86 13.662C149.992 13.7794 150.138 13.937 150.3 14.135L151.917 16.093Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--        <path d="M153.58 9.57005L153.591 8.93205H154.46L157.584 15.51V16.137H156.704L153.58 9.57005ZM158.024 16.137H156.968L156.88 8.93205H158.024V16.137ZM154.24 16.137H153.096V8.93205H154.152L154.24 16.137Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--        <path d="M159.963 8.93205H161.206V16.137H159.963V8.93205ZM160.095 9.96605V8.93205H164.858V9.96605H160.095ZM160.095 16.137V15.103H164.902V16.137H160.095ZM160.095 13.013V11.99H164.374V13.013H160.095Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--        <path d="M169.052 15.257C169.543 15.257 169.895 15.1654 170.108 14.982C170.328 14.7987 170.438 14.5457 170.438 14.223C170.438 14.047 170.405 13.8967 170.339 13.772C170.273 13.6474 170.152 13.5337 169.976 13.431C169.807 13.321 169.558 13.2147 169.228 13.112L168.491 12.881C167.846 12.6757 167.38 12.4044 167.094 12.067C166.808 11.7297 166.665 11.3007 166.665 10.78C166.665 10.428 166.76 10.1017 166.951 9.80105C167.142 9.50038 167.428 9.25838 167.809 9.07505C168.19 8.89172 168.663 8.80005 169.228 8.80005C169.631 8.80005 169.998 8.82938 170.328 8.88805C170.665 8.93938 171.039 9.01638 171.45 9.11905L171.274 10.175C170.834 10.0504 170.442 9.96238 170.097 9.91105C169.76 9.85238 169.463 9.82305 169.206 9.82305C168.737 9.82305 168.403 9.90738 168.205 10.076C168.007 10.2374 167.908 10.439 167.908 10.681C167.908 10.857 167.941 11.0147 168.007 11.154C168.073 11.286 168.19 11.407 168.359 11.517C168.535 11.627 168.784 11.7334 169.107 11.836L169.866 12.078C170.526 12.276 170.995 12.5327 171.274 12.848C171.553 13.156 171.692 13.585 171.692 14.135C171.692 14.5604 171.589 14.9344 171.384 15.257C171.179 15.5797 170.878 15.8327 170.482 16.016C170.093 16.1994 169.609 16.291 169.03 16.291C168.627 16.291 168.212 16.247 167.787 16.159C167.362 16.071 166.9 15.9427 166.401 15.774L166.665 14.718C167.156 14.894 167.6 15.0297 167.996 15.125C168.399 15.213 168.751 15.257 169.052 15.257Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--        <path d="M175.809 15.257C176.3 15.257 176.652 15.1654 176.865 14.982C177.085 14.7987 177.195 14.5457 177.195 14.223C177.195 14.047 177.162 13.8967 177.096 13.772C177.03 13.6474 176.909 13.5337 176.733 13.431C176.564 13.321 176.315 13.2147 175.985 13.112L175.248 12.881C174.603 12.6757 174.137 12.4044 173.851 12.067C173.565 11.7297 173.422 11.3007 173.422 10.78C173.422 10.428 173.517 10.1017 173.708 9.80105C173.899 9.50038 174.185 9.25838 174.566 9.07505C174.947 8.89172 175.42 8.80005 175.985 8.80005C176.388 8.80005 176.755 8.82938 177.085 8.88805C177.422 8.93938 177.796 9.01638 178.207 9.11905L178.031 10.175C177.591 10.0504 177.199 9.96238 176.854 9.91105C176.517 9.85238 176.22 9.82305 175.963 9.82305C175.494 9.82305 175.16 9.90738 174.962 10.076C174.764 10.2374 174.665 10.439 174.665 10.681C174.665 10.857 174.698 11.0147 174.764 11.154C174.83 11.286 174.947 11.407 175.116 11.517C175.292 11.627 175.541 11.7334 175.864 11.836L176.623 12.078C177.283 12.276 177.752 12.5327 178.031 12.848C178.31 13.156 178.449 13.585 178.449 14.135C178.449 14.5604 178.346 14.9344 178.141 15.257C177.936 15.5797 177.635 15.8327 177.239 16.016C176.85 16.1994 176.366 16.291 175.787 16.291C175.384 16.291 174.969 16.247 174.544 16.159C174.119 16.071 173.657 15.9427 173.158 15.774L173.422 14.718C173.913 14.894 174.357 15.0297 174.753 15.125C175.156 15.213 175.508 15.257 175.809 15.257Z" fill="var(--dsw-alias-label-primary-inverted)"/>
--      </g>
--      <defs>
--        <clipPath id="dsh-wordmark-whale-clip">
--          <rect width="23.16" height="17.0435" fill="white" transform="translate(0.141602 3.52185)"/>
--        </clipPath>
--        <clipPath id="dsh-wordmark-badge-clip">
--          <rect width="46" height="14" fill="white" transform="translate(132.348 5.5)"/>
--        </clipPath>
--      </defs>
--    </svg>
--  )
-+/** Compatibility export for consumers that still import the former wordmark name. */
-+export function BrandWordmark(props: IconProps) {
-+  return <TessivumWordmark {...props} />
- }
-diff --git a/packages/client/ui-primitives/src/FishLogo.tsx b/packages/client/ui-primitives/src/FishLogo.tsx
---- a/packages/client/ui-primitives/src/FishLogo.tsx
-+++ b/packages/client/ui-primitives/src/FishLogo.tsx
-@@ -1,27 +1,7 @@
--// DeepSeek fish logo (figma I39:24057;88:8943 fillGeometry, exact extract;
--// the full-canvas rectangle path from the raw dump is a background plate and
--// is intentionally dropped). Native 23.16x17.04, rendered 24x18 by default;
--// hero usage scales to 34x25. Color rides currentColor (wordmark ink).
-+import type { IconProps } from './icons/props.ts'
-+import { TessivumMark } from './TessivumMark.tsx'
- 
--import type { IconProps } from './icons/props.ts'
--
--/**
-- * Render the fish logo.
-- * @param props.size - width in px (default 24; height keeps the 23.16:17.04 ratio).
-- * @param props.className - extra class for layout placement.
-- * @returns the logo svg (aria-hidden; pair with the wordmark for accessibility).
-- */
--export function FishLogo({ size = 24, className }: IconProps) {
--  return (
--    <svg
--      width={size}
--      height={(size * 17.04) / 23.16}
--      className={className}
--      viewBox="0 0 23.16 17.04"
--      fill="none"
--      aria-hidden="true"
--    >
--      <path d="M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z" fill="currentColor"/>
--    </svg>
--  )
-+/** Compatibility export for consumers that still import the former logo name. */
-+export function FishLogo(props: IconProps) {
-+  return <TessivumMark {...props} />
- }
-diff --git a/packages/client/ui-primitives/src/TessivumMark.tsx b/packages/client/ui-primitives/src/TessivumMark.tsx
-new file mode 100644
---- /dev/null
-+++ b/packages/client/ui-primitives/src/TessivumMark.tsx
-@@ -0,0 +1,20 @@
-+import type { IconProps } from './icons/props.ts'
-+
-+/** Render Tessivum's four-piece open-loop mark. */
-+export function TessivumMark({ size = 24, className }: IconProps) {
-+  return (
-+    <svg
-+      width={size}
-+      height={size}
-+      className={className}
-+      viewBox="0 0 24 24"
-+      fill="currentColor"
-+      aria-hidden="true"
-+    >
-+      <path d="M6 3H21V7H10L6 3Z" />
-+      <path d="M21 8V21H17V12L21 8Z" />
-+      <path d="M16 21H3V17H12L16 21Z" />
-+      <path d="M3 16V8H7V12L3 16Z" />
-+    </svg>
-+  )
-+}
-diff --git a/packages/client/ui-primitives/src/TessivumWordmark.tsx b/packages/client/ui-primitives/src/TessivumWordmark.tsx
-new file mode 100644
---- /dev/null
-+++ b/packages/client/ui-primitives/src/TessivumWordmark.tsx
-@@ -0,0 +1,27 @@
-+import type { IconProps } from './icons/props.ts'
-+
-+/** Render Tessivum's mark and custom vector wordmark. */
-+export function TessivumWordmark({ size = 24, className }: IconProps) {
-+  return (
-+    <svg
-+      width={(size * 126) / 24}
-+      height={size}
-+      className={className}
-+      viewBox="0 0 126 24"
-+      fill="none"
-+      aria-hidden="true"
-+    >
-+      <path d="M6 3H21V7H10L6 3Z" fill="currentColor" />
-+      <path d="M21 8V21H17V12L21 8Z" fill="currentColor" />
-+      <path d="M16 21H3V17H12L16 21Z" fill="currentColor" />
-+      <path d="M3 16V8H7V12L3 16Z" fill="currentColor" />
-+      <path
-+        d="M30 6H38M34 6V18 M50 6H42V18H50M42 12H48 M62 6H54V12H62V18H54 M74 6H66V12H74V18H66 M78 6H86M82 6V18M78 18H86 M90 6L94 18L98 6 M102 6V16C102 17.3 102.7 18 104 18H108C109.3 18 110 17.3 110 16V6 M114 18V6L118 12L122 6V18"
-+        stroke="currentColor"
-+        strokeWidth="2"
-+        strokeLinecap="square"
-+        strokeLinejoin="miter"
-+      />
-+    </svg>
-+  )
-+}
-diff --git a/packages/client/ui-primitives/src/index.ts b/packages/client/ui-primitives/src/index.ts
---- a/packages/client/ui-primitives/src/index.ts
-+++ b/packages/client/ui-primitives/src/index.ts
-@@ -19,6 +19,8 @@
- export { RiskConfirmation } from './RiskConfirmation.tsx'
- export type { RiskConfirmationProps } from './RiskConfirmation.tsx'
- export { ConnectionBanner } from './ConnectionBanner.tsx'
-+export { TessivumMark } from './TessivumMark.tsx'
-+export { TessivumWordmark } from './TessivumWordmark.tsx'
- export { FishLogo } from './FishLogo.tsx'
- export { BrandWordmark } from './BrandWordmark.tsx'
- export { Tooltip } from './Tooltip.tsx'
-diff --git a/packages/client/ui-primitives/tests/icons.client.spec.tsx b/packages/client/ui-primitives/tests/icons.client.spec.tsx
---- a/packages/client/ui-primitives/tests/icons.client.spec.tsx
-+++ b/packages/client/ui-primitives/tests/icons.client.spec.tsx
-@@ -54,15 +54,27 @@
-   })
- })
- 
--describe('FishLogo', () => {
--  it('renders the fish path in currentColor at the native ratio', () => {
--    const { container } = render(<primitives.FishLogo />)
-+describe('Tessivum brand assets', () => {
-+  it('renders a square four-piece currentColor mark with no embedded presentation', () => {
-+    const { container } = render(<primitives.TessivumMark />)
-     const svg = container.querySelector('svg')!
-     expect(svg.getAttribute('width')).toBe('24')
--    expect(Number(svg.getAttribute('height'))).toBeCloseTo(17.66, 1)
--    expect(svg.getAttribute('viewBox')).toBe('0 0 23.16 17.04')
--    expect(container.querySelectorAll('path')).toHaveLength(1)
-+    expect(svg.getAttribute('height')).toBe('24')
-+    expect(svg.getAttribute('viewBox')).toBe('0 0 24 24')
-+    expect(svg.getAttribute('aria-hidden')).toBe('true')
-+    expect(container.querySelectorAll('path')).toHaveLength(4)
-     expect(container.innerHTML).toContain('currentColor')
--    expect(container.innerHTML).not.toContain('M0 0L23.16')
-+    expect(container.querySelector('linearGradient, filter, text, image')).toBeNull()
-+  })
-+
-+  it('keeps compatibility exports on the Tessivum artwork', () => {
-+    const currentMark = render(<primitives.TessivumMark />)
-+    const legacyMark = render(<primitives.FishLogo />)
-+    expect(legacyMark.container.innerHTML).toBe(currentMark.container.innerHTML)
-+    const currentWordmark = render(<primitives.TessivumWordmark />)
-+    const legacyWordmark = render(<primitives.BrandWordmark />)
-+    expect(legacyWordmark.container.innerHTML).toBe(currentWordmark.container.innerHTML)
-+    expect(currentWordmark.container.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true')
-+    expect(currentWordmark.container.querySelector('linearGradient, filter, text, image')).toBeNull()
-   })
- })
-diff --git a/packages/client/ui-settings-models/src/onboarding-copy.ts b/packages/client/ui-settings-models/src/onboarding-copy.ts
---- a/packages/client/ui-settings-models/src/onboarding-copy.ts
-+++ b/packages/client/ui-settings-models/src/onboarding-copy.ts
-@@ -8,18 +8,18 @@
-  * Bump only when the notice changes materially and every user should see it
-  * again. The acknowledgement is compared for exact equality.
-  */
--export const WELCOME_NOTICE_VERSION = '2026-08-13.1'
-+export const WELCOME_NOTICE_VERSION = '2026-08-26.1'
- 
- /** The complete editable internal-testing notice in both supported GUI locales. */
- export const WELCOME_NOTICE_COPY = {
-   zh: {
-     title: '内测声明',
--    body: 'DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。',
-+    body: 'Tessivum 目前的 0.1 版本仍处在面向开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 Tessivum 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。',
-     continueLabel: '继续',
-   },
-   en: {
-     title: 'Internal Testing Notice',
--    body: "DeepSeek Harness 0.1 remains in testing for Harness developers. Many areas need further improvement, and we welcome feedback from the developer community. DeepSeek Harness's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome Harness developers everywhere to join the DSH plugin ecosystem.",
-+    body: "Tessivum 0.1 remains in testing for developers. Many areas need further improvement, and we welcome feedback from the developer community. Tessivum's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome developers everywhere to join the Tessivum plugin ecosystem.",
-     continueLabel: 'Continue',
-   },
- } as const
-diff --git a/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx b/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
---- a/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
-+++ b/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
-@@ -64,7 +64,7 @@
-   it('uses the exact owner copy in both GUI locales', () => {
-     expect(WELCOME_NOTICE_COPY.en).toEqual({
-       title: 'Internal Testing Notice',
--      body: "DeepSeek Harness 0.1 remains in testing for Harness developers. Many areas need further improvement, and we welcome feedback from the developer community. DeepSeek Harness's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome Harness developers everywhere to join the DSH plugin ecosystem.",
-+      body: "Tessivum 0.1 remains in testing for developers. Many areas need further improvement, and we welcome feedback from the developer community. Tessivum's core plugins and foundational APIs will continue to evolve rapidly over the coming months.\n\nWe look forward to exploring the limits of intelligence with developers around the world, building on open-source, open, reusable, and composable infrastructure. We welcome developers everywhere to join the Tessivum plugin ecosystem.",
-       continueLabel: 'Continue',
-     })
-     expect(en.welcomeBody).toBe(WELCOME_NOTICE_COPY.en.body)
-diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
---- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-+++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-@@ -18,7 +18,7 @@
- import { useEffect, useRef, useState } from 'react'
- import clsx from 'clsx'
- import {
--  BrandWordmark, FishLogo,
-+  TessivumMark, TessivumWordmark,
-   IconNewChatOutline16, IconPanelLeftOutline16,
-   Tooltip,
- } from '@deepseek-ai/dsh-client-ui-primitives'
-@@ -137,10 +137,10 @@
-             aria-label={t('session.new.label')}
-             onClick={() => { startSession() }}
-           >
--            <BrandWordmark />
-+            <TessivumWordmark />
-           </button>
-         )}
--        {/* Rail resting state is the whale mark; hovering swaps in the panel
-+        {/* Rail resting state is the Tessivum mark; hovering swaps in the panel
-             icon (the expand affordance, figma sidebar-hover flow). */}
-         <Tooltip label={collapsed ? t('toggle.open') : t('toggle.collapse')} delayMs={500}>
-           <button
-@@ -149,7 +149,7 @@
-             aria-label={collapsed ? t('toggle.open') : t('toggle.collapse')}
-             onClick={() => { toggleSidebar() }}
-           >
--            {!wide && <FishLogo className={css.railFish} size={24} />}
-+            {!wide && <TessivumMark className={css.railFish} size={24} />}
-             {/* Rail icons render at 18 (figma rail spec); expanded keeps the glyph-native sizes. */}
-             <IconPanelLeftOutline16 className={css.panelIcon} size={wide ? 16 : 18} />
-           </button>
 diff --git a/packages/client/web/tests/document-title.client.spec.tsx b/packages/client/web/tests/document-title.client.spec.tsx
+index ed336a1..8e188ad 100644
 --- a/packages/client/web/tests/document-title.client.spec.tsx
 +++ b/packages/client/web/tests/document-title.client.spec.tsx
-@@ -10,19 +10,19 @@
+@@ -10,19 +10,19 @@ afterEach(() => {
  
  describe('DocumentTitle', () => {
    it('preserves the product title without a durable title and restores it on unmount', () => {
@@ -663,9 +867,10 @@ diff --git a/packages/client/web/tests/document-title.client.spec.tsx b/packages
    })
  })
 diff --git a/packages/core/agent-loop/tests/loop.spec.ts b/packages/core/agent-loop/tests/loop.spec.ts
+index ca4a530..605d60b 100644
 --- a/packages/core/agent-loop/tests/loop.spec.ts
 +++ b/packages/core/agent-loop/tests/loop.spec.ts
-@@ -252,7 +252,7 @@
+@@ -252,7 +252,7 @@ describe('agent loop', () => {
      await waitForIdle(ctx, agent)
  
      const request = adapter.requests[0]
@@ -674,7 +879,7 @@ diff --git a/packages/core/agent-loop/tests/loop.spec.ts b/packages/core/agent-l
      expect(request!.tools?.map(t => t.name)).toEqual(['noop'])
    })
  
-@@ -269,7 +269,7 @@
+@@ -269,7 +269,7 @@ describe('agent loop', () => {
      send(agent, 'hi')
      await waitForIdle(ctx, agent)
  
@@ -683,7 +888,7 @@ diff --git a/packages/core/agent-loop/tests/loop.spec.ts b/packages/core/agent-l
    })
  
    it('contains a strict-variable render failure: the turn errors, the loop keeps serving turns', async () => {
-@@ -305,7 +305,7 @@
+@@ -305,7 +305,7 @@ describe('agent loop', () => {
      await waitForIdle(ctx, agent)
  
      expect(adapter.requests).toHaveLength(1)
@@ -692,7 +897,7 @@ diff --git a/packages/core/agent-loop/tests/loop.spec.ts b/packages/core/agent-l
      const turnEnds = agent.session.events.filter(e => e.type === 'turn/end')
      expect(turnEnds).toHaveLength(2)
      expect(turnEnds[1]?.type === 'turn/end' && turnEnds[1].data.reason.kind).toBe('completed')
-@@ -335,7 +335,7 @@
+@@ -335,7 +335,7 @@ describe('agent loop', () => {
  
      expect(adapter.requests).toHaveLength(1)
      expect(adapter.requests[0]!.model).toBe('mock')
@@ -701,10 +906,25 @@ diff --git a/packages/core/agent-loop/tests/loop.spec.ts b/packages/core/agent-l
    })
  
    it('omits the system field when system-prompt/assemble short-circuits with an empty assembly', async () => {
+diff --git a/packages/core/agent/src/types.ts b/packages/core/agent/src/types.ts
+index b54e56e..51b3517 100644
+--- a/packages/core/agent/src/types.ts
++++ b/packages/core/agent/src/types.ts
+@@ -22,6 +22,9 @@ declare module '@deepseek-ai/dsh-session/types' {
+       removedCount?: number
+       inserted: UserMessage[]
+       outcome?: 'canceled'
++      itemId?: UserMessage['id']
++      action?: 'steer'
++      message?: UserMessage
+     }
+   }
+ }
 diff --git a/packages/core/system-prompt/src/index.ts b/packages/core/system-prompt/src/index.ts
+index ffc052e..df35796 100644
 --- a/packages/core/system-prompt/src/index.ts
 +++ b/packages/core/system-prompt/src/index.ts
-@@ -358,7 +358,7 @@
+@@ -358,7 +358,7 @@ export class SystemPrompt extends Service {
        this.section({
          name: 'harness:identity',
          order: -100,
@@ -714,9 +934,10 @@ diff --git a/packages/core/system-prompt/src/index.ts b/packages/core/system-pro
      }
      this.section({
 diff --git a/packages/core/system-prompt/tests/system-prompt.spec.ts b/packages/core/system-prompt/tests/system-prompt.spec.ts
+index cf19689..f724d09 100644
 --- a/packages/core/system-prompt/tests/system-prompt.spec.ts
 +++ b/packages/core/system-prompt/tests/system-prompt.spec.ts
-@@ -9,7 +9,7 @@
+@@ -9,7 +9,7 @@ import SystemPrompt, { AssembleContext, PromptAssembly, renderContextSnapshot, r
   * their own sections; the built-ins' behavior is pinned by its own describe.
   */
  const BUILT_IN = ['harness:identity', 'deployment:persona']
@@ -726,9 +947,10 @@ diff --git a/packages/core/system-prompt/tests/system-prompt.spec.ts b/packages/
    return assembly.sections.filter(section => !BUILT_IN.includes(section.name))
  }
 diff --git a/packages/examples/agent-spine-demo/tests/agent-core.spec.ts b/packages/examples/agent-spine-demo/tests/agent-core.spec.ts
+index 56f7903..52d967b 100644
 --- a/packages/examples/agent-spine-demo/tests/agent-core.spec.ts
 +++ b/packages/examples/agent-spine-demo/tests/agent-core.spec.ts
-@@ -375,7 +375,7 @@
+@@ -375,7 +375,7 @@ describe('dsh-agent-spine-demo bundle', () => {
        const firstRequestText = adapter.requests[0]?.messages.map(messageText).join('\n')
        expect(firstRequestText).toContain('hi')
        expect(firstRequestText).toContain('bundled project rule')
@@ -737,3 +959,29 @@ diff --git a/packages/examples/agent-spine-demo/tests/agent-core.spec.ts b/packa
        expect(adapter.requests[0]?.system).not.toContain('bundled project rule')
        await handle.dispose()
        await ctx.fiber.dispose()
+diff --git a/packages/subagent/subagent-codex/src/wire.ts b/packages/subagent/subagent-codex/src/wire.ts
+index bc00ff0..079280d 100644
+--- a/packages/subagent/subagent-codex/src/wire.ts
++++ b/packages/subagent/subagent-codex/src/wire.ts
+@@ -133,7 +133,7 @@ export class CodexAppServerWire {
+     object(await this.guarded(this.transport.request('initialize', {
+       clientInfo: {
+         name: 'deepseek-harness',
+-        title: 'DeepSeek Harness',
++        title: 'Tessivum',
+         version: '0.0.1',
+       },
+       capabilities: {
+diff --git a/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts b/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
+index 37b2e9f..66c4c01 100644
+--- a/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
++++ b/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
+@@ -372,7 +372,7 @@ describe('CodexAppServerWire', () => {
+     expect(initialize.params).toEqual({
+       clientInfo: {
+         name: 'deepseek-harness',
+-        title: 'DeepSeek Harness',
++        title: 'Tessivum',
+         version: '0.0.1',
+       },
+       capabilities: {

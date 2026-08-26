@@ -36,16 +36,16 @@ use tessivum::{
         SessionId, SessionModelSelection, SessionPromptParams, SessionPromptResult, SessionStatus,
         StreamChunk,
     },
+    session::{MemorySessionPersistence, SessionStore},
     settings::{MemorySettingsProvider, Settings, SettingsRegistration},
     subagent::{
         SessionProjectionsBlock, SubagentDeleteRequest, SubagentDeleteResult,
         SubagentHistoryRequest, SubagentHistoryResult, SubagentInterruptRequest,
         SubagentInterruptResult, SubagentMode, SubagentPromptRequest, SubagentPromptResult,
     },
-    TessivumError,
-    session::{MemorySessionPersistence, SessionStore},
     system_prompt::SystemPrompt,
     tools::ToolRuntime,
+    TessivumError,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -542,7 +542,7 @@ async fn raw_http_status(
         "Content-Type: application/json\r\n"
     };
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{origins}{content_type}Content-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n{origins}{content_type}Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -568,7 +568,9 @@ async fn raw_http_status(
 async fn registered_market_route_forwards_through_the_bound_listener() {
     use std::{os::unix::net::UnixStream, sync::mpsc, thread};
 
-    use tessivum_node_bridge::{BridgeClient, BridgeHandler, ClientConfig, Frame, FrameCodec, FrameKind};
+    use tessivum_node_bridge::{
+        BridgeClient, BridgeHandler, ClientConfig, Frame, FrameCodec, FrameKind,
+    };
 
     let (rust, mut node) = UnixStream::pair().expect("duplex pair constructs");
     let client = BridgeClient::from_io(
@@ -581,11 +583,18 @@ async fn registered_market_route_forwards_through_the_bound_listener() {
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let peer = thread::spawn(move || {
         let codec = FrameCodec::new(1024 * 1024).expect("codec constructs");
-        assert_eq!(codec.read_frame(&mut node).expect("hello reads").kind, FrameKind::Hello);
+        assert_eq!(
+            codec.read_frame(&mut node).expect("hello reads").kind,
+            FrameKind::Hello
+        );
         codec
             .write_frame(
                 &mut node,
-                &Frame::new(1, FrameKind::Ready, json!({"extensions": ["web.route/v1"]})),
+                &Frame::new(
+                    1,
+                    FrameKind::Ready,
+                    json!({"capabilities": ["web.route/v1"]}),
+                ),
             )
             .expect("ready writes");
         let request = codec.read_frame(&mut node).expect("route request reads");
@@ -627,14 +636,10 @@ async fn registered_market_route_forwards_through_the_bound_listener() {
     )
     .expect("route registers");
     let host = Arc::new(FakeHost::new());
-    let mut server = ApiServer::bind_with_web_routes(
-        host,
-        ApiServerConfig::default(),
-        Vec::new(),
-        Some(bridge),
-    )
-    .await
-    .expect("listener binds");
+    let mut server =
+        ApiServer::bind_with_web_routes(host, ApiServerConfig::default(), Vec::new(), Some(bridge))
+            .await
+            .expect("listener binds");
     let authority = server.local_addr().to_string();
     let origin = format!("http://{authority}");
     assert!(

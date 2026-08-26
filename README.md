@@ -8,9 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.9` is a prerelease and reproducible baseline, not a production-stable API promise. GitHub Releases provides native Linux and macOS archives for x86-64 and ARM64.
-
-The next productization work—original Tessivum branding, install channels, and bounded `dshmarket@1.29.2` compatibility—is specified as planned work in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md); it is not part of Alpha.9.
+`v0.1.0-alpha.11` is a prerelease, not a production-stable API or data-format promise. It adds Tessivum-owned branding and install channels plus bounded compatibility with `dshmarket@1.29.2`.
 
 Current implementation foundation:
 
@@ -19,16 +17,17 @@ Current implementation foundation:
 - Headless CLI plus NDJSON JSON-RPC/ACP SDK with TypeScript and Python clients;
 - HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
 - Native/WASM/Browser routing plus a real Legacy Node compat-host over the bounded `cordis.node/v1` bridge and DomainBridge services;
-- Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the upstream `AppWebEntry` source shell with a 38-package `dsh.client` graph.
+- Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the frozen upstream `AppWebEntry` source shell;
+- a pnpm-owned plugin profile, bounded `web.route/v1`, packaged Host compatibility modules, and restart-required `dshmarket@1.29.2` activation.
 
-The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline is complete:
+The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline remains complete:
 
 - the source Web shell and all 38 composed client packages build from commit `47f943859bef60e4160492346772ded9b24f765a`; Tessivum applies its checked-in compatibility patch before auditing and building the source tree;
 - the Rust `/api` dispatcher implements all 52 frozen Core RPC method names and both Browser WebSocket downlinks;
 - provider-neutral streaming, retry, cancellation, atomic queue/steer, durable sessions, presets, Subagents, Workflow, Native/WASM tools, and JSONL replay are covered by focused Rust contracts;
 - all 69 source-Web Chromium scenarios pass as the behavioral schema/event parity gate.
 
-The authoritative contract and completion gates are in [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md).
+The authoritative compatibility contract is [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md). Alpha.11 architecture and release gates are recorded in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md).
 
 ## Architecture
 
@@ -55,20 +54,41 @@ Supported cross-runtime operations use the bounded, versioned DomainBridge contr
 
 ## Requirements
 
-Source builds require Rust stable with `rustfmt` and `clippy`, Bun 1.3.14 or newer, npm, Git, and network access to the pinned `tessivum-core` revision.
+Source builds require Rust stable with `rustfmt` and `clippy`, Bun 1.3.14 or newer, pnpm 10 or newer, Git, and network access to the pinned `tessivum-core` revision and frozen npm inputs.
 
-Prebuilt archives do not require Rust or Git. Bun 1.3.14 or newer is needed only when Legacy Node plugins run; npm is needed only by `tessivum plugin add/remove`.
+Prebuilt archives do not require Rust, Git, or a system Node.js. Core Headless/Web operation does not require Bun or pnpm. Bun is required when Legacy Node plugins run; pnpm is required for `tessivum plugin add/remove` and dshmarket mutations. The Homebrew formula installs both runtime dependencies.
 
-## Prebuilt archives
+## Install
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.9 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.9), verify the checksum, then run the packaged launcher:
+### Homebrew Tap
+
+```bash
+brew tap wavetao2010/tap
+brew install tessivum
+tessivum --version
+```
+
+### No-sudo installer
+
+Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates `~/.local/bin/tessivum`:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.11/install.sh
+sh install.sh 0.1.0-alpha.11
+```
+
+The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
+
+### Prebuilt archives
+
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.11 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.11), verify the checksum, then run the packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.9-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.9-$target.tar.gz"
-"./tessivum-0.1.0-alpha.9-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.9-$target/bin/tessivum" --data-dir "$HOME/.local/share/tessivum" web
+sha256sum -c "tessivum-0.1.0-alpha.11-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.11-$target.tar.gz"
+"./tessivum-0.1.0-alpha.11-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.11-$target/bin/tessivum" web
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -117,20 +137,22 @@ cargo run --release -- \
 
 The Responses adapter sends `store: false`, streams text/reasoning/function calls, persists encrypted reasoning items for stateless tool-call continuation, and materializes validated AttachmentRef images as Responses data URLs. Custom provider routes also dispatch `openai-completions` to `/chat/completions` and `anthropic-messages` to `/messages`; the selected protocol is no longer treated as Responses. `openai-codex-responses` remains out of scope because it is an OAuth transport rather than the API-key Responses contract.
 
-### Community plugins
+### Community plugins and dshmarket
 
-Install npm, Git, tarball, or local Cordis packages into the deployment-owned profile, then start Web with the same data directory:
+All package mutations target `${TESSIVUM_HOME:-$HOME/.tessivum}/plugins` and use pnpm. Installs ignore lifecycle scripts unless the profile contains a non-empty, explicit `pnpm.onlyBuiltDependencies` allowlist.
 
 ```bash
-data_dir="$HOME/.local/share/tessivum"
-cargo run --release -- --data-dir "$data_dir" plugin add @scope/package
-cargo run --release -- --data-dir "$data_dir" plugin remove @scope/package
-cargo run --release -- --data-dir "$data_dir" web
+tessivum plugin add @scope/package
+tessivum plugin remove @scope/package
+
+# Frozen market compatibility target
+tessivum plugin add dshmarket@1.29.2
+tessivum web
 ```
 
-The default profile is `.tessivum/plugins`; `--data-dir <dir>` selects another profile for both management and Web. Installs disable npm lifecycle scripts and copy local packages into the confined profile. On Web/SDK startup, ordinary Cordis packages run in the Legacy Node host, Extism declarations run as WASM, `dsh.bundle.patch` insertions are composed into the Host entry tree, and published `dsh.client` bundles join the Browser graph. The Settings inventory reports installed Host and Browser entries; it is not a package marketplace and Tessivum does not install community packages without an explicit `plugin add`.
+Plugin changes are restart-required: stop and restart `tessivum web` after add, update, remove, restore, or an allow-builds change. Tessivum does not expose a global `dsh` shim and does not hot-mount a second Node-side loader state.
 
-Legacy plugins are trusted code, not a sandbox. The source checkout resolves the compatibility host from `../tessivum-core/node/compat-host` and the pinned Cordis vendor from `../upstream/deepseek-harness/vendor`; packaged deployments can set `TESSIVUM_COMPAT_HOST` and `CORDIS_VENDOR_ROOT` explicitly.
+Legacy plugins and their lifecycle scripts are trusted code running with the user's permissions, not a sandbox. `web.route/v1` registrations remain Rust-owned, same-origin, prefix-restricted, size-bounded, deadline-bounded, cancellable, and generation-scoped. Packaged deployments locate the compatibility host, Cordis vendor, Host modules, and Agent Presets relative to the launcher; source checkouts use their pinned development paths.
 
 ### Browser shell
 
@@ -151,6 +173,32 @@ cargo run --release -- sdk
 ```
 
 SDK mode reads newline-delimited JSON-RPC from stdin and writes protocol frames to stdout. Client implementations live in [`sdk/typescript`](sdk/typescript) and [`sdk/python`](sdk/python).
+
+## Data migration, upgrade, rollback, and uninstall
+
+The data-root precedence is `--data-dir`, then absolute `TESSIVUM_HOME`, then `$HOME/.tessivum`. If the new default does not exist but `./.tessivum` does, Tessivum stops with a migration diagnostic instead of silently creating a second state tree. Back up both directories, then move the old tree explicitly only when the destination is absent:
+
+```bash
+test ! -e "$HOME/.tessivum" && mv ./.tessivum "$HOME/.tessivum"
+```
+
+Alpha.11 makes pnpm the only plugin-profile mutation backend. The first successful mutation removes a legacy `package-lock.json`; `package.json`, `pnpm-lock.yaml`, and `node_modules` are then owned as one profile. Back up `$TESSIVUM_HOME/plugins` (or `$HOME/.tessivum/plugins`) before migration or restore.
+
+Homebrew upgrades switch the program without deleting user data. The no-sudo installer retains versioned program directories; rerunning `sh install.sh <older-version>` atomically repoints the launcher. Binary rollback does not rewrite an Alpha data or plugin profile, so restore the matching backup if the newer release changed it.
+
+```bash
+brew uninstall tessivum              # program only
+sh install.sh --uninstall            # program only
+rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
+```
+
+## Security and provenance
+
+- Release archives are built from the tagged Tessivum source and the exact `tessivum-core` Git revision in `Cargo.lock`; the Browser baseline is pinned to DeepSeek Harness commit `47f943859bef60e4160492346772ded9b24f765a`.
+- Host compatibility npm inputs are exact versions with registry URLs, SHA-512 integrities, file hashes, and licenses in `packaging/host-modules.json`; archives include `THIRD_PARTY_LICENSES.txt` and `release-metadata.json`.
+- The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
+- HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
+- Checksums detect corruption but are not signatures. Alpha.11 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
 
 ## Verification
 
@@ -173,6 +221,7 @@ These gates exercise the Rust-native runtime, the pinned DeepSeek client package
 - the native Responses adapter requires the standard API-key `/responses` contract; direct ChatGPT/Codex OAuth and remote image URLs are not wired;
 - image-bearing MCP/tool-result serialization is covered by focused adapter tests; the real Browser E2E currently exercises text tool continuation plus user image input, because no production-configured image-producing tool is exposed;
 - API listeners are loopback-only; prebuilt archives are checksum-verified but are not code-signed or notarized.
+- dshmarket compatibility is frozen to `1.29.2`; other market versions and hot activation are unsupported until separately verified.
 
 These are product follow-ups, not work to change or deprecate the official DeepSeek Harness project.
 
@@ -182,9 +231,10 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Development and cutover plan](docs/DEVELOPMENT_PLAN.md)
 - [Plugin compatibility](docs/PLUGIN_COMPATIBILITY.md)
 - [Phase 3 product capability plan](docs/PHASE3_PRODUCT_PLAN.md)
+- [Phase 4 branding, distribution, and dshmarket plan](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)
 - [DeepSeek Harness compatibility baseline](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E port checklist (69 upstream files)](docs/WEB_E2E_PORT_CHECKLIST.md)
 
 ## License
 
-Tessivum is licensed under the [MIT License](LICENSE).
+Tessivum source is licensed under the [MIT License](LICENSE). Release archives also contain `THIRD_PARTY_LICENSES.txt`; compatibility does not relicense bundled Cordis, DeepSeek Harness-derived Browser sources, or npm dependencies.

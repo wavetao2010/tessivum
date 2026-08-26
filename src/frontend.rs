@@ -467,6 +467,11 @@ fn scan_roots(roots: &[PathBuf]) -> Result<ScannedPackages, FrontendError> {
             .cmp(&right.entry.id)
             .then_with(|| left.manifest.cmp(&right.manifest))
     });
+    // pnpm may materialize one byte-identical package per peer set.
+    rows.dedup_by(|left, right| {
+        left.entry == right.entry
+            && left.map.as_ref().map(|(_, rev)| rev) == right.map.as_ref().map(|(_, rev)| rev)
+    });
     for pair in rows.windows(2) {
         if pair[0].entry.id == pair[1].entry.id {
             errors.push(manifest_error(
@@ -586,7 +591,8 @@ fn discover_manifests(
                     .and_then(Path::file_name)
                     .and_then(|parent| parent.to_str())
                     == Some(".pnpm");
-            if matches!(name.to_str(), Some(".git" | "target" | "node_modules")) && !is_pnpm_modules {
+            if matches!(name.to_str(), Some(".git" | "target" | "node_modules")) && !is_pnpm_modules
+            {
                 continue;
             }
             discover_manifests(&path, depth + 1, entries, manifests, errors);

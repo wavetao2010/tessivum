@@ -66,7 +66,9 @@ beforeAll(async () => {
 
   const port = await freePort()
   const baseUrl = `http://127.0.0.1:${port}`
-  server = Bun.spawn([join(CRATE_ROOT, 'target/debug/tessivum'), 'web'], {
+  server = Bun.spawn([
+    join(CRATE_ROOT, 'target/debug/tessivum'), 'web', '--data-dir', join(workspace, '.tessivum'),
+  ], {
     cwd: workspace,
     env: { ...process.env, DEEPSEEK_API_KEY: 'test', TESSIVUM_WEB_ADDR: `127.0.0.1:${port}` },
     stdout: 'inherit',

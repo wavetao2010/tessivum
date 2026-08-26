@@ -204,7 +204,7 @@ def verify(root: Path, packages: list[dict]) -> None:
     if inventory.get("format") != 1 or not isinstance(rows, list) or len(rows) != len(packages):
         fail("host module inventory has an invalid format or package count")
     expected_files: set[tuple[str, str]] = set()
-    for package, row in zip(packages, rows, strict=True):
+    for package, row in zip(packages, rows):
         if not isinstance(row, dict):
             fail("host module inventory package must be an object")
         for key in ("name", "version", "url", "sri", "license", "licenseFile", "runtimeEntries"):

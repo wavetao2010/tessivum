@@ -453,6 +453,8 @@ async fn web_environment_route_remains_dynamic_after_settings_mutation() {
             .env_remove("TESSIVUM_REPLAY")
             .env_remove("TESSIVUM_LLM_PROVIDER")
             .arg("web")
+            .arg("--data-dir")
+            .arg(fixture.path().join("state"))
             .stderr(Stdio::piped())
             .spawn()
             .expect("web command starts"),
@@ -465,16 +467,16 @@ async fn web_environment_route_remains_dynamic_after_settings_mutation() {
         .take()
         .expect("stderr is piped");
     let mut lines = BufReader::new(stderr).lines();
+    let mut startup = Vec::new();
     let listen = timeout(Duration::from_secs(5), async {
         loop {
-            let line = lines
-                .next_line()
-                .await
-                .expect("web stderr reads")
-                .expect("web command stays alive");
+            let Some(line) = lines.next_line().await.expect("web stderr reads") else {
+                panic!("web command exited during startup:\n{}", startup.join("\n"));
+            };
             if line.starts_with("Tessivum web listening at http://") {
                 return line;
             }
+            startup.push(line);
         }
     })
     .await

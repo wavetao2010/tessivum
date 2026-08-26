@@ -131,6 +131,7 @@ impl LegacyProfile {
         config.max_frame_size = MARKET_BRIDGE_MAX_FRAME_SIZE;
         let command = validate_command(command)?;
         validate_config(&config)?;
+        let request_timeout = config.request_timeout;
         let supervisor = Arc::new(NodeSupervisor::new(command, config)?);
         let bridge = Arc::new(DomainBridge::new(services)?);
         Ok(Self {
@@ -172,6 +173,7 @@ impl LegacyProfile {
                 return Err(error.into());
             }
         };
+        client.set_log_handler(|message| eprintln!("Legacy Node: {message}"));
         let generation = client.generation();
 
         if let Err(error) = self.inner.bridge.attach_client(client.clone(), generation) {

@@ -10,8 +10,8 @@ test('ships install metadata with the built web application', async () => {
 
   expect(JSON.parse(await readFile(join(DIST_ROOT, 'manifest.webmanifest'), 'utf8'))).toEqual({
     id: '/',
-    name: 'DeepSeek Harness',
-    short_name: 'DSH',
+    name: 'Tessivum',
+    short_name: 'Tessivum',
     start_url: '/',
     scope: '/',
     display: 'fullscreen',
@@ -24,8 +24,9 @@ test('ships install metadata with the built web application', async () => {
   })
 })
 
-test('ships a favicon that switches to a light mark under dark color scheme', async () => {
+test('ships the Tessivum mark in the current system color', async () => {
   const favicon = await readFile(join(DIST_ROOT, 'favicon.svg'), 'utf8')
-  expect(favicon).toMatch(/@media \(prefers-color-scheme: dark\)\s*{\s*path\s*{[^}]*fill:\s*#fff/i)
-  expect(favicon).toContain('fill="#000"')
+  expect(favicon).toContain('fill="currentColor"')
+  expect(favicon).toContain('color-scheme: light dark')
+  expect(favicon.match(/<path /g)).toHaveLength(4)
 })

@@ -16,7 +16,7 @@ CORDIS = Path(os.environ.get("TESSIVUM_CORDIS_SOURCE", WORKSPACE / "upstream/cor
 CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
-CORE_SHA = "7bfeeb9600008c66b78f065244dbcd8a64e730cb"
+CORE_SHA = "e894744e88cbed359179745e31eed00c1f45201b"
 BASELINE = PROJECT / "docs/COMPATIBILITY_BASELINE.md"
 CHECKLIST = PROJECT / "docs/WEB_E2E_PORT_CHECKLIST.md"
 README = PROJECT / "README.md"
@@ -44,6 +44,8 @@ EXPECTED_NODE_KINDS = {
     "plugin.load", "plugin.update", "plugin.dispose", "plugin.snapshot",
     "service.call", "service.provide", "service.remove",
     "event.subscribe", "event.emit", "event.callback", "registration.dispose",
+    "web.route.register", "web.route.unregister", "web.route.request",
+    "pnpm.run", "pnpm.output",
 }
 
 
@@ -80,6 +82,12 @@ def main() -> int:
     check(CORDIS_SHA in plan, "Cordis commit is not frozen in the development plan", failures)
     check(CORE_SHA in (PROJECT / "Cargo.toml").read_text(),
           "tessivum-core dependency revision changed", failures)
+    ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text()
+    release_workflow = (PROJECT / ".github/workflows/release.yml").read_text()
+    check(ci_workflow.count(f"ref: {CORE_SHA}") == 2,
+          "CI tessivum-core checkout revision changed", failures)
+    check(release_workflow.count(f"ref: {CORE_SHA}") == 1,
+          "release tessivum-core checkout revision changed", failures)
     harness_package = (UPSTREAM / "package.json").read_text()
     check('"version": "0.1.0-rc.5"' in harness_package,
           "DeepSeek Harness package version changed", failures)

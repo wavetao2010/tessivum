@@ -321,6 +321,18 @@ async fn pnpm_client_source_maps_are_optional_and_integrity_checked() {
         source_map,
     );
     packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2_peer/node_modules/dshmarket/package.json",
+        r#"{"name":"dshmarket","exports":{"./client":"./client/client.js"},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2_peer/node_modules/dshmarket/client/client.js",
+        bundle,
+    );
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2_peer/node_modules/dshmarket/client/client.js.map",
+        source_map,
+    );
+    packages.write(
         "plugins/node_modules/.pnpm/dependency@1.0.0/node_modules/dependency/package.json",
         r#"{"name":"dependency"}"#,
     );
@@ -332,8 +344,11 @@ async fn pnpm_client_source_maps_are_optional_and_integrity_checked() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&package, node_modules.join("dshmarket")).unwrap();
-        std::os::unix::fs::symlink(packages.path().join("outside"), node_modules.join("escaped"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            packages.path().join("outside"),
+            node_modules.join("escaped"),
+        )
+        .unwrap();
     }
 
     let frontend = FrontendStatic::new(dist.path()).unwrap();
@@ -379,6 +394,15 @@ async fn pnpm_client_source_maps_are_optional_and_integrity_checked() {
         StatusCode::FORBIDDEN
     );
 
+    packages.write(
+        "plugins/node_modules/.pnpm/dshmarket@1.29.2_peer/node_modules/dshmarket/client/client.js",
+        "export const dshmarket = 'conflict';",
+    );
+    assert!(matches!(
+        frontend.rebuild(),
+        Err(FrontendError::InvalidPackageManifests { .. })
+    ));
+    fs::remove_dir_all(node_modules.join(".pnpm/dshmarket@1.29.2_peer")).unwrap();
     packages.write(
         "plugins/node_modules/.pnpm/dshmarket@1.29.2/node_modules/dshmarket/client/client.js.map",
         r#"{"version":3,"sources":["changed.ts"]}"#,

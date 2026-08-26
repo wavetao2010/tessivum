@@ -225,7 +225,10 @@ impl PnpmOutputSink {
             return Ok(());
         }
         if chunk.len() > MAX_PNPM_OUTPUT_CHUNK {
-            return Err(remote("PNPM_OUTPUT_LIMIT", "pnpm output chunk exceeds 64 KiB"));
+            return Err(remote(
+                "PNPM_OUTPUT_LIMIT",
+                "pnpm output chunk exceeds 64 KiB",
+            ));
         }
         if self.cancellation.is_cancelled() {
             return Err(BridgeError::Cancelled);
@@ -238,7 +241,12 @@ impl PnpmOutputSink {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(chunk.len()).filter(|next| *next <= limit)
             })
-            .map_err(|_| remote("PNPM_OUTPUT_LIMIT", "pnpm output exceeds its configured limit"))?;
+            .map_err(|_| {
+                remote(
+                    "PNPM_OUTPUT_LIMIT",
+                    "pnpm output exceeds its configured limit",
+                )
+            })?;
         if self.cancellation.is_cancelled() {
             return Err(BridgeError::Cancelled);
         }
@@ -252,7 +260,6 @@ impl PnpmOutputSink {
         )
     }
 }
-
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -710,7 +717,6 @@ struct WebRouteKey {
     path: String,
 }
 
-
 struct PendingRequestGuard {
     client: BridgeClient,
     request_id: u64,
@@ -809,7 +815,6 @@ impl DomainBridge {
     pub fn with_limits(services: BridgeServices, limits: BridgeLimits) -> BridgeResult<Self> {
         Self::with_limits_and_policy_registry(services, limits, WasmPolicyRegistry::new())
     }
-
 
     /// Creates a bridge whose WASM calls are authorized by `policy_registry`.
     pub fn with_policy_registry(
@@ -975,7 +980,10 @@ impl DomainBridge {
         let request_id = pending.request_id();
         let mut cancel = PendingRequestGuard::new(client.clone(), request_id);
         let timeout = WEB_ROUTE_TIMEOUT;
-        let wait = self.inner.handle.spawn_blocking(move || pending.wait(timeout));
+        let wait = self
+            .inner
+            .handle
+            .spawn_blocking(move || pending.wait(timeout));
         let result = tokio::select! {
             _ = cancellation.cancelled() => {
                 return Err(stale_generation(entry.generation));
@@ -1735,8 +1743,12 @@ impl DomainBridge {
                 let request_id = frame
                     .request_id
                     .ok_or_else(|| invalid("pnpm.run requires a request id"))?;
-                self.pnpm_run(frame.connection_generation, request_id, decode(frame.payload)?)
-                    .await
+                self.pnpm_run(
+                    frame.connection_generation,
+                    request_id,
+                    decode(frame.payload)?,
+                )
+                .await
             }
             FrameKind::Cancel => {
                 self.ensure_generation(frame.connection_generation)?;
@@ -2033,14 +2045,20 @@ fn validate_web_request(request: &WebRouteRequest) -> BridgeResult<()> {
         || request.method.len() > 16
         || !request.method.bytes().all(is_http_token)
     {
-        return Err(remote("INVALID_HTTP_REQUEST", "method is not a valid HTTP token"));
+        return Err(remote(
+            "INVALID_HTTP_REQUEST",
+            "method is not a valid HTTP token",
+        ));
     }
     validate_product_path(&request.path)?;
     if request.query.len() > MAX_WEB_QUERY_BYTES
         || request.query.contains('\0')
         || request.query.contains('#')
     {
-        return Err(remote("INVALID_HTTP_REQUEST", "query is invalid or too large"));
+        return Err(remote(
+            "INVALID_HTTP_REQUEST",
+            "query is invalid or too large",
+        ));
     }
     validate_web_headers(&request.headers, false)?;
     base64_decoded_len(&request.body_base64, WEB_REQUEST_BODY_LIMIT)?;
@@ -2049,7 +2067,10 @@ fn validate_web_request(request: &WebRouteRequest) -> BridgeResult<()> {
 
 fn validate_web_response(response: &WebRouteResponse) -> BridgeResult<()> {
     if !(100..=599).contains(&response.status) {
-        return Err(remote("INVALID_HTTP_RESPONSE", "status is outside the HTTP range"));
+        return Err(remote(
+            "INVALID_HTTP_RESPONSE",
+            "status is outside the HTTP range",
+        ));
     }
     validate_web_headers(&response.headers, true)?;
     base64_decoded_len(&response.body_base64, WEB_RESPONSE_BODY_LIMIT)?;
@@ -2087,7 +2108,10 @@ fn validate_web_headers(headers: &[(String, String)], response: bool) -> BridgeR
             || (response && normalized == "content-length")
             || (response && !seen.insert(normalized))
         {
-            return Err(remote("INVALID_HTTP_HEADER", "header is forbidden or duplicated"));
+            return Err(remote(
+                "INVALID_HTTP_HEADER",
+                "header is forbidden or duplicated",
+            ));
         }
         if value.contains('\0') || value.contains('\r') || value.contains('\n') {
             return Err(remote("INVALID_HTTP_HEADER", "header value is invalid"));
@@ -2111,44 +2135,22 @@ fn web_prefix_matches(path: &str, prefix: &str) -> bool {
 
 fn validate_pnpm_run(request: &PnpmRunRequest) -> BridgeResult<()> {
     validate_identifier("operationId", &request.operation_id, 128)?;
-    if request.args.is_empty() || request.args.len() > 64 {
-        return Err(remote("INVALID_PNPM_REQUEST", "args must contain one bounded command"));
-    }
     let invoking_dir = Path::new(&request.invoking_dir);
     if request.invoking_dir.is_empty()
         || request.invoking_dir.len() > MAX_WEB_PATH_BYTES
         || request.invoking_dir.contains('\0')
         || !invoking_dir.is_absolute()
-        || invoking_dir.components().any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        || invoking_dir
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
     {
-        return Err(remote("INVALID_PNPM_REQUEST", "invokingDir must be an absolute traversal-free path"));
+        return Err(remote(
+            "INVALID_PNPM_REQUEST",
+            "invokingDir must be an absolute traversal-free path",
+        ));
     }
-    let mut command = None;
-    let mut targets = 0usize;
-    for argument in &request.args {
-        if argument.is_empty() || argument.len() > 512 || argument.contains('\0') {
-            return Err(remote("INVALID_PNPM_REQUEST", "an argument is invalid"));
-        }
-        match argument.as_str() {
-            "add" | "remove" | "install" if command.is_none() => command = Some(argument.as_str()),
-            "-w" => {}
-            value if value.starts_with('-') => return Err(remote("INVALID_PNPM_REQUEST", "a pnpm flag is not permitted")),
-            value => {
-                let target = Path::new(value);
-                if value.chars().any(char::is_whitespace)
-                    || target.is_absolute()
-                    || target.components().any(|component| matches!(component, Component::ParentDir | Component::CurDir | Component::RootDir))
-                {
-                    return Err(remote("INVALID_PNPM_REQUEST", "a package target is invalid"));
-                }
-                targets += 1;
-            }
-        }
-    }
-    match (command, targets) {
-        (Some("add" | "remove"), 1) | (Some("install"), 0) => Ok(()),
-        _ => Err(remote("INVALID_PNPM_REQUEST", "pnpm command arguments are not permitted")),
-    }
+    crate::plugin_manager::validate_market_pnpm_args(&request.args)
+        .map_err(|message| remote("INVALID_PNPM_REQUEST", message))
 }
 
 fn validate_pnpm_result(result: &PnpmRunResult, limit: usize) -> BridgeResult<()> {
@@ -2179,7 +2181,7 @@ fn is_http_token(byte: u8) -> bool {
         || byte.is_ascii_alphanumeric()
 }
 
-fn is_hop_header(name: &str) -> bool {
+pub(crate) fn is_hop_header(name: &str) -> bool {
     matches!(
         name,
         "connection"
@@ -2224,8 +2226,11 @@ pub fn decode_web_body(encoded: &str) -> BridgeResult<Vec<u8>> {
 
 fn base64_decoded_len(encoded: &str, limit: usize) -> BridgeResult<usize> {
     let bytes = encoded.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return Err(remote("INVALID_BASE64", "base64 must use complete quartets"));
+    if !bytes.len().is_multiple_of(4) {
+        return Err(remote(
+            "INVALID_BASE64",
+            "base64 must use complete quartets",
+        ));
     }
     let padding = bytes.ends_with(b"==") as usize * 2
         + (bytes.ends_with(b"=") && !bytes.ends_with(b"==")) as usize;
@@ -2236,7 +2241,10 @@ fn base64_decoded_len(encoded: &str, limit: usize) -> BridgeResult<usize> {
         .and_then(|length| length.checked_sub(padding))
         .ok_or_else(|| remote("INVALID_BASE64", "base64 padding is invalid"))?;
     if length > limit {
-        return Err(remote("PAYLOAD_TOO_LARGE", "body exceeds its configured limit"));
+        return Err(remote(
+            "PAYLOAD_TOO_LARGE",
+            "body exceeds its configured limit",
+        ));
     }
     for (index, byte) in bytes.iter().copied().enumerate() {
         if byte == b'=' {
@@ -2260,8 +2268,16 @@ fn decode_base64(encoded: &str, limit: usize) -> BridgeResult<Vec<u8>> {
     for chunk in bytes.chunks_exact(4) {
         let first = base64_value(chunk[0]).expect("validated base64");
         let second = base64_value(chunk[1]).expect("validated base64");
-        let third = if chunk[2] == b'=' { 0 } else { base64_value(chunk[2]).expect("validated base64") };
-        let fourth = if chunk[3] == b'=' { 0 } else { base64_value(chunk[3]).expect("validated base64") };
+        let third = if chunk[2] == b'=' {
+            0
+        } else {
+            base64_value(chunk[2]).expect("validated base64")
+        };
+        let fourth = if chunk[3] == b'=' {
+            0
+        } else {
+            base64_value(chunk[3]).expect("validated base64")
+        };
         decoded.push((first << 2) | (second >> 4));
         if chunk[2] != b'=' {
             decoded.push((second << 4) | (third >> 2));
@@ -2479,7 +2495,6 @@ struct PromptAssemble {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PromptRegister {
-
     registration_id: String,
     id: String,
     order: i64,
@@ -2637,7 +2652,13 @@ mod alpha11_tests {
             .web_routes_supported = true;
     }
 
-    fn register(bridge: &DomainBridge, generation: u64, route_id: &str, kind: WebRouteKind, path: &str) {
+    fn register(
+        bridge: &DomainBridge,
+        generation: u64,
+        route_id: &str,
+        kind: WebRouteKind,
+        path: &str,
+    ) {
         assert_eq!(
             BridgeHandler::handle(
                 bridge,
@@ -2688,8 +2709,20 @@ mod alpha11_tests {
         let bridge = bridge();
         attach(&bridge, 1);
         register(&bridge, 1, "root", WebRouteKind::Prefix, "/dsh-market");
-        register(&bridge, 1, "nested", WebRouteKind::Prefix, "/dsh-market/admin");
-        register(&bridge, 1, "exact", WebRouteKind::Exact, "/dsh-market/admin/ping");
+        register(
+            &bridge,
+            1,
+            "nested",
+            WebRouteKind::Prefix,
+            "/dsh-market/admin",
+        );
+        register(
+            &bridge,
+            1,
+            "exact",
+            WebRouteKind::Exact,
+            "/dsh-market/admin/ping",
+        );
 
         assert_eq!(
             bridge
@@ -2818,7 +2851,10 @@ mod alpha11_tests {
             .expect("route invocation succeeds")
             .expect("route matches");
         assert_eq!(response.status, 201);
-        assert_eq!(decode_web_body(&response.body_base64).expect("response decodes"), b"ok");
+        assert_eq!(
+            decode_web_body(&response.body_base64).expect("response decodes"),
+            b"ok"
+        );
         let payload = seen_rx.recv().expect("Node observed request");
         assert_eq!(payload["routeId"], "synthetic");
         assert_eq!(payload["path"], "/dsh-market/synthetic");
@@ -2872,8 +2908,14 @@ mod alpha11_tests {
         let agents = AgentRegistry::new(sessions.clone());
         let bridge = Arc::new(
             DomainBridge::new(
-                BridgeServices::new(tools, SystemPrompt::new(), LlmRuntime::new(), sessions, agents)
-                    .with_pnpm_boundary(Arc::new(BlockingPnpmBoundary(Arc::clone(&started)))),
+                BridgeServices::new(
+                    tools,
+                    SystemPrompt::new(),
+                    LlmRuntime::new(),
+                    sessions,
+                    agents,
+                )
+                .with_pnpm_boundary(Arc::new(BlockingPnpmBoundary(Arc::clone(&started)))),
             )
             .expect("bridge constructs"),
         );
@@ -2884,13 +2926,17 @@ mod alpha11_tests {
             tokio::spawn(async move { bridge.pnpm_run(1, 9, request).await })
         };
         started.notified().await;
-        assert!(!bridge.cancel_pnpm_request(2, 9).expect("foreign generation observes"));
+        assert!(!bridge
+            .cancel_pnpm_request(2, 9)
+            .expect("foreign generation observes"));
         assert_eq!(
-            BridgeHandler::handle(&*bridge, Frame::cancel(1, 9)).expect("generic cancel dispatches"),
+            BridgeHandler::handle(&*bridge, Frame::cancel(1, 9))
+                .expect("generic cancel dispatches"),
             json!({"cancelled": true})
         );
         assert_eq!(
-            BridgeHandler::handle(&*bridge, Frame::cancel(1, 9)).expect("generic cancel is idempotent"),
+            BridgeHandler::handle(&*bridge, Frame::cancel(1, 9))
+                .expect("generic cancel is idempotent"),
             json!({"cancelled": false})
         );
         assert!(running.await.expect("runner task joins").is_ok());
