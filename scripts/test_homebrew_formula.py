@@ -55,6 +55,8 @@ def main() -> None:
         assert formula.count("url ") == 4
         assert formula.count("sha256 ") == 4
         assert 'depends_on "bun"' in formula and 'depends_on "pnpm"' in formula
+        assert 'desc "Rust-native AI agent harness"' in formula
+        assert formula.index('depends_on "bun"') < formula.index("on_macos do")
         assert 'libexec.install Dir["*"]' in formula
         assert 'bin.install_symlink libexec/"bin/tessivum"' in formula
 

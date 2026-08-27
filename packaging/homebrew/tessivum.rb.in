@@ -1,7 +1,10 @@
 class Tessivum < Formula
-  desc "Tessivum AI agent"
+  desc "Rust-native AI agent harness"
   homepage "https://github.com/wavetao2010/tessivum"
   version "@VERSION@"
+
+  depends_on "bun"
+  depends_on "pnpm"
 
   on_macos do
     if Hardware::CPU.intel?
@@ -22,9 +25,6 @@ class Tessivum < Formula
       sha256 "@SHA256_AARCH64_UNKNOWN_LINUX_GNU@"
     end
   end
-
-  depends_on "bun"
-  depends_on "pnpm"
 
   def install
     libexec.install Dir["*"]
