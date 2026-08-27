@@ -99,6 +99,12 @@ fn builtins_are_the_complete_native_roster() {
     assert!(minimal.spec.prompt.complete);
     assert_eq!(minimal.resolved_tools, vec!["bash", "str_replace_editor"]);
     assert!(minimal.spec.capabilities.persistent_shell);
+    assert!(minimal
+        .spec
+        .normalized_toml()
+        .unwrap()
+        .lines()
+        .any(|line| line == "persistent-shell = true"));
     assert!(!minimal.spec.capabilities.skills);
     assert!(!minimal.spec.capabilities.planning);
     assert!(!minimal.spec.capabilities.compaction);

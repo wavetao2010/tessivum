@@ -240,7 +240,7 @@ jobs:
             printf '%s schema=1 sha256=%s\n' "$mode" "$mode_hash"
           done
           native_mode_read 38079 ptc | jq -e '.result.value.content | test("(?m)^presentation = \\\"programmatic\\\"$") and test("(?m)^bun = true$")'
-          native_mode_read 38079 minimal | jq -e '.result.value.content | test("(?m)^persistent_shell = true$")'
+          native_mode_read 38079 minimal | jq -e '.result.value.content | test("(?m)^persistent-shell = true$")'
           native_mode_read 38079 composition | jq -e '.result.value.content | test("(?m)^composition = true$")'
           curl -fsS \
             -H 'content-type: application/json' \
