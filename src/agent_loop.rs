@@ -21,7 +21,9 @@ use crate::{
         InboxClaimReservation,
     },
     agent_mode::{AgentModeId, AgentModeRegistry, ToolCapabilityId, ToolPresentation},
+    builtin_tools::PersistentShellSessions,
     code_runtime::{register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE},
+    composition::CompositionRegistry,
     compaction::{CompactionOutcome, CompactionService, CompactionTrigger},
     llm::{BlockAssembler, LlmRuntime},
     permissions::runtime_context,
@@ -67,6 +69,9 @@ pub struct AgentLoopFactory {
     modes: Arc<AgentModeRegistry>,
     default_mode: AgentModeId,
     code_runtime: Option<ProcessCodeRuntime>,
+    persistent_shells: Option<PersistentShellSessions>,
+    composition: Option<CompositionRegistry>,
+    root_context: Option<ContextHandle>,
     approval_required_tools: BTreeSet<String>,
     compaction: Option<CompactionService>,
     skills: Option<(SkillRuntime, SkillSessionScopes)>,
@@ -100,6 +105,9 @@ impl AgentLoopFactory {
             modes,
             default_mode,
             code_runtime: None,
+            persistent_shells: None,
+            composition: None,
+            root_context: None,
             approval_required_tools: BTreeSet::new(),
             compaction: None,
             skills: None,
@@ -113,6 +121,21 @@ impl AgentLoopFactory {
         self.code_runtime = Some(code_runtime);
         self
     }
+    pub fn with_persistent_shell_sessions(mut self, sessions: PersistentShellSessions) -> Self {
+        self.persistent_shells = Some(sessions);
+        self
+    }
+
+    pub fn with_composition_registry(mut self, composition: CompositionRegistry) -> Self {
+        self.composition = Some(composition);
+        self
+    }
+
+    pub fn with_root_context(mut self, root_context: ContextHandle) -> Self {
+        self.root_context = Some(root_context);
+        self
+    }
+
 
     pub fn with_approval_required_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
         self.approval_required_tools = names.into_iter().collect();
@@ -151,6 +174,92 @@ impl AgentLoopFactory {
     pub fn max_steps(&self) -> u64 {
         self.max_steps
     }
+    async fn attach_resources(
+        &self,
+        runtime: &SessionRuntimeSpec,
+        session: &Session,
+    ) -> Result<SessionResources, AgentError> {
+        let persistent_shells = if runtime.persistent_shell {
+            Some(self.persistent_shells.clone().ok_or_else(|| {
+                resource_error(
+                    "PERSISTENT_SHELL_SESSIONS_UNAVAILABLE",
+                    "the selected mode requires injected persistent-shell sessions",
+                    runtime,
+                    session,
+                    Vec::new(),
+                )
+            })?)
+        } else {
+            None
+        };
+        let composition = if runtime.composition {
+            Some((
+                self.composition.clone().ok_or_else(|| {
+                    resource_error(
+                        "COMPOSITION_REGISTRY_UNAVAILABLE",
+                        "the selected mode requires an injected composition registry",
+                        runtime,
+                        session,
+                        Vec::new(),
+                    )
+                })?,
+                self.root_context.clone().ok_or_else(|| {
+                    resource_error(
+                        "COMPOSITION_CONTEXT_UNAVAILABLE",
+                        "the selected mode requires an injected root context",
+                        runtime,
+                        session,
+                        Vec::new(),
+                    )
+                })?,
+            ))
+        } else {
+            None
+        };
+        if let Some(shells) = &persistent_shells {
+            shells.enable(session.id());
+        }
+        let composition = if let Some((registry, root)) = composition {
+            let context = match root.child() {
+                Ok(context) => context,
+                Err(error) => {
+                    if let Some(shells) = &persistent_shells {
+                        shells.disable(&session.id()).await;
+                    }
+                    return Err(resource_error(
+                        "COMPOSITION_SESSION_SCOPE_UNAVAILABLE",
+                        "the selected mode could not create its composition session scope",
+                        runtime,
+                        session,
+                        vec![error.to_string()],
+                    ));
+                }
+            };
+            if let Err(error) = registry.attach_session(session.id(), context.clone()) {
+                let mut cleanup = vec![error.to_string()];
+                if let Err(error) = context.scope().dispose().await {
+                    cleanup.push(error.to_string());
+                }
+                if let Some(shells) = &persistent_shells {
+                    shells.disable(&session.id()).await;
+                }
+                return Err(resource_error(
+                    "COMPOSITION_SESSION_ATTACH_FAILED",
+                    "the selected mode could not attach its composition session scope",
+                    runtime,
+                    session,
+                    cleanup,
+                ));
+            }
+            Some(CompositionSession { registry, context })
+        } else {
+            None
+        };
+        Ok(SessionResources {
+            persistent_shells,
+            composition,
+        })
+    }
 }
 
 #[async_trait]
@@ -166,6 +275,21 @@ impl AgentFactory for AgentLoopFactory {
             return Err(AgentError::Cancelled);
         }
         let runtime = SessionRuntimeSpec::resolve(self, &session)?;
+        let resources = self.attach_resources(&runtime, &session).await?;
+        if cancellation.is_cancelled() {
+            let failures = resources.dispose(&session.id()).await;
+            return if failures.is_empty() {
+                Err(AgentError::Cancelled)
+            } else {
+                Err(resource_error(
+                    "AGENT_RESOURCE_DISPOSE_FAILED",
+                    "the cancelled agent setup could not release every session resource",
+                    &runtime,
+                    &session,
+                    failures,
+                ))
+            };
+        }
         Ok(AgentLoop::spawn(
             session,
             options,
@@ -174,6 +298,7 @@ impl AgentFactory for AgentLoopFactory {
             self.llm.clone(),
             self.prompt.clone(),
             runtime,
+            resources,
             self.context_window.clone(),
             self.max_parallel_tool_calls,
             self.max_steps,
@@ -183,11 +308,60 @@ impl AgentFactory for AgentLoopFactory {
 
 /// Immutable mode policy and model-facing runtime for one live session.
 struct SessionRuntimeSpec {
+    mode: AgentModeId,
+    persistent_shell: bool,
+    composition: bool,
     prompt: ModePrompt,
     tools: ToolRuntime,
     compaction: Option<CompactionService>,
     skills: Option<(SkillRuntime, SkillSessionScopes)>,
     _tool_registrations: Vec<ToolRegistration>,
+}
+
+struct SessionResources {
+    persistent_shells: Option<PersistentShellSessions>,
+    composition: Option<CompositionSession>,
+}
+
+struct CompositionSession {
+    registry: CompositionRegistry,
+    context: ContextHandle,
+}
+impl SessionResources {
+    async fn dispose(&self, owner: &crate::SessionId) -> Vec<String> {
+        let mut failures = Vec::new();
+        if let Some(shells) = &self.persistent_shells {
+            shells.disable(owner).await;
+        }
+        if let Some(composition) = &self.composition {
+            if let Err(error) = composition.registry.dispose_session(owner).await {
+                failures.push(error.to_string());
+            }
+            if let Err(error) = composition.context.scope().dispose().await {
+                failures.push(error.to_string());
+            }
+        }
+        failures
+    }
+}
+
+fn resource_error(
+    code: &str,
+    message: &str,
+    runtime: &SessionRuntimeSpec,
+    session: &Session,
+    failures: Vec<String>,
+) -> AgentError {
+    AgentError::Message(TessivumError::new(
+        code,
+        message,
+        "agent-loop",
+        json!({
+            "agentMode": runtime.mode.as_str(),
+            "sessionId": session.id(),
+            "failures": failures,
+        }),
+    ))
 }
 
 struct ModePrompt {
@@ -206,19 +380,14 @@ impl SessionRuntimeSpec {
         let mode_prompt = mode.spec.prompt.clone();
         let skills_enabled = mode.spec.skills;
         let compaction_enabled = mode.spec.compaction.is_some();
+        let persistent_shell = mode.spec.capabilities.persistent_shell;
+        let composition = mode.spec.capabilities.composition;
         let presentation = mode.spec.presentation;
-        let available = factory
-            .native_tools
-            .schemas()
-            .into_iter()
-            .map(|schema| schema.name)
-            .collect::<BTreeSet<_>>();
-        let mut names = mode
-            .nested_tools
-            .iter()
-            .filter(|name| available.contains(*name))
-            .cloned()
-            .collect::<Vec<_>>();
+        let skills = factory
+            .skills
+            .as_ref()
+            .filter(|(_, scopes)| skills_enabled && lock(scopes).contains_key(&session.id()));
+        let mut names = mode.nested_tools.clone();
         if !mode.spec.planning {
             let planning_tools = [ToolCapabilityId::PlanExit, ToolCapabilityId::PlanTodo]
                 .into_iter()
@@ -229,6 +398,28 @@ impl SessionRuntimeSpec {
         }
         if session.header().origin == Some(SessionOrigin::Subagent) {
             names.retain(|name| !CHILD_OWNER_BOUND_TOOL_NAMES.contains(&name.as_str()));
+        }
+        if skills.is_none() {
+            names.retain(|name| name != "skill");
+        }
+        let available = factory
+            .native_tools
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<BTreeSet<_>>();
+        let missing = names
+            .iter()
+            .filter(|name| !available.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(AgentError::Message(TessivumError::new(
+                "MODE_NATIVE_TOOL_UNAVAILABLE",
+                "the selected mode requires native tools absent from the Host registry",
+                "agent-loop",
+                json!({"agentMode": mode_id.as_str(), "missing": missing}),
+            )));
         }
         let approval_required = factory
             .approval_required_tools
@@ -243,17 +434,6 @@ impl SessionRuntimeSpec {
             .native_tools
             .scoped(restrictions)
             .map_err(AgentError::Message)?;
-        let skills = factory
-            .skills
-            .as_ref()
-            .filter(|(_, scopes)| skills_enabled && lock(scopes).contains_key(&session.id()));
-        let native_tools = if skills.is_some() {
-            native_tools
-        } else {
-            native_tools
-                .scoped(ToolRestrictions::new().deny("skill"))
-                .map_err(AgentError::Message)?
-        };
         let (tools, registrations) = match presentation {
             ToolPresentation::Direct => (native_tools, Vec::new()),
             ToolPresentation::Programmatic => {
@@ -272,6 +452,9 @@ impl SessionRuntimeSpec {
             }
         };
         Ok(Self {
+            mode: mode_id.clone(),
+            persistent_shell,
+            composition,
             prompt: ModePrompt {
                 complete: mode_prompt.complete,
                 section: PromptSection::new(format!("agent-mode/{mode_id}"), 0, mode_prompt.text),
@@ -339,6 +522,7 @@ struct Inner {
     llm: LlmRuntime,
     prompt: SystemPrompt,
     runtime: SessionRuntimeSpec,
+    resources: SessionResources,
     context_window: Option<ContextWindowResolver>,
     max_parallel_tool_calls: usize,
     max_steps: u64,
@@ -368,6 +552,7 @@ impl AgentLoop {
         llm: LlmRuntime,
         prompt: SystemPrompt,
         runtime: SessionRuntimeSpec,
+        resources: SessionResources,
         context_window: Option<ContextWindowResolver>,
         max_parallel_tool_calls: usize,
         max_steps: u64,
@@ -386,6 +571,7 @@ impl AgentLoop {
             llm,
             prompt,
             runtime,
+            resources,
             context_window,
             max_parallel_tool_calls,
             max_steps,
@@ -474,12 +660,23 @@ impl AgentRuntime for AgentLoop {
         self.inner.cancellation.cancel();
         self.inner.wake.notify_waiters();
         self.inner.idle.notify_waiters();
+        let mut failures = Vec::new();
         if let Some(worker) = worker {
-            worker.await.map_err(|error| {
-                AgentError::Runtime(format!("agent loop worker failed: {error}"))
-            })?;
+            if let Err(error) = worker.await {
+                failures.push(format!("agent loop worker failed: {error}"));
+            }
         }
-        Ok(())
+        failures.extend(self.inner.resources.dispose(&self.inner.session.id()).await);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AgentError::Message(TessivumError::new(
+                "AGENT_RESOURCE_DISPOSE_FAILED",
+                "the agent worker or one or more session resources could not be disposed cleanly",
+                "agent-loop",
+                json!({"sessionId": self.inner.session.id(), "failures": failures}),
+            )))
+        }
     }
 }
 

@@ -1,6 +1,8 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    fs,
+    path::PathBuf,
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use async_trait::async_trait;
@@ -9,8 +11,10 @@ use serde_json::{json, Value};
 use tessivum::{
     agent::{AgentCancelCause, AgentError, AgentOptions, AgentRegistry},
     agent_loop::AgentLoopFactory,
-    agent_mode::{AgentModeId, AgentModeRegistry},
+    agent_mode::{AgentModeId, AgentModeRegistry, AgentModeRoot, AgentModeTrust},
+    builtin_tools::PersistentShellSessions,
     code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
+    composition::CompositionRegistry,
     llm::{LlmAdapter, LlmRetryPolicy, LlmRuntime, LlmStream, RecordedLlmAdapter},
     session::{MemorySessionPersistence, SessionStore},
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
@@ -22,7 +26,10 @@ use tessivum::{
     SessionEvent, SessionHeader, SessionId, SessionOrigin, StreamChunk, SurfaceOp, ToolCallId,
     ToolSchema,
 };
-use tessivum_core::{CancellationToken, ContextHandle};
+use tessivum_core::{
+    CancellationToken, ContextHandle, LoaderError, LoaderFuture, LoaderRuntime, PackageResolver,
+    ResolvedPackage, RuntimeKind,
+};
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -41,14 +48,79 @@ fn header(id: &str) -> SessionHeader {
         agent_mode: None,
     }
 }
+fn header_with_mode(id: &str, mode: &str) -> SessionHeader {
+    let mut header = header(id);
+    header.agent_mode = Some(AgentModeId::new(mode).unwrap());
+    header
+}
+
+
+static TEST_MODES_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+    let root = std::env::temp_dir().join(format!("tessivum-agent-loop-{}", std::process::id()));
+    for (id, presentation, enabled, bun) in [
+        ("test-empty", "direct", "[]", false),
+        ("test-read", "direct", "[\"fs.read\"]", false),
+        ("test-ptc", "programmatic", "[\"fs.read\"]", true),
+        ("test-ptc-bash", "programmatic", "[\"shell.bash\"]", true),
+    ] {
+        let directory = root.join(id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("mode.toml"),
+            format!(
+                "schema = 1\nid = \"{id}\"\nname = \"{id}\"\ndescription = \"agent-loop test mode\"\n\n[prompt]\ncomplete = false\ntext = \"Use the additive Tessivum persona, workspace instructions, and runtime context.\"\n\n[tools]\npresentation = \"{presentation}\"\nenabled = {enabled}\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n{}",
+                bun.then_some("bun = true\n").unwrap_or_default(),
+            ),
+        )
+        .unwrap();
+    }
+    root
+});
+
+fn test_modes_root() -> PathBuf {
+    TEST_MODES_ROOT.clone()
+}
 
 fn modes() -> Arc<AgentModeRegistry> {
-    Arc::new(AgentModeRegistry::with_roots(Vec::new(), None))
+    Arc::new(AgentModeRegistry::with_roots(
+        vec![AgentModeRoot {
+            path: test_modes_root(),
+            trust: AgentModeTrust::User,
+        }],
+        None,
+    ))
 }
 
 fn factory(llm: LlmRuntime, prompt: SystemPrompt, tools: ToolRuntime) -> AgentLoopFactory {
-    AgentLoopFactory::new(llm, prompt, tools, modes(), AgentModeId::standard())
+    AgentLoopFactory::new(
+        llm,
+        prompt,
+        tools,
+        modes(),
+        AgentModeId::new("test-empty").unwrap(),
+    )
+    .with_persistent_shell_sessions(PersistentShellSessions::new())
 }
+struct UnusedResolver;
+
+impl PackageResolver for UnusedResolver {
+    fn resolve<'a>(
+        &'a self,
+        _specifier: &'a str,
+        _runtime: RuntimeKind,
+    ) -> LoaderFuture<'a, ResolvedPackage> {
+        Box::pin(async { Err(LoaderError::Validation("composition resolver was not expected".into())) })
+    }
+}
+
+fn composition_registry() -> CompositionRegistry {
+    CompositionRegistry::new(
+        Arc::new(UnusedResolver),
+        Vec::<Arc<dyn LoaderRuntime>>::new(),
+    )
+    .unwrap()
+}
+
 
 fn ptc_runtime() -> ProcessCodeRuntime {
     ProcessCodeRuntime::new(ProcessCodeRuntimeConfig::ptc_javascript().unwrap()).unwrap()
@@ -235,7 +307,7 @@ async fn durable_events(adapter: Arc<dyn LlmAdapter>) -> Vec<SessionEvent> {
         .unwrap();
     let agent = registry
         .create(
-            header("replay-equivalence"),
+            header_with_mode("replay-equivalence", "test-read"),
             AgentOptions {
                 provider: "test".into(),
                 model: "deterministic".into(),
@@ -378,7 +450,7 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
         .unwrap();
     let agent = registry
         .create(
-            header("round-trip"),
+            header_with_mode("round-trip", "test-read"),
             AgentOptions {
                 provider: "test".into(),
                 model: "deterministic".into(),
@@ -575,7 +647,7 @@ async fn changed_effective_header_emits_change_event() {
         .unwrap();
     let agent = registry
         .create(
-            header("changed-header"),
+            header_with_mode("changed-header", "test-read"),
             AgentOptions {
                 provider: "test".into(),
                 model: "deterministic".into(),
@@ -1003,7 +1075,7 @@ async fn cancellation_during_tool_wait_settles_the_started_call_once() {
         .unwrap();
     let agent = registry
         .create(
-            header("cancel-tool"),
+            header_with_mode("cancel-tool", "test-read"),
             AgentOptions {
                 provider: "test".into(),
                 model: "deterministic".into(),
@@ -1159,6 +1231,41 @@ fn install_tools(runtime: &ToolRuntime, names: &[&str]) -> Vec<tessivum::tools::
         })
         .collect()
 }
+fn standard_tool_names() -> Vec<&'static str> {
+    vec![
+        "ask_user_question",
+        "bash",
+        "create_goal",
+        "edit",
+        "exit_plan_mode",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "jobs.kill",
+        "jobs.list",
+        "jobs.read",
+        "jobs.wait",
+        "list_agents",
+        "ralph",
+        "read",
+        "read_image",
+        "schedule_create",
+        "schedule_delete",
+        "schedule_list",
+        "send_message",
+        "str_replace_editor",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "web_fetch",
+        "web_search",
+        "workflow",
+        "write",
+    ]
+}
+
 
 fn options() -> AgentOptions {
     AgentOptions {
@@ -1236,30 +1343,31 @@ async fn four_session_runtime_specs_are_isolated() {
         )
         .unwrap();
     let tools = ToolRuntime::new();
-    let _tools = install_tools(
-        &tools,
-        &[
-            "bash",
-            "composition_define",
-            "composition_inspect",
-            "composition_run",
-            "composition_stop",
-            "composition_validate",
-            "exit_plan_mode",
-            "read",
-            "str_replace_editor",
-            "todo_write",
-        ],
-    );
+    let mut host_tools = standard_tool_names();
+    host_tools.extend([
+        "composition_define",
+        "composition_inspect",
+        "composition_run",
+        "composition_stop",
+        "composition_validate",
+    ]);
+    host_tools.sort_unstable();
+    let _tools = install_tools(&tools, &host_tools);
     let prompt = SystemPrompt::new();
     let _host_prompt = prompt
         .register(PromptSection::new("host", 0, "host prompt"))
         .unwrap();
+    let persistent_shells = PersistentShellSessions::new();
+    let compositions = composition_registry();
+    let root_context = ContextHandle::root();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
         .register_factory(Arc::new(
             AgentLoopFactory::new(llm, prompt, tools, modes(), AgentModeId::standard())
-                .with_code_runtime(ptc_runtime()),
+                .with_code_runtime(ptc_runtime())
+                .with_persistent_shell_sessions(persistent_shells.clone())
+                .with_composition_registry(compositions.clone())
+                .with_root_context(root_context.clone()),
         ))
         .unwrap();
 
@@ -1285,6 +1393,11 @@ async fn four_session_runtime_specs_are_isolated() {
         .create(ptc_header, options(), cancellation())
         .await
         .unwrap();
+    assert_eq!(format!("{persistent_shells:?}"), "PersistentShellSessions { session_count: 1 }");
+    assert!(compositions
+        .inspect(&SessionId::from("mode-composition"), None)
+        .await
+        .is_ok());
 
     let (standard_result, minimal_result, composition_result, ptc_result) = tokio::join!(
         standard.followup(user("standard")),
@@ -1310,32 +1423,30 @@ async fn four_session_runtime_specs_are_isolated() {
     let requests = requests.lock();
     assert_eq!(
         tool_names(request_for(&requests, "mode-standard")),
-        [
-            "bash",
-            "exit_plan_mode",
-            "read",
-            "str_replace_editor",
-            "todo_write"
-        ]
+        standard_tool_names()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>(),
     );
     assert_eq!(
         tool_names(request_for(&requests, "mode-minimal")),
         ["bash", "str_replace_editor"]
     );
+    let mut composition_tools = standard_tool_names();
+    composition_tools.extend([
+        "composition_define",
+        "composition_inspect",
+        "composition_run",
+        "composition_stop",
+        "composition_validate",
+    ]);
+    composition_tools.sort_unstable();
     assert_eq!(
         tool_names(request_for(&requests, "mode-composition")),
-        [
-            "bash",
-            "composition_define",
-            "composition_inspect",
-            "composition_run",
-            "composition_stop",
-            "composition_validate",
-            "exit_plan_mode",
-            "read",
-            "str_replace_editor",
-            "todo_write",
-        ]
+        composition_tools
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>(),
     );
     assert_eq!(tool_names(request_for(&requests, "mode-ptc")), ["run_code"]);
     drop(requests);
@@ -1343,6 +1454,16 @@ async fn four_session_runtime_specs_are_isolated() {
     minimal.dispose().await.unwrap();
     composition.dispose().await.unwrap();
     ptc.dispose().await.unwrap();
+    assert_eq!(format!("{persistent_shells:?}"), "PersistentShellSessions { session_count: 0 }");
+    assert_eq!(
+        compositions
+            .inspect(&SessionId::from("mode-composition"), None)
+            .await
+            .unwrap_err()
+            .code,
+        "COMPOSITION_SESSION_UNAVAILABLE"
+    );
+    root_context.scope().dispose().await.unwrap();
 }
 
 #[tokio::test]
@@ -1432,7 +1553,7 @@ async fn latest_mode_selection_event_overrides_header_and_programmatic_catalog_c
                 event_type: "agent-mode/selected".into(),
                 seq: 0,
                 time: 0,
-                data: json!({"agentMode":"ptc"}),
+                data: json!({"agentMode":"test-ptc"}),
                 ignorable: None,
                 source_event_seqs: None,
                 surface_op: None,
@@ -1464,16 +1585,18 @@ async fn latest_mode_selection_event_overrides_header_and_programmatic_catalog_c
 
 #[tokio::test]
 async fn programmatic_mode_requires_configured_code_runtime() {
+    let tools = ToolRuntime::new();
+    let _tools = install_tools(&tools, &["read"]);
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
         .register_factory(Arc::new(factory(
             LlmRuntime::new(),
             SystemPrompt::new(),
-            ToolRuntime::new(),
+            tools,
         )))
         .unwrap();
     let mut selected = header("missing-ptc-runtime");
-    selected.agent_mode = Some(AgentModeId::ptc());
+    selected.agent_mode = Some(AgentModeId::new("test-ptc").unwrap());
     let error = match registry.create(selected, options(), cancellation()).await {
         Ok(_) => panic!("programmatic mode unexpectedly started without a code runtime"),
         Err(error) => error,
@@ -1483,6 +1606,44 @@ async fn programmatic_mode_requires_configured_code_runtime() {
         other => panic!("unexpected programmatic setup error: {other:?}"),
     }
 }
+#[tokio::test]
+async fn mode_native_tools_must_exist_before_session_start() {
+    let persistent_shells = PersistentShellSessions::new();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            AgentLoopFactory::new(
+                LlmRuntime::new(),
+                SystemPrompt::new(),
+                ToolRuntime::new(),
+                modes(),
+                AgentModeId::new("test-empty").unwrap(),
+            )
+            .with_persistent_shell_sessions(persistent_shells.clone()),
+        ))
+        .unwrap();
+    let error = match registry
+        .create(
+            header_with_mode("missing-native-tool", "minimal"),
+            options(),
+            cancellation(),
+        )
+        .await
+    {
+        Ok(_) => panic!("minimal mode unexpectedly started without its native tools"),
+        Err(error) => error,
+    };
+    match error {
+        AgentError::Message(error) => {
+            assert_eq!(error.code, "MODE_NATIVE_TOOL_UNAVAILABLE");
+            assert_eq!(error.details["agentMode"], "minimal");
+            assert_eq!(error.details["missing"], json!(["bash", "str_replace_editor"]));
+        }
+        other => panic!("unexpected missing native tool error: {other:?}"),
+    }
+    assert_eq!(format!("{persistent_shells:?}"), "PersistentShellSessions { session_count: 0 }");
+}
+
 
 #[tokio::test]
 async fn native_child_mode_excludes_owner_bound_tools() {
@@ -1526,6 +1687,7 @@ async fn native_child_mode_excludes_owner_bound_tools() {
         .unwrap();
     let mut child = header("native-child");
     child.origin = Some(SessionOrigin::Subagent);
+    child.agent_mode = Some(AgentModeId::new("test-read").unwrap());
     let child = registry
         .create(child, options(), cancellation())
         .await
@@ -1591,7 +1753,7 @@ async fn programmatic_nested_tools_preserve_denial_and_approval() {
         } else {
             "nested-denial"
         });
-        selected.agent_mode = Some(AgentModeId::ptc());
+        selected.agent_mode = Some(AgentModeId::new("test-ptc").unwrap());
         let agent = registry
             .create(selected, options(), cancellation())
             .await
@@ -1653,7 +1815,7 @@ async fn programmatic_nested_tool_cancellation_reaches_the_native_dispatcher() {
         ))
         .unwrap();
     let mut selected = header("nested-cancel");
-    selected.agent_mode = Some(AgentModeId::ptc());
+    selected.agent_mode = Some(AgentModeId::new("test-ptc-bash").unwrap());
     let agent = registry
         .create(selected, options(), cancellation())
         .await

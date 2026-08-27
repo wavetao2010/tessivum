@@ -202,14 +202,6 @@ pub struct CompositionInspection {
 pub struct CompositionTools {
     _registrations: Vec<ToolRegistration>,
 }
-/// Non-starting validation supplied beside the injected Core runtime authority.
-/// Implementations validate runtime source, manifests, permissions, and declared
-/// dependencies without calling an entry lifecycle start hook.
-#[async_trait]
-pub trait CompositionValidator: Send + Sync {
-    async fn validate(&self, entry: &Entry, package: &ResolvedPackage)
-        -> Result<(), TessivumError>;
-}
 
 #[derive(Clone)]
 pub struct CompositionRegistry {
@@ -218,7 +210,6 @@ pub struct CompositionRegistry {
 
 struct RegistryInner {
     catalog: RuntimeCatalog,
-    validator: Arc<dyn CompositionValidator>,
     sessions: Mutex<BTreeMap<SessionId, Arc<SessionState>>>,
 }
 
@@ -254,7 +245,6 @@ impl CompositionRegistry {
     pub fn new(
         resolver: Arc<dyn PackageResolver>,
         runtimes: impl IntoIterator<Item = Arc<dyn LoaderRuntime>>,
-        validator: Arc<dyn CompositionValidator>,
     ) -> Result<Self, TessivumError> {
         let mut catalog = BTreeMap::new();
         for runtime in runtimes {
@@ -273,7 +263,6 @@ impl CompositionRegistry {
                     resolver,
                     runtimes: catalog,
                 },
-                validator,
                 sessions: Mutex::new(BTreeMap::new()),
             }),
         })
@@ -432,8 +421,8 @@ impl CompositionRegistry {
         ))
     }
 
-    /// Resolves the descriptor source, then calls the injected non-starting
-    /// runtime validator for manifest, policy, config, and dependency checks.
+    /// Resolves an entry, instantiates it in a detached child scope, then disposes
+    /// the candidate without activating it.
     pub async fn validate(
         &self,
         owner: &SessionId,
@@ -588,41 +577,32 @@ impl CompositionRegistry {
             .active
             .take()
             .expect("active lifecycle always retains its Core runtime handle");
+        let mut failures = Vec::new();
         if let Err(error) = active.handle.dispose().await {
-            record.active = Some(active);
+            failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
+        }
+        if let Err(error) = active.scope.dispose().await {
+            failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
+        }
+        record.lifecycle = CompositionLifecycle::Validated;
+        record.fiber_state = Some(FiberState::Disposed);
+        record.last_scope_state = Some(active.scope.state());
+        if failures.is_empty() {
+            record.last_failure = None;
+            Ok(snapshot(owner, record))
+        } else {
             let error = composition_error(
                 "COMPOSITION_STOP_FAILED",
-                "the Core runtime handle could not dispose the active composition",
+                "one or more composition resources could not be disposed cleanly",
                 json!({
                     "id": id,
                     "runtime": runtime.as_str(),
                     "package": bounded(&package, MAX_COMPOSITION_PACKAGE_BYTES),
-                    "error": bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES),
+                    "failures": failures,
                 }),
             );
             record.last_failure = Some(failure(&error));
-            return Err(error);
-        }
-        let scope_state = active.scope.state();
-        record.lifecycle = CompositionLifecycle::Validated;
-        record.fiber_state = Some(FiberState::Disposed);
-        record.last_scope_state = Some(scope_state);
-        match active.scope.dispose().await {
-            Ok(()) => {
-                record.last_scope_state = Some(FiberState::Disposed);
-                record.last_failure = None;
-                Ok(snapshot(owner, record))
-            }
-            Err(error) => {
-                let error = composition_error(
-                    "COMPOSITION_STOP_FAILED",
-                    "the composition child scope could not be disposed cleanly",
-                    json!({"id": id, "error": bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES)}),
-                );
-                record.last_scope_state = Some(FiberState::Disposed);
-                record.last_failure = Some(failure(&error));
-                Err(error)
-            }
+            Err(error)
         }
     }
 
@@ -718,11 +698,6 @@ impl CompositionRegistry {
         entry: &Entry,
     ) -> Result<(), TessivumError> {
         let (runtime, package) = self.resolve_entry(entry).await?;
-        self.inner
-            .validator
-            .validate(entry, &package)
-            .await
-            .map_err(|error| validation_error(entry, "source", error.to_string()))?;
 
         let scope = session_context.scope().child().map_err(|error| {
             composition_error(
@@ -1154,28 +1129,6 @@ mod tests {
         }
     }
 
-    struct FixtureValidator;
-
-    #[async_trait::async_trait]
-    impl CompositionValidator for FixtureValidator {
-        async fn validate(
-            &self,
-            entry: &Entry,
-            package: &ResolvedPackage,
-        ) -> Result<(), TessivumError> {
-            if entry.options.runtime != RuntimeKind::Native
-                || entry.package != "fixture"
-                || package.specifier != "fixture"
-            {
-                return Err(composition_error(
-                    "FIXTURE_VALIDATION_FAILED",
-                    "fixture validator received an unexpected Core entry",
-                    Value::Null,
-                ));
-            }
-            Ok(())
-        }
-    }
 
     struct FixturePlugin {
         live: Arc<AtomicUsize>,
@@ -1229,19 +1182,33 @@ mod tests {
     }
 
     fn registry(live: Arc<AtomicUsize>, fail_start: bool) -> CompositionRegistry {
+        registry_with_probe(live, fail_start).0
+    }
+
+    fn registry_with_probe(
+        live: Arc<AtomicUsize>,
+        fail_start: bool,
+    ) -> (CompositionRegistry, Arc<AtomicUsize>) {
+        let instantiated = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&instantiated);
         let mut native = NativePluginRuntime::new();
         native
-            .register("fixture", move || FixturePlugin {
-                live: Arc::clone(&live),
-                fail_start,
+            .register("fixture", move || {
+                factory_calls.fetch_add(1, Ordering::AcqRel);
+                FixturePlugin {
+                    live: Arc::clone(&live),
+                    fail_start,
+                }
             })
             .unwrap();
-        CompositionRegistry::new(
-            Arc::new(Resolver),
-            [Arc::new(native) as Arc<dyn LoaderRuntime>],
-            Arc::new(FixtureValidator),
+        (
+            CompositionRegistry::new(
+                Arc::new(Resolver),
+                [Arc::new(native) as Arc<dyn LoaderRuntime>],
+            )
+            .unwrap(),
+            instantiated,
         )
-        .unwrap()
     }
 
     fn descriptor(id: &str) -> CompositionDescriptor {
@@ -1273,7 +1240,7 @@ mod tests {
     async fn native_composition_define_validate_run_inspect_and_stop_has_no_live_resources() {
         let root = ContextHandle::root();
         let live = Arc::new(AtomicUsize::new(0));
-        let registry = registry(Arc::clone(&live), false);
+        let (registry, instantiated) = registry_with_probe(Arc::clone(&live), false);
         let owner = SessionId::from("owner");
         registry
             .attach_session(owner.clone(), root.clone())
@@ -1300,10 +1267,16 @@ mod tests {
             0,
             "validation must not start the native plugin"
         );
+        assert_eq!(
+            instantiated.load(Ordering::Acquire),
+            1,
+            "validation must instantiate one detached candidate"
+        );
         let active = registry.run(&owner, "fixture-entry").await.unwrap();
         assert_eq!(active.lifecycle, CompositionLifecycle::Active);
         assert_eq!(active.core.fiber_state, Some(FiberState::Active));
         assert_eq!(live.load(Ordering::Acquire), 1);
+        assert_eq!(instantiated.load(Ordering::Acquire), 2);
         assert_eq!(
             registry
                 .inspect(&owner, Some("fixture-entry"))
