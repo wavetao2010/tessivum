@@ -1,7 +1,9 @@
 use std::{fs, sync::Arc};
 
+use rusqlite::{params, Connection};
 use serde_json::json;
 use tessivum::{
+    agent_mode::AgentModeId,
     persistence_sqlite::SqliteSessionPersistence,
     projection::{ProjectionDefinition, ProjectionError, ProjectionRegistry},
     protocol::{SessionEvent, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
@@ -31,7 +33,7 @@ fn header(id: &str) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 
@@ -118,6 +120,120 @@ async fn sqlite_commits_exact_dtos_and_rejects_partial_or_concurrent_duplicates(
             .await
             .unwrap(),
         vec![event(0), event(1)]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_migrates_legacy_mode_storage_and_writes_only_native_columns() {
+    let root = root();
+    fs::create_dir_all(&root).unwrap();
+    let clean_path = root.join("clean.sqlite");
+    let clean_persistence = SqliteSessionPersistence::open(&clean_path).unwrap();
+    let mut native = header("clean-native");
+    native.agent_mode = Some(AgentModeId::ptc());
+    clean_persistence.create(&native, cancellation()).await.unwrap();
+    drop(clean_persistence);
+    let clean = Connection::open(&clean_path).unwrap();
+    let columns = clean
+        .prepare("PRAGMA table_info(sessions)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.iter().any(|column| column == "agent_mode"));
+    assert!(!columns.iter().any(|column| column == "agent_preset"));
+    assert_eq!(
+        clean
+            .query_row("SELECT agent_mode FROM sessions WHERE id = 'clean-native'", [], |row| row.get::<_, Option<String>>(0))
+            .unwrap(),
+        Some("ptc".into())
+    );
+    drop(clean);
+
+    let legacy_path = root.join("legacy.sqlite");
+    let legacy = Connection::open(&legacy_path).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+                cwd TEXT NULL, parent_session_id TEXT NULL, seed_length INTEGER NULL,
+                origin_json TEXT NULL, delegation_depth INTEGER NULL, agent_preset TEXT NULL
+            );
+            CREATE TABLE events (
+                session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_type TEXT NOT NULL,
+                time INTEGER NOT NULL, data_json TEXT NOT NULL, ignorable INTEGER NULL,
+                source_event_seqs_json TEXT NULL, surface_op_json TEXT NULL,
+                PRIMARY KEY (session_id, seq)
+            );
+            CREATE TABLE persistence_state (
+                session_id TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL, revision INTEGER NOT NULL,
+                incarnation INTEGER NOT NULL, next_seq INTEGER NOT NULL, flush_count INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+    for (legacy_preset, _agent_mode) in [
+        ("standard", "standard"),
+        ("code", "ptc"),
+        ("minimal", "minimal"),
+        ("cordis", "composition"),
+    ] {
+        let id = format!("legacy-{legacy_preset}");
+        legacy
+            .execute(
+                "INSERT INTO sessions (id, version, created_at, agent_preset) VALUES (?1, 0, 0, ?2)",
+                params![id, legacy_preset],
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO persistence_state (session_id, version, revision, incarnation, next_seq, flush_count) VALUES (?1, 1, 0, 1, 1, 0)",
+                params![id],
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO events (session_id, seq, event_type, time, data_json) VALUES (?1, 0, 'agent-preset/selected', 0, ?2)",
+                params![id, format!("{{\"agentPreset\":\"{legacy_preset}\",\"obsolete\":true}}")],
+            )
+            .unwrap();
+    }
+    drop(legacy);
+
+    let persistence = SqliteSessionPersistence::open(&legacy_path).unwrap();
+    for (legacy_preset, agent_mode) in [
+        ("standard", "standard"),
+        ("code", "ptc"),
+        ("minimal", "minimal"),
+        ("cordis", "composition"),
+    ] {
+        let id = SessionId::from(format!("legacy-{legacy_preset}"));
+        assert_eq!(
+            persistence.load(&id, cancellation()).await.unwrap().unwrap().agent_mode,
+            Some(AgentModeId::new(agent_mode).unwrap())
+        );
+        let event = persistence.read_from(&id, 0, cancellation()).await.unwrap().pop().unwrap();
+        assert_eq!(event.event_type, "agent-mode/selected");
+        assert_eq!(event.data, json!({"agentMode": agent_mode}));
+    }
+    drop(persistence);
+
+    let unknown_path = root.join("unknown.sqlite");
+    let unknown = Connection::open(&unknown_path).unwrap();
+    unknown
+        .execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_preset TEXT NULL);")
+        .unwrap();
+    unknown
+        .execute(
+            "INSERT INTO sessions (id, agent_preset) VALUES ('custom', 'repository-maintainer')",
+            [],
+        )
+        .unwrap();
+    drop(unknown);
+    assert_eq!(
+        SqliteSessionPersistence::open(&unknown_path).unwrap_err().code(),
+        "MODE_MIGRATION_REQUIRED"
     );
     fs::remove_dir_all(root).unwrap();
 }

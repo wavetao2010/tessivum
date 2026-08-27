@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use crate::{
     error::TessivumError,
-    protocol::{SessionEvent, SessionHeader, SessionId},
+    protocol::{
+        migrate_legacy_agent_preset_selection, SessionEvent, SessionHeader, SessionId,
+    },
     session::{SessionError, SessionInspection, SessionPersistence, SessionRawArtifact},
 };
 
@@ -142,7 +144,7 @@ impl JsonlSessionPersistence {
             .map_err(|error| io_error("read", &path, error))?;
         parse_session(&bytes, format, Some(session_id))
             .map(Some)
-            .map_err(|error| log_error(&path, error))
+            .map_err(|error| session_parse_error(&path, error))
     }
 
     async fn write_new(&self, path: &Path, record: &[u8]) -> Result<(), SessionError> {
@@ -283,7 +285,7 @@ impl SessionPersistence for JsonlSessionPersistence {
             .map_err(|error| io_error("read", &path, error))?;
         check_cancellation(&cancellation)?;
         parse_session(&stored, format, Some(session_id))
-            .map_err(|error| log_error(&path, error))?;
+            .map_err(|error| session_parse_error(&path, error))?;
         let bytes = match format {
             JsonlStorageFormat::Raw => committed_raw_bytes(stored),
             JsonlStorageFormat::Zstd => {
@@ -433,7 +435,7 @@ impl SessionPersistence for JsonlSessionPersistence {
                 .await
                 .map_err(|error| io_error("read", &path, error))?;
             let session = parse_session(&bytes, format, Some(&id))
-                .map_err(|error| log_error(&path, error))?;
+                .map_err(|error| session_parse_error(&path, error))?;
             let event_count =
                 u64::try_from(session.events.len()).map_err(|_| SessionError::SequenceExhausted)?;
             sessions.push(SessionInspection {
@@ -454,11 +456,22 @@ struct StoredSession {
     events: Vec<SessionEvent>,
 }
 
+enum SessionParseError {
+    Corrupt(String),
+    Protocol(TessivumError),
+}
+
+impl From<String> for SessionParseError {
+    fn from(message: String) -> Self {
+        Self::Corrupt(message)
+    }
+}
+
 fn parse_session(
     bytes: &[u8],
     format: JsonlStorageFormat,
     expected_id: Option<&SessionId>,
-) -> Result<StoredSession, String> {
+) -> Result<StoredSession, SessionParseError> {
     let records = match format {
         JsonlStorageFormat::Raw => parse_raw_records(bytes)?,
         JsonlStorageFormat::Zstd => parse_zstd_records(bytes)?,
@@ -477,8 +490,10 @@ fn parse_session(
 
     let mut events = Vec::with_capacity(event_records.len());
     for record in event_records {
-        let event = serde_json::from_slice::<SessionEvent>(record)
+        let mut event = serde_json::from_slice::<SessionEvent>(record)
             .map_err(|error| format!("invalid session event: {error}"))?;
+        migrate_legacy_agent_preset_selection(&mut event.event_type, &mut event.data)
+            .map_err(SessionParseError::Protocol)?;
         event.validate().map_err(|error| error.to_string())?;
         let expected = next_seq(&events).map_err(|error| error.to_string())?;
         if event.seq != expected {
@@ -592,7 +607,7 @@ fn decode_zstd_raw(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(raw)
 }
 
-fn parse_header(record: &[u8]) -> Result<SessionHeader, String> {
+fn parse_header(record: &[u8]) -> Result<SessionHeader, SessionParseError> {
     let mut value: Value = serde_json::from_slice(record)
         .map_err(|error| format!("invalid session header: {error}"))?;
     let object = value
@@ -602,7 +617,13 @@ fn parse_header(record: &[u8]) -> Result<SessionHeader, String> {
         Some(Value::String(kind)) if kind == "session" => {}
         _ => return Err("first JSONL record must have type=session".into()),
     }
-    serde_json::from_value(value).map_err(|error| format!("invalid session header: {error}"))
+    SessionHeader::from_json_value(value).map_err(|error| {
+        if error.code == "MODE_MIGRATION_REQUIRED" {
+            SessionParseError::Protocol(error)
+        } else {
+            SessionParseError::Corrupt(format!("invalid session header: {error}"))
+        }
+    })
 }
 
 fn header_record(header: &SessionHeader) -> String {
@@ -703,6 +724,13 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+
+fn session_parse_error(path: &Path, error: SessionParseError) -> SessionError {
+    match error {
+        SessionParseError::Corrupt(message) => log_error(path, message),
+        SessionParseError::Protocol(error) => SessionError::Protocol(error),
+    }
+}
 fn io_error(operation: &str, path: &Path, error: std::io::Error) -> SessionError {
     persistence_error(operation, format!("{}: {error}", path.display()))
 }

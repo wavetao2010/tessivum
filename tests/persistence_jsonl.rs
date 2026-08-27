@@ -2,6 +2,7 @@ use std::{fs, sync::Arc};
 
 use serde_json::json;
 use tessivum::{
+    agent_mode::AgentModeId,
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{SessionEvent, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
     session::{RestoreMode, SessionError, SessionPersistence, SessionStore},
@@ -27,7 +28,7 @@ fn header(id: &str) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 
@@ -265,6 +266,79 @@ async fn rejects_version_id_sequence_and_required_event_corruption() {
     )
     .unwrap();
     assert!(persistence.load(&unknown, cancellation()).await.is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn cold_restore_migrates_legacy_mode_headers_and_selection_events() {
+    let root = root();
+    let persistence = JsonlSessionPersistence::new(&root);
+    fs::create_dir_all(&root).unwrap();
+    let store = SessionStore::new(Arc::new(persistence.clone()));
+
+    for (legacy_preset, agent_mode) in [
+        ("standard", "standard"),
+        ("code", "ptc"),
+        ("minimal", "minimal"),
+        ("cordis", "composition"),
+    ] {
+        let id = SessionId::from(format!("legacy-{legacy_preset}"));
+        fs::write(
+            persistence.raw_path(&id),
+            format!(
+                "{{\"type\":\"session\",\"version\":0,\"id\":\"{}\",\"createdAt\":0,\"agentPreset\":\"{legacy_preset}\"}}\n{{\"type\":\"agent-preset/selected\",\"seq\":0,\"time\":0,\"data\":{{\"agentPreset\":\"{legacy_preset}\",\"obsolete\":true}}}}\n",
+                id.as_str()
+            ),
+        )
+        .unwrap();
+
+        let restored = store.restore(&id, RestoreMode::Cold, cancellation()).await.unwrap();
+        assert_eq!(restored.header().agent_mode, Some(AgentModeId::new(agent_mode).unwrap()));
+        assert_eq!(
+            restored.events().last().unwrap().event_type,
+            "agent-mode/selected"
+        );
+        assert_eq!(
+            restored.events().last().unwrap().data,
+            json!({"agentMode": agent_mode})
+        );
+    }
+
+    let custom = SessionId::from("legacy-custom");
+    fs::write(
+        persistence.raw_path(&custom),
+        "{\"type\":\"session\",\"version\":0,\"id\":\"legacy-custom\",\"createdAt\":0,\"agentPreset\":\"repository-maintainer\"}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        persistence.load(&custom, cancellation()).await.unwrap_err().code(),
+        "MODE_MIGRATION_REQUIRED"
+    );
+
+    let mut native = header("native-mode");
+    native.agent_mode = Some(AgentModeId::ptc());
+    persistence.create(&native, cancellation()).await.unwrap();
+    persistence
+        .append(
+            &native.id,
+            &SessionEvent {
+                event_type: "agent-mode/selected".into(),
+                seq: 0,
+                time: 0,
+                data: json!({"agentMode": "ptc"}),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let written = fs::read_to_string(persistence.raw_path(&native.id)).unwrap();
+    assert!(written.contains("agentMode"));
+    assert!(written.contains("agent-mode/selected"));
+    assert!(!written.contains("agentPreset"));
+    assert!(!written.contains("agent-preset/selected"));
     fs::remove_dir_all(root).unwrap();
 }
 

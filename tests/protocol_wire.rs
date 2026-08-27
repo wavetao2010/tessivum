@@ -1,3 +1,4 @@
+use tessivum::agent_mode::AgentModeId;
 use serde_json::{json, Value};
 use tessivum::protocol::{
     ContentBlock, EpochHeader, FinishReason, LlmCallConfig, LlmCallConfigAdapterDefaults,
@@ -187,6 +188,69 @@ fn validation_rejects_misspelled_required_event() {
             .code,
         "UNKNOWN_REQUIRED_EVENT"
     );
+}
+
+#[test]
+fn session_headers_serialize_native_modes_and_migrate_only_builtin_presets() {
+    let header = SessionHeader {
+        version: 0,
+        id: "native-mode".into(),
+        created_at: 1,
+        cwd: None,
+        parent_session: None,
+        seed_length: None,
+        origin: None,
+        delegation_depth: None,
+        agent_mode: Some(AgentModeId::ptc()),
+    };
+    assert_eq!(
+        serde_json::to_value(&header).unwrap(),
+        json!({"version": 0, "id": "native-mode", "createdAt": 1, "agentMode": "ptc"})
+    );
+
+    for (legacy_preset, agent_mode) in [
+        ("standard", "standard"),
+        ("code", "ptc"),
+        ("minimal", "minimal"),
+        ("cordis", "composition"),
+    ] {
+        let migrated: SessionHeader = serde_json::from_value(json!({
+            "version": 0,
+            "id": legacy_preset,
+            "createdAt": 0,
+            "agentPreset": legacy_preset,
+        }))
+        .unwrap();
+        assert_eq!(migrated.agent_mode, Some(AgentModeId::new(agent_mode).unwrap()));
+        assert_eq!(
+            serde_json::to_value(migrated).unwrap()["agentMode"],
+            json!(agent_mode)
+        );
+    }
+
+    assert!(serde_json::from_value::<SessionHeader>(json!({
+        "version": 0,
+        "id": "ambiguous",
+        "createdAt": 0,
+        "agentMode": "standard",
+        "agentPreset": "standard",
+    }))
+    .is_err());
+
+    let error = serde_json::from_value::<SessionHeader>(json!({
+        "version": 0,
+        "id": "custom",
+        "createdAt": 0,
+        "agentPreset": "repository-maintainer",
+    }))
+    .unwrap_err()
+    .to_string();
+    let root = std::env::var_os("TESSIVUM_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".tessivum")))
+        .unwrap_or_else(|| std::path::PathBuf::from(".tessivum"));
+    assert!(error.contains("MODE_MIGRATION_REQUIRED"));
+    assert!(error.contains(&format!("{}/modes/repository-maintainer/mode.toml", root.display())));
 }
 
 #[test]

@@ -15,8 +15,12 @@ use serde_json::{json, Value};
 use tessivum_core::CancellationToken;
 
 use crate::{
+    agent_mode::AgentModeId,
     error::TessivumError,
-    protocol::{SessionEvent, SessionHeader, SessionId, SessionOrigin, SurfaceOp},
+    protocol::{
+        migrate_legacy_agent_preset, migrate_legacy_agent_preset_selection, SessionEvent,
+        SessionHeader, SessionId, SessionOrigin, SurfaceOp,
+    },
     session::{SessionError, SessionInspection, SessionPersistence},
 };
 
@@ -381,7 +385,7 @@ fn initialize(connection: &Connection) -> Result<(), SessionError> {
                 seed_length INTEGER NULL,
                 origin_json TEXT NULL,
                 delegation_depth INTEGER NULL,
-                agent_preset TEXT NULL
+                agent_mode TEXT NULL
              );
              CREATE TABLE IF NOT EXISTS events (
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -405,7 +409,54 @@ fn initialize(connection: &Connection) -> Result<(), SessionError> {
              CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq);
              COMMIT;",
         )
-        .map_err(|error| sqlite_error("initialize schema", error))
+        .map_err(|error| sqlite_error("initialize schema", error))?;
+    migrate_legacy_session_headers(connection)
+}
+
+fn migrate_legacy_session_headers(connection: &Connection) -> Result<(), SessionError> {
+    let columns = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(sessions)")
+            .map_err(|error| sqlite_error("inspect session schema", error))?;
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| sqlite_error("read session schema", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("decode session schema", error))?
+    };
+    if !columns.iter().any(|column| column == "agent_preset") {
+        return Ok(());
+    }
+
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin mode migration", error))?;
+    if !columns.iter().any(|column| column == "agent_mode") {
+        transaction
+            .execute_batch("ALTER TABLE sessions ADD COLUMN agent_mode TEXT NULL")
+            .map_err(|error| sqlite_error("add agent mode column", error))?;
+    }
+    let legacy_rows = {
+        let mut statement = transaction
+            .prepare("SELECT id, agent_preset FROM sessions WHERE agent_preset IS NOT NULL")
+            .map_err(|error| sqlite_error("read legacy agent presets", error))?;
+        statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| sqlite_error("query legacy agent presets", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("decode legacy agent presets", error))?
+    };
+    for (id, legacy_preset) in legacy_rows {
+        let agent_mode = migrate_legacy_agent_preset(&legacy_preset)?;
+        transaction
+            .execute(
+                "UPDATE sessions SET agent_mode = ?2 WHERE id = ?1 AND agent_mode IS NULL",
+                params![id, agent_mode.as_str()],
+            )
+            .map_err(|error| sqlite_error("migrate legacy agent preset", error))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit mode migration", error))
 }
 
 fn insert_header(
@@ -426,7 +477,7 @@ fn insert_header(
     transaction
         .execute(
             "INSERT INTO sessions
-             (id, version, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_preset)
+             (id, version, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 header.id.as_str(),
@@ -437,7 +488,7 @@ fn insert_header(
                 header.seed_length.map(|value| to_i64(value, "header seed length")).transpose()?,
                 origin_json,
                 header.delegation_depth.map(|value| to_i64(value, "header delegation depth")).transpose()?,
-                header.agent_preset,
+                header.agent_mode.as_ref().map(AgentModeId::as_str),
             ],
         )
         .map_err(|error| sqlite_error("insert session header", error))?;
@@ -499,7 +550,7 @@ fn read_session(
 ) -> Result<Option<StoredSession>, SessionError> {
     let header = connection
         .query_row(
-            "SELECT version, id, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_preset
+            "SELECT version, id, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_mode
              FROM sessions WHERE id = ?1",
             params![session_id.as_str()],
             decode_header,
@@ -528,11 +579,16 @@ fn read_session(
              FROM events WHERE session_id = ?1 ORDER BY seq",
         )
         .map_err(|error| sqlite_error("prepare event read", error))?;
-    let events = statement
-        .query_map(params![session_id.as_str()], decode_event)
-        .map_err(|error| sqlite_error("read events", error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| sqlite_error("decode event row", error))?;
+    let mut rows = statement
+        .query(params![session_id.as_str()])
+        .map_err(|error| sqlite_error("read events", error))?;
+    let mut events = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_error("read event row", error))?
+    {
+        events.push(decode_event(row)?);
+    }
     validate_committed(&events, &state, session_id)?;
     Ok(Some(StoredSession {
         header,
@@ -582,6 +638,10 @@ fn decode_header(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHeader> {
         .get::<_, Option<i64>>(7)?
         .map(|value| from_i64(value, "header delegation depth").map_err(to_sql_error))
         .transpose()?;
+    let agent_mode = row
+        .get::<_, Option<String>>(8)?
+        .map(|value| AgentModeId::new(value).map_err(to_sql_error))
+        .transpose()?;
     Ok(SessionHeader {
         version,
         id,
@@ -591,27 +651,55 @@ fn decode_header(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHeader> {
         seed_length,
         origin,
         delegation_depth,
-        agent_preset: row.get(8)?,
+        agent_mode,
     })
 }
 
-fn decode_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionEvent> {
-    let data_json: String = row.get(3)?;
-    let sources_json: Option<String> = row.get(5)?;
-    let surface_json: Option<String> = row.get(6)?;
-    Ok(SessionEvent {
-        event_type: row.get(1)?,
-        seq: from_i64(row.get(0)?, "event sequence").map_err(to_sql_error)?,
-        time: from_i64(row.get(2)?, "event time").map_err(to_sql_error)?,
-        data: serde_json::from_str(&data_json).map_err(to_sql_error)?,
-        ignorable: row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
+fn decode_event(row: &rusqlite::Row<'_>) -> Result<SessionEvent, SessionError> {
+    let data_json: String = row
+        .get(3)
+        .map_err(|error| sqlite_error("decode event data", error))?;
+    let sources_json: Option<String> = row
+        .get(5)
+        .map_err(|error| sqlite_error("decode event sources", error))?;
+    let surface_json: Option<String> = row
+        .get(6)
+        .map_err(|error| sqlite_error("decode event surface", error))?;
+    let mut event = SessionEvent {
+        event_type: row
+            .get(1)
+            .map_err(|error| sqlite_error("decode event type", error))?,
+        seq: from_i64(
+            row.get(0)
+                .map_err(|error| sqlite_error("decode event sequence", error))?,
+            "event sequence",
+        )?,
+        time: from_i64(
+            row.get(2)
+                .map_err(|error| sqlite_error("decode event time", error))?,
+            "event time",
+        )?,
+        data: serde_json::from_str(&data_json)
+            .map_err(|error| corrupt("decode event data", json!({"error": error.to_string()})))?,
+        ignorable: row
+            .get::<_, Option<i64>>(4)
+            .map_err(|error| sqlite_error("decode event ignorable", error))?
+            .map(|value| value != 0),
         source_event_seqs: sources_json
-            .map(|json| serde_json::from_str(&json).map_err(to_sql_error))
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|error| corrupt("decode event sources", json!({"error": error.to_string()})))
+            })
             .transpose()?,
         surface_op: surface_json
-            .map(|json| serde_json::from_str::<SurfaceOp>(&json).map_err(to_sql_error))
+            .map(|json| {
+                serde_json::from_str::<SurfaceOp>(&json)
+                    .map_err(|error| corrupt("decode event surface", json!({"error": error.to_string()})))
+            })
             .transpose()?,
-    })
+    };
+    migrate_legacy_agent_preset_selection(&mut event.event_type, &mut event.data)?;
+    Ok(event)
 }
 
 fn validate_committed(

@@ -1,11 +1,11 @@
-use std::fmt;
+use std::{env, fmt, path::PathBuf};
 
 use serde::ser::SerializeStruct;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::error::TessivumError;
+use crate::{agent_mode::AgentModeId, error::TessivumError};
 
 /// The only session-log format accepted by this crate.
 pub const SESSION_FORMAT_VERSION: u64 = 0;
@@ -96,7 +96,7 @@ opaque_string_id!(
 );
 
 /// Durable metadata kept outside a session's append-only event log.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHeader {
     pub version: u64,
@@ -113,7 +113,107 @@ pub struct SessionHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegation_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_preset: Option<String>,
+    pub agent_mode: Option<AgentModeId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionHeaderWire {
+    version: u64,
+    id: SessionId,
+    created_at: u64,
+    cwd: Option<String>,
+    parent_session: Option<SessionId>,
+    seed_length: Option<u64>,
+    origin: Option<SessionOrigin>,
+    delegation_depth: Option<u64>,
+    agent_mode: Option<AgentModeId>,
+    agent_preset: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SessionHeader {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::from_wire(SessionHeaderWire::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl SessionHeader {
+    pub(crate) fn from_json_value(value: Value) -> Result<Self, TessivumError> {
+        let wire = serde_json::from_value(value).map_err(|error| {
+            invalid(
+                "INVALID_SESSION_HEADER",
+                "session header is invalid",
+                json!({"reason": error.to_string()}),
+            )
+        })?;
+        Self::from_wire(wire)
+    }
+
+    fn from_wire(wire: SessionHeaderWire) -> Result<Self, TessivumError> {
+        if wire.agent_mode.is_some() && wire.agent_preset.is_some() {
+            return Err(invalid(
+                "SESSION_HEADER_MODE_CONFLICT",
+                "session header cannot contain both agentMode and agentPreset",
+                json!({"fields": ["agentMode", "agentPreset"]}),
+            ));
+        }
+        Ok(Self {
+            version: wire.version,
+            id: wire.id,
+            created_at: wire.created_at,
+            cwd: wire.cwd,
+            parent_session: wire.parent_session,
+            seed_length: wire.seed_length,
+            origin: wire.origin,
+            delegation_depth: wire.delegation_depth,
+            agent_mode: wire
+                .agent_mode
+                .map(Ok)
+                .or_else(|| wire.agent_preset.as_deref().map(migrate_legacy_agent_preset))
+                .transpose()?,
+        })
+    }
+}
+
+/// Converts one stored Rust-domain preset name only at a persistence migration boundary.
+pub(crate) fn migrate_legacy_agent_preset(
+    legacy_preset: &str,
+) -> Result<AgentModeId, TessivumError> {
+    match legacy_preset {
+        "standard" => Ok(AgentModeId::standard()),
+        "code" => Ok(AgentModeId::ptc()),
+        "minimal" => Ok(AgentModeId::minimal()),
+        "cordis" => Ok(AgentModeId::composition()),
+        _ => {
+            let expected_mode_path = legacy_mode_path(legacy_preset);
+            Err(TessivumError::new(
+                "MODE_MIGRATION_REQUIRED",
+                format!(
+                    "legacy agent preset {legacy_preset:?} must migrate to {}",
+                    expected_mode_path.display()
+                ),
+                "persistence",
+                json!({
+                    "legacyPreset": legacy_preset,
+                    "expectedModePath": expected_mode_path.display().to_string(),
+                }),
+            ))
+        }
+    }
+}
+
+fn legacy_mode_path(legacy_preset: &str) -> PathBuf {
+    let root = env::var_os("TESSIVUM_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".tessivum")))
+        .unwrap_or_else(|| PathBuf::from(".tessivum"));
+    PathBuf::from(format!(
+        "{}/modes/{legacy_preset}/mode.toml",
+        root.display()
+    ))
 }
 /// Provider/model authority captured for a session or the durable host default.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1023,6 +1123,31 @@ impl SessionEvent {
     }
 }
 
+/// Converts a stored preset-selection event only while restoring durable history.
+pub(crate) fn migrate_legacy_agent_preset_selection(
+    event_type: &mut String,
+    data: &mut Value,
+) -> Result<(), TessivumError> {
+    if event_type != "agent-preset/selected" {
+        return Ok(());
+    }
+    let legacy_preset = data
+        .as_object()
+        .and_then(|object| object.get("agentPreset"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            invalid(
+                "INVALID_LEGACY_AGENT_PRESET_EVENT",
+                "legacy agent preset selection must contain agentPreset",
+                Value::Null,
+            )
+        })?;
+    let agent_mode = migrate_legacy_agent_preset(legacy_preset)?;
+    *event_type = "agent-mode/selected".into();
+    *data = json!({"agentMode": agent_mode});
+    Ok(())
+}
+
 /// One entry in a whole-list todo snapshot.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct TodoItem {
@@ -1272,6 +1397,7 @@ fn is_known_event_type(event_type: &str) -> bool {
             | "permission/preset"
             | "sandbox/mode"
             | "approval/policy"
+            | "agent-mode/selected"
             | "approval/asked"
             | "approval/decided"
             | "question/asked"
