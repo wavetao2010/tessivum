@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod agent_loop;
+pub mod agent_mode;
 pub mod agent_preset;
 pub mod api;
 pub mod approval;

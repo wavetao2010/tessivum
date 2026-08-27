@@ -2850,6 +2850,7 @@ dependencies = [
  "tessivum-extism",
  "tessivum-node-bridge",
  "thiserror 2.0.20",
+ "toml",
  "tokio",
  "tokio-stream",
  "tower",

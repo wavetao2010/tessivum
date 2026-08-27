@@ -16,6 +16,7 @@ tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", re
 tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "a1a6d2e5584253391b9962c482f2140263b703bf", version = "=0.1.5" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.9"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
