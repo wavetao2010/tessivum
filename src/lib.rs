@@ -15,6 +15,7 @@ pub mod builtin_tools;
 pub mod cli;
 pub mod code_runtime;
 pub mod compaction;
+pub mod composition;
 pub mod compatible_api;
 pub mod credentials;
 pub mod dynamic_cordis;
