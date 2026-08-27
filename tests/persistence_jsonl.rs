@@ -292,8 +292,14 @@ async fn cold_restore_migrates_legacy_mode_headers_and_selection_events() {
         )
         .unwrap();
 
-        let restored = store.restore(&id, RestoreMode::Cold, cancellation()).await.unwrap();
-        assert_eq!(restored.header().agent_mode, Some(AgentModeId::new(agent_mode).unwrap()));
+        let restored = store
+            .restore(&id, RestoreMode::Cold, cancellation())
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.header().agent_mode,
+            Some(AgentModeId::new(agent_mode).unwrap())
+        );
         assert_eq!(
             restored.events().last().unwrap().event_type,
             "agent-mode/selected"
@@ -311,7 +317,11 @@ async fn cold_restore_migrates_legacy_mode_headers_and_selection_events() {
     )
     .unwrap();
     assert_eq!(
-        persistence.load(&custom, cancellation()).await.unwrap_err().code(),
+        persistence
+            .load(&custom, cancellation())
+            .await
+            .unwrap_err()
+            .code(),
         "MODE_MIGRATION_REQUIRED"
     );
 

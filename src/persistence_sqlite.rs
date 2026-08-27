@@ -418,11 +418,12 @@ fn migrate_legacy_session_headers(connection: &Connection) -> Result<(), Session
         let mut statement = connection
             .prepare("PRAGMA table_info(sessions)")
             .map_err(|error| sqlite_error("inspect session schema", error))?;
-        statement
+        let columns = statement
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|error| sqlite_error("read session schema", error))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| sqlite_error("decode session schema", error))?
+            .map_err(|error| sqlite_error("decode session schema", error))?;
+        columns
     };
     if !columns.iter().any(|column| column == "agent_preset") {
         return Ok(());
@@ -439,11 +440,14 @@ fn migrate_legacy_session_headers(connection: &Connection) -> Result<(), Session
         let mut statement = transaction
             .prepare("SELECT id, agent_preset FROM sessions WHERE agent_preset IS NOT NULL")
             .map_err(|error| sqlite_error("read legacy agent presets", error))?;
-        statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| sqlite_error("query legacy agent presets", error))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| sqlite_error("decode legacy agent presets", error))?
+            .map_err(|error| sqlite_error("decode legacy agent presets", error))?;
+        rows
     };
     for (id, legacy_preset) in legacy_rows {
         let agent_mode = migrate_legacy_agent_preset(&legacy_preset)?;
@@ -687,14 +691,16 @@ fn decode_event(row: &rusqlite::Row<'_>) -> Result<SessionEvent, SessionError> {
             .map(|value| value != 0),
         source_event_seqs: sources_json
             .map(|json| {
-                serde_json::from_str(&json)
-                    .map_err(|error| corrupt("decode event sources", json!({"error": error.to_string()})))
+                serde_json::from_str(&json).map_err(|error| {
+                    corrupt("decode event sources", json!({"error": error.to_string()}))
+                })
             })
             .transpose()?,
         surface_op: surface_json
             .map(|json| {
-                serde_json::from_str::<SurfaceOp>(&json)
-                    .map_err(|error| corrupt("decode event surface", json!({"error": error.to_string()})))
+                serde_json::from_str::<SurfaceOp>(&json).map_err(|error| {
+                    corrupt("decode event surface", json!({"error": error.to_string()}))
+                })
             })
             .transpose()?,
     };

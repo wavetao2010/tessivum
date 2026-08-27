@@ -1,5 +1,5 @@
-use tessivum::agent_mode::AgentModeId;
 use serde_json::{json, Value};
+use tessivum::agent_mode::AgentModeId;
 use tessivum::protocol::{
     ContentBlock, EpochHeader, FinishReason, LlmCallConfig, LlmCallConfigAdapterDefaults,
     LlmFailure, Message, MessageId, MessageRole, MessageSource, ProviderRequestId, RequestContext,
@@ -221,7 +221,10 @@ fn session_headers_serialize_native_modes_and_migrate_only_builtin_presets() {
             "agentPreset": legacy_preset,
         }))
         .unwrap();
-        assert_eq!(migrated.agent_mode, Some(AgentModeId::new(agent_mode).unwrap()));
+        assert_eq!(
+            migrated.agent_mode,
+            Some(AgentModeId::new(agent_mode).unwrap())
+        );
         assert_eq!(
             serde_json::to_value(migrated).unwrap()["agentMode"],
             json!(agent_mode)
@@ -247,10 +250,15 @@ fn session_headers_serialize_native_modes_and_migrate_only_builtin_presets() {
     .to_string();
     let root = std::env::var_os("TESSIVUM_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".tessivum")))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".tessivum"))
+        })
         .unwrap_or_else(|| std::path::PathBuf::from(".tessivum"));
     assert!(error.contains("MODE_MIGRATION_REQUIRED"));
-    assert!(error.contains(&format!("{}/modes/repository-maintainer/mode.toml", root.display())));
+    assert!(error.contains(&format!(
+        "{}/modes/repository-maintainer/mode.toml",
+        root.display()
+    )));
 }
 
 #[test]

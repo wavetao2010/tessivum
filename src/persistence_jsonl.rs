@@ -20,9 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     error::TessivumError,
-    protocol::{
-        migrate_legacy_agent_preset_selection, SessionEvent, SessionHeader, SessionId,
-    },
+    protocol::{migrate_legacy_agent_preset_selection, SessionEvent, SessionHeader, SessionId},
     session::{SessionError, SessionInspection, SessionPersistence, SessionRawArtifact},
 };
 
@@ -477,15 +475,17 @@ fn parse_session(
         JsonlStorageFormat::Zstd => parse_zstd_records(bytes)?,
     };
     let Some((header_record, event_records)) = records.split_first() else {
-        return Err("session log has no header record".into());
+        return Err("session log has no header record".to_owned().into());
     };
     let header = parse_header(header_record)?;
     if header.id.as_str().is_empty() {
-        return Err("session header ID is empty".into());
+        return Err("session header ID is empty".to_owned().into());
     }
     header.validate().map_err(|error| error.to_string())?;
     if expected_id.is_some_and(|id| *id != header.id) {
-        return Err("session header ID does not match its log path".into());
+        return Err("session header ID does not match its log path"
+            .to_owned()
+            .into());
     }
 
     let mut events = Vec::with_capacity(event_records.len());
@@ -500,7 +500,8 @@ fn parse_session(
             return Err(format!(
                 "session event sequence is not contiguous: expected {expected}, got {}",
                 event.seq
-            ));
+            )
+            .into());
         }
         events.push(event);
     }
@@ -615,7 +616,11 @@ fn parse_header(record: &[u8]) -> Result<SessionHeader, SessionParseError> {
         .ok_or_else(|| "session header must be a JSON object".to_owned())?;
     match object.remove("type") {
         Some(Value::String(kind)) if kind == "session" => {}
-        _ => return Err("first JSONL record must have type=session".into()),
+        _ => {
+            return Err("first JSONL record must have type=session"
+                .to_owned()
+                .into())
+        }
     }
     SessionHeader::from_json_value(value).map_err(|error| {
         if error.code == "MODE_MIGRATION_REQUIRED" {
@@ -723,7 +728,6 @@ fn hex_digit(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-
 
 fn session_parse_error(path: &Path, error: SessionParseError) -> SessionError {
     match error {

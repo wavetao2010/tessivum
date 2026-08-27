@@ -132,7 +132,10 @@ async fn sqlite_migrates_legacy_mode_storage_and_writes_only_native_columns() {
     let clean_persistence = SqliteSessionPersistence::open(&clean_path).unwrap();
     let mut native = header("clean-native");
     native.agent_mode = Some(AgentModeId::ptc());
-    clean_persistence.create(&native, cancellation()).await.unwrap();
+    clean_persistence
+        .create(&native, cancellation())
+        .await
+        .unwrap();
     drop(clean_persistence);
     let clean = Connection::open(&clean_path).unwrap();
     let columns = clean
@@ -146,7 +149,11 @@ async fn sqlite_migrates_legacy_mode_storage_and_writes_only_native_columns() {
     assert!(!columns.iter().any(|column| column == "agent_preset"));
     assert_eq!(
         clean
-            .query_row("SELECT agent_mode FROM sessions WHERE id = 'clean-native'", [], |row| row.get::<_, Option<String>>(0))
+            .query_row(
+                "SELECT agent_mode FROM sessions WHERE id = 'clean-native'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
             .unwrap(),
         Some("ptc".into())
     );
@@ -210,10 +217,20 @@ async fn sqlite_migrates_legacy_mode_storage_and_writes_only_native_columns() {
     ] {
         let id = SessionId::from(format!("legacy-{legacy_preset}"));
         assert_eq!(
-            persistence.load(&id, cancellation()).await.unwrap().unwrap().agent_mode,
+            persistence
+                .load(&id, cancellation())
+                .await
+                .unwrap()
+                .unwrap()
+                .agent_mode,
             Some(AgentModeId::new(agent_mode).unwrap())
         );
-        let event = persistence.read_from(&id, 0, cancellation()).await.unwrap().pop().unwrap();
+        let event = persistence
+            .read_from(&id, 0, cancellation())
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
         assert_eq!(event.event_type, "agent-mode/selected");
         assert_eq!(event.data, json!({"agentMode": agent_mode}));
     }
@@ -232,7 +249,9 @@ async fn sqlite_migrates_legacy_mode_storage_and_writes_only_native_columns() {
         .unwrap();
     drop(unknown);
     assert_eq!(
-        SqliteSessionPersistence::open(&unknown_path).unwrap_err().code(),
+        SqliteSessionPersistence::open(&unknown_path)
+            .unwrap_err()
+            .code(),
         "MODE_MIGRATION_REQUIRED"
     );
     fs::remove_dir_all(root).unwrap();

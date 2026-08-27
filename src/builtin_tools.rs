@@ -17,6 +17,11 @@ use std::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+#[cfg(unix)]
+use crate::subprocess::{
+    PersistentShell, PersistentShellCommand, PersistentShellConfig, PersistentShellLeaseValidator,
+    PersistentShellResult,
+};
 use crate::{
     attachments::AttachmentStore,
     jobs::{JobOwner, JobStart},
@@ -30,12 +35,6 @@ use crate::{
     workspace::{SessionResourceResolver, WorkspaceError, WorkspaceLease},
     ContentBlock, SessionId, TessivumError, ToolSchema,
 };
-#[cfg(unix)]
-use crate::subprocess::{
-    PersistentShell, PersistentShellCommand, PersistentShellConfig, PersistentShellLeaseValidator,
-    PersistentShellResult,
-};
-
 
 /// Default upper bound for combined `bash` stdout and stderr.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -65,7 +64,8 @@ impl PersistentShellSessions {
 
     /// Enables lazy persistent-shell creation for one session.
     pub fn enable(&self, session: SessionId) {
-        let entry = lock(&self.inner)
+        let mut sessions = lock(&self.inner);
+        let entry = sessions
             .entry(session)
             .or_insert_with(|| Arc::new(PersistentShellSession::new()));
         entry.enabled.store(true, Ordering::Release);
@@ -119,11 +119,13 @@ impl PersistentShellSessions {
             .get(session)
             .filter(|entry| entry.enabled.load(Ordering::Acquire))
             .cloned()
-            .ok_or_else(|| persistent_bash_error(
-                "PERSISTENT_SHELL_DISABLED",
-                "persistent shell is not enabled for this session",
-                json!({"sessionId": session}),
-            ))?;
+            .ok_or_else(|| {
+                persistent_bash_error(
+                    "PERSISTENT_SHELL_DISABLED",
+                    "persistent shell is not enabled for this session",
+                    json!({"sessionId": session}),
+                )
+            })?;
         let mut state = entry.shell.lock().await;
         if !entry.enabled.load(Ordering::Acquire) {
             return Err(persistent_bash_error(
@@ -179,14 +181,14 @@ impl PersistentShellSession {
         }
     }
 
-async fn dispose(&self) {
-    #[cfg(unix)]
-    let shell = self.shell.lock().await.take();
-    #[cfg(unix)]
-    if let Some(shell) = shell {
-        shell.shell.dispose().await;
+    async fn dispose(&self) {
+        #[cfg(unix)]
+        let shell = self.shell.lock().await.take();
+        #[cfg(unix)]
+        if let Some(shell) = shell {
+            shell.shell.dispose().await;
+        }
     }
-}
 }
 
 #[cfg(unix)]
@@ -206,7 +208,6 @@ struct PersistentBashPlan {
 fn persistent_bash_error(code: &str, message: &str, details: Value) -> TessivumError {
     TessivumError::new(code, message, "tools", details)
 }
-
 
 pub(crate) struct HostToolServices {
     sessions: SessionStore,
@@ -238,7 +239,6 @@ impl HostToolServices {
             attachments,
             web,
             persistent_shells,
-
         }
     }
 }
@@ -294,7 +294,6 @@ impl BuiltinTools {
     pub fn persistent_shell_sessions(&self) -> PersistentShellSessions {
         self.persistent_shells.clone()
     }
-
 
     fn build(
         runtime: &ToolRuntime,
@@ -359,7 +358,6 @@ impl BuiltinTools {
                     max_output_bytes: config.max_output_bytes,
                     job_owners,
                     persistent_shells: persistent_shells.clone(),
-
                 },
             ))?);
         }
@@ -408,7 +406,6 @@ fn canonical_config(mut config: BuiltinToolsConfig) -> Result<BuiltinToolsConfig
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
-
 
 fn config_error(code: &str, message: &str, details: Value) -> TessivumError {
     TessivumError::new(code, message, "tools", details)
@@ -576,7 +573,6 @@ struct Bash {
     max_output_bytes: usize,
     job_owners: Option<BashJobOwners>,
     persistent_shells: PersistentShellSessions,
-
 }
 
 #[cfg(unix)]
@@ -766,8 +762,7 @@ impl ToolHandler for Bash {
                 .run(
                     &context.session,
                     mode,
-                    PersistentShellCommand::new(command)
-                        .cancelled_by(context.cancellation.clone()),
+                    PersistentShellCommand::new(command).cancelled_by(context.cancellation.clone()),
                     move || {
                         persistent_bash_plan(
                             &cwd,
@@ -894,10 +889,15 @@ fn persistent_bash_output(result: PersistentShellResult, max_output_bytes: usize
     let mut output = CapturedOutput::default();
     let stdout = result.stdout.tail;
     let stderr = result.stderr.tail;
-    let total_bytes = result.stdout.total_bytes.saturating_add(result.stderr.total_bytes);
+    let total_bytes = result
+        .stdout
+        .total_bytes
+        .saturating_add(result.stderr.total_bytes);
     let stdout_len = stdout.len().min(max_output_bytes);
     output.stdout.extend_from_slice(&stdout[..stdout_len]);
-    let stderr_len = stderr.len().min(max_output_bytes.saturating_sub(stdout_len));
+    let stderr_len = stderr
+        .len()
+        .min(max_output_bytes.saturating_sub(stdout_len));
     output.stderr.extend_from_slice(&stderr[..stderr_len]);
     output.bytes = stdout_len + stderr_len;
     output.truncated = total_bytes > output.bytes as u64;
@@ -1233,7 +1233,8 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_bash_uses_the_sandbox_wrapped_shell_argv() {
-        let root = std::env::temp_dir().join(format!("tessivum-persistent-bash-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("tessivum-persistent-bash-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let registry = WorkspaceRegistry::open(root.join("data"), &root, Vec::new()).unwrap();
         let session = SessionId::from("sandboxed-persistent-shell");

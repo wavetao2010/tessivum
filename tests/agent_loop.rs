@@ -482,7 +482,11 @@ async fn durable_inbox_claims_precede_their_fifo_user_messages() {
     let _provider = llm.register("test", Arc::new(adapter)).unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .create(
@@ -652,7 +656,11 @@ async fn preloaded_request_header_makes_first_runtime_header_resume() {
     let _provider = llm.register("test", Arc::new(adapter)).unwrap();
     let registry = AgentRegistry::new(store);
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .resume(
@@ -707,7 +715,11 @@ async fn retry_preserves_partial_chunks_without_committing_or_executing_them() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .create(
@@ -774,7 +786,11 @@ async fn retry_budget_is_reconstructed_from_the_durable_ledger() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .create(
@@ -842,7 +858,11 @@ async fn cancellation_during_backoff_wins_without_starting_another_attempt() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .create(
@@ -897,7 +917,11 @@ async fn cancellation_during_provider_wait_closes_one_step_and_turn() {
     let _provider = llm.register("test", Arc::new(BlockingAdapter)).unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .create(
@@ -1051,7 +1075,11 @@ async fn failed_tool_stream_never_starts_durable_tool_lifecycle() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
+        .register_factory(Arc::new(factory(
+            llm,
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
         .unwrap();
     let agent = registry
         .create(
@@ -1152,7 +1180,12 @@ fn tool_names(request: &GenerateRequest) -> Vec<String> {
 fn request_for<'a>(requests: &'a [GenerateRequest], session: &str) -> &'a GenerateRequest {
     requests
         .iter()
-        .find(|request| request.session_id.as_ref().is_some_and(|id| id.as_str() == session))
+        .find(|request| {
+            request
+                .session_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == session)
+        })
         .unwrap()
 }
 
@@ -1225,14 +1258,8 @@ async fn four_session_runtime_specs_are_isolated() {
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
         .register_factory(Arc::new(
-            AgentLoopFactory::new(
-                llm,
-                prompt,
-                tools,
-                modes(),
-                AgentModeId::standard(),
-            )
-            .with_code_runtime(ptc_runtime()),
+            AgentLoopFactory::new(llm, prompt, tools, modes(), AgentModeId::standard())
+                .with_code_runtime(ptc_runtime()),
         ))
         .unwrap();
 
@@ -1283,7 +1310,13 @@ async fn four_session_runtime_specs_are_isolated() {
     let requests = requests.lock();
     assert_eq!(
         tool_names(request_for(&requests, "mode-standard")),
-        ["bash", "exit_plan_mode", "read", "str_replace_editor", "todo_write"]
+        [
+            "bash",
+            "exit_plan_mode",
+            "read",
+            "str_replace_editor",
+            "todo_write"
+        ]
     );
     assert_eq!(
         tool_names(request_for(&requests, "mode-minimal")),
@@ -1409,7 +1442,11 @@ async fn latest_mode_selection_event_overrides_header_and_programmatic_catalog_c
         .await
         .unwrap();
     let agent = registry
-        .resume(SessionId::from("mode-event-wins"), options(), cancellation())
+        .resume(
+            SessionId::from("mode-event-wins"),
+            options(),
+            cancellation(),
+        )
         .await
         .unwrap();
     agent.followup(user("ptc")).await.unwrap();
@@ -1417,7 +1454,10 @@ async fn latest_mode_selection_event_overrides_header_and_programmatic_catalog_c
 
     let requests = requests.lock();
 
-    assert_eq!(tool_names(request_for(&requests, "mode-event-wins")), ["run_code"]);
+    assert_eq!(
+        tool_names(request_for(&requests, "mode-event-wins")),
+        ["run_code"]
+    );
     drop(requests);
     agent.dispose().await.unwrap();
 }
@@ -1453,7 +1493,9 @@ async fn native_child_mode_excludes_owner_bound_tools() {
             "test",
             Arc::new(RecordingAdapter {
                 requests: Arc::clone(&requests),
-                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn("child")]))),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn(
+                    "child",
+                )]))),
             }),
         )
         .unwrap();
@@ -1484,13 +1526,13 @@ async fn native_child_mode_excludes_owner_bound_tools() {
         .unwrap();
     let mut child = header("native-child");
     child.origin = Some(SessionOrigin::Subagent);
-    let child = registry.create(child, options(), cancellation()).await.unwrap();
+    let child = registry
+        .create(child, options(), cancellation())
+        .await
+        .unwrap();
     child.followup(user("child")).await.unwrap();
     child.when_idle().await.unwrap();
-    assert_eq!(
-        tool_names(&requests.lock()[0]),
-        ["read"]
-    );
+    assert_eq!(tool_names(&requests.lock()[0]), ["read"]);
     child.dispose().await.unwrap();
 }
 
@@ -1535,7 +1577,8 @@ async fn programmatic_nested_tools_preserve_denial_and_approval() {
                 Echo,
             ))
             .unwrap();
-        let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+        let registry =
+            AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
         let _factory = registry
             .register_factory(Arc::new(
                 factory(llm, SystemPrompt::new(), tools)
@@ -1543,9 +1586,16 @@ async fn programmatic_nested_tools_preserve_denial_and_approval() {
                     .with_approval_required_tools(["read".into()]),
             ))
             .unwrap();
-        let mut selected = header(if approved { "nested-approval" } else { "nested-denial" });
+        let mut selected = header(if approved {
+            "nested-approval"
+        } else {
+            "nested-denial"
+        });
         selected.agent_mode = Some(AgentModeId::ptc());
-        let agent = registry.create(selected, options(), cancellation()).await.unwrap();
+        let agent = registry
+            .create(selected, options(), cancellation())
+            .await
+            .unwrap();
         agent.followup(user("nested")).await.unwrap();
         agent.when_idle().await.unwrap();
         let result = agent
@@ -1604,7 +1654,10 @@ async fn programmatic_nested_tool_cancellation_reaches_the_native_dispatcher() {
         .unwrap();
     let mut selected = header("nested-cancel");
     selected.agent_mode = Some(AgentModeId::ptc());
-    let agent = registry.create(selected, options(), cancellation()).await.unwrap();
+    let agent = registry
+        .create(selected, options(), cancellation())
+        .await
+        .unwrap();
     let wait_for_start = started.notified();
     agent.followup(user("cancel")).await.unwrap();
     wait_for_start.await;

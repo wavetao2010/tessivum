@@ -1,5 +1,7 @@
 //! Shell-free subprocess ownership with bounded, replayable output.
 
+#[cfg(unix)]
+use std::os::fd::RawFd;
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
@@ -12,9 +14,6 @@ use std::{
     },
     time::Duration,
 };
-#[cfg(unix)]
-use std::os::fd::RawFd;
-
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -508,16 +507,16 @@ pub struct PersistentShellConfig {
 
 #[cfg(unix)]
 impl PersistentShellConfig {
-pub fn new(workspace: impl Into<PathBuf>) -> Self {
-    Self {
-        argv: vec!["/bin/sh".into(), "-s".into()],
-        workspace: workspace.into(),
-        cwd_fd: None,
-        env: BTreeMap::new(),
-        max_output_bytes: DEFAULT_TAIL_BYTES,
-        terminate_grace: Duration::from_millis(500),
+    pub fn new(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            argv: vec!["/bin/sh".into(), "-s".into()],
+            workspace: workspace.into(),
+            cwd_fd: None,
+            env: BTreeMap::new(),
+            max_output_bytes: DEFAULT_TAIL_BYTES,
+            terminate_grace: Duration::from_millis(500),
+        }
     }
-}
 }
 
 /// One request evaluated by a [`PersistentShell`].
@@ -718,29 +717,29 @@ impl PersistentShell {
         validate_persistent_shell_config(&config)?;
         let validator: PersistentShellLeaseValidator = Arc::new(validate_lease);
         validator()?;
-let cwd = config
-    .cwd_fd
-    .is_none()
-    .then(|| canonical_cwd(&config.workspace))
-    .transpose()?;
-let mut command = Command::new(&config.argv[0]);
-command.args(&config.argv[1..]);
-if let Some(directory) = config.cwd_fd {
-    use std::os::unix::process::CommandExt;
+        let cwd = config
+            .cwd_fd
+            .is_none()
+            .then(|| canonical_cwd(&config.workspace))
+            .transpose()?;
+        let mut command = Command::new(&config.argv[0]);
+        command.args(&config.argv[1..]);
+        if let Some(directory) = config.cwd_fd {
+            use std::os::unix::process::CommandExt;
 
-    unsafe {
-        command.as_std_mut().pre_exec(move || {
-            if libc::fchdir(directory) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
+            unsafe {
+                command.as_std_mut().pre_exec(move || {
+                    if libc::fchdir(directory) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
             }
-        });
-    }
-} else {
-    command.current_dir(cwd.expect("cwd is present without a directory descriptor"));
-}
-configure_environment(&mut command, &config.env)?;
+        } else {
+            command.current_dir(cwd.expect("cwd is present without a directory descriptor"));
+        }
+        configure_environment(&mut command, &config.env)?;
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -1283,7 +1282,10 @@ fn validate_persistent_shell_config(config: &PersistentShellConfig) -> Result<()
             json!({}),
         ));
     };
-    if program.is_empty() || program.contains('\0') || config.argv.iter().any(|arg| arg.contains('\0')) {
+    if program.is_empty()
+        || program.contains('\0')
+        || config.argv.iter().any(|arg| arg.contains('\0'))
+    {
         return Err(persistent_shell_error(
             "PERSISTENT_SHELL_INVALID_ARGV",
             "persistent shell argv entries must be non-empty program text without NUL",

@@ -172,7 +172,11 @@ impl SessionHeader {
             agent_mode: wire
                 .agent_mode
                 .map(Ok)
-                .or_else(|| wire.agent_preset.as_deref().map(migrate_legacy_agent_preset))
+                .or_else(|| {
+                    wire.agent_preset
+                        .as_deref()
+                        .map(migrate_legacy_agent_preset)
+                })
                 .transpose()?,
         })
     }

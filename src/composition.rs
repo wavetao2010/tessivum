@@ -146,7 +146,6 @@ fn validate_composition_id(id: &str) -> Result<(), TessivumError> {
     Ok(())
 }
 
-
 /// The lifecycle state owned by one descriptor.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -208,13 +207,9 @@ pub struct CompositionTools {
 /// dependencies without calling an entry lifecycle start hook.
 #[async_trait]
 pub trait CompositionValidator: Send + Sync {
-    async fn validate(
-        &self,
-        entry: &Entry,
-        package: &ResolvedPackage,
-    ) -> Result<(), TessivumError>;
+    async fn validate(&self, entry: &Entry, package: &ResolvedPackage)
+        -> Result<(), TessivumError>;
 }
-
 
 #[derive(Clone)]
 pub struct CompositionRegistry {
@@ -274,7 +269,10 @@ impl CompositionRegistry {
         }
         Ok(Self {
             inner: Arc::new(RegistryInner {
-                catalog: RuntimeCatalog { resolver, runtimes: catalog },
+                catalog: RuntimeCatalog {
+                    resolver,
+                    runtimes: catalog,
+                },
                 validator,
                 sessions: Mutex::new(BTreeMap::new()),
             }),
@@ -428,7 +426,9 @@ impl CompositionRegistry {
         );
         Ok(snapshot(
             owner,
-            descriptors.get(&id).expect("inserted composition is present"),
+            descriptors
+                .get(&id)
+                .expect("inserted composition is present"),
         ))
     }
 
@@ -447,7 +447,7 @@ impl CompositionRegistry {
                 require_transition(record, "validate", CompositionLifecycle::Draft)?;
                 record.entry.clone()
             }
-            None => return Err(self.missing_or_denied(owner, id).await),
+            None => return Err(composition_not_found(id)),
         };
         let result = self.validate_entry(&session.context, &entry).await;
         let record = descriptors
@@ -483,7 +483,7 @@ impl CompositionRegistry {
                 require_transition(record, "run", CompositionLifecycle::Validated)?;
                 record.entry.clone()
             }
-            None => return Err(self.missing_or_denied(owner, id).await),
+            None => return Err(composition_not_found(id)),
         };
         let (runtime, package) = match self.resolve_entry(&entry).await {
             Ok(prepared) => prepared,
@@ -576,7 +576,7 @@ impl CompositionRegistry {
         let session = self.session(owner)?;
         let mut descriptors = session.descriptors.lock().await;
         let Some(record) = descriptors.get_mut(id) else {
-            return Err(self.missing_or_denied(owner, id).await);
+            return Err(composition_not_found(id));
         };
         if record.lifecycle == CompositionLifecycle::Validated {
             return Ok(snapshot(owner, record));
@@ -639,10 +639,7 @@ impl CompositionRegistry {
         let rows = match id {
             Some(id) => match descriptors.get(id) {
                 Some(record) => vec![snapshot(owner, record)],
-                None => {
-                    drop(descriptors);
-                    return Err(self.missing_or_denied(owner, id).await);
-                }
+                None => return Err(composition_not_found(id)),
             },
             None => descriptors
                 .values()
@@ -663,13 +660,16 @@ impl CompositionRegistry {
     }
 
     fn session(&self, owner: &SessionId) -> Result<Arc<SessionState>, TessivumError> {
-        lock(&self.inner.sessions).get(owner).cloned().ok_or_else(|| {
-            composition_error(
-                "COMPOSITION_SESSION_UNAVAILABLE",
-                "the composition registry is not attached to this session",
-                json!({"owner": owner}),
-            )
-        })
+        lock(&self.inner.sessions)
+            .get(owner)
+            .cloned()
+            .ok_or_else(|| {
+                composition_error(
+                    "COMPOSITION_SESSION_UNAVAILABLE",
+                    "the composition registry is not attached to this session",
+                    json!({"owner": owner}),
+                )
+            })
     }
 
     async fn resolve_entry(
@@ -712,7 +712,6 @@ impl CompositionRegistry {
         Ok((runtime, package))
     }
 
-
     async fn validate_entry(
         &self,
         session_context: &ContextHandle,
@@ -741,10 +740,14 @@ impl CompositionRegistry {
                     .await
                     .err()
                     .map(|cleanup| bounded(&cleanup.to_string(), MAX_FAILURE_TEXT_BYTES));
-                return Err(validation_error(entry, "instantiate", match cleanup {
-                    Some(cleanup) => format!("{error}; cleanup: {cleanup}"),
-                    None => error.to_string(),
-                }));
+                return Err(validation_error(
+                    entry,
+                    "instantiate",
+                    match cleanup {
+                        Some(cleanup) => format!("{error}; cleanup: {cleanup}"),
+                        None => error.to_string(),
+                    },
+                ));
             }
         };
         let dispose = handle.dispose().await.err();
@@ -769,21 +772,7 @@ impl CompositionRegistry {
         }
     }
 
-    async fn missing_or_denied(&self, owner: &SessionId, id: &str) -> TessivumError {
-        let sessions = lock(&self.inner.sessions)
-            .iter()
-            .filter(|(candidate, _)| *candidate != owner)
-            .map(|(_, session)| Arc::clone(session))
-            .collect::<Vec<_>>();
-        for session in sessions {
-            if session.descriptors.lock().await.contains_key(id) {
-                return composition_error(
-                    "COMPOSITION_ACCESS_DENIED",
-                    "the requested composition is owned by another session",
-                    json!({"id": bounded(id, MAX_COMPOSITION_ID_BYTES)}),
-                );
-            }
-        }
+    fn composition_not_found(id: &str) -> TessivumError {
         composition_error(
             "COMPOSITION_NOT_FOUND",
             "the requested composition is not defined for this session",
@@ -791,7 +780,6 @@ impl CompositionRegistry {
         )
     }
 }
-
 
 #[derive(Clone, Copy)]
 enum ToolKind {
@@ -813,15 +801,27 @@ impl ToolHandler for CompositionTool {
         match self.kind {
             ToolKind::Inspect => {
                 let request: InspectRequest = parse_request(arguments)?;
-                success(self.registry.inspect(&context.session, request.id.as_deref()).await?)
+                success(
+                    self.registry
+                        .inspect(&context.session, request.id.as_deref())
+                        .await?,
+                )
             }
             ToolKind::Define => {
                 let request: DefineRequest = parse_request(arguments)?;
-                success(self.registry.define(&context.session, request.descriptor).await?)
+                success(
+                    self.registry
+                        .define(&context.session, request.descriptor)
+                        .await?,
+                )
             }
             ToolKind::Validate => {
                 let request: IdRequest = parse_request(arguments)?;
-                success(self.registry.validate(&context.session, &request.id).await?)
+                success(
+                    self.registry
+                        .validate(&context.session, &request.id)
+                        .await?,
+                )
             }
             ToolKind::Run => {
                 let request: IdRequest = parse_request(arguments)?;
@@ -932,7 +932,12 @@ fn validate_config(config: &Value) -> Result<(), TessivumError> {
         ));
     }
     let size = serde_json::to_vec(config)
-        .map_err(|error| descriptor_error("config cannot be encoded as JSON", json!({"error": error.to_string()})))?
+        .map_err(|error| {
+            descriptor_error(
+                "config cannot be encoded as JSON",
+                json!({"error": error.to_string()}),
+            )
+        })?
         .len();
     if size > MAX_COMPOSITION_CONFIG_BYTES {
         return Err(descriptor_error(
@@ -969,37 +974,13 @@ fn validate_config_value(
             }
         }
         Value::Object(values) => {
-            for (key, value) in values {
-                if forbidden_config_key(key) {
-                    return Err(descriptor_error(
-                        "config must not contain source, script, or expression fields",
-                        json!({"field": key}),
-                    ));
-                }
+            for value in values.values() {
                 validate_config_value(value, depth + 1, nodes)?;
             }
         }
         _ => {}
     }
     Ok(())
-}
-
-fn forbidden_config_key(key: &str) -> bool {
-    let key = key
-        .bytes()
-        .filter(|byte| byte.is_ascii_alphanumeric())
-        .map(|byte| byte.to_ascii_lowercase() as char)
-        .collect::<String>();
-    key.contains("source")
-        || key.contains("script")
-        || key.contains("expression")
-        || key.contains("javascript")
-        || key.contains("typescript")
-        || key.contains("eval")
-        || key == "host"
-        || key == "client"
-        || key == "code"
-        || key.ends_with("code")
 }
 
 fn descriptor_error(message: impl Into<String>, details: Value) -> TessivumError {
@@ -1043,7 +1024,10 @@ fn start_failure(
     cleanup: Vec<String>,
 ) -> TessivumError {
     let mut details = Map::new();
-    details.insert("id".into(), Value::String(bounded(id, MAX_COMPOSITION_ID_BYTES)));
+    details.insert(
+        "id".into(),
+        Value::String(bounded(id, MAX_COMPOSITION_ID_BYTES)),
+    );
     details.insert(
         "runtime".into(),
         Value::String(entry.runtime.as_str().into()),
@@ -1272,37 +1256,17 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_reject_source_forms_and_unknown_fields() {
+    fn descriptors_reject_entry_source_but_allow_opaque_bounded_config() {
         let unknown = serde_json::from_value::<CompositionDescriptor>(json!({
             "id": "fixture-entry",
             "entry": {"runtime": "native", "package": "fixture", "source": "ignored"},
             "config": {},
         }));
         assert!(unknown.is_err());
-        for key in [
-            "source",
-            "host",
-            "client",
-            "hostCode",
-            "clientScript",
-            "script",
-            "expression",
-            "eval",
-        ] {
-            let mut config = serde_json::Map::new();
-            config.insert(key.into(), json!("forbidden"));
-            let error = CompositionDescriptor {
-                id: "fixture-entry".into(),
-                entry: CompositionEntryReference {
-                    runtime: CompositionRuntime::Native,
-                    package: "fixture".into(),
-                },
-                config: Value::Object(config),
-            }
-            .validate()
-            .unwrap_err();
-            assert_eq!(error.code, "COMPOSITION_DESCRIPTOR_INVALID");
-        }
+
+        let mut descriptor = descriptor("fixture-entry");
+        descriptor.config = json!({"script": "opaque registered-plugin config"});
+        descriptor.validate().unwrap();
     }
 
     #[tokio::test]
@@ -1311,7 +1275,9 @@ mod tests {
         let live = Arc::new(AtomicUsize::new(0));
         let registry = registry(Arc::clone(&live), false);
         let owner = SessionId::from("owner");
-        registry.attach_session(owner.clone(), root.clone()).unwrap();
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
 
         assert_eq!(
             registry
@@ -1329,7 +1295,11 @@ mod tests {
                 .lifecycle,
             CompositionLifecycle::Validated
         );
-        assert_eq!(live.load(Ordering::Acquire), 0, "validation must not start the native plugin");
+        assert_eq!(
+            live.load(Ordering::Acquire),
+            0,
+            "validation must not start the native plugin"
+        );
         let active = registry.run(&owner, "fixture-entry").await.unwrap();
         assert_eq!(active.lifecycle, CompositionLifecycle::Active);
         assert_eq!(active.core.fiber_state, Some(FiberState::Active));
@@ -1358,9 +1328,16 @@ mod tests {
         let registry = registry(Arc::new(AtomicUsize::new(0)), false);
         let owner = SessionId::from("owner");
         let other = SessionId::from("other");
-        registry.attach_session(owner.clone(), root.clone()).unwrap();
-        registry.attach_session(other.clone(), root.clone()).unwrap();
-        registry.define(&owner, descriptor("fixture-entry")).await.unwrap();
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
+        registry
+            .attach_session(other.clone(), root.clone())
+            .unwrap();
+        registry
+            .define(&owner, descriptor("fixture-entry"))
+            .await
+            .unwrap();
         assert_eq!(
             registry
                 .define(&owner, descriptor("fixture-entry"))
@@ -1371,7 +1348,11 @@ mod tests {
         );
 
         assert_eq!(
-            registry.run(&owner, "fixture-entry").await.unwrap_err().code,
+            registry
+                .run(&owner, "fixture-entry")
+                .await
+                .unwrap_err()
+                .code,
             "COMPOSITION_INVALID_TRANSITION"
         );
         assert_eq!(
@@ -1380,7 +1361,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            "COMPOSITION_ACCESS_DENIED"
+            "COMPOSITION_NOT_FOUND"
         );
         root.scope().dispose().await.unwrap();
     }
@@ -1391,12 +1372,21 @@ mod tests {
         let live = Arc::new(AtomicUsize::new(0));
         let registry = registry(Arc::clone(&live), true);
         let owner = SessionId::from("owner");
-        registry.attach_session(owner.clone(), root.clone()).unwrap();
-        registry.define(&owner, descriptor("fixture-entry")).await.unwrap();
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
+        registry
+            .define(&owner, descriptor("fixture-entry"))
+            .await
+            .unwrap();
         registry.validate(&owner, "fixture-entry").await.unwrap();
 
         assert_eq!(
-            registry.run(&owner, "fixture-entry").await.unwrap_err().code,
+            registry
+                .run(&owner, "fixture-entry")
+                .await
+                .unwrap_err()
+                .code,
             "COMPOSITION_START_FAILED"
         );
         assert_eq!(live.load(Ordering::Acquire), 0);
@@ -1409,7 +1399,10 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.lifecycle, CompositionLifecycle::Validated);
         assert_eq!(
-            snapshot.last_failure.as_ref().map(|failure| failure.code.as_str()),
+            snapshot
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
             Some("COMPOSITION_START_FAILED")
         );
         root.scope().dispose().await.unwrap();
@@ -1421,7 +1414,9 @@ mod tests {
         let live = Arc::new(AtomicUsize::new(0));
         let registry = registry(Arc::clone(&live), false);
         let owner = SessionId::from("owner");
-        registry.attach_session(owner.clone(), root.clone()).unwrap();
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
         let tools = ToolRuntime::new();
         let _tools = registry.register_tools(&tools).unwrap();
         assert_eq!(
@@ -1443,28 +1438,37 @@ mod tests {
             call: call.into(),
             cancellation: root.scope().cancellation(),
         };
-        assert!(!tools
-            .execute(
-                context("define"),
-                "composition_define",
-                json!({"descriptor": descriptor("fixture-entry")}),
-            )
-            .await
-            .is_error);
-        for (call, tool) in [("validate", "composition_validate"), ("run", "composition_run")] {
-            assert!(!tools
-                .execute(context(call), tool, json!({"id": "fixture-entry"}))
+        assert!(
+            !tools
+                .execute(
+                    context("define"),
+                    "composition_define",
+                    json!({"descriptor": descriptor("fixture-entry")}),
+                )
                 .await
-                .is_error);
+                .is_error
+        );
+        for (call, tool) in [
+            ("validate", "composition_validate"),
+            ("run", "composition_run"),
+        ] {
+            assert!(
+                !tools
+                    .execute(context(call), tool, json!({"id": "fixture-entry"}))
+                    .await
+                    .is_error
+            );
         }
-        assert!(!tools
-            .execute(
-                context("stop"),
-                "composition_stop",
-                json!({"id": "fixture-entry"}),
-            )
-            .await
-            .is_error);
+        assert!(
+            !tools
+                .execute(
+                    context("stop"),
+                    "composition_stop",
+                    json!({"id": "fixture-entry"}),
+                )
+                .await
+                .is_error
+        );
         assert_eq!(live.load(Ordering::Acquire), 0);
         root.scope().dispose().await.unwrap();
     }

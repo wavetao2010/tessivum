@@ -501,7 +501,10 @@ async fn enabled_bash_session_retains_cwd_environment_and_functions() {
             json!({"command": "printf never", "sandbox_permissions": "read-only"}),
         )
         .await;
-    assert_eq!(code(&policy_change), "PERSISTENT_SHELL_SANDBOX_POLICY_MISMATCH");
+    assert_eq!(
+        code(&policy_change),
+        "PERSISTENT_SHELL_SANDBOX_POLICY_MISMATCH"
+    );
     let output = runtime
         .execute(
             context_for(&root, session.as_str(), "observe"),
@@ -512,7 +515,10 @@ async fn enabled_bash_session_retains_cwd_environment_and_functions() {
     assert!(!output.is_error);
     assert_eq!(
         text(&output),
-        format!("value|function|{}\n", nested.canonicalize().unwrap().display())
+        format!(
+            "value|function|{}\n",
+            nested.canonicalize().unwrap().display()
+        )
     );
     shells.shutdown().await;
 }
@@ -544,7 +550,10 @@ async fn disabled_bash_session_remains_one_shot() {
     assert!(!output.is_error);
     assert_eq!(
         text(&output),
-        format!("unset|missing|{}\n", directory.path().canonicalize().unwrap().display())
+        format!(
+            "unset|missing|{}\n",
+            directory.path().canonicalize().unwrap().display()
+        )
     );
 }
 
@@ -561,14 +570,16 @@ async fn enabled_bash_sessions_are_isolated() {
     shells.enable(first.clone());
     shells.enable(second.clone());
 
-    assert!(!runtime
-        .execute(
-            context_for(&root, first.as_str(), "first-write"),
-            "bash",
-            json!({"command": "export TESSIVUM_SESSION_VALUE=first"}),
-        )
-        .await
-        .is_error);
+    assert!(
+        !runtime
+            .execute(
+                context_for(&root, first.as_str(), "first-write"),
+                "bash",
+                json!({"command": "export TESSIVUM_SESSION_VALUE=first"}),
+            )
+            .await
+            .is_error
+    );
     let second_output = runtime
         .execute(
             context_for(&root, second.as_str(), "second-read"),
@@ -602,8 +613,15 @@ async fn persistent_bash_cancellation_disable_and_shutdown_reap_process_groups()
     let task = tokio::spawn({
         let runtime = runtime.clone();
         let context = context_for(&root, cancelled.as_str(), "cancel");
-        let command = format!("sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; wait", child.display());
-        async move { runtime.execute(context, "bash", json!({"command": command})).await }
+        let command = format!(
+            "sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; wait",
+            child.display()
+        );
+        async move {
+            runtime
+                .execute(context, "bash", json!({"command": command}))
+                .await
+        }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
         while !child.exists() {
@@ -620,28 +638,32 @@ async fn persistent_bash_cancellation_disable_and_shutdown_reap_process_groups()
     let disabled = SessionId::from("persistent-disabled");
     shells.enable(disabled.clone());
     let disabled_pid = directory.path().join("disabled.pid");
-    assert!(!runtime
-        .execute(
-            context_for(&ContextHandle::root(), disabled.as_str(), "start-disabled"),
-            "bash",
-            json!({"command": format!("printf '%s' \"$$\" > '{}'", disabled_pid.display())}),
-        )
-        .await
-        .is_error);
+    assert!(
+        !runtime
+            .execute(
+                context_for(&ContextHandle::root(), disabled.as_str(), "start-disabled"),
+                "bash",
+                json!({"command": format!("printf '%s' \"$$\" > '{}'", disabled_pid.display())}),
+            )
+            .await
+            .is_error
+    );
     shells.disable(&disabled).await;
     assert_reaped(&fs::read_to_string(&disabled_pid).unwrap()).await;
 
     let shutdown = SessionId::from("persistent-shutdown");
     shells.enable(shutdown.clone());
     let shutdown_pid = directory.path().join("shutdown.pid");
-    assert!(!runtime
-        .execute(
-            context_for(&ContextHandle::root(), shutdown.as_str(), "start-shutdown"),
-            "bash",
-            json!({"command": format!("printf '%s' \"$$\" > '{}'", shutdown_pid.display())}),
-        )
-        .await
-        .is_error);
+    assert!(
+        !runtime
+            .execute(
+                context_for(&ContextHandle::root(), shutdown.as_str(), "start-shutdown"),
+                "bash",
+                json!({"command": format!("printf '%s' \"$$\" > '{}'", shutdown_pid.display())}),
+            )
+            .await
+            .is_error
+    );
     shells.shutdown().await;
     assert_reaped(&fs::read_to_string(&shutdown_pid).unwrap()).await;
 }
@@ -674,14 +696,16 @@ async fn stale_workspace_retires_the_enabled_bash_shell() {
     shells.enable(session.clone());
     let context_root = ContextHandle::root();
     let pid_path = first.join("shell.pid");
-    assert!(!runtime
-        .execute(
-            context_for(&context_root, session.as_str(), "start"),
-            "bash",
-            json!({"command": "printf '%s' \"$$\" > shell.pid"}),
-        )
-        .await
-        .is_error);
+    assert!(
+        !runtime
+            .execute(
+                context_for(&context_root, session.as_str(), "start"),
+                "bash",
+                json!({"command": "printf '%s' \"$$\" > shell.pid"}),
+            )
+            .await
+            .is_error
+    );
     let pid = fs::read_to_string(&pid_path).unwrap();
     let old = root.path().join("old");
     fs::rename(&first, &old).unwrap();

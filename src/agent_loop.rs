@@ -223,7 +223,7 @@ impl SessionRuntimeSpec {
             let planning_tools = [ToolCapabilityId::PlanExit, ToolCapabilityId::PlanTodo]
                 .into_iter()
                 .flat_map(ToolCapabilityId::native_tools)
-                .map(str::to_owned)
+                .map(|name| (*name).to_owned())
                 .collect::<BTreeSet<_>>();
             names.retain(|name| !planning_tools.contains(name));
         }
@@ -243,9 +243,10 @@ impl SessionRuntimeSpec {
             .native_tools
             .scoped(restrictions)
             .map_err(AgentError::Message)?;
-        let skills = factory.skills.as_ref().filter(|(_, scopes)| {
-            skills_enabled && lock(scopes).contains_key(&session.id())
-        });
+        let skills = factory
+            .skills
+            .as_ref()
+            .filter(|(_, scopes)| skills_enabled && lock(scopes).contains_key(&session.id()));
         let native_tools = if skills.is_some() {
             native_tools
         } else {
@@ -273,11 +274,7 @@ impl SessionRuntimeSpec {
         Ok(Self {
             prompt: ModePrompt {
                 complete: mode_prompt.complete,
-                section: PromptSection::new(
-                    format!("agent-mode/{mode_id}"),
-                    0,
-                    mode_prompt.text,
-                ),
+                section: PromptSection::new(format!("agent-mode/{mode_id}"), 0, mode_prompt.text),
             },
             tools,
             compaction: compaction_enabled
@@ -624,7 +621,10 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
 
         let tool_schemas = inner.runtime.tools.schemas();
         let (system, tools) = if inner.runtime.prompt.complete {
-            (Some(inner.runtime.prompt.section.text.clone()), tool_schemas)
+            (
+                Some(inner.runtime.prompt.section.text.clone()),
+                tool_schemas,
+            )
         } else {
             let assembly = inner
                 .prompt
