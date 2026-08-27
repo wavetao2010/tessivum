@@ -122,6 +122,8 @@ pub struct AgentModeDocument {
     pub id: AgentModeId,
     pub trust: AgentModeTrust,
     pub content: String,
+    pub name: String,
+    pub description: String,
     pub built_in: bool,
 }
 
@@ -512,6 +514,8 @@ impl AgentModeRegistry {
             id: location.resolved.spec.id.clone(),
             trust: location.resolved.trust,
             content,
+            name: location.resolved.spec.name.clone(),
+            description: location.resolved.spec.description.clone(),
             built_in: location.resolved.trust == AgentModeTrust::Builtin,
         })
     }
@@ -800,30 +804,105 @@ fn builtin_specs() -> Vec<AgentModeSpec> {
     let standard_tools = standard_tool_capabilities();
     vec![
         AgentModeSpec {
-            id: AgentModeId::standard(), name: "Standard".into(), description: "The full native Tessivum tool catalog.".into(),
-            prompt: PromptPolicy { complete: false, text: "Use the additive Tessivum persona, workspace instructions, and runtime context.".into() },
-            presentation: ToolPresentation::Direct, tools: standard_tools.clone(), skills: true, planning: true, compaction: Some(CompactionPolicy::Standard), plugins: Vec::new(),
-            capabilities: ModeCapabilities { skills: true, planning: true, compaction: true, ..ModeCapabilities::default() },
-        },
-        AgentModeSpec {
-            id: AgentModeId::ptc(), name: "PTC".into(), description: "A programmatic tool-calling mode backed by Bun.".into(),
-            prompt: PromptPolicy { complete: false, text: "Use the additive PTC prompt section and invoke tools through run_code.".into() },
-            presentation: ToolPresentation::Programmatic, tools: standard_tools.clone(), skills: true, planning: true, compaction: Some(CompactionPolicy::Standard), plugins: Vec::new(),
-            capabilities: ModeCapabilities { skills: true, planning: true, compaction: true, bun: true, ..ModeCapabilities::default() },
-        },
-        AgentModeSpec {
-            id: AgentModeId::minimal(), name: "Minimal".into(), description: "A focused persistent-shell editing mode.".into(),
-            prompt: PromptPolicy { complete: true, text: "Use only bash and str_replace_editor to complete the task.".into() },
-            presentation: ToolPresentation::Direct, tools: vec![ToolCapabilityId::ShellBash, ToolCapabilityId::FsStrReplaceEditor], skills: false, planning: false, compaction: None, plugins: Vec::new(),
-            capabilities: ModeCapabilities { persistent_shell: true, ..ModeCapabilities::default() },
-        },
-        AgentModeSpec {
-            id: AgentModeId::composition(), name: "Composition".into(), description: "A native entry composition-builder mode.".into(),
-            prompt: PromptPolicy { complete: false, text: "Use the additive composition-builder prompt section.".into() },
+            id: AgentModeId::standard(),
+            name: "标准模式".into(),
+            description: "功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。".into(),
+            prompt: PromptPolicy {
+                complete: false,
+                text: "Use the additive Tessivum persona, workspace instructions, and runtime context.".into(),
+            },
             presentation: ToolPresentation::Direct,
-            tools: standard_tools.into_iter().chain([ToolCapabilityId::CompositionInspect, ToolCapabilityId::CompositionDefine, ToolCapabilityId::CompositionValidate, ToolCapabilityId::CompositionRun, ToolCapabilityId::CompositionStop]).collect(),
-            skills: true, planning: true, compaction: Some(CompactionPolicy::Standard), plugins: Vec::new(),
-            capabilities: ModeCapabilities { skills: true, planning: true, compaction: true, composition: true, ..ModeCapabilities::default() },
+            tools: standard_tools.clone(),
+            skills: true,
+            planning: true,
+            compaction: Some(CompactionPolicy::Standard),
+            plugins: Vec::new(),
+            capabilities: ModeCapabilities {
+                skills: true,
+                planning: true,
+                compaction: true,
+                ..ModeCapabilities::default()
+            },
+        },
+        AgentModeSpec {
+            id: AgentModeId::ptc(),
+            name: "PTC 模式".into(),
+            description: "具备标准模式的全部能力，并通过 run_code 让模型用一个 JavaScript 程序组合多步操作。".into(),
+            prompt: PromptPolicy {
+                complete: false,
+                text: concat!(
+                    "## Writing code for run_code\n",
+                    "Use the `run_code` tool for model-directed actions. Its JavaScript program receives the native tool ",
+                    "SDK as `declare const tools`; call `await tools.<name>(arguments)` for each operation and return a ",
+                    "JSON-serializable result.",
+                ).into(),
+            },
+            presentation: ToolPresentation::Programmatic,
+            tools: standard_tools.clone(),
+            skills: true,
+            planning: true,
+            compaction: Some(CompactionPolicy::Standard),
+            plugins: Vec::new(),
+            capabilities: ModeCapabilities {
+                skills: true,
+                planning: true,
+                compaction: true,
+                bun: true,
+                ..ModeCapabilities::default()
+            },
+        },
+        AgentModeSpec {
+            id: AgentModeId::minimal(),
+            name: "极简模式".into(),
+            description: "仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。".into(),
+            prompt: PromptPolicy {
+                complete: true,
+                text: "You are a helpful software engineer assistant.\n\nUse only bash and str_replace_editor to complete the task.".into(),
+            },
+            presentation: ToolPresentation::Direct,
+            tools: vec![
+                ToolCapabilityId::ShellBash,
+                ToolCapabilityId::FsStrReplaceEditor,
+            ],
+            skills: false,
+            planning: false,
+            compaction: None,
+            plugins: Vec::new(),
+            capabilities: ModeCapabilities {
+                persistent_shell: true,
+                ..ModeCapabilities::default()
+            },
+        },
+        AgentModeSpec {
+            id: AgentModeId::composition(),
+            name: "创造模式".into(),
+            description: "具备标准模式的全部能力，并提供 Native、WASM 与 Legacy Entry 组合工具。".into(),
+            prompt: PromptPolicy {
+                complete: false,
+                text: "Use composition tools to define, validate, run, inspect, and stop typed Native, WASM, or Legacy entries. Never execute arbitrary source code.".into(),
+            },
+            presentation: ToolPresentation::Direct,
+            tools: standard_tools
+                .into_iter()
+                .chain([
+                    ToolCapabilityId::CompositionInspect,
+                    ToolCapabilityId::CompositionDefine,
+                    ToolCapabilityId::CompositionValidate,
+                    ToolCapabilityId::CompositionRun,
+                    ToolCapabilityId::CompositionStop,
+                ])
+                .collect(),
+            skills: true,
+            planning: true,
+            compaction: Some(CompactionPolicy::Standard),
+            plugins: Vec::new(),
+            capabilities: ModeCapabilities {
+                skills: true,
+                planning: true,
+                compaction: true,
+                composition: true,
+                ..ModeCapabilities::default()
+            },
         },
     ]
 }
