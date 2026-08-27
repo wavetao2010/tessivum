@@ -15,13 +15,12 @@ use clap::error::ErrorKind;
 use serde::Deserialize;
 use serde_json::Value;
 use tessivum::{
-    agent_preset::AgentPresetTrust,
+    agent_mode::AgentModeId,
     boot_theme::inject_boot_theme,
     cli::{
         parse_cli, resolve_data_root, CliCommand, DataRootError, ExitClass, HeadlessCommand,
         PluginAction, PluginCommand, SdkCommand,
     },
-    code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     frontend::{FrontendHtmlTap, FrontendStatic, FrontendTapRegistration},
     headless::{run_headless, run_headless_with_adapter, HeadlessConfig},
     host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
@@ -235,7 +234,6 @@ async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic
 
 async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
-    let dynamic_cordis = feature_flag("TESSIVUM_CORDIS_TOOLS")?;
     let address = env::var("TESSIVUM_WEB_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse::<SocketAddr>()
@@ -253,7 +251,6 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         cwd,
         data_dir.clone(),
         web_replay().await?,
-        dynamic_cordis,
         true,
         Some(web_system_prompt(address)),
         patches,
@@ -412,15 +409,6 @@ fn installed_client_package_roots(data_dir: &Path) -> Result<Vec<PathBuf>, Diagn
         .collect())
 }
 
-fn feature_flag(name: &str) -> Result<bool, Diagnostic> {
-    match environment(name)?.as_deref() {
-        None | Some("0" | "false" | "off") => Ok(false),
-        Some("1" | "true" | "on") => Ok(true),
-        Some(value) => Err(Diagnostic::usage(format!(
-            "{name} must be 0/1, false/true, or off/on; got {value}"
-        ))),
-    }
-}
 
 enum SdkOutcome {
     Eof,
@@ -429,7 +417,7 @@ enum SdkOutcome {
 
 async fn run_sdk(command: SdkCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
-    let runtime = boot_host(cwd, data_dir, None, false, true, None, Vec::new()).await?;
+    let runtime = boot_host(cwd, data_dir, None, true, None, Vec::new()).await?;
     let server = tessivum::sdk::JsonRpcServer::new(Arc::new(runtime.handle()));
     let reader = tokio::io::stdin();
     let writer = tokio::io::stdout();
@@ -470,7 +458,6 @@ async fn boot_host(
     cwd: PathBuf,
     data_dir: PathBuf,
     recorded_replay: Option<WebReplay>,
-    dynamic_cordis: bool,
     enable_trusted_bash: bool,
     system_prompt: Option<String>,
     cli_patches: Vec<Value>,
@@ -478,26 +465,6 @@ async fn boot_host(
     let mut config = HostConfig::new(cwd, data_dir);
     config.enable_trusted_bash = enable_trusted_bash;
     config.system_prompt = system_prompt;
-    config.dynamic_cordis = dynamic_cordis;
-    config.cli_patches = cli_patches;
-    match environment("TESSIVUM_TOOLS_MODE")?.as_deref() {
-        None | Some("native") => {}
-        Some("code") => {
-            config.enable_trusted_bash = true;
-            config.code_runtime = Some(
-                ProcessCodeRuntime::new(ProcessCodeRuntimeConfig::javascript("node"))
-                    .map_err(|error| Diagnostic::runtime("CODE_RUNTIME_CONFIG_FAILED", error))?,
-            );
-        }
-        Some(mode) => {
-            return Err(Diagnostic::usage(format!(
-                "TESSIVUM_TOOLS_MODE must be native or code, got {mode}"
-            )))
-        }
-    }
-    if let Some(root) = environment("TESSIVUM_AGENT_PRESET_ROOT")? {
-        config = config.with_agent_preset_root(root, AgentPresetTrust::System);
-    }
     if let Some(replay) = recorded_replay {
         let route = replay_route(&replay.recording);
         config = config
@@ -743,6 +710,7 @@ async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Di
             data_dir,
             cwd,
             session_id,
+            agent_mode: AgentModeId::standard(),
             resume: command.resume,
             provider: command.provider,
             model: command.model,

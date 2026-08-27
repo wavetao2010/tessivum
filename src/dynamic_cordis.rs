@@ -3,18 +3,13 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::{
     code_runtime::{CodeRunRequest, CodeRuntime, ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     host::{HostNotification, HostRemoteEvent},
-    tools::{
-        ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
-        ToolRunContext, ToolRuntime,
-    },
-    ContentBlock, SessionId, TessivumError,
+    SessionId, TessivumError,
 };
 
 const MAX_CORDIS_VALUE_BYTES: usize = 64 * 1024;
@@ -29,9 +24,6 @@ pub struct DynamicCordisRegistry {
     code: ProcessCodeRuntime,
 }
 
-pub struct DynamicCordisTools {
-    _registrations: Vec<ToolRegistration>,
-}
 
 #[derive(Default)]
 struct State {
@@ -111,16 +103,18 @@ struct PendingInspect {
 }
 impl DynamicCordisRegistry {
     pub fn new(notices: broadcast::Sender<HostNotification>) -> Result<Self, TessivumError> {
-        let code = ProcessCodeRuntime::new(ProcessCodeRuntimeConfig::javascript("node")).map_err(
-            |error| {
+        let code = ProcessCodeRuntimeConfig::ptc_javascript()
+            .and_then(ProcessCodeRuntime::new)
+            .map_err(|error| {
                 TessivumError::new(
-                    "CORDIS_RUNTIME_CONFIG_FAILED",
+                    error
+                        .diagnostic_code()
+                        .unwrap_or("CORDIS_RUNTIME_CONFIG_FAILED"),
                     error.to_string(),
                     "cordis",
                     Value::Null,
                 )
-            },
-        )?;
+            })?;
         Ok(Self {
             inner: Arc::new(Mutex::new(State::default())),
             notices,
@@ -128,74 +122,6 @@ impl DynamicCordisRegistry {
         })
     }
 
-    pub fn register_tools(&self, tools: &ToolRuntime) -> Result<DynamicCordisTools, TessivumError> {
-        let registrations = vec![
-            tools.register(ToolDefinition::new(
-                "cordis_inspect_list",
-                "Lists current dynamic Cordis inspect providers.",
-                json!({"type":"object","properties":{},"additionalProperties":false}),
-                CordisTool { registry: self.clone(), kind: ToolKind::InspectList },
-            ))?,
-            tools.register(ToolDefinition::new(
-                "cordis_inspect_query",
-                "Runs one declared read-only dynamic Cordis inspect query.",
-                json!({
-                    "type":"object",
-                    "properties": {
-                        "provider": {"type":"string"},
-                        "method": {"type":"string"},
-                        "input": {"type":"object","properties":{}}
-                    },
-                    "required": ["provider", "method"],
-                    "additionalProperties": false
-                }),
-                CordisTool { registry: self.clone(), kind: ToolKind::InspectQuery },
-            ))?,
-            tools.register(ToolDefinition::new(
-                "cordis_inspect_self",
-                "Inspects dynamic Cordis plugins owned by the current session.",
-                json!({
-                    "type":"object",
-                    "properties": {"pluginId":{"type":"string"},"packageId":{"type":"string"}},
-                    "additionalProperties":false
-                }),
-                CordisTool { registry: self.clone(), kind: ToolKind::Inspect },
-            ))?,
-            tools.register(ToolDefinition::new(
-                "cordis_define",
-                "Defines one immutable dynamic Cordis package without running it.",
-                json!({
-                    "type":"object",
-                    "properties": {
-                        "plugin":{"type":"object","properties":{"kind":{"type":"string","enum":["new","existing"]},"idPrefix":{"type":"string"},"pluginId":{"type":"string"}},"required":["kind"],"additionalProperties":false},
-                        "name":{"type":"string"}, "purpose":{"type":"string"},
-                        "code":{"type":"object","properties":{"host":{"type":"string"},"client":{"type":"string"}},"additionalProperties":false}
-                    },
-                    "required":["plugin","name","purpose","code"],"additionalProperties":false
-                }),
-                CordisTool { registry: self.clone(), kind: ToolKind::Define },
-            ))?,
-            tools.register(ToolDefinition::new(
-                "cordis_run",
-                "Runs an exact dynamic Cordis package; Client code requires browser approval.",
-                json!({
-                    "type":"object",
-                    "properties":{"pluginId":{"type":"string"},"packageId":{"type":"string"},"mode":{"type":"string","enum":["run","update"]}},
-                    "required":["pluginId","packageId","mode"],"additionalProperties":false
-                }),
-                CordisTool { registry: self.clone(), kind: ToolKind::Run },
-            ))?,
-            tools.register(ToolDefinition::new(
-                "cordis_stop",
-                "Stops a running dynamic Cordis plugin while retaining its packages.",
-                json!({"type":"object","properties":{"pluginId":{"type":"string"}},"required":["pluginId"],"additionalProperties":false}),
-                CordisTool { registry: self.clone(), kind: ToolKind::Stop },
-            ))?,
-        ];
-        Ok(DynamicCordisTools {
-            _registrations: registrations,
-        })
-    }
 
     pub fn inventory(&self) -> Value {
         let state = lock(&self.inner);
@@ -538,7 +464,7 @@ impl DynamicCordisRegistry {
                     )
                 } else {
                     format!(
-                        "Cordis {} {}/{} ({}) failed after cordis_run returned {}: {message}",
+                        "Dynamic Cordis {} {}/{} ({}) failed after activation returned {}: {message}",
                         pending.mode,
                         plugin.plugin_id,
                         pending.package_id,
@@ -985,287 +911,6 @@ impl DynamicCordisRegistry {
         }
     }
 
-    async fn inspect_query(&self, context: ToolRunContext, arguments: &Value) -> ToolHandlerResult {
-        ensure_bounded(arguments)?;
-        let provider = required_str(arguments, "provider")?;
-        let method = required_str(arguments, "method")?;
-        let input = arguments.get("input").cloned().unwrap_or(Value::Null);
-        let (request_id, receiver) = {
-            let mut state = lock(&self.inner);
-            let output_schema = {
-                let provider_record = state
-                    .inspect_manifest
-                    .iter()
-                    .find(|entry| entry.id == provider)
-                    .ok_or_else(|| {
-                        cordis_error(
-                            "CORDIS_INSPECT_PROVIDER_MISSING",
-                            "Client Cordis inspect provider is not registered",
-                        )
-                    })?;
-                let method_record = provider_record
-                    .methods
-                    .iter()
-                    .find(|entry| entry.name == method)
-                    .ok_or_else(|| {
-                        cordis_error(
-                            "CORDIS_INSPECT_METHOD_MISSING",
-                            "Client Cordis inspect method is not registered",
-                        )
-                    })?;
-                if !schema_allows(&method_record.input_schema, &input) {
-                    return Err(cordis_error(
-                        "CORDIS_INSPECT_INVALID_INPUT",
-                        "Client Cordis inspect input violates the declared schema",
-                    ));
-                }
-                method_record.output_schema.clone()
-            };
-            state.next_inspect_request += 1;
-            let request_id = format!("inspect-{}", state.next_inspect_request);
-            let (sender, receiver) = oneshot::channel();
-            state.pending_inspects.insert(
-                request_id.clone(),
-                PendingInspect {
-                    agent_id: context.session.clone(),
-                    output_schema,
-                    sender,
-                },
-            );
-            (request_id, receiver)
-        };
-        self.notify("cordis/inspect-query", json!({"requestId":request_id,"agentId":context.session,"provider":provider,"method":method,"input":input}));
-        let data = tokio::select! {
-            result = receiver => result
-                .map_err(|_| cordis_error("CORDIS_INSPECT_CANCELLED", "Client Cordis inspect query was cancelled"))??,
-            _ = context.cancellation.cancelled() => {
-                lock(&self.inner).pending_inspects.remove(&request_id);
-                self.notify("cordis/inspect-query-resolved", json!({"requestId":request_id}));
-                return Err(cordis_error("CORDIS_INSPECT_CANCELLED", "Client Cordis inspect query was cancelled"));
-            }
-        };
-        success(
-            serde_json::to_string_pretty(&data).expect("JSON serializes"),
-            json!({"provider":provider,"method":method}),
-        )
-    }
-
-    async fn request_run(&self, session_id: &SessionId, arguments: &Value) -> ToolHandlerResult {
-        let plugin_id = required_str(arguments, "pluginId")?;
-        let package_id = required_str(arguments, "packageId")?;
-        let mode = required_mode(arguments)?;
-        let has_client_half = {
-            let state = lock(&self.inner);
-            package(
-                owned_plugin(&state, session_id.as_str(), plugin_id)?,
-                package_id,
-            )?
-            .client_code
-            .is_some()
-        };
-        let (run_id, request_id) = {
-            let mut state = lock(&self.inner);
-            state.next_run += 1;
-            let run_id = format!("run-{}", state.next_run);
-            let request_id = if has_client_half {
-                state.next_request += 1;
-                format!("approval-{}", state.next_request)
-            } else {
-                String::new()
-            };
-            (run_id, request_id)
-        };
-        let (definition, request_id, run_id, requires_approval) = {
-            let mut state = lock(&self.inner);
-            let plugin = owned_plugin_mut(&mut state, session_id.as_str(), plugin_id)?;
-            let definition = package(plugin, package_id)?.clone();
-            validate_mode(plugin, package_id, mode)?;
-            if plugin.pending.is_some()
-                || plugin.active_run.as_ref().is_some_and(|run| !run.started)
-            {
-                return Err(cordis_error(
-                    "CORDIS_TRANSITION_IN_FLIGHT",
-                    "dynamic Cordis plugin already has a pending run request",
-                ));
-            }
-            if definition.client_code.is_none() {
-                (definition, None, run_id, false)
-            } else {
-                let requires_approval = !plugin.approve_future_versions
-                    && !plugin.approved_client_packages.contains(package_id);
-                plugin.next_package_id = Some(package_id.into());
-                plugin.pending = Some(PendingRun {
-                    request_id: request_id.clone(),
-                    plugin_run_id: run_id.clone(),
-                    package_id: package_id.into(),
-                    mode: mode.into(),
-                    requires_approval,
-                });
-                let mut latest = attempt(
-                    package_id,
-                    &run_id,
-                    mode,
-                    if requires_approval {
-                        "awaiting-approval"
-                    } else {
-                        "starting-host"
-                    },
-                    &definition,
-                    None,
-                );
-                latest["approvalRequestId"] = json!(request_id);
-                latest["requiresApproval"] = json!(requires_approval);
-                plugin.latest_run = Some(latest);
-                (definition, Some(request_id), run_id, requires_approval)
-            }
-        };
-        if let Some(request_id) = request_id {
-            self.notify("cordis/request-run", json!({"requestId":request_id,"agentId":session_id,"pluginId":plugin_id,"packageId":package_id,"mode":mode,"name":definition.name,"purpose":definition.purpose,"requiresApproval":requires_approval}));
-            return success(
-                format!("{plugin_id}/{package_id} is awaiting user approval ({run_id})."),
-                json!({"pluginId":plugin_id,"packageId":package_id,"pluginRunId":run_id}),
-            );
-        }
-        let remote = json!({"agentId":session_id,"pluginId":plugin_id,"packageId":package_id,"mode":mode,"requestId":null,"approveFutureVersions":false});
-        let result = self.run_host_half(&remote).await?;
-        if result.get("ok") == Some(&Value::Bool(true)) {
-            success(format!("{plugin_id}/{package_id} is running."), result)
-        } else {
-            Err(cordis_error(
-                "CORDIS_HOST_RUNTIME_FAILED",
-                result
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Host activation failed"),
-            ))
-        }
-    }
-
-    fn inspect(&self, session_id: &SessionId, arguments: &Value) -> ToolHandlerResult {
-        let state = lock(&self.inner);
-        let rows = state
-            .plugins
-            .iter()
-            .filter(|plugin| &plugin.session_id == session_id)
-            .filter(|plugin| {
-                arguments
-                    .get("pluginId")
-                    .and_then(Value::as_str)
-                    .is_none_or(|id| plugin.plugin_id == id)
-            })
-            .map(inventory_row)
-            .collect::<Vec<_>>();
-        success(
-            serde_json::to_string_pretty(&rows).expect("Cordis inventory serializes"),
-            json!({}),
-        )
-    }
-
-    fn inspect_list(&self) -> ToolHandlerResult {
-        let state = lock(&self.inner);
-        let providers = state.inspect_manifest.iter().map(|provider| json!({
-            "platform":"client", "id":provider.id, "description":provider.description,
-            "methods":provider.methods.iter().map(|method| json!({"name":method.name,"description":method.description,"inputSchema":method.input_schema,"outputSchema":method.output_schema})).collect::<Vec<_>>()
-        })).collect::<Vec<_>>();
-        success(
-            serde_json::to_string_pretty(&json!({"providers":providers})).expect("JSON serializes"),
-            json!({}),
-        )
-    }
-
-    fn define(&self, session_id: &SessionId, arguments: &Value) -> ToolHandlerResult {
-        ensure_bounded(arguments)?;
-        let name = required_str(arguments, "name")?.trim();
-        let purpose = required_str(arguments, "purpose")?.trim();
-        if name.is_empty() || purpose.is_empty() {
-            return Err(cordis_error(
-                "INVALID_CORDIS_DEFINITION",
-                "name and purpose must not be blank",
-            ));
-        }
-        let code = arguments
-            .get("code")
-            .and_then(Value::as_object)
-            .ok_or_else(|| cordis_error("INVALID_CORDIS_DEFINITION", "code must be an object"))?;
-        let host_code = optional_source(code, "host")?;
-        let client_code = optional_source(code, "client")?;
-        if host_code.is_none() && client_code.is_none() {
-            return Err(cordis_error(
-                "INVALID_CORDIS_DEFINITION",
-                "code.host or code.client is required",
-            ));
-        }
-        let selector = arguments
-            .get("plugin")
-            .and_then(Value::as_object)
-            .ok_or_else(|| cordis_error("INVALID_CORDIS_DEFINITION", "plugin must be an object"))?;
-        let mut state = lock(&self.inner);
-        state.next_package += 1;
-        let package_id = format!("pkg-{}", state.next_package);
-        let plugin = match selector.get("kind").and_then(Value::as_str) {
-            Some("new") => {
-                let prefix = selector
-                    .get("idPrefix")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if !(3..=6).contains(&prefix.len())
-                    || !prefix.bytes().all(|byte| byte.is_ascii_lowercase())
-                {
-                    return Err(cordis_error(
-                        "INVALID_CORDIS_PREFIX",
-                        "plugin.idPrefix must contain 3-6 lowercase English letters",
-                    ));
-                }
-                state.next_plugin += 1;
-                let plugin_id = format!("{prefix}-{}", state.next_plugin);
-                state.plugins.push(Plugin {
-                    plugin_id,
-                    session_id: session_id.clone(),
-                    packages: Vec::new(),
-                    approved_client_packages: BTreeSet::new(),
-                    approve_future_versions: false,
-                    current_package_id: None,
-                    next_package_id: None,
-                    active_run: None,
-                    pending: None,
-                    latest_run: None,
-                });
-                state.plugins.last_mut().expect("plugin was inserted")
-            }
-            Some("existing") => owned_plugin_mut(
-                &mut state,
-                session_id.as_str(),
-                selector
-                    .get("pluginId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            )?,
-            _ => {
-                return Err(cordis_error(
-                    "INVALID_CORDIS_DEFINITION",
-                    "plugin.kind must be new or existing",
-                ))
-            }
-        };
-        let plugin_id = plugin.plugin_id.clone();
-        plugin.packages.push(Package {
-            package_id: package_id.clone(),
-            name: name.into(),
-            purpose: purpose.into(),
-            host_code,
-            client_code,
-        });
-        success(format!("Defined {plugin_id}/{package_id} ({name}); it is not running yet. Use cordis_run to activate this Package."), json!({"pluginId":plugin_id,"packageId":package_id}))
-    }
-
-    fn stop(&self, session_id: &SessionId, arguments: &Value) -> ToolHandlerResult {
-        let plugin_id = required_str(arguments, "pluginId")?;
-        self.stop_owned(session_id.as_str(), plugin_id)?;
-        success(
-            format!("Dynamic Plugin {plugin_id} is stopped; its definition and versions remain."),
-            json!({"pluginId":plugin_id}),
-        )
-    }
 
     fn stop_owned(&self, agent_id: &str, plugin_id: &str) -> Result<Value, TessivumError> {
         let run = {
@@ -1379,38 +1024,6 @@ impl Run {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ToolKind {
-    InspectList,
-    InspectQuery,
-    Inspect,
-    Define,
-    Run,
-    Stop,
-}
-
-struct CordisTool {
-    registry: DynamicCordisRegistry,
-    kind: ToolKind,
-}
-
-#[async_trait]
-impl ToolHandler for CordisTool {
-    async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
-        match self.kind {
-            ToolKind::InspectList => self.registry.inspect_list(),
-            ToolKind::InspectQuery => self.registry.inspect_query(context, &arguments).await,
-            ToolKind::Inspect => self.registry.inspect(&context.session, &arguments),
-            ToolKind::Define => self.registry.define(&context.session, &arguments),
-            ToolKind::Run => {
-                self.registry
-                    .request_run(&context.session, &arguments)
-                    .await
-            }
-            ToolKind::Stop => self.registry.stop(&context.session, &arguments),
-        }
-    }
-}
 
 fn inventory_row(plugin: &Plugin) -> Value {
     let mut row = json!({"pluginId":plugin.plugin_id,"agentId":plugin.session_id,"packages":plugin.packages.iter().map(|package| json!({"packageId":package.package_id,"name":package.name,"purpose":package.purpose,"hasHostHalf":package.host_code.is_some(),"hasClientHalf":package.client_code.is_some()})).collect::<Vec<_>>()});
@@ -1496,13 +1109,6 @@ fn invoke_failure(code: &str, message: &str) -> Value {
     json!({"ok":false,"code":code,"message":message})
 }
 
-fn success(text: String, meta: Value) -> ToolHandlerResult {
-    Ok(ToolOutput::new(
-        vec![ContentBlock::Text { text }],
-        false,
-        meta,
-    ))
-}
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, TessivumError> {
     value
@@ -1567,23 +1173,6 @@ fn required_field<'a>(
         })
 }
 
-fn optional_source(
-    value: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<Option<String>, TessivumError> {
-    match value.get(key) {
-        None => Ok(None),
-        Some(Value::String(source))
-            if !source.is_empty() && source.len() <= MAX_CORDIS_VALUE_BYTES =>
-        {
-            Ok(Some(source.clone()))
-        }
-        _ => Err(cordis_error(
-            "INVALID_CORDIS_DEFINITION",
-            &format!("code.{key} must be a non-empty bounded string"),
-        )),
-    }
-}
 
 fn package<'a>(plugin: &'a Plugin, package_id: &str) -> Result<&'a Package, TessivumError> {
     plugin
