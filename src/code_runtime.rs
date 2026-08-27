@@ -52,6 +52,16 @@ impl CodeLanguage {
     }
 }
 
+/// Selects the executable contract for a JavaScript worker.
+///
+/// `Generic` retains the established Node-compatible invocation for callers
+/// that select their own JavaScript executable. `Bun` is the PTC contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JavaScriptRuntime {
+    Generic,
+    Bun,
+}
+
 pub type CodeJsonValue = Value;
 
 #[async_trait]
@@ -159,39 +169,78 @@ pub struct CodeRunResult {
     pub error: Option<CodeRunFailure>,
 }
 
+/// Stable Host diagnostic code for a missing or unusable PTC Bun runtime.
+pub const PTC_RUNTIME_UNAVAILABLE: &str = "PTC_RUNTIME_UNAVAILABLE";
+
 #[derive(Debug, Error)]
 pub enum CodeRuntimeError {
     #[error("code runtime is disposed")]
     Disposed,
     #[error("invalid code-runtime configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("PTC Bun runtime is unavailable: {0}")]
+    PtcRuntimeUnavailable(String),
     #[error("invalid code binding: {0}")]
     InvalidBinding(String),
     #[error(transparent)]
     Core(#[from] CoreError),
 }
+impl CodeRuntimeError {
+    /// Returns the Host-facing diagnostic code, when this error has one.
+    pub const fn diagnostic_code(&self) -> Option<&'static str> {
+        match self {
+            Self::PtcRuntimeUnavailable(_) => Some(PTC_RUNTIME_UNAVAILABLE),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ProcessCodeRuntimeConfig {
     pub language: CodeLanguage,
+    pub javascript_runtime: JavaScriptRuntime,
     pub executable: PathBuf,
     pub isolation: String,
     pub timeout: Duration,
     pub max_output_bytes: usize,
 }
 impl ProcessCodeRuntimeConfig {
+    /// Configures a caller-selected JavaScript executable with the established
+    /// Node-compatible worker invocation.
     pub fn javascript(executable: impl Into<PathBuf>) -> Self {
         Self {
             language: CodeLanguage::JavaScript,
+            javascript_runtime: JavaScriptRuntime::Generic,
             executable: executable.into(),
             isolation: "process".into(),
             timeout: Duration::from_secs(60),
             max_output_bytes: 1_048_576,
         }
     }
+    /// Configures PTC's Bun JavaScript worker with an explicit executable.
+    ///
+    /// `ProcessCodeRuntime::new` resolves the executable and reports a missing
+    /// or unusable one through [`PTC_RUNTIME_UNAVAILABLE`].
+    pub fn ptc_javascript_with(executable: impl Into<PathBuf>) -> Self {
+        Self {
+            language: CodeLanguage::JavaScript,
+            javascript_runtime: JavaScriptRuntime::Bun,
+            executable: executable.into(),
+            isolation: "process".into(),
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 1_048_576,
+        }
+    }
+    /// Resolves the Bun executable required by PTC.
+    pub fn ptc_javascript() -> Result<Self, CodeRuntimeError> {
+        let mut config = Self::ptc_javascript_with("bun");
+        config.validate()?;
+        Ok(config)
+    }
     pub fn python(executable: impl Into<PathBuf>) -> Self {
         Self {
             language: CodeLanguage::Python,
+            javascript_runtime: JavaScriptRuntime::Generic,
             executable: executable.into(),
             isolation: "process".into(),
             timeout: Duration::from_secs(60),
@@ -200,11 +249,10 @@ impl ProcessCodeRuntimeConfig {
     }
     fn validate(&mut self) -> Result<(), CodeRuntimeError> {
         if self.executable.as_os_str().is_empty() {
-            return Err(CodeRuntimeError::InvalidConfiguration(
-                "executable must not be empty".into(),
-            ));
+            return Err(self.executable_error("executable must not be empty"));
         }
-        self.executable = resolve_executable(&self.executable)?;
+        self.executable = resolve_executable(&self.executable)
+            .map_err(|error| self.executable_error(error.to_string()))?;
         if self.timeout.is_zero() || self.max_output_bytes < 4 {
             return Err(CodeRuntimeError::InvalidConfiguration(
                 "timeout must be positive and output cap must be at least four bytes".into(),
@@ -221,6 +269,13 @@ impl ProcessCodeRuntimeConfig {
             ));
         }
         Ok(())
+    }
+    fn executable_error(&self, message: impl Into<String>) -> CodeRuntimeError {
+        if self.javascript_runtime == JavaScriptRuntime::Bun {
+            CodeRuntimeError::PtcRuntimeUnavailable(message.into())
+        } else {
+            CodeRuntimeError::InvalidConfiguration(message.into())
+        }
     }
 }
 
@@ -334,11 +389,18 @@ impl ProcessCodeRuntime {
             ));
         }
         let mut command = Command::new(&self.inner.config.executable);
-        match self.inner.config.language {
-            CodeLanguage::JavaScript => {
+        match (self.inner.config.language, self.inner.config.javascript_runtime) {
+            (CodeLanguage::JavaScript, JavaScriptRuntime::Generic) => {
                 command.arg("--disable-proto=throw").arg("-e").arg(JS);
             }
-            CodeLanguage::Python => {
+            (CodeLanguage::JavaScript, JavaScriptRuntime::Bun) => {
+                command
+                    .arg("--no-install")
+                    .arg("--no-env-file")
+                    .arg("-e")
+                    .arg(JS);
+            }
+            (CodeLanguage::Python, _) => {
                 command.arg("-I").arg("-c").arg(PY);
             }
         }
@@ -1024,7 +1086,22 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 
 const JS: &str = r#"'use strict';
 const rl=require('node:readline'),out=process.stdout.write.bind(process.stdout),emit=x=>out(JSON.stringify(x)+'\n');
-const boot=rl.createInterface({input:process.stdin,crlfDelay:Infinity});boot.once('line',async line=>{boot.close();try{const d=JSON.parse(line),pending=new Map(),input=rl.createInterface({input:process.stdin,crlfDelay:Infinity});let n=1;input.on('line',l=>{try{const r=JSON.parse(l),p=pending.get(r.id);if(!p)return;pending.delete(r.id);r.ok?p.resolve(r.value):p.reject(new Error(String(r.message)))}catch{}});const valid=(v,seen=new Set())=>v===null||['boolean','string'].includes(typeof v)||(typeof v==='number'&&Number.isFinite(v))||(typeof v==='object'&&!seen.has(v)&&(seen.add(v),Array.isArray(v)?v.every(x=>valid(x,seen)):Object.keys(v).every(k=>valid(v[k],seen)),seen.delete(v),true));const classes=new Map();for(const b of d.bindings)if(b.errorClass){const e=b.errorClass;classes.set(b.global,class extends Error{constructor(member,message){super(message);Object.defineProperty(this,'name',{value:e.name});Object.defineProperty(this,e.memberNameProperty,{value:member,enumerable:true})}})}const call=(g,m,a)=>{const E=classes.get(g);if(!valid(a))return Promise.reject(E?new E(m,'binding arguments must be lossless JSON'):new Error('binding arguments must be lossless JSON'));return new Promise((resolve,reject)=>{const id=n++;pending.set(id,{resolve,reject:e=>reject(E?new E(m,String(e.message||e)):e)});emit({type:'call',id,global:g,name:m,args:a})})};const ps=[],vs=[];for(const b of d.bindings){const o=Object.create(null);for(const m of b.names)Object.defineProperty(o,m,{enumerable:true,value:a=>call(b.global,m,a)});Object.freeze(o);ps.push(b.global);vs.push(o);if(b.errorClass){ps.push(b.errorClass.name);vs.push(classes.get(b.global))}}const render=a=>a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '),console={log:(...a)=>emit({type:'log',text:render(a)}),info:(...a)=>emit({type:'log',text:render(a)}),warn:(...a)=>emit({type:'log',text:render(a)}),error:(...a)=>emit({type:'log',text:render(a)}),debug:(...a)=>emit({type:'log',text:render(a)})};const F=Object.getPrototypeOf(async function(){}).constructor,v=await new F(...ps,'console',`'use strict';\n${d.program}`)(...vs,console);if(v===undefined)emit({type:'done'});else if(valid(v))emit({type:'done',value:v});else emit({type:'done',error:{kind:'invalid-output',message:'program completion must be lossless JSON'}})}catch(e){emit({type:'done',error:{kind:'exception',message:String(e&&e.message||e)}})}});"#;
+const boot=rl.createInterface({input:process.stdin,crlfDelay:Infinity});boot.once('line',async line=>{boot.close();try{
+ const d=JSON.parse(line),pending=new Map(),input=rl.createInterface({input:process.stdin,crlfDelay:Infinity});let n=1;
+ input.on('line',l=>{try{const r=JSON.parse(l),p=pending.get(r.id);if(!p)return;pending.delete(r.id);r.ok?p.resolve(r.value):p.reject(new Error(String(r.message)))}catch{}});
+ const valid=(v,seen=new Set())=>{
+  if(v===null||['boolean','string'].includes(typeof v)||(typeof v==='number'&&Number.isFinite(v)))return true;
+  if(typeof v!=='object'||seen.has(v))return false;
+  const array=Array.isArray(v),keys=Object.keys(v),prototype=Object.getPrototypeOf(v);
+  if(array?(keys.length!==v.length||Object.getOwnPropertyNames(v).length!==v.length+1||keys.some((key,index)=>key!==String(index))):(prototype!==Object.prototype&&prototype!==null||keys.length!==Reflect.ownKeys(v).length))return false;
+  seen.add(v);const ok=keys.every(key=>{const descriptor=Object.getOwnPropertyDescriptor(v,key);return descriptor&&'value'in descriptor&&valid(descriptor.value,seen)});seen.delete(v);return ok;
+ };
+ const classes=new Map();for(const b of d.bindings)if(b.errorClass){const e=b.errorClass;classes.set(b.global,class extends Error{constructor(member,message){super(message);Object.defineProperty(this,'name',{value:e.name});Object.defineProperty(this,e.memberNameProperty,{value:member,enumerable:true})}})}
+ const call=(g,m,a)=>{const E=classes.get(g);if(!valid(a))return Promise.reject(E?new E(m,'binding arguments must be lossless JSON'):new Error('binding arguments must be lossless JSON'));return new Promise((resolve,reject)=>{const id=n++;pending.set(id,{resolve,reject:e=>reject(E?new E(m,String(e.message||e)):e)});emit({type:'call',id,global:g,name:m,args:a})})};
+ const ps=[],vs=[];for(const b of d.bindings){const o=Object.create(null);for(const m of b.names)Object.defineProperty(o,m,{enumerable:true,value:a=>call(b.global,m,a)});Object.freeze(o);ps.push(b.global);vs.push(o);if(b.errorClass){ps.push(b.errorClass.name);vs.push(classes.get(b.global))}}
+ const render=a=>a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '),console={log:(...a)=>emit({type:'log',text:render(a)}),info:(...a)=>emit({type:'log',text:render(a)}),warn:(...a)=>emit({type:'log',text:render(a)}),error:(...a)=>emit({type:'log',text:render(a)}),debug:(...a)=>emit({type:'log',text:render(a)})};
+ const F=Object.getPrototypeOf(async function(){}).constructor,v=await new F(...ps,'console',`'use strict';\n${d.program}`)(...vs,console);if(v===undefined)emit({type:'done'});else if(valid(v))emit({type:'done',value:v});else emit({type:'done',error:{kind:'invalid-output',message:'program completion must be lossless JSON'}})
+}catch(e){emit({type:'done',error:{kind:'exception',message:String(e&&e.message||e)}})}});"#;
 const PY: &str = r#"import asyncio,builtins,json,math,sys
 def emit(x): sys.stdout.write(json.dumps(x,separators=(',',':'))+'\n');sys.stdout.flush()
 def valid(x,seen=None):

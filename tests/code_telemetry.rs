@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tessivum::{
     code_runtime::{
-        CodeBindingNamespace, CodeRunFailureKind, CodeRunRequest, CodeRuntime, ProcessCodeRuntime,
-        ProcessCodeRuntimeConfig,
+        CodeBindingNamespace, CodeRunFailureKind, CodeRunRequest, CodeRuntime, CodeRuntimeError,
+        JavaScriptRuntime, ProcessCodeRuntime, ProcessCodeRuntimeConfig, PTC_RUNTIME_UNAVAILABLE,
     },
     invariants::{InvariantConfig, InvariantInstallerError, InvariantRegistry},
     telemetry::{
@@ -17,7 +17,8 @@ use tessivum::{
 use tessivum_core::ContextHandle;
 
 fn runtime(cap: usize) -> ProcessCodeRuntime {
-    let mut config = ProcessCodeRuntimeConfig::javascript("node");
+    let mut config = ProcessCodeRuntimeConfig::ptc_javascript()
+        .expect("Bun is required for PTC runtime tests; install a usable bun executable");
     config.max_output_bytes = cap;
     ProcessCodeRuntime::new(config).expect("runtime")
 }
@@ -31,6 +32,75 @@ fn event(seq: u64, kind: &str, data: Value) -> SessionEvent {
         source_event_seqs: None,
         surface_op: None,
     }
+}
+
+#[test]
+fn ptc_bun_configuration_resolves_and_reports_unavailable_executables() {
+    let config = ProcessCodeRuntimeConfig::ptc_javascript()
+        .expect("Bun is required for PTC runtime tests; install a usable bun executable");
+    assert_eq!(config.javascript_runtime, JavaScriptRuntime::Bun);
+    assert!(config.executable.is_absolute());
+
+    let unavailable = match ProcessCodeRuntime::new(
+        ProcessCodeRuntimeConfig::ptc_javascript_with(std::env::temp_dir().join(format!(
+            "tessivum-ptc-bun-{}-does-not-exist",
+            std::process::id(),
+        ))),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("missing PTC Bun executable must fail configuration"),
+    };
+    assert!(matches!(unavailable, CodeRuntimeError::PtcRuntimeUnavailable(_)));
+    assert_eq!(unavailable.diagnostic_code(), Some(PTC_RUNTIME_UNAVAILABLE));
+}
+
+#[tokio::test]
+async fn ptc_bun_worker_invocation_uses_bun() {
+    let result = runtime(1024)
+        .run(CodeRunRequest::new(
+            "return { bun: process.versions.bun, argv: process.argv }",
+            vec![],
+        ))
+        .await
+        .expect("service call");
+    let value = result.value.expect("Bun worker completion");
+    assert!(value["bun"].as_str().is_some_and(|version| !version.is_empty()));
+    let argv = value["argv"].as_array().expect("Bun eval argv");
+    assert_eq!(argv.len(), 1);
+    assert!(argv[0].as_str().is_some_and(|path| path.contains("bun")));
+}
+
+#[tokio::test]
+async fn ptc_bun_validates_binding_arguments_and_orders_nested_calls() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let first_calls = calls.clone();
+    let second_calls = calls.clone();
+    let result = runtime(1024)
+        .run(CodeRunRequest::new(
+            "const second = await tools.second({first: await tools.first({})}); try { await tools.first({nan: NaN}); } catch (error) { return {second, rejection: error.message}; }",
+            vec![CodeBindingNamespace::new("tools")
+                .function("first", move |_| {
+                    let calls = first_calls.clone();
+                    async move {
+                        calls.lock().push("first");
+                        Ok(json!("first"))
+                    }
+                })
+                .function("second", move |_| {
+                    let calls = second_calls.clone();
+                    async move {
+                        calls.lock().push("second");
+                        Ok(json!("second"))
+                    }
+                })],
+        ))
+        .await
+        .expect("service call");
+    assert_eq!(result.value, Some(json!({
+        "second": "second",
+        "rejection": "binding arguments must be lossless JSON",
+    })));
+    assert_eq!(*calls.lock(), ["first", "second"]);
 }
 
 #[tokio::test]
@@ -76,7 +146,8 @@ async fn process_runtime_resolves_success_exception_invalid_output_and_limit() {
 
 #[tokio::test]
 async fn process_runtime_timeout_abort_isolation_and_disposal() {
-    let mut config = ProcessCodeRuntimeConfig::javascript("node");
+    let mut config = ProcessCodeRuntimeConfig::ptc_javascript()
+        .expect("Bun is required for PTC runtime tests; install a usable bun executable");
     config.timeout = std::time::Duration::from_millis(30);
     let slow = ProcessCodeRuntime::new(config).expect("runtime");
     assert_eq!(
