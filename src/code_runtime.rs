@@ -389,7 +389,10 @@ impl ProcessCodeRuntime {
             ));
         }
         let mut command = Command::new(&self.inner.config.executable);
-        match (self.inner.config.language, self.inner.config.javascript_runtime) {
+        match (
+            self.inner.config.language,
+            self.inner.config.javascript_runtime,
+        ) {
             (CodeLanguage::JavaScript, JavaScriptRuntime::Generic) => {
                 command.arg("--disable-proto=throw").arg("-e").arg(JS);
             }

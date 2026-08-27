@@ -59,7 +59,10 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
             .collect::<BTreeSet<_>>(),
         legacy_ids
     );
-    assert_eq!(headers["legacyPresetIds"].as_array().unwrap().len(), legacy_ids.len());
+    assert_eq!(
+        headers["legacyPresetIds"].as_array().unwrap().len(),
+        legacy_ids.len()
+    );
     let header_rows = headers["headers"].as_array().expect("header rows");
     assert_eq!(header_rows.len(), 5);
     let mut cases = BTreeSet::new();
@@ -68,7 +71,10 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
     for row in header_rows {
         assert_keys(row, &["case", "header"]);
         let case = row["case"].as_str().expect("header case");
-        assert!(cases.insert(case.to_owned()), "duplicate header case: {case}");
+        assert!(
+            cases.insert(case.to_owned()),
+            "duplicate header case: {case}"
+        );
         let raw = &row["header"];
         assert_keys(raw, &["version", "id", "createdAt", "agentPreset"]);
         let header: SessionHeader = serde_json::from_value(raw.clone())
@@ -111,7 +117,10 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
             .collect::<BTreeSet<_>>(),
         legacy_ids
     );
-    assert_eq!(browser["legacyPresetIds"].as_array().unwrap().len(), legacy_ids.len());
+    assert_eq!(
+        browser["legacyPresetIds"].as_array().unwrap().len(),
+        legacy_ids.len()
+    );
     let calls = browser["calls"].as_array().expect("browser calls");
     assert_eq!(calls.len(), 6);
     let mut call_cases = BTreeSet::new();
@@ -120,16 +129,25 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
     for call in calls {
         assert_keys(call, &["case", "request", "response"]);
         let case = call["case"].as_str().expect("browser case");
-        assert!(call_cases.insert(case.to_owned()), "duplicate browser case: {case}");
+        assert!(
+            call_cases.insert(case.to_owned()),
+            "duplicate browser case: {case}"
+        );
         let request = &call["request"];
         assert_keys(request, &["path", "body"]);
         let body = &request["body"];
         assert_keys(body, &["type", "rpcId", "method", "payload"]);
         assert_eq!(body["type"], json!("client-request"));
         let rpc_id = body["rpcId"].as_str().expect("request RPC ID");
-        assert!(rpc_ids.insert(rpc_id.to_owned()), "duplicate RPC ID: {rpc_id}");
+        assert!(
+            rpc_ids.insert(rpc_id.to_owned()),
+            "duplicate RPC ID: {rpc_id}"
+        );
         let method = body["method"].as_str().expect("request method");
-        assert!(methods.insert(method.to_owned()), "duplicate method: {method}");
+        assert!(
+            methods.insert(method.to_owned()),
+            "duplicate method: {method}"
+        );
         assert_eq!(request["path"], json!(format!("/api/{method}")));
 
         let response = &call["response"];
@@ -159,14 +177,23 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
                 assert_keys(&body["payload"], &["agentPreset"]);
                 assert_eq!(body["payload"]["agentPreset"], json!("standard"));
                 let value = &response["result"]["value"];
-                assert_keys(value, &["agentPreset", "trust", "content", "name", "description"]);
+                assert_keys(
+                    value,
+                    &["agentPreset", "trust", "content", "name", "description"],
+                );
                 assert_eq!(value["agentPreset"], json!("standard"));
-                assert!(!value["content"].as_str().expect("composition content").is_empty());
+                assert!(!value["content"]
+                    .as_str()
+                    .expect("composition content")
+                    .is_empty());
             }
             "agentPreset.copy" => {
                 assert_keys(&body["payload"], &["from", "agentPreset", "name"]);
                 assert_eq!(body["payload"]["from"], json!("standard"));
-                assert_eq!(response["result"]["value"], json!({"agentPreset": "phase5-copy"}));
+                assert_eq!(
+                    response["result"]["value"],
+                    json!({"agentPreset": "phase5-copy"})
+                );
             }
             "agentPreset.remove" => {
                 assert_keys(&body["payload"], &["agentPreset"]);
@@ -179,7 +206,10 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
             "agentPreset.select" => {
                 assert_keys(&body["payload"], &["sessionId", "agentPreset"]);
                 assert_eq!(body["payload"]["agentPreset"], json!("cordis"));
-                assert_eq!(response["result"]["value"], json!({"agentPreset": "cordis"}));
+                assert_eq!(
+                    response["result"]["value"],
+                    json!({"agentPreset": "cordis"})
+                );
             }
             _ => panic!("unexpected browser migration method: {method}"),
         }
@@ -199,13 +229,22 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
     let observations = fixture("legacy mode observations", LEGACY_MODE_OBSERVATIONS);
     assert_keys(
         &observations,
-        &["schema", "legacyPresetIds", "status", "hostGlobalSwitch", "observations"],
+        &[
+            "schema",
+            "legacyPresetIds",
+            "status",
+            "hostGlobalSwitch",
+            "observations",
+        ],
     );
     assert_eq!(observations["schema"], json!(1));
     assert_eq!(
-        strings(&observations["legacyPresetIds"], "observed legacy preset IDs")
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
+        strings(
+            &observations["legacyPresetIds"],
+            "observed legacy preset IDs"
+        )
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
         legacy_ids
     );
     assert_eq!(
@@ -219,11 +258,19 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
     let global = &observations["hostGlobalSwitch"];
     assert_keys(
         global,
-        &["name", "whenAbsent", "whenPresent", "knownHostGlobalDefects"],
+        &[
+            "name",
+            "whenAbsent",
+            "whenPresent",
+            "knownHostGlobalDefects",
+        ],
     );
     assert_eq!(global["name"], json!("codeRuntime"));
     assert_keys(&global["whenAbsent"], &["factory", "modelToolPresentation"]);
-    assert_keys(&global["whenPresent"], &["factory", "modelToolPresentation"]);
+    assert_keys(
+        &global["whenPresent"],
+        &["factory", "modelToolPresentation"],
+    );
     let mut defects = BTreeSet::new();
     for defect in global["knownHostGlobalDefects"]
         .as_array()
@@ -231,7 +278,12 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
     {
         assert_keys(
             defect,
-            &["id", "affectedLegacyPresetIds", "observation", "notDesiredBehavior"],
+            &[
+                "id",
+                "affectedLegacyPresetIds",
+                "observation",
+                "notDesiredBehavior",
+            ],
         );
         let id = defect["id"].as_str().expect("defect ID");
         assert!(defects.insert(id.to_owned()), "duplicate defect ID: {id}");
@@ -239,7 +291,9 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
     }
     assert_eq!(defects.len(), 2);
 
-    let rows = observations["observations"].as_array().expect("mode observations");
+    let rows = observations["observations"]
+        .as_array()
+        .expect("mode observations");
     assert_eq!(rows.len(), 4);
     let mut observed_presets = BTreeSet::new();
     for row in rows {
@@ -254,9 +308,15 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
             ],
         );
         let preset = row["legacyPreset"].as_str().expect("observed preset");
-        assert!(observed_presets.insert(preset.to_owned()), "duplicate observation: {preset}");
+        assert!(
+            observed_presets.insert(preset.to_owned()),
+            "duplicate observation: {preset}"
+        );
         assert_eq!(row["sessionHeader"], json!({"agentPreset": preset}));
-        assert_keys(&row["prompt"], &["completePersona", "modelHeaderSource", "text"]);
+        assert_keys(
+            &row["prompt"],
+            &["completePersona", "modelHeaderSource", "text"],
+        );
         let absent = strings(&row["toolsWhenCodeRuntimeAbsent"], "direct tool catalog");
         let present = strings(&row["toolsWhenCodeRuntimePresent"], "code tool catalog");
         assert!(!absent.is_empty());
@@ -268,7 +328,10 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
                     row["prompt"]["text"],
                     json!("You are a helpful software engineer assistant.")
                 );
-                assert_eq!(absent, vec!["bash".to_owned(), "str_replace_editor".to_owned()]);
+                assert_eq!(
+                    absent,
+                    vec!["bash".to_owned(), "str_replace_editor".to_owned()]
+                );
             }
             "standard" | "code" | "cordis" => {
                 assert_eq!(row["prompt"]["completePersona"], json!(false));

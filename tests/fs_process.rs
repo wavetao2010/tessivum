@@ -327,7 +327,10 @@ async fn persistent_shell_preserves_cwd_environment_and_functions() {
         .unwrap();
     assert_eq!(
         String::from_utf8(result.stdout.tail).unwrap(),
-        format!("retained|function|{}\n", workspace.join("nested").display())
+        format!(
+            "retained|function|{}\n",
+            workspace.join("nested").canonicalize().unwrap().display()
+        )
     );
     shell.dispose().await;
 }
@@ -339,12 +342,16 @@ async fn persistent_shells_are_isolated() {
     let first = persistent_shell(&first_root).await;
     let second = persistent_shell(&second_root).await;
     first
-        .run(PersistentShellCommand::new("export TESSIVUM_SHELL_ISOLATED=first"))
+        .run(PersistentShellCommand::new(
+            "export TESSIVUM_SHELL_ISOLATED=first",
+        ))
         .await
         .unwrap();
     assert_eq!(
         second
-            .run(PersistentShellCommand::new("printf '%s' \"${TESSIVUM_SHELL_ISOLATED-unset}\""))
+            .run(PersistentShellCommand::new(
+                "printf '%s' \"${TESSIVUM_SHELL_ISOLATED-unset}\""
+            ))
             .await
             .unwrap()
             .stdout
@@ -352,12 +359,16 @@ async fn persistent_shells_are_isolated() {
         b"unset"
     );
     second
-        .run(PersistentShellCommand::new("export TESSIVUM_SHELL_ISOLATED=second"))
+        .run(PersistentShellCommand::new(
+            "export TESSIVUM_SHELL_ISOLATED=second",
+        ))
         .await
         .unwrap();
     assert_eq!(
         first
-            .run(PersistentShellCommand::new("printf '%s' \"$TESSIVUM_SHELL_ISOLATED\""))
+            .run(PersistentShellCommand::new(
+                "printf '%s' \"$TESSIVUM_SHELL_ISOLATED\""
+            ))
             .await
             .unwrap()
             .stdout
@@ -401,7 +412,9 @@ async fn persistent_shell_bounds_each_output_stream_and_ignores_foreign_frames()
     config.max_output_bytes = 3;
     let shell = PersistentShell::start(config, || Ok(())).await.unwrap();
     let result = shell
-        .run(PersistentShellCommand::new("printf abcdef; printf ghijkl >&2"))
+        .run(PersistentShellCommand::new(
+            "printf abcdef; printf ghijkl >&2",
+        ))
         .await
         .unwrap();
     assert_eq!(result.stdout.total_bytes, 6);
@@ -429,7 +442,7 @@ async fn persistent_shell_cancellation_kills_descendants() {
     let workspace = root();
     let child_pid = workspace.join("child.pid");
     let shell = persistent_shell(&workspace).await;
-    let cancellation = tessivum_core::CancellationToken::new();
+    let cancellation = tessivum_core::Scope::root().cancellation();
     let command = PersistentShellCommand::new(format!(
         "sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; wait",
         child_pid.display()
@@ -520,7 +533,6 @@ async fn persistent_shell_never_waits_for_closed_stdin() {
     }
     shell.dispose().await;
 }
-
 
 #[tokio::test]
 async fn persistent_shell_fails_closed_after_exec_and_dispose_is_idempotent() {

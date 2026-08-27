@@ -681,7 +681,7 @@ struct PersistentShellInner {
     done: Notify,
     closed: AtomicBool,
     disposed: AtomicBool,
-    cancellation: CancellationToken,
+    dispose_signal: Notify,
     dispose_gate: AsyncMutex<()>,
 }
 
@@ -756,7 +756,7 @@ impl PersistentShell {
             done: Notify::new(),
             closed: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
-            cancellation: CancellationToken::new(),
+            dispose_signal: Notify::new(),
             dispose_gate: AsyncMutex::new(()),
         });
         let stdout_task = tokio::spawn(drain_persistent_shell_stream(
@@ -769,7 +769,12 @@ impl PersistentShell {
             false,
             Arc::clone(&inner),
         ));
-        tokio::spawn(reap_persistent_shell(child, stdout_task, stderr_task, Arc::clone(&inner)));
+        tokio::spawn(reap_persistent_shell(
+            child,
+            stdout_task,
+            stderr_task,
+            Arc::clone(&inner),
+        ));
         Ok(Self { inner })
     }
 
@@ -786,7 +791,7 @@ impl PersistentShell {
         let cancellation = request.cancellation.clone();
         let operation = tokio::select! {
             biased;
-            _ = self.inner.cancellation.cancelled() => return Err(persistent_shell_disposed()),
+            _ = self.inner.disposed() => return Err(persistent_shell_disposed()),
             _ = optional_cancellation(cancellation.clone()) => return Err(persistent_shell_cancelled()),
             operation = self.inner.serial.lock() => operation,
         };
@@ -828,16 +833,15 @@ impl PersistentShell {
         let frame = persistent_shell_frame(&request.script, &nonce);
         let write = {
             let mut stdin = self.inner.stdin.lock().await;
-            let Some(stdin) = stdin.as_mut() else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "persistent shell stdin is closed",
-                ))
-            } else {
-                match stdin.write_all(frame.as_bytes()).await {
+            match stdin.as_mut() {
+                Some(stdin) => match stdin.write_all(frame.as_bytes()).await {
                     Ok(()) => stdin.flush().await,
                     Err(error) => Err(error),
-                }
+                },
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "persistent shell stdin is closed",
+                )),
             }
         };
         if let Err(error) = write {
@@ -854,7 +858,7 @@ impl PersistentShell {
         let cancellation = request.cancellation.clone();
         let result = tokio::select! {
             biased;
-            _ = self.inner.cancellation.cancelled() => {
+            _ = self.inner.disposed() => {
                 self.inner.stop(ProcessTermination::Shutdown).await;
                 Err(persistent_shell_disposed())
             }
@@ -884,13 +888,22 @@ impl PersistentShell {
             self.inner.wait_closed().await;
             return;
         }
-        self.inner.cancellation.cancel();
+        self.inner.dispose_signal.notify_waiters();
         self.inner.stop(ProcessTermination::Shutdown).await;
     }
 }
 
 #[cfg(unix)]
 impl PersistentShellInner {
+    async fn disposed(&self) {
+        loop {
+            let notified = self.dispose_signal.notified();
+            if self.disposed.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
     fn clear_active(&self, command: &Arc<PersistentShellCommandState>) {
         let mut active = lock(&self.active);
         if active
@@ -1129,9 +1142,8 @@ impl PersistentShellFrameParser {
                 }
                 break;
             };
-            let end = PERSISTENT_SHELL_FRAME_PREFIX.len()
-                + suffix
-                + PERSISTENT_SHELL_FRAME_SUFFIX.len();
+            let end =
+                PERSISTENT_SHELL_FRAME_PREFIX.len() + suffix + PERSISTENT_SHELL_FRAME_SUFFIX.len();
             if end > MAX_PERSISTENT_SHELL_FRAME_BYTES {
                 self.drain_data(1, &mut tokens);
                 continue;
@@ -1213,7 +1225,9 @@ command printf '\036TESSIVUM-SHELL:{nonce}:E:%s\037\n' "${variable}" >&2
 
 #[cfg(unix)]
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 #[cfg(unix)]
@@ -1286,11 +1300,7 @@ fn validate_persistent_shell_command(
 }
 
 #[cfg(unix)]
-fn persistent_shell_error(
-    code: &str,
-    message: &str,
-    details: serde_json::Value,
-) -> TessivumError {
+fn persistent_shell_error(code: &str, message: &str, details: serde_json::Value) -> TessivumError {
     TessivumError::new(code, message, "persistent-shell", details)
 }
 

@@ -41,16 +41,19 @@ fn ptc_bun_configuration_resolves_and_reports_unavailable_executables() {
     assert_eq!(config.javascript_runtime, JavaScriptRuntime::Bun);
     assert!(config.executable.is_absolute());
 
-    let unavailable = match ProcessCodeRuntime::new(
-        ProcessCodeRuntimeConfig::ptc_javascript_with(std::env::temp_dir().join(format!(
+    let unavailable = match ProcessCodeRuntime::new(ProcessCodeRuntimeConfig::ptc_javascript_with(
+        std::env::temp_dir().join(format!(
             "tessivum-ptc-bun-{}-does-not-exist",
             std::process::id(),
-        ))),
-    ) {
+        )),
+    )) {
         Err(error) => error,
         Ok(_) => panic!("missing PTC Bun executable must fail configuration"),
     };
-    assert!(matches!(unavailable, CodeRuntimeError::PtcRuntimeUnavailable(_)));
+    assert!(matches!(
+        unavailable,
+        CodeRuntimeError::PtcRuntimeUnavailable(_)
+    ));
     assert_eq!(unavailable.diagnostic_code(), Some(PTC_RUNTIME_UNAVAILABLE));
 }
 
@@ -64,7 +67,9 @@ async fn ptc_bun_worker_invocation_uses_bun() {
         .await
         .expect("service call");
     let value = result.value.expect("Bun worker completion");
-    assert!(value["bun"].as_str().is_some_and(|version| !version.is_empty()));
+    assert!(value["bun"]
+        .as_str()
+        .is_some_and(|version| !version.is_empty()));
     let argv = value["argv"].as_array().expect("Bun eval argv");
     assert_eq!(argv.len(), 1);
     assert!(argv[0].as_str().is_some_and(|path| path.contains("bun")));
@@ -96,10 +101,13 @@ async fn ptc_bun_validates_binding_arguments_and_orders_nested_calls() {
         ))
         .await
         .expect("service call");
-    assert_eq!(result.value, Some(json!({
-        "second": "second",
-        "rejection": "binding arguments must be lossless JSON",
-    })));
+    assert_eq!(
+        result.value,
+        Some(json!({
+            "second": "second",
+            "rejection": "binding arguments must be lossless JSON",
+        }))
+    );
     assert_eq!(*calls.lock(), ["first", "second"]);
 }
 
