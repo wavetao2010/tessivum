@@ -16,6 +16,7 @@ use tessivum::{
         AgentCancelCause, AgentError, AgentFactory, AgentHandle, AgentOptions, AgentRegistry,
         AgentRuntime, AgentStatus, Inbox,
     },
+    agent_mode::AgentModeId,
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
         ContentBlock, Message, SessionEvent, SessionHeader, SessionId, SessionOrigin, SurfaceOp,
@@ -56,7 +57,7 @@ fn header(id: &str, parent: Option<&str>) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn request(id: &str) -> SubagentStartRequest {
         provider: "native".into(),
         agent_id: "scout".into(),
         child_session_id: SessionId::from(id),
+        agent_mode: None,
         mode: SubagentMode::OneShot,
         capabilities: vec!["scout".into()],
         options: options(),
@@ -1036,9 +1038,10 @@ async fn cold_resume_uses_durable_child_header() {
 }
 
 #[tokio::test]
-async fn nonworkspace_service_inherits_parent_header_and_rejects_cwd_override() {
+async fn nonworkspace_service_inherits_parent_mode_and_rejects_cwd_override() {
     let mut parent_header = header("parent", None);
     parent_header.cwd = Some("/parent-root".into());
+    parent_header.agent_mode = Some(AgentModeId::minimal());
     let harness = setup_with_parent_header(
         Arc::new(MemorySessionPersistence::new()),
         Arc::new(Factory),
@@ -1050,17 +1053,30 @@ async fn nonworkspace_service_inherits_parent_header_and_rejects_cwd_override() 
         .start(request("inherited-child"), cancellation())
         .await
         .unwrap();
+    let inherited_header = harness
+        .persistence
+        .load(&SessionId::from("inherited-child"), cancellation())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inherited_header.cwd, Some("/parent-root".into()));
+    assert_eq!(inherited_header.agent_mode, Some(AgentModeId::minimal()));
+    child.dispose().await.unwrap();
+
+    let mut explicit_request = request("explicit-mode-child");
+    explicit_request.agent_mode = Some(AgentModeId::composition());
+    let (_, explicit_child) = parent.start(explicit_request, cancellation()).await.unwrap();
     assert_eq!(
         harness
             .persistence
-            .load(&SessionId::from("inherited-child"), cancellation())
+            .load(&SessionId::from("explicit-mode-child"), cancellation())
             .await
             .unwrap()
             .unwrap()
-            .cwd,
-        Some("/parent-root".into())
+            .agent_mode,
+        Some(AgentModeId::composition())
     );
-    child.dispose().await.unwrap();
+    explicit_child.dispose().await.unwrap();
 
     let calls = harness.provider.calls.load(Ordering::Acquire);
     let mut override_request = request("override-child");
@@ -1177,7 +1193,7 @@ async fn workspace_resume_rejects_foreign_and_removed_parent_workspaces() {
                 seed_length: None,
                 origin: Some(SessionOrigin::Subagent),
                 delegation_depth: None,
-                agent_preset: Some("scout".into()),
+                agent_mode: Some(AgentModeId::standard()),
             },
             options(),
             cancellation(),
@@ -1225,7 +1241,7 @@ async fn workspace_resume_rejects_foreign_and_removed_parent_workspaces() {
         seed_length: None,
         origin: Some(SessionOrigin::Subagent),
         delegation_depth: None,
-        agent_preset: Some("scout".into()),
+        agent_mode: Some(AgentModeId::standard()),
     };
     let foreign_child = harness
         .agents

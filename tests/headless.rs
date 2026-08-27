@@ -5,6 +5,7 @@ use std::{
 
 use serde_json::Value;
 use tessivum::{
+    agent_mode::AgentModeId,
     headless::{run_headless, HeadlessConfig},
     oracle::{normalize_session_trace, ReplacementMap},
     persistence_jsonl::JsonlSessionPersistence,
@@ -44,6 +45,7 @@ fn config(root: &TempDir, session: &str, resume: bool) -> HeadlessConfig {
         data_dir: root.path().join("durable-log"),
         cwd: root.path().into(),
         session_id: SessionId::from(session),
+        agent_mode: AgentModeId::standard(),
         resume,
         provider: "cli-mock".into(),
         model: "cli-mock".into(),
@@ -188,6 +190,7 @@ async fn normalized_rust_suffix_matches_typescript_for_overlapping_events() {
         .await
         .expect("durable header loads")
         .expect("session exists");
+    assert_eq!(header.agent_mode, Some(AgentModeId::standard()));
 
     let mut replacements = ReplacementMap::from([
         ("session-headless-replay".into(), "<session-id>".into()),

@@ -21,6 +21,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::{
     agent::{AgentError, AgentHandle, AgentOptions, AgentRegistry, InboxTarget},
+    agent_mode::AgentModeId,
     builtin_tools::BashJobOwners,
     host::inbox_enqueued_event,
     jobs::JobStart,
@@ -248,6 +249,8 @@ pub struct SubagentStartRequest {
     pub provider: String,
     pub agent_id: String,
     pub child_session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mode: Option<AgentModeId>,
     #[serde(default)]
     pub mode: SubagentMode,
     pub capabilities: Vec<String>,
@@ -660,6 +663,7 @@ impl ToolHandler for DelegationTool {
             provider: "native".into(),
             agent_id: label.clone(),
             child_session_id: child_id.clone(),
+            agent_mode: None,
             mode,
             capabilities: Vec::new(),
             options,
@@ -906,6 +910,7 @@ async fn run_ralph(
                 provider: "native".into(),
                 agent_id: format!("Ralph round {round}"),
                 child_session_id: child_id.clone(),
+                agent_mode: None,
                 mode: SubagentMode::OneShot,
                 capabilities: Vec::new(),
                 options: options.clone(),
@@ -2771,7 +2776,10 @@ impl SubagentInner {
             &request,
             cwd,
             seed_events.as_ref().map(|events| events.len() as u64),
-            selected_subagent_preset(&parent),
+            request
+                .agent_mode
+                .clone()
+                .or_else(|| parent_header.agent_mode.clone()),
             Some(
                 parent_header
                     .delegation_depth
@@ -3053,7 +3061,7 @@ fn child_header(
     request: &SubagentStartRequest,
     cwd: Option<String>,
     seed_length: Option<u64>,
-    agent_preset: Option<String>,
+    agent_mode: Option<AgentModeId>,
     delegation_depth: Option<u64>,
 ) -> Result<SessionHeader, SubagentError> {
     let header = SessionHeader {
@@ -3065,27 +3073,12 @@ fn child_header(
         seed_length,
         origin: Some(SessionOrigin::Subagent),
         delegation_depth,
-        agent_preset,
+        agent_mode,
     };
     header.validate()?;
     Ok(header)
 }
 
-fn selected_subagent_preset(parent: &Session) -> Option<String> {
-    parent
-        .events()
-        .into_iter()
-        .rev()
-        .find(|event| event.event_type == "agent-preset/selected")
-        .and_then(|event| {
-            event
-                .data
-                .get("agentPreset")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .or_else(|| parent.header().agent_preset)
-}
 
 fn completed_parent_seed(events: &[SessionEvent]) -> Vec<SessionEvent> {
     let Some(boundary) = events
@@ -3218,7 +3211,7 @@ mod delegation_tests {
             seed_length: None,
             origin: None,
             delegation_depth: None,
-            agent_preset: None,
+            agent_mode: None,
         }
     }
 
@@ -3236,6 +3229,7 @@ mod delegation_tests {
             provider: "native".into(),
             agent_id: "test-child".into(),
             child_session_id: SessionId::from(id),
+            agent_mode: None,
             mode,
             capabilities: Vec::new(),
             options: options(),

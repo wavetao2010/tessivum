@@ -18,6 +18,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::{
+    agent_mode::AgentModeId,
     protocol::{ContentBlock, Message, MessageId, SessionHeader, SessionId},
     session::{RestoreMode, Session, SessionError, SessionStore},
     TessivumError,
@@ -957,7 +958,6 @@ impl AgentRegistry {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
         let id = header.id.clone();
-        let agent_preset = header.agent_preset.clone();
         let factory = self.reserve(&id)?;
         let session = match self
             .inner
@@ -971,12 +971,13 @@ impl AgentRegistry {
                 return Err(error.into());
             }
         };
+        let agent_mode = session.header().agent_mode;
         self.finish_setup(
             id,
             session,
             options,
             factory,
-            agent_preset,
+            agent_mode,
             setup_cancellation,
         )
         .await
@@ -1007,13 +1008,13 @@ impl AgentRegistry {
                 }
             },
         };
-        let agent_preset = session.header().agent_preset;
+        let agent_mode = session.header().agent_mode;
         self.finish_setup(
             session_id,
             session,
             options,
             factory,
-            agent_preset,
+            agent_mode,
             setup_cancellation,
         )
         .await
@@ -1029,7 +1030,6 @@ impl AgentRegistry {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
         let id = header.id.clone();
-        let agent_preset = header.agent_preset.clone();
         let factory = self.reserve(&id)?;
         let session = match self.inner.sessions.get(&id) {
             Some(session) => Ok(session),
@@ -1056,12 +1056,13 @@ impl AgentRegistry {
                 return Err(error.into());
             }
         };
+        let agent_mode = session.header().agent_mode;
         self.finish_setup(
             id,
             session,
             options,
             factory,
-            agent_preset,
+            agent_mode,
             setup_cancellation,
         )
         .await
@@ -1174,7 +1175,7 @@ impl AgentRegistry {
         session: Arc<Session>,
         options: AgentOptions,
         factory: Arc<dyn AgentFactory>,
-        agent_preset: Option<String>,
+        agent_mode: Option<AgentModeId>,
         setup_cancellation: CancellationToken,
     ) -> Result<AgentHandle, AgentError> {
         let inbox = Inbox::new();
@@ -1205,7 +1206,7 @@ impl AgentRegistry {
 
         let inner = Arc::new(AgentInner {
             id: session_id.clone(),
-            agent_preset,
+            agent_mode,
             session,
             options,
             inbox,
@@ -1258,7 +1259,7 @@ struct AgentState {
 
 struct AgentInner {
     id: SessionId,
-    agent_preset: Option<String>,
+    agent_mode: Option<AgentModeId>,
     session: Arc<Session>,
     options: AgentOptions,
     inbox: Inbox,
@@ -1530,8 +1531,8 @@ impl AgentHandle {
         Arc::clone(&self.inner.session)
     }
 
-    pub fn agent_preset(&self) -> Option<String> {
-        self.inner.agent_preset.clone()
+    pub fn agent_mode(&self) -> Option<AgentModeId> {
+        self.inner.agent_mode.clone()
     }
 
     pub fn options(&self) -> AgentOptions {

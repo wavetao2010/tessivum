@@ -1,5 +1,4 @@
 use std::{
-    fs,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -15,7 +14,7 @@ use tessivum::{
         AgentRegistry, AgentRuntime, AgentStatus, Inbox, InboxTarget, InboxUpdate,
         InboxUpdateResult,
     },
-    agent_preset::{AgentPresetRoot, AgentPresetService, AgentPresetTrust},
+    agent_mode::AgentModeId,
     protocol::{
         Message, SessionEvent, SessionHeader, SessionId, SurfaceOp, SESSION_FORMAT_VERSION,
     },
@@ -23,7 +22,6 @@ use tessivum::{
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::Notify;
-use uuid::Uuid;
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -39,7 +37,7 @@ fn header(id: &str) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 
@@ -178,6 +176,21 @@ async fn setup_failure_never_publishes_and_reuses_the_same_session_identity() {
         factory.sessions.lock().unwrap().as_slice(),
         &[SessionId::from("rollback"), SessionId::from("rollback")]
     );
+    handle.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn handle_exposes_typed_session_agent_mode() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory).unwrap();
+    let mut mode_header = header("mode");
+    mode_header.agent_mode = Some(AgentModeId::minimal());
+
+    let handle = registry
+        .create(mode_header, options(), cancellation())
+        .await
+        .unwrap();
+    assert_eq!(handle.agent_mode(), Some(AgentModeId::minimal()));
     handle.dispose().await.unwrap();
 }
 
@@ -589,79 +602,4 @@ fn registry_publishes_the_versioned_service_to_context() {
         .get::<AgentRegistry>(&agents_service_key())
         .unwrap()
         .is_some());
-}
-#[tokio::test]
-async fn preset_authoring_confines_the_writable_root_and_dereferences_copies() {
-    let root = std::env::temp_dir().join(format!("tessivum-preset-{}", Uuid::new_v4()));
-    let system = root.join("system");
-    let foreign_user = root.join("foreign-user");
-    let writable_user = root.join("writable-user");
-    for (directory, content) in [
-        (system.join("base"), "[]\n"),
-        (system.join("shadow"), "[]\n"),
-        (foreign_user.join("foreign"), "[]\n"),
-    ] {
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("agent.cordis.yml"), content).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-
-        fs::write(system.join("base/template.txt"), "copied").unwrap();
-        symlink("template.txt", system.join("base/shared.txt")).unwrap();
-    }
-    let presets = AgentPresetService::with_roots(
-        vec![
-            AgentPresetRoot {
-                path: system,
-                trust: AgentPresetTrust::System,
-            },
-            AgentPresetRoot {
-                path: foreign_user.clone(),
-                trust: AgentPresetTrust::User,
-            },
-            AgentPresetRoot {
-                path: writable_user.clone(),
-                trust: AgentPresetTrust::User,
-            },
-        ],
-        Some(writable_user.clone()),
-    );
-
-    assert_eq!(
-        presets.read("missing").await.unwrap_err()["code"],
-        "agent-preset-not-found"
-    );
-    assert_eq!(
-        presets.copy("base", "shadow", None).await.unwrap_err()["code"],
-        "agent-preset-invalid"
-    );
-    assert!(!writable_user.join("shadow").exists());
-    assert_eq!(
-        presets.copy("base", "working", None).await.unwrap(),
-        "working"
-    );
-    let copied = presets.read("working").await.unwrap();
-    assert_eq!(copied.content, "[]\n");
-    assert_eq!(copied.name, None);
-    #[cfg(unix)]
-    assert!(
-        !fs::symlink_metadata(writable_user.join("working/shared.txt"))
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
-    assert_eq!(
-        presets.remove("base").await.unwrap_err()["code"],
-        "agent-preset-read-only"
-    );
-    assert_eq!(
-        presets.remove("foreign").await.unwrap_err()["code"],
-        "agent-preset-read-only"
-    );
-    assert!(foreign_user.join("foreign").exists());
-    presets.remove("working").await.unwrap();
-    assert!(!writable_user.join("working").exists());
-    let _ = fs::remove_dir_all(root);
 }

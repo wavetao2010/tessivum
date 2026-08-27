@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{
     agent::{AgentError, AgentFactoryRegistration, AgentHandle, AgentOptions, AgentRegistry},
     agent_loop::AgentLoopFactory,
+    agent_mode::{AgentModeId, AgentModeRegistry},
     builtin_tools::{BuiltinTools, BuiltinToolsConfig},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, RecordedLlmAdapter},
     persistence_jsonl::JsonlSessionPersistence,
@@ -25,6 +26,7 @@ pub struct HeadlessConfig {
     pub data_dir: PathBuf,
     pub cwd: PathBuf,
     pub session_id: SessionId,
+    pub agent_mode: AgentModeId,
     pub resume: bool,
     pub provider: String,
     pub model: String,
@@ -193,11 +195,17 @@ async fn run_headless_validated(
         )?);
         scope.tools_service = Some(tools.publish(&scope.root)?);
 
+        let modes = Arc::new(AgentModeRegistry::with_roots(Vec::new(), None));
         let registry = AgentRegistry::new(sessions.clone());
         scope.registry = Some(registry.clone());
         scope.registry_service = Some(registry.clone().publish(&scope.root)?);
-        scope.factory_registration =
-            Some(registry.register_factory(Arc::new(AgentLoopFactory::new(llm, prompt, tools)))?);
+        scope.factory_registration = Some(registry.register_factory(Arc::new(AgentLoopFactory::new(
+            llm,
+            prompt,
+            tools,
+            modes,
+            config.agent_mode.clone(),
+        )))?);
 
         let options = AgentOptions {
             provider: config.provider.clone(),
@@ -206,7 +214,7 @@ async fn run_headless_validated(
             max_tokens: config.max_tokens,
         };
         let cancellation = scope.root.scope().cancellation();
-        let header = session_header(&config.session_id, &cwd);
+        let header = session_header(&config.session_id, &cwd, config.agent_mode.clone());
         let handle = if config.resume {
             sessions
                 .restore(&config.session_id, RestoreMode::Cold, cancellation.clone())
@@ -297,7 +305,11 @@ fn validate(
     Ok(cwd)
 }
 
-fn session_header(session_id: &SessionId, cwd: &std::path::Path) -> SessionHeader {
+fn session_header(
+    session_id: &SessionId,
+    cwd: &std::path::Path,
+    agent_mode: AgentModeId,
+) -> SessionHeader {
     SessionHeader {
         version: SESSION_FORMAT_VERSION,
         id: session_id.clone(),
@@ -307,7 +319,7 @@ fn session_header(session_id: &SessionId, cwd: &std::path::Path) -> SessionHeade
         seed_length: None,
         origin: None,
         delegation_depth: Some(0),
-        agent_preset: None,
+        agent_mode: Some(agent_mode),
     }
 }
 
