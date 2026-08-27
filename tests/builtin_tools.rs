@@ -44,6 +44,29 @@ fn context(root: &ContextHandle, call: &str) -> ToolRunContext {
     }
 }
 
+fn context_for(root: &ContextHandle, session: &str, call: &str) -> ToolRunContext {
+    ToolRunContext {
+        session: SessionId::from(session),
+        call: ToolCallId::from(call),
+        cancellation: root.scope().cancellation(),
+    }
+}
+
+#[cfg(unix)]
+async fn assert_reaped(pid: &str) {
+    for _ in 0..100 {
+        let status = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .expect("kill command starts");
+        if !status.success() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("persistent shell process {pid} must be reaped");
+}
+
 fn text(output: &tessivum::tools::ToolOutput) -> &str {
     match output.content.as_slice() {
         [ContentBlock::Text { text }] => text,
@@ -440,6 +463,239 @@ async fn bash_keeps_the_resolved_directory_fd_across_a_path_swap() {
     let output = task.await.unwrap();
     assert!(!output.is_error);
     assert_eq!(text(&output), "original");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn enabled_bash_session_retains_cwd_environment_and_functions() {
+    let directory = TempDir::new();
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    let root = ContextHandle::root();
+    let session = SessionId::from("persistent-state");
+    shells.enable(session.clone());
+
+    let initialized = runtime
+        .execute(
+            context_for(&root, session.as_str(), "initialize"),
+            "bash",
+            json!({"command": "cd nested; export TESSIVUM_PERSISTENT=value; remembered() { printf function; }"}),
+        )
+        .await;
+    assert!(!initialized.is_error);
+    let background = runtime
+        .execute(
+            context_for(&root, session.as_str(), "background"),
+            "bash",
+            json!({"command": "printf never", "run_in_background": true}),
+        )
+        .await;
+    assert_eq!(code(&background), "PERSISTENT_SHELL_BACKGROUND_UNSUPPORTED");
+    let policy_change = runtime
+        .execute(
+            context_for(&root, session.as_str(), "policy-change"),
+            "bash",
+            json!({"command": "printf never", "sandbox_permissions": "read-only"}),
+        )
+        .await;
+    assert_eq!(code(&policy_change), "PERSISTENT_SHELL_SANDBOX_POLICY_MISMATCH");
+    let output = runtime
+        .execute(
+            context_for(&root, session.as_str(), "observe"),
+            "bash",
+            json!({"command": "printf '%s|' \"$TESSIVUM_PERSISTENT\"; remembered; printf '|'; pwd"}),
+        )
+        .await;
+    assert!(!output.is_error);
+    assert_eq!(
+        text(&output),
+        format!("value|function|{}\n", nested.canonicalize().unwrap().display())
+    );
+    shells.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn disabled_bash_session_remains_one_shot() {
+    let directory = TempDir::new();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let root = ContextHandle::root();
+
+    let initialized = runtime
+        .execute(
+            context(&root, "initialize"),
+            "bash",
+            json!({"command": "cd nested; export TESSIVUM_EPHEMERAL=value; remembered() { printf function; }"}),
+        )
+        .await;
+    assert!(!initialized.is_error);
+    let output = runtime
+        .execute(
+            context(&root, "observe"),
+            "bash",
+            json!({"command": "printf '%s|' \"${TESSIVUM_EPHEMERAL-unset}\"; command -v remembered || printf missing; printf '|'; pwd"}),
+        )
+        .await;
+    assert!(!output.is_error);
+    assert_eq!(
+        text(&output),
+        format!("unset|missing|{}\n", directory.path().canonicalize().unwrap().display())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn enabled_bash_sessions_are_isolated() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    let root = ContextHandle::root();
+    let first = SessionId::from("persistent-first");
+    let second = SessionId::from("persistent-second");
+    shells.enable(first.clone());
+    shells.enable(second.clone());
+
+    assert!(!runtime
+        .execute(
+            context_for(&root, first.as_str(), "first-write"),
+            "bash",
+            json!({"command": "export TESSIVUM_SESSION_VALUE=first"}),
+        )
+        .await
+        .is_error);
+    let second_output = runtime
+        .execute(
+            context_for(&root, second.as_str(), "second-read"),
+            "bash",
+            json!({"command": "printf '%s' \"${TESSIVUM_SESSION_VALUE-unset}\""}),
+        )
+        .await;
+    assert_eq!(text(&second_output), "unset");
+    let first_output = runtime
+        .execute(
+            context_for(&root, first.as_str(), "first-read"),
+            "bash",
+            json!({"command": "printf '%s' \"$TESSIVUM_SESSION_VALUE\""}),
+        )
+        .await;
+    assert_eq!(text(&first_output), "first");
+    shells.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_bash_cancellation_disable_and_shutdown_reap_process_groups() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    let root = ContextHandle::root();
+    let cancelled = SessionId::from("persistent-cancelled");
+    shells.enable(cancelled.clone());
+    let child = directory.path().join("cancelled-child.pid");
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        let context = context_for(&root, cancelled.as_str(), "cancel");
+        let command = format!("sleep 30 & child=$!; printf '%s' \"$child\" > '{}'; wait", child.display());
+        async move { runtime.execute(context, "bash", json!({"command": command})).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !child.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("persistent shell starts its child");
+    root.scope().dispose().await.unwrap();
+    let output = task.await.unwrap();
+    assert_eq!(code(&output), "CANCELLED");
+    assert_reaped(&fs::read_to_string(&child).unwrap()).await;
+
+    let disabled = SessionId::from("persistent-disabled");
+    shells.enable(disabled.clone());
+    let disabled_pid = directory.path().join("disabled.pid");
+    assert!(!runtime
+        .execute(
+            context_for(&ContextHandle::root(), disabled.as_str(), "start-disabled"),
+            "bash",
+            json!({"command": format!("printf '%s' \"$$\" > '{}'", disabled_pid.display())}),
+        )
+        .await
+        .is_error);
+    shells.disable(&disabled).await;
+    assert_reaped(&fs::read_to_string(&disabled_pid).unwrap()).await;
+
+    let shutdown = SessionId::from("persistent-shutdown");
+    shells.enable(shutdown.clone());
+    let shutdown_pid = directory.path().join("shutdown.pid");
+    assert!(!runtime
+        .execute(
+            context_for(&ContextHandle::root(), shutdown.as_str(), "start-shutdown"),
+            "bash",
+            json!({"command": format!("printf '%s' \"$$\" > '{}'", shutdown_pid.display())}),
+        )
+        .await
+        .is_error);
+    shells.shutdown().await;
+    assert_reaped(&fs::read_to_string(&shutdown_pid).unwrap()).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stale_workspace_retires_the_enabled_bash_shell() {
+    let root = TempDir::new();
+    let first = root.path().join("first");
+    let replacement = root.path().join("replacement");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&replacement).unwrap();
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &first, Vec::new()).unwrap();
+    let workspace = registry.list()[0].workspace_id.clone();
+    let session = SessionId::from("persistent-stale");
+    registry.recognize_session(&session).unwrap();
+    registry.attach_session(&workspace, &session, None).unwrap();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: root.path().to_path_buf(),
+            resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    shells.enable(session.clone());
+    let context_root = ContextHandle::root();
+    let pid_path = first.join("shell.pid");
+    assert!(!runtime
+        .execute(
+            context_for(&context_root, session.as_str(), "start"),
+            "bash",
+            json!({"command": "printf '%s' \"$$\" > shell.pid"}),
+        )
+        .await
+        .is_error);
+    let pid = fs::read_to_string(&pid_path).unwrap();
+    let old = root.path().join("old");
+    fs::rename(&first, &old).unwrap();
+    fs::rename(&replacement, &first).unwrap();
+    let stale = runtime
+        .execute(
+            context_for(&context_root, session.as_str(), "stale"),
+            "bash",
+            json!({"command": "printf should-not-run"}),
+        )
+        .await;
+    assert_eq!(code(&stale), "STALE_WORKSPACE_LEASE");
+    assert_reaped(&pid).await;
+    shells.shutdown().await;
 }
 
 #[cfg(not(unix))]

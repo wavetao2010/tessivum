@@ -8,7 +8,10 @@ mod model_tools;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use async_trait::async_trait;
@@ -27,6 +30,12 @@ use crate::{
     workspace::{SessionResourceResolver, WorkspaceError, WorkspaceLease},
     ContentBlock, SessionId, TessivumError, ToolSchema,
 };
+#[cfg(unix)]
+use crate::subprocess::{
+    PersistentShell, PersistentShellCommand, PersistentShellConfig, PersistentShellLeaseValidator,
+    PersistentShellResult,
+};
+
 
 /// Default upper bound for combined `bash` stdout and stderr.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -34,12 +43,178 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 pub(crate) type BashJobOwners = Arc<Mutex<BTreeMap<SessionId, JobOwner>>>;
+/// Cloneable session ownership for opt-in persistent Bash shells.
+#[derive(Clone, Default)]
+pub struct PersistentShellSessions {
+    inner: Arc<Mutex<BTreeMap<SessionId, Arc<PersistentShellSession>>>>,
+}
+
+impl std::fmt::Debug for PersistentShellSessions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PersistentShellSessions")
+            .field("session_count", &lock(&self.inner).len())
+            .finish()
+    }
+}
+
+impl PersistentShellSessions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enables lazy persistent-shell creation for one session.
+    pub fn enable(&self, session: SessionId) {
+        let entry = lock(&self.inner)
+            .entry(session)
+            .or_insert_with(|| Arc::new(PersistentShellSession::new()));
+        entry.enabled.store(true, Ordering::Release);
+    }
+
+    /// Retires one session shell and waits until its process group is reaped.
+    pub async fn disable(&self, session: &SessionId) {
+        let entry = lock(&self.inner).remove(session);
+        if let Some(entry) = entry {
+            entry.enabled.store(false, Ordering::Release);
+            entry.dispose().await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn retire(&self, session: &SessionId) {
+        let entry = lock(&self.inner).get(session).cloned();
+        if let Some(entry) = entry {
+            entry.dispose().await;
+        }
+    }
+
+    /// Retires every session shell and waits until every process group is reaped.
+    pub async fn shutdown(&self) {
+        let entries = std::mem::take(&mut *lock(&self.inner));
+        for entry in entries.into_values() {
+            entry.enabled.store(false, Ordering::Release);
+            entry.dispose().await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn enabled(&self, session: &SessionId) -> bool {
+        lock(&self.inner)
+            .get(session)
+            .is_some_and(|entry| entry.enabled.load(Ordering::Acquire))
+    }
+
+    #[cfg(unix)]
+    async fn run<F>(
+        &self,
+        session: &SessionId,
+        mode: SandboxMode,
+        command: PersistentShellCommand,
+        make_plan: F,
+    ) -> Result<PersistentShellResult, TessivumError>
+    where
+        F: FnOnce() -> Result<PersistentBashPlan, TessivumError>,
+    {
+        let entry = lock(&self.inner)
+            .get(session)
+            .filter(|entry| entry.enabled.load(Ordering::Acquire))
+            .cloned()
+            .ok_or_else(|| persistent_bash_error(
+                "PERSISTENT_SHELL_DISABLED",
+                "persistent shell is not enabled for this session",
+                json!({"sessionId": session}),
+            ))?;
+        let mut state = entry.shell.lock().await;
+        if !entry.enabled.load(Ordering::Acquire) {
+            return Err(persistent_bash_error(
+                "PERSISTENT_SHELL_DISABLED",
+                "persistent shell is not enabled for this session",
+                json!({"sessionId": session}),
+            ));
+        }
+        let shell = match state.as_ref() {
+            Some(state) if state.mode == mode => state.shell.clone(),
+            Some(state) => {
+                return Err(persistent_bash_error(
+                    "PERSISTENT_SHELL_SANDBOX_POLICY_MISMATCH",
+                    "persistent shell cannot change its fixed sandbox policy",
+                    json!({"current": state.mode, "requested": mode}),
+                ));
+            }
+            None => {
+                let plan = make_plan()?;
+                let validator = Arc::clone(&plan.validator);
+                let shell = PersistentShell::start(plan.config, move || validator()).await?;
+                *state = Some(PersistentShellState {
+                    mode: plan.mode,
+                    shell: shell.clone(),
+                });
+                shell
+            }
+        };
+        let result = shell.run(command).await;
+        if result.is_err() {
+            let retired = state.take();
+            drop(state);
+            if let Some(retired) = retired {
+                retired.shell.dispose().await;
+            }
+        }
+        result
+    }
+}
+
+struct PersistentShellSession {
+    enabled: AtomicBool,
+    #[cfg(unix)]
+    shell: tokio::sync::Mutex<Option<PersistentShellState>>,
+}
+
+impl PersistentShellSession {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(true),
+            #[cfg(unix)]
+            shell: tokio::sync::Mutex::new(None),
+        }
+    }
+
+async fn dispose(&self) {
+    #[cfg(unix)]
+    let shell = self.shell.lock().await.take();
+    #[cfg(unix)]
+    if let Some(shell) = shell {
+        shell.shell.dispose().await;
+    }
+}
+}
+
+#[cfg(unix)]
+struct PersistentShellState {
+    mode: SandboxMode,
+    shell: PersistentShell,
+}
+
+#[cfg(unix)]
+struct PersistentBashPlan {
+    mode: SandboxMode,
+    config: PersistentShellConfig,
+    validator: PersistentShellLeaseValidator,
+}
+
+#[cfg(unix)]
+fn persistent_bash_error(code: &str, message: &str, details: Value) -> TessivumError {
+    TessivumError::new(code, message, "tools", details)
+}
+
 
 pub(crate) struct HostToolServices {
     sessions: SessionStore,
     sandbox: Sandbox,
     approval: Arc<dyn ToolApproval>,
     job_owners: BashJobOwners,
+    persistent_shells: PersistentShellSessions,
+
     attachments: Arc<AttachmentStore>,
     web: WebRuntime,
 }
@@ -50,6 +225,8 @@ impl HostToolServices {
         sandbox: Sandbox,
         approval: Arc<dyn ToolApproval>,
         job_owners: BashJobOwners,
+        persistent_shells: PersistentShellSessions,
+
         attachments: Arc<AttachmentStore>,
         web: WebRuntime,
     ) -> Self {
@@ -60,6 +237,8 @@ impl HostToolServices {
             job_owners,
             attachments,
             web,
+            persistent_shells,
+
         }
     }
 }
@@ -95,6 +274,7 @@ impl Default for BuiltinToolsConfig {
 pub struct BuiltinTools {
     _config: BuiltinToolsConfig,
     _registrations: Vec<ToolRegistration>,
+    persistent_shells: PersistentShellSessions,
 }
 
 impl BuiltinTools {
@@ -111,6 +291,10 @@ impl BuiltinTools {
     ) -> Result<Self, TessivumError> {
         Self::build(runtime, config, Some(services))
     }
+    pub fn persistent_shell_sessions(&self) -> PersistentShellSessions {
+        self.persistent_shells.clone()
+    }
+
 
     fn build(
         runtime: &ToolRuntime,
@@ -125,6 +309,11 @@ impl BuiltinTools {
                 Value::Null,
             ));
         }
+        let persistent_shells = services
+            .as_ref()
+            .map(|services| services.persistent_shells.clone())
+            .unwrap_or_default();
+
         let mut registrations = vec![runtime.register(ToolDefinition::new(
             "echo",
             "Returns the supplied text unchanged.",
@@ -169,12 +358,15 @@ impl BuiltinTools {
                     approval,
                     max_output_bytes: config.max_output_bytes,
                     job_owners,
+                    persistent_shells: persistent_shells.clone(),
+
                 },
             ))?);
         }
         Ok(Self {
             _config: config,
             _registrations: registrations,
+            persistent_shells,
         })
     }
 
@@ -213,6 +405,10 @@ fn canonical_config(mut config: BuiltinToolsConfig) -> Result<BuiltinToolsConfig
     }
     Ok(config)
 }
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 
 fn config_error(code: &str, message: &str, details: Value) -> TessivumError {
     TessivumError::new(code, message, "tools", details)
@@ -379,6 +575,8 @@ struct Bash {
     approval: Option<Arc<dyn ToolApproval>>,
     max_output_bytes: usize,
     job_owners: Option<BashJobOwners>,
+    persistent_shells: PersistentShellSessions,
+
 }
 
 #[cfg(unix)]
@@ -397,12 +595,21 @@ impl ToolHandler for Bash {
                 json!({"path": "$.command"}),
             ));
         }
-        let lease = self
+        let persistent = self.persistent_shells.enabled(&context.session);
+        let lease = match self
             .resolver
             .as_ref()
             .map(|resolver| resolver.resolve(&context.session))
             .transpose()
-            .map_err(|error| workspace_error(&context, error))?;
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                if persistent {
+                    self.persistent_shells.retire(&context.session).await;
+                }
+                return Err(workspace_error(&context, error));
+            }
+        };
         let current = session_sandbox_mode(self.sessions.as_ref(), &context.session);
         let requested = arguments
             .get("sandbox_permissions")
@@ -450,6 +657,14 @@ impl ToolHandler for Bash {
                 ))
             }
         };
+        if background && persistent {
+            return Err(persistent_bash_error(
+                "PERSISTENT_SHELL_BACKGROUND_UNSUPPORTED",
+                "persistent shell sessions do not support background Bash execution",
+                json!({"sessionId": context.session}),
+            ));
+        }
+
         if background {
             let owners = self.job_owners.as_ref().ok_or_else(|| {
                 TessivumError::new(
@@ -541,6 +756,33 @@ impl ToolHandler for Bash {
                 json!({"jobId": job.id}),
             ));
         }
+        if persistent {
+            let cwd = self.cwd.clone();
+            let resolver = self.resolver.clone();
+            let sandbox = self.sandbox.clone();
+            let session = context.session.clone();
+            let result = self
+                .persistent_shells
+                .run(
+                    &context.session,
+                    mode,
+                    PersistentShellCommand::new(command)
+                        .cancelled_by(context.cancellation.clone()),
+                    move || {
+                        persistent_bash_plan(
+                            &cwd,
+                            lease,
+                            resolver,
+                            sandbox.as_ref(),
+                            mode,
+                            self.max_output_bytes,
+                            session,
+                        )
+                    },
+                )
+                .await?;
+            return Ok(persistent_bash_output(result, self.max_output_bytes));
+        }
         run_bash(
             &self.cwd,
             lease.as_ref(),
@@ -552,6 +794,126 @@ impl ToolHandler for Bash {
         )
         .await
     }
+}
+
+#[cfg(unix)]
+fn prepare_bash_argv(
+    argv: Vec<String>,
+    lease: Option<&WorkspaceLease>,
+    sandbox: Option<&Sandbox>,
+    mode: SandboxMode,
+    session: &SessionId,
+) -> Result<Vec<String>, TessivumError> {
+    if let (Some(sandbox), Some(lease)) = (sandbox, lease) {
+        let workspace = lease
+            .validate_current()
+            .map_err(|error| workspace_error_for_session(session, error))?;
+        let write_roots = vec![workspace.clone()];
+        return Ok(sandbox
+            .prepare(
+                &SandboxRequest {
+                    mode,
+                    workspace,
+                    read_policy: SandboxReadPolicy::Deny,
+                    read_roots: Vec::new(),
+                    write_roots,
+                    approval: (mode == SandboxMode::WorkspaceWrite).then_some(SandboxApproval {
+                        mode: Some(SandboxMode::WorkspaceWrite),
+                        read_policy: None,
+                    }),
+                },
+                &argv,
+            )?
+            .argv);
+    }
+    Ok(argv)
+}
+
+#[cfg(unix)]
+fn persistent_bash_plan(
+    cwd: &Path,
+    lease: Option<WorkspaceLease>,
+    resolver: Option<Arc<SessionResourceResolver>>,
+    sandbox: Option<&Sandbox>,
+    mode: SandboxMode,
+    max_output_bytes: usize,
+    session: SessionId,
+) -> Result<PersistentBashPlan, TessivumError> {
+    let raw_argv = vec!["/bin/sh".into(), "-s".into()];
+    let (workspace, cwd_fd, argv, validator) = if let Some(lease) = lease {
+        let workspace = lease
+            .validate_current()
+            .map_err(|error| workspace_error_for_session(&session, error))?;
+        let cwd_fd = lease
+            .directory_fd()
+            .map_err(|error| workspace_error_for_session(&session, error))?;
+        let argv = prepare_bash_argv(raw_argv, Some(&lease), sandbox, mode, &session)?;
+        let expected_workspace = lease.workspace_id().clone();
+        let lease = Arc::new(lease);
+        let validator: PersistentShellLeaseValidator = Arc::new(move || {
+            lease
+                .validate_current()
+                .map_err(|error| workspace_error_for_session(&session, error))?;
+            if let Some(resolver) = &resolver {
+                let current = resolver
+                    .resolve(&session)
+                    .map_err(|error| workspace_error_for_session(&session, error))?;
+                if current.workspace_id() != &expected_workspace {
+                    return Err(TessivumError::new(
+                        "STALE_WORKSPACE_LEASE",
+                        "workspace lease is stale",
+                        "tools",
+                        json!({"sessionId": session}),
+                    ));
+                }
+            }
+            Ok(())
+        });
+        (workspace, Some(cwd_fd), argv, validator)
+    } else {
+        (
+            cwd.to_path_buf(),
+            None,
+            raw_argv,
+            Arc::new(|| Ok(())) as PersistentShellLeaseValidator,
+        )
+    };
+    let mut config = PersistentShellConfig::new(workspace);
+    config.argv = argv;
+    config.cwd_fd = cwd_fd;
+    config.max_output_bytes = max_output_bytes;
+    Ok(PersistentBashPlan {
+        mode,
+        config,
+        validator,
+    })
+}
+
+#[cfg(unix)]
+fn persistent_bash_output(result: PersistentShellResult, max_output_bytes: usize) -> ToolOutput {
+    let mut output = CapturedOutput::default();
+    let stdout = result.stdout.tail;
+    let stderr = result.stderr.tail;
+    let total_bytes = result.stdout.total_bytes.saturating_add(result.stderr.total_bytes);
+    let stdout_len = stdout.len().min(max_output_bytes);
+    output.stdout.extend_from_slice(&stdout[..stdout_len]);
+    let stderr_len = stderr.len().min(max_output_bytes.saturating_sub(stdout_len));
+    output.stderr.extend_from_slice(&stderr[..stderr_len]);
+    output.bytes = stdout_len + stderr_len;
+    output.truncated = total_bytes > output.bytes as u64;
+    let output_bytes = output.bytes;
+    let truncated = output.truncated;
+    let text = output.text(Some(result.exit_code));
+    ToolOutput::new(
+        vec![ContentBlock::Text { text }],
+        result.exit_code != 0,
+        json!({
+            "exitCode": result.exit_code,
+            "signal": Value::Null,
+            "outputBytes": output_bytes,
+            "truncated": truncated,
+        }),
+    )
 }
 
 #[cfg(unix)]
@@ -568,31 +930,13 @@ async fn run_bash(
 
     use tokio::process::Command;
 
-    let argv = vec!["/bin/sh".into(), "-lc".into(), "--".into(), command.into()];
-    let argv = if let (Some(sandbox), Some(lease)) = (sandbox, lease) {
-        let workspace = lease
-            .validate_current()
-            .map_err(|error| workspace_error(context, error))?;
-        let write_roots = vec![workspace.clone()];
-        sandbox
-            .prepare(
-                &SandboxRequest {
-                    mode,
-                    workspace,
-                    read_policy: SandboxReadPolicy::Deny,
-                    read_roots: Vec::new(),
-                    write_roots,
-                    approval: (mode == SandboxMode::WorkspaceWrite).then_some(SandboxApproval {
-                        mode: Some(SandboxMode::WorkspaceWrite),
-                        read_policy: None,
-                    }),
-                },
-                &argv,
-            )?
-            .argv
-    } else {
-        argv
-    };
+    let argv = prepare_bash_argv(
+        vec!["/bin/sh".into(), "-lc".into(), "--".into(), command.into()],
+        lease,
+        sandbox,
+        mode,
+        &context.session,
+    )?;
     let mut shell = Command::new(&argv[0]);
     shell.args(&argv[1..]);
     if let Some(lease) = lease {
@@ -741,11 +1085,16 @@ fn bash_error(message: &str, error: std::io::Error) -> TessivumError {
 
 #[cfg(unix)]
 fn workspace_error(context: &ToolRunContext, error: WorkspaceError) -> TessivumError {
+    workspace_error_for_session(&context.session, error)
+}
+
+#[cfg(unix)]
+fn workspace_error_for_session(session: &SessionId, error: WorkspaceError) -> TessivumError {
     TessivumError::new(
         error.code(),
         error.to_string(),
         "tools",
-        json!({"sessionId": context.session}),
+        json!({"sessionId": session}),
     )
 }
 
@@ -839,5 +1188,100 @@ where
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .append(stream, &chunk[..read], max_output_bytes);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{fs, sync::Arc};
+
+    use super::*;
+    use crate::{
+        sandbox::{
+            EffectiveSandboxRequest, RunnerRules, SandboxEnforcement, SandboxPlan, SandboxProvider,
+        },
+        workspace::WorkspaceRegistry,
+    };
+
+    #[derive(Clone)]
+    struct RecordingSandbox {
+        argv: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl SandboxProvider for RecordingSandbox {
+        fn confine(
+            &self,
+            _: &EffectiveSandboxRequest,
+            argv: &[String],
+        ) -> Result<SandboxPlan, TessivumError> {
+            lock(&self.argv).push(argv.to_vec());
+            Ok(SandboxPlan {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "exec \"$@\"".into(),
+                    "tessivum-persistent-wrapper".into(),
+                    "/bin/sh".into(),
+                    "-s".into(),
+                ],
+                enforcement: SandboxEnforcement::Full,
+                denial: None,
+                runner_rules: RunnerRules::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_bash_uses_the_sandbox_wrapped_shell_argv() {
+        let root = std::env::temp_dir().join(format!("tessivum-persistent-bash-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let registry = WorkspaceRegistry::open(root.join("data"), &root, Vec::new()).unwrap();
+        let session = SessionId::from("sandboxed-persistent-shell");
+        let workspace = registry.list()[0].workspace_id.clone();
+        registry.recognize_session(&session).unwrap();
+        registry.attach_session(&workspace, &session, None).unwrap();
+        let argv = Arc::new(Mutex::new(Vec::new()));
+        let persistent_shells = PersistentShellSessions::new();
+        persistent_shells.enable(session.clone());
+        let runtime = ToolRuntime::new();
+        let _registration = runtime
+            .register(ToolDefinition::new(
+                "bash",
+                "test Bash",
+                bash_schema(),
+                Bash {
+                    cwd: root.clone(),
+                    resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
+                    sessions: None,
+                    sandbox: Some(Sandbox::new(Some(Arc::new(RecordingSandbox {
+                        argv: Arc::clone(&argv),
+                    })))),
+                    approval: None,
+                    max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+                    job_owners: None,
+                    persistent_shells: persistent_shells.clone(),
+                },
+            ))
+            .unwrap();
+        let root_context = tessivum_core::ContextHandle::root();
+        let context = ToolRunContext {
+            session,
+            call: crate::ToolCallId::from("sandboxed-persistent-shell"),
+            cancellation: root_context.scope().cancellation(),
+        };
+        let output = runtime
+            .execute(context, "bash", json!({"command": "printf wrapped"}))
+            .await;
+        assert!(!output.is_error);
+        assert!(matches!(
+            output.content.as_slice(),
+            [ContentBlock::Text { text }] if text == "wrapped"
+        ));
+        assert_eq!(
+            lock(&argv).as_slice(),
+            &[vec!["/bin/sh".to_owned(), "-s".to_owned()]],
+        );
+        persistent_shells.shutdown().await;
+        let _ = fs::remove_dir_all(root);
     }
 }

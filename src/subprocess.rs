@@ -12,6 +12,9 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(unix)]
+use std::os::fd::RawFd;
+
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -490,7 +493,12 @@ pub type PersistentShellLeaseValidator =
 #[cfg(unix)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistentShellConfig {
+    /// Fixed shell or sandbox-wrapper argv. The default is `/bin/sh -s`.
+    pub argv: Vec<String>,
+    /// Fallback workspace path used when no validated directory descriptor is supplied.
     pub workspace: PathBuf,
+    /// A caller-validated directory descriptor used for the initial child cwd.
+    pub cwd_fd: Option<RawFd>,
     /// Explicit environment additions/removals after the normal ambient-secret scrub.
     pub env: BTreeMap<String, Option<String>>,
     /// Per-stream in-memory tail limit for one command.
@@ -500,14 +508,16 @@ pub struct PersistentShellConfig {
 
 #[cfg(unix)]
 impl PersistentShellConfig {
-    pub fn new(workspace: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace: workspace.into(),
-            env: BTreeMap::new(),
-            max_output_bytes: DEFAULT_TAIL_BYTES,
-            terminate_grace: Duration::from_millis(500),
-        }
+pub fn new(workspace: impl Into<PathBuf>) -> Self {
+    Self {
+        argv: vec!["/bin/sh".into(), "-s".into()],
+        workspace: workspace.into(),
+        cwd_fd: None,
+        env: BTreeMap::new(),
+        max_output_bytes: DEFAULT_TAIL_BYTES,
+        terminate_grace: Duration::from_millis(500),
     }
+}
 }
 
 /// One request evaluated by a [`PersistentShell`].
@@ -708,11 +718,29 @@ impl PersistentShell {
         validate_persistent_shell_config(&config)?;
         let validator: PersistentShellLeaseValidator = Arc::new(validate_lease);
         validator()?;
-        let workspace = canonical_cwd(&config.workspace)?;
-        let mut command = Command::new("/bin/sh");
-        command.arg("-s");
-        command.current_dir(workspace);
-        configure_environment(&mut command, &config.env)?;
+let cwd = config
+    .cwd_fd
+    .is_none()
+    .then(|| canonical_cwd(&config.workspace))
+    .transpose()?;
+let mut command = Command::new(&config.argv[0]);
+command.args(&config.argv[1..]);
+if let Some(directory) = config.cwd_fd {
+    use std::os::unix::process::CommandExt;
+
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            if libc::fchdir(directory) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+} else {
+    command.current_dir(cwd.expect("cwd is present without a directory descriptor"));
+}
+configure_environment(&mut command, &config.env)?;
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -1248,6 +1276,21 @@ async fn optional_cancellation(cancellation: Option<CancellationToken>) {
 
 #[cfg(unix)]
 fn validate_persistent_shell_config(config: &PersistentShellConfig) -> Result<(), TessivumError> {
+    let Some(program) = config.argv.first() else {
+        return Err(persistent_shell_error(
+            "PERSISTENT_SHELL_INVALID_ARGV",
+            "persistent shell argv must contain a program",
+            json!({}),
+        ));
+    };
+    if program.is_empty() || program.contains('\0') || config.argv.iter().any(|arg| arg.contains('\0')) {
+        return Err(persistent_shell_error(
+            "PERSISTENT_SHELL_INVALID_ARGV",
+            "persistent shell argv entries must be non-empty program text without NUL",
+            json!({}),
+        ));
+    }
+
     if config.max_output_bytes > MAX_TAIL_BYTES {
         return Err(persistent_shell_error(
             "PERSISTENT_SHELL_OUTPUT_TOO_LARGE",
