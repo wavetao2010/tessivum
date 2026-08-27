@@ -24,7 +24,7 @@ fn header(id: &str, seed_length: Option<u64>) -> SessionHeader {
         seed_length,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 

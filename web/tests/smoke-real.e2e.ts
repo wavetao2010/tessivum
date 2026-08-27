@@ -166,7 +166,7 @@ test('the loopback Web host completes a conversation and retains the live surfac
 test('PTC projects the shipped SDK tool boundary instead of the direct native catalog', async () => {
   const harness = await RustWebHarness.launch({
     name: 'smoke-real-ptc-web-e2e',
-    toolsMode: 'code',
+    agentMode: 'ptc',
     replayRecording: replayRecording(PTC),
   })
   try {

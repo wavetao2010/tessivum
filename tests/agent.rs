@@ -78,6 +78,7 @@ struct FakeRuntime {
     idle_calls: AtomicUsize,
     disposals: AtomicUsize,
     blocked_idle: AtomicBool,
+    fail_dispose: AtomicBool,
     idle_started: Notify,
     release_idle: Notify,
 }
@@ -104,6 +105,9 @@ impl AgentRuntime for FakeRuntime {
 
     async fn dispose(&self) -> Result<(), AgentError> {
         self.disposals.fetch_add(1, Ordering::AcqRel);
+        if self.fail_dispose.load(Ordering::Acquire) {
+            return Err(AgentError::Runtime("fixture dispose failed".into()));
+        }
         Ok(())
     }
 }
@@ -548,6 +552,27 @@ async fn stale_dispose_cannot_remove_a_later_generation() {
     assert_eq!(first_runtime.disposals.load(Ordering::Acquire), 1);
     assert_eq!(second_runtime.disposals.load(Ordering::Acquire), 0);
     second.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_dispose_retains_the_live_generation_until_retry_succeeds() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    let handle = registry
+        .create_or_resume(header("dispose-retry"), options(), cancellation())
+        .await
+        .unwrap();
+    let runtime = factory.runtime(0);
+    runtime.fail_dispose.store(true, Ordering::Release);
+
+    assert!(handle.dispose().await.is_err());
+    assert!(registry.get(&SessionId::from("dispose-retry")).is_some());
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+
+    runtime.fail_dispose.store(false, Ordering::Release);
+    handle.dispose().await.unwrap();
+    assert!(registry.get(&SessionId::from("dispose-retry")).is_none());
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 2);
 }
 
 #[tokio::test]

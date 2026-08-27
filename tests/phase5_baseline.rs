@@ -64,7 +64,7 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
         legacy_ids.len()
     );
     let header_rows = headers["headers"].as_array().expect("header rows");
-    assert_eq!(header_rows.len(), 5);
+    assert_eq!(header_rows.len(), 6);
     let mut cases = BTreeSet::new();
     let mut session_ids = BTreeSet::new();
     let mut presets = BTreeSet::new();
@@ -76,16 +76,37 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
             "duplicate header case: {case}"
         );
         let raw = &row["header"];
-        assert_keys(raw, &["version", "id", "createdAt", "agentPreset"]);
-        let header: SessionHeader = serde_json::from_value(raw.clone())
-            .expect("legacy SessionHeader deserializes through current code");
-        header.validate().expect("legacy SessionHeader validates");
+        if case == "snake-code" {
+            assert_keys(raw, &["version", "id", "createdAt", "agent_preset"]);
+        } else {
+            assert_keys(raw, &["version", "id", "createdAt", "agentPreset"]);
+        }
+        let parsed = serde_json::from_value::<SessionHeader>(raw.clone());
+        if case == "unknown-custom" {
+            assert!(
+                parsed
+                    .unwrap_err()
+                    .to_string()
+                    .contains("MODE_MIGRATION_REQUIRED"),
+                "unknown legacy presets require an explicit mode.toml migration"
+            );
+            continue;
+        }
+        let header = parsed.expect("known legacy SessionHeader migrates");
+        header.validate().expect("migrated SessionHeader validates");
         assert!(
             session_ids.insert(header.id.as_str().to_owned()),
             "duplicate legacy session ID"
         );
-        let preset = header.agent_preset.expect("legacy agentPreset");
-        assert!(presets.insert(preset), "duplicate legacy preset input");
+        let mode = header.agent_mode.expect("legacy agentPreset migrates");
+        if case == "snake-code" {
+            assert_eq!(mode.as_str(), "ptc");
+            continue;
+        }
+        assert!(
+            presets.insert(mode.into_string()),
+            "duplicate legacy preset input"
+        );
     }
     assert_eq!(
         cases,
@@ -94,16 +115,16 @@ fn phase_five_baseline_fixtures_preserve_legacy_migration_inputs() {
             "cordis".to_owned(),
             "minimal".to_owned(),
             "standard".to_owned(),
+            "snake-code".to_owned(),
             "unknown-custom".to_owned(),
         ])
     );
     assert_eq!(
         presets,
         BTreeSet::from([
-            "code".to_owned(),
-            "cordis".to_owned(),
+            "composition".to_owned(),
+            "ptc".to_owned(),
             "minimal".to_owned(),
-            "repository-maintainer".to_owned(),
             "standard".to_owned(),
         ])
     );

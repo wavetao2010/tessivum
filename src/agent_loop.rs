@@ -20,11 +20,15 @@ use crate::{
         AgentCancelCause, AgentError, AgentFactory, AgentOptions, AgentRuntime, AgentStatus, Inbox,
         InboxClaimReservation,
     },
-    agent_mode::{AgentModeId, AgentModeRegistry, ToolCapabilityId, ToolPresentation},
+    agent_mode::{
+        AgentModeId, AgentModeRegistry, ModePluginRuntime, ToolCapabilityId, ToolPresentation,
+    },
     builtin_tools::PersistentShellSessions,
     code_runtime::{register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE},
-    composition::CompositionRegistry,
     compaction::{CompactionOutcome, CompactionService, CompactionTrigger},
+    composition::{
+        CompositionDescriptor, CompositionEntryReference, CompositionRegistry, CompositionRuntime,
+    },
     llm::{BlockAssembler, LlmRuntime},
     permissions::runtime_context,
     protocol::{
@@ -136,7 +140,6 @@ impl AgentLoopFactory {
         self
     }
 
-
     pub fn with_approval_required_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
         self.approval_required_tools = names.into_iter().collect();
         self
@@ -235,7 +238,10 @@ impl AgentLoopFactory {
                     ));
                 }
             };
-            if let Err(error) = registry.attach_session(session.id(), context.clone()) {
+            if let Err(error) = registry
+                .attach_session_replacing_stale(session.id(), context.clone())
+                .await
+            {
                 let mut cleanup = vec![error.to_string()];
                 if let Err(error) = context.scope().dispose().await {
                     cleanup.push(error.to_string());
@@ -251,7 +257,30 @@ impl AgentLoopFactory {
                     cleanup,
                 ));
             }
-            Some(CompositionSession { registry, context })
+            let composition = CompositionSession {
+                registry,
+                context,
+                registry_finished: AtomicBool::new(false),
+                context_finished: AtomicBool::new(false),
+            };
+            if let Err(error) = composition
+                .activate_plugins(&runtime.plugins, &session.id())
+                .await
+            {
+                let mut failures = vec![error.to_string()];
+                failures.extend(composition.dispose(&session.id()).await);
+                if let Some(shells) = &persistent_shells {
+                    shells.disable(&session.id()).await;
+                }
+                return Err(resource_error(
+                    "MODE_PLUGIN_ACTIVATION_FAILED",
+                    "the selected mode could not activate its declared plugins",
+                    runtime,
+                    session,
+                    failures,
+                ));
+            }
+            Some(composition)
         } else {
             None
         };
@@ -274,6 +303,7 @@ impl AgentFactory for AgentLoopFactory {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
+        materialize_default_mode(&session, &self.default_mode, cancellation.clone()).await?;
         let runtime = SessionRuntimeSpec::resolve(self, &session)?;
         let resources = self.attach_resources(&runtime, &session).await?;
         if cancellation.is_cancelled() {
@@ -316,6 +346,7 @@ struct SessionRuntimeSpec {
     compaction: Option<CompactionService>,
     skills: Option<(SkillRuntime, SkillSessionScopes)>,
     _tool_registrations: Vec<ToolRegistration>,
+    plugins: Vec<CompositionDescriptor>,
 }
 
 struct SessionResources {
@@ -326,22 +357,51 @@ struct SessionResources {
 struct CompositionSession {
     registry: CompositionRegistry,
     context: ContextHandle,
+    registry_finished: AtomicBool,
+    context_finished: AtomicBool,
+}
+impl CompositionSession {
+    async fn activate_plugins(
+        &self,
+        plugins: &[CompositionDescriptor],
+        owner: &crate::SessionId,
+    ) -> Result<(), TessivumError> {
+        for plugin in plugins {
+            self.registry.define(owner, plugin.clone()).await?;
+            self.registry.validate(owner, &plugin.id).await?;
+            self.registry.run(owner, &plugin.id).await?;
+        }
+        Ok(())
+    }
+
+    async fn dispose(&self, owner: &crate::SessionId) -> Vec<String> {
+        if !self.registry_finished.load(Ordering::Acquire) {
+            if let Err(error) = self.registry.dispose_session(owner).await {
+                return vec![error.to_string()];
+            }
+            self.registry_finished.store(true, Ordering::Release);
+        }
+        if self.context_finished.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        let result = self.context.scope().dispose().await;
+        // Core Scope cleanup is one-shot even when it returns diagnostics.
+        self.context_finished.store(true, Ordering::Release);
+        result
+            .err()
+            .map(|error| vec![error.to_string()])
+            .unwrap_or_default()
+    }
 }
 impl SessionResources {
     async fn dispose(&self, owner: &crate::SessionId) -> Vec<String> {
-        let mut failures = Vec::new();
         if let Some(shells) = &self.persistent_shells {
             shells.disable(owner).await;
         }
-        if let Some(composition) = &self.composition {
-            if let Err(error) = composition.registry.dispose_session(owner).await {
-                failures.push(error.to_string());
-            }
-            if let Err(error) = composition.context.scope().dispose().await {
-                failures.push(error.to_string());
-            }
+        match &self.composition {
+            Some(composition) => composition.dispose(owner).await,
+            None => Vec::new(),
         }
-        failures
     }
 }
 
@@ -381,7 +441,40 @@ impl SessionRuntimeSpec {
         let skills_enabled = mode.spec.skills;
         let compaction_enabled = mode.spec.compaction.is_some();
         let persistent_shell = mode.spec.capabilities.persistent_shell;
-        let composition = mode.spec.capabilities.composition;
+        let plugins = mode
+            .resolved_plugins
+            .iter()
+            .map(|plugin| {
+                let runtime = match plugin.runtime {
+                    ModePluginRuntime::Native => CompositionRuntime::Native,
+                    ModePluginRuntime::Wasm => CompositionRuntime::Wasm,
+                    ModePluginRuntime::LegacyNode => CompositionRuntime::Legacy,
+                };
+                let package = match plugin.runtime {
+                    ModePluginRuntime::Wasm => mode
+                        .plugin_source(&plugin.id)
+                        .ok_or_else(|| {
+                            AgentError::Message(TessivumError::new(
+                                "MODE_PLUGIN_SOURCE_MISSING",
+                                "the selected mode has no resolved WASM plugin source",
+                                "agent-loop",
+                                json!({"agentMode": mode_id.as_str(), "plugin": plugin.id}),
+                            ))
+                        })?
+                        .to_string_lossy()
+                        .into_owned(),
+                    ModePluginRuntime::Native | ModePluginRuntime::LegacyNode => {
+                        plugin.source.clone()
+                    }
+                };
+                Ok(CompositionDescriptor {
+                    id: plugin.id.clone(),
+                    entry: CompositionEntryReference { runtime, package },
+                    config: plugin.config.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, AgentError>>()?;
+        let composition = mode.spec.capabilities.composition || !plugins.is_empty();
         let presentation = mode.spec.presentation;
         let skills = factory
             .skills
@@ -408,7 +501,18 @@ impl SessionRuntimeSpec {
             .into_iter()
             .map(|schema| schema.name)
             .collect::<BTreeSet<_>>();
-        let missing = names
+        let required = if mode.source_dir.is_some() || mode_id == AgentModeId::minimal() {
+            names.clone()
+        } else if mode.spec.capabilities.composition {
+            names
+                .iter()
+                .filter(|name| name.starts_with("composition_"))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let missing = required
             .iter()
             .filter(|name| !available.contains(*name))
             .cloned()
@@ -421,6 +525,7 @@ impl SessionRuntimeSpec {
                 json!({"agentMode": mode_id.as_str(), "missing": missing}),
             )));
         }
+        names.retain(|name| available.contains(name));
         let approval_required = factory
             .approval_required_tools
             .iter()
@@ -465,12 +570,13 @@ impl SessionRuntimeSpec {
                 .flatten(),
             skills: skills.cloned(),
             _tool_registrations: registrations,
+            plugins,
         })
     }
 }
 
-fn selected_mode(session: &Session, default_mode: &AgentModeId) -> Result<AgentModeId, AgentError> {
-    let selected = session
+fn persisted_mode(session: &Session) -> Result<Option<AgentModeId>, AgentError> {
+    session
         .events()
         .into_iter()
         .rev()
@@ -491,10 +597,39 @@ fn selected_mode(session: &Session, default_mode: &AgentModeId) -> Result<AgentM
                 })?;
             AgentModeId::new(value).map_err(AgentError::Message)
         })
-        .transpose()?;
-    Ok(selected
-        .or_else(|| session.header().agent_mode)
-        .unwrap_or_else(|| default_mode.clone()))
+        .transpose()
+        .map(|selected| selected.or_else(|| session.header().agent_mode))
+}
+
+async fn materialize_default_mode(
+    session: &Session,
+    default_mode: &AgentModeId,
+    cancellation: CancellationToken,
+) -> Result<(), AgentError> {
+    if persisted_mode(session)?.is_some() {
+        return Ok(());
+    }
+    session
+        .append(
+            SessionEvent {
+                event_type: "agent-mode/selected".into(),
+                seq: session.next_seq()?,
+                time: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |value| value.as_millis().try_into().unwrap_or(u64::MAX)),
+                data: json!({"agentMode": default_mode}),
+                ignorable: Some(true),
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            cancellation,
+        )
+        .await?;
+    Ok(())
+}
+
+fn selected_mode(session: &Session, default_mode: &AgentModeId) -> Result<AgentModeId, AgentError> {
+    Ok(persisted_mode(session)?.unwrap_or_else(|| default_mode.clone()))
 }
 
 /// A single-session driver. One persistent worker waits for coalesced wakeups.
@@ -651,10 +786,11 @@ impl AgentRuntime for AgentLoop {
         let worker = {
             let mut state = lock(&self.inner.state);
             if state.disposed {
-                return Ok(());
+                None
+            } else {
+                state.disposed = true;
+                state.worker.take()
             }
-            state.disposed = true;
-            state.worker.take()
         };
         self.cancel(AgentCancelCause::Disposed);
         self.inner.cancellation.cancel();
@@ -1827,4 +1963,47 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod composition_cleanup_tests {
+    use super::*;
+    use crate::legacy::ProductPackageResolver;
+    use tessivum_core::{LoaderRuntime, PackageResolver};
+
+    #[tokio::test]
+    async fn completed_registry_phase_is_not_repeated_after_context_failure() {
+        let context = ContextHandle::root();
+        context
+            .scope()
+            .add_effect(
+                "fixture context failure",
+                Box::new(|| {
+                    Box::pin(async {
+                        Err(tessivum_core::CoreError::Plugin {
+                            phase: "dispose",
+                            message: "fixture context failure".into(),
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let resolver: Arc<dyn PackageResolver> = Arc::new(ProductPackageResolver::new());
+        let registry =
+            CompositionRegistry::new(resolver, std::iter::empty::<Arc<dyn LoaderRuntime>>())
+                .unwrap();
+        let owner = crate::SessionId::from("cleanup-owner");
+        registry
+            .attach_session(owner.clone(), context.clone())
+            .unwrap();
+        let session = CompositionSession {
+            registry,
+            context,
+            registry_finished: AtomicBool::new(false),
+            context_finished: AtomicBool::new(false),
+        };
+
+        assert_eq!(session.dispose(&owner).await.len(), 1);
+        assert!(session.dispose(&owner).await.is_empty());
+    }
 }

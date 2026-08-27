@@ -1,4 +1,4 @@
-//! SQLite-backed durable [`SessionPersistence`](crate::session::SessionPersistence).
+//! SQLite-backed durable [`SessionPersistence`].
 //!
 //! Each mutating operation uses an immediate SQLite transaction. The database is
 //! the commit point: a failed transaction is never reflected by a later read.

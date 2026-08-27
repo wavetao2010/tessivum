@@ -1,10 +1,10 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移完成；Rust Cordis 内核、Rust-native Harness 与冻结的 source-exact Web 兼容基线均已通过验收
-> 计划校准日期：2026-08-25
-> Tessivum 实现基线：`v0.1.0-alpha.9`
+> 状态：两阶段迁移与 Phase 5 原生 Agent Mode clean cutover 已完成
+> 计划校准日期：2026-08-27
+> Tessivum 实现基线：`v0.1.0-alpha.12`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
-> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、插件生态兼容与 Web 模型配置面
+> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容与 Web 模型配置面
 
 ## 1. 文档集
 
@@ -14,6 +14,7 @@
 - [插件生态兼容方案](PLUGIN_COMPATIBILITY.md)：现有 npm 插件兼容级别、Legacy Node Bridge、WASM ABI 和迁移路径。
 - [Phase 3 产品能力开发计划](PHASE3_PRODUCT_PLAN.md)：已完成的 Alpha.2 WASM 权限、Alpha.3 Browser 控制面与 Alpha.4 多工作区实施记录。
 - [Phase 4 品牌、分发与社区市场开发计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)：已完成 Alpha.10 独立品牌/可安装分发与 Alpha.11 `dshmarket@1.29.2` 兼容实施。
+- [Phase 5 原生 Agent Mode 与插件组合开发计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)：已完成 Native Mode、`mode.toml`、Session 级能力隔离和 `agent.cordis.yml` clean cutover。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
@@ -590,9 +591,9 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 - HMR 是否进入首个稳定版；
 - Rust 主干达到何种资源阈值才切换默认入口。
 
-## 14. 当前后续工作入口
+## 14. 当前实现状态
 
-原 Alpha 阶段只完成了 Rust-native 产品纵向闭环，不能据此关闭两阶段迁移。当前冻结 Core RPC method roster 已达到 52/52，LLM/Agent 的 chunk、prepared request、retry/cancel、queue/steer、durable assistant state 与 JSONL replay 已有 focused/differential Rust 契约；`cordis.node/v1` 保持真实 compat-host 与社区插件回归。上游 `AppWebEntry` 和 38 个 client bundles 现从固定 `0.1.0-rc.5` 源码构建，staging 校验 handoff id、source/staged SHA-1 与 Rust graph revision，且默认 Web 路径不再扫描 registry artifacts。当前固定工作顺序是完成并通过 69 个真实 Chromium 场景，在场景暴露具体 schema/event/Host domain 缺口时修复源契约，并持续保留 Node regression gate。详见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)。
+当前实现基线为 `v0.1.0-alpha.12` 加 Phase 5 clean cutover。Standard/PTC/Minimal/Composition 已由 Rust Native Mode Registry 解析并按 Session 固化；`mode.toml` 是唯一模式文件，Native/WASM/Legacy Node/Browser 四类插件平面继续保留。Rust Runtime 不再读取或执行 `preset.yml`、`agent.cordis.yml` 与动态 Cordis Node Runner。冻结 RPC、69 个 Chromium 场景和社区插件回归继续分别以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)、[`WEB_E2E_PORT_CHECKLIST.md`](WEB_E2E_PORT_CHECKLIST.md) 与 [`PLUGIN_COMPATIBILITY.md`](PLUGIN_COMPATIBILITY.md) 为门槛。
 
 ## 14.1 Alpha.9 发布记录
 

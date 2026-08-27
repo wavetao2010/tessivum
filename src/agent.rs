@@ -1255,6 +1255,7 @@ impl AgentRegistry {
 struct AgentState {
     cancellation: Option<AgentCancelOptions>,
     disposed: bool,
+    cleanup_complete: bool,
 }
 
 struct AgentInner {
@@ -1392,18 +1393,22 @@ impl AgentInner {
         let _gate = self.dispose_gate.lock().await;
         let clear_inbox = {
             let mut state = lock(&self.state);
-            if state.disposed {
+            if state.cleanup_complete {
                 return Ok(());
             }
-            state.disposed = true;
-            if state.cancellation.is_none() {
-                state.cancellation = Some(AgentCancelOptions {
-                    cause: AgentCancelCause::Disposed,
-                    keep_inbox: false,
-                });
-                true
-            } else {
+            if state.disposed {
                 false
+            } else {
+                state.disposed = true;
+                if state.cancellation.is_none() {
+                    state.cancellation = Some(AgentCancelOptions {
+                        cause: AgentCancelCause::Disposed,
+                        keep_inbox: false,
+                    });
+                    true
+                } else {
+                    false
+                }
             }
         };
         if clear_inbox {
@@ -1411,9 +1416,10 @@ impl AgentInner {
             self.runtime.cancel(AgentCancelCause::Disposed);
         }
         self.cancellation.cancel();
-        let result = self.runtime.dispose().await;
+        self.runtime.dispose().await?;
+        lock(&self.state).cleanup_complete = true;
         self.remove_from_registry();
-        result
+        Ok(())
     }
 
     fn remove_from_registry(&self) {
@@ -1621,7 +1627,7 @@ impl AgentHandle {
         self.inner.when_idle().await
     }
 
-    /// Explicitly stops the runtime once and removes only this registry generation.
+    /// Stops the runtime and removes this generation only after cleanup succeeds; failures may be retried.
     pub async fn dispose(&self) -> Result<(), AgentError> {
         self.inner.dispose().await
     }

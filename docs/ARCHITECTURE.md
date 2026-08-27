@@ -1,6 +1,6 @@
 # Tessivum 目标运行时架构
 
-> 本文定义目标结构和跨运行时不变量；工作顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，插件迁移规则见[插件生态兼容方案](PLUGIN_COMPATIBILITY.md)。
+> 本文定义目标结构和跨运行时不变量；工作顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，原生 Agent Mode clean cutover 见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)，插件迁移规则见[插件生态兼容方案](PLUGIN_COMPATIBILITY.md)。
 
 ## 1. 架构目标
 
@@ -60,6 +60,27 @@ flowchart TB
 | CLI、Host/API、SDK、Web/Browser 集成 | `tessivum` |
 
 Tessivum Core 不认识 Agent、Session 或 Tool。Tessivum 产品只通过核心框架公开接口和版本化协议集成，不能读取私有 Registry/Fiber 字段。通用 transport 与产品领域代理分离，避免核心框架反向依赖 Harness 产品。
+
+### 1.2 产品级 Native Agent Mode
+
+Standard、PTC、Minimal 和 Composition 是 `tessivum` 产品组合，不是 Core 概念。产品层的 `AgentModeSpec` 声明 Prompt、模型工具呈现、Session 可调用工具、Skills、Plan、Compaction 和 Native/WASM/Legacy 插件 Entry；创建或恢复 Session 时解析为不可变 `ResolvedMode`，再挂载到 Session 子 Context。
+
+```text
+Host shared services
+├── LLM / Tool Runtime / Skills / Compaction
+├── Native / WASM / Legacy PluginRuntime
+└── Native Agent Mode Registry
+    ├── Standard Session Scope
+    ├── PTC Session Scope
+    ├── Minimal Session Scope
+    └── Composition Session Scope
+```
+
+Mode 只授予受限视图，不复制共享服务，也不能扩大 WASM manifest 权限或 Legacy Bridge 服务面。同一 Host 的 Session 可以选择不同 Mode，且 Prompt、工具目录、Compaction、Skill roots 和临时插件资源不得相互泄漏。
+
+内置 Mode 由 Rust 静态规格定义；自定义 Mode 使用 `${data_dir}/modes/<id>/mode.toml`，并可由有序 CLI `--patch` 的 `agent-presets.default` 选择。Rust Agent Runtime 不执行上游 `agent.cordis.yml`，也不执行任意 Host/Client JavaScript。现有 npm/Cordis 包仍由 Legacy Node Host 加载，Browser `dsh.client` 仍由 Browser Cordis 加载；Mode 配置格式与插件 Runtime 是两条正交轴。
+
+冻结源 Web 使用的 `agentPreset.*`/`agentPreset` 仅存在于 `api.rs` 的 Browser Wire adapter。内部 Session、Agent、Registry 和持久新写入统一使用 `ModeId`/`agentMode`；旧内置 ID 只在持久数据迁移边界转换。`dynamicCordisRunner/*` 仅保留不可执行的有界兼容响应，不是 Composition 或 Agent Mode 的运行时入口。完整契约、删除项和验收矩阵见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)。
 
 ## 2. 术语
 
@@ -513,3 +534,8 @@ CordisError {
 10. Browser 永不读取 credential value 或 settings secret；DNS rebinding 不能绕过 exact Host/Origin authority。
 11. Workspace ID 由 Host 签发；Session/Tool/Subagent 仅通过 generation-checked lease 使用 canonical root，Browser path 只允许 workspace.create。
 12. Registry 0600、bounded single-open、exclusive profile lock、atomic replace；删除 workspace 先撤销 live Agent，再失效 lease。
+13. Agent Mode 属于 `tessivum` 产品层，`tessivum-core` 不出现 Standard/PTC/Minimal/Composition 领域类型。
+14. Session 的 `ResolvedMode` 是 Prompt、工具视图、Skills、Plan、Compaction 和模式插件 Entry 的唯一权威；Host 级环境变量不得切换全部 Session 的模式。
+15. PTC 的 nested dispatcher 只能调用当前 Session 允许的工具；Minimal persistent shell 和 Composition Entry 全部归当前 Session Scope。
+16. `mode.toml` 只能引用已知 capability/Runtime/插件且不能扩大插件权限；未知或缺失项在 Agent 启动前失败。
+17. 删除 `agent.cordis.yml` Runtime Parser 不改变 Legacy Node、Extism/WASM 或 Browser Cordis 的独立兼容边界。

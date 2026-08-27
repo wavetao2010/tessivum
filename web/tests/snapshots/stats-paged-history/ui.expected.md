@@ -1,6 +1,8 @@
 - banner:
   - navigation "Session hierarchy":
     - button "{{workspace}}" [disabled]
+  - img
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

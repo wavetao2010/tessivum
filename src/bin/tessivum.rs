@@ -12,7 +12,6 @@ use std::{
 };
 
 use clap::error::ErrorKind;
-use serde::Deserialize;
 use serde_json::Value;
 use tessivum::{
     agent_mode::AgentModeId,
@@ -196,11 +195,6 @@ fn run_plugin_command(command: PluginCommand) -> Result<(), Diagnostic> {
 }
 
 async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic> {
-    if !command.patches.is_empty() {
-        return Err(Diagnostic::usage(
-            "--patch overlays are only supported by the web profile",
-        ));
-    }
     let (config, task) = config(command).await?;
     let adapter = config
         .replay_jsonl
@@ -234,6 +228,7 @@ async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic
 
 async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
+    let cli_patches = load_cli_patches(&command.patches).await?;
     let address = env::var("TESSIVUM_WEB_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse::<SocketAddr>()
@@ -246,14 +241,13 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         FrontendStatic::new(PathBuf::from(dist))
             .map_err(|error| Diagnostic::runtime("WEB_FRONTEND_FAILED", error))?;
     }
-    let patches = load_cli_patches(&command.patches).await?;
     let runtime = boot_host(
         cwd,
         data_dir.clone(),
         web_replay().await?,
         true,
         Some(web_system_prompt(address)),
-        patches,
+        cli_patches,
     )
     .await?;
     let (frontend, _theme_tap, _embedded_assets) = match web_frontend(
@@ -409,7 +403,6 @@ fn installed_client_package_roots(data_dir: &Path) -> Result<Vec<PathBuf>, Diagn
         .collect())
 }
 
-
 enum SdkOutcome {
     Eof,
     Signal(i32),
@@ -465,6 +458,9 @@ async fn boot_host(
     let mut config = HostConfig::new(cwd, data_dir);
     config.enable_trusted_bash = enable_trusted_bash;
     config.system_prompt = system_prompt;
+    for patch in cli_patches {
+        config = config.with_cli_patch(patch);
+    }
     if let Some(replay) = recorded_replay {
         let route = replay_route(&replay.recording);
         config = config
@@ -648,48 +644,35 @@ async fn web_replay() -> Result<Option<WebReplay>, Diagnostic> {
     }))
 }
 
-async fn load_cli_patches(paths: &[PathBuf]) -> Result<Vec<Value>, Diagnostic> {
-    let mut patches = Vec::with_capacity(paths.len());
-    for path in paths {
-        let document = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|error| Diagnostic::runtime("PATCH_READ_FAILED", error))?;
-        let mut documents = serde_yaml::Deserializer::from_str(&document);
-        let document = documents.next().ok_or_else(|| {
-            Diagnostic::usage(format!(
-                "patch {} must contain one YAML document",
-                path.display()
-            ))
-        })?;
-        let patch = Value::deserialize(document).map_err(|error| {
-            Diagnostic::usage(format!(
-                "could not parse YAML patch {}: {error}",
-                path.display()
-            ))
-        })?;
-        if documents.next().is_some() {
-            return Err(Diagnostic::usage(format!(
-                "patch {} must contain exactly one YAML document",
-                path.display()
-            )));
-        }
-        if !patch.is_object() {
-            return Err(Diagnostic::usage(format!(
-                "patch {} must be a YAML mapping that converts to a JSON object",
-                path.display()
-            )));
-        }
-        patches.push(patch);
-    }
-    Ok(patches)
-}
-
 fn host_paths(data_dir: Option<PathBuf>) -> Result<(PathBuf, PathBuf), Diagnostic> {
     let paths = resolve_data_root(data_dir).map_err(|error| match error {
         DataRootError::CurrentDir(source) => Diagnostic::runtime("CWD_RESOLUTION_FAILED", source),
         error => Diagnostic::usage(error.to_string()),
     })?;
     Ok((paths.cwd, paths.data_dir))
+}
+
+async fn load_cli_patches(paths: &[PathBuf]) -> Result<Vec<Value>, Diagnostic> {
+    let mut patches = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = tokio::fs::read_to_string(path).await.map_err(|error| {
+            Diagnostic::runtime(
+                "PATCH_READ_FAILED",
+                format!("cannot read {}: {error}", path.display()),
+            )
+        })?;
+        let patch = serde_yaml::from_str::<Value>(&source).map_err(|error| {
+            Diagnostic::usage(format!("invalid patch {}: {error}", path.display()))
+        })?;
+        if !patch.is_object() {
+            return Err(Diagnostic::usage(format!(
+                "patch {} must contain a YAML mapping",
+                path.display()
+            )));
+        }
+        patches.push(patch);
+    }
+    Ok(patches)
 }
 
 async fn config(command: HeadlessCommand) -> Result<(HeadlessConfig, String), Diagnostic> {
@@ -765,54 +748,34 @@ fn diagnostic_message(message: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
     fn patch_dir(name: &str) -> PathBuf {
         let root = env::temp_dir().join(format!(
             "tessivum-cli-{name}-{}-{}",
             process::id(),
             EMBEDDED_WEB_INSTANCE.fetch_add(1, Ordering::Relaxed),
         ));
-        fs::create_dir(&root).expect("patch fixture directory creates");
+        fs::create_dir(&root).expect("test fixture directory creates");
         root
     }
 
     #[tokio::test]
-    async fn yaml_patch_overlays_preserve_order() {
-        let root = patch_dir("ordered-patches");
+    async fn cli_patches_load_yaml_mappings_in_order() {
+        let root = patch_dir("patch-overlays");
         let base = root.join("base.yml");
         let local = root.join("local.yml");
-        fs::write(&base, "ui-theme:\n  preference: light\n").expect("base patch writes");
-        fs::write(&local, "ui-theme:\n  preference: dark\n").expect("local patch writes");
-
-        let patches = load_cli_patches(&[base, local])
-            .await
-            .expect("YAML mappings load");
+        fs::write(&base, "feature:\n  enabled: false\n").unwrap();
+        fs::write(&local, "feature:\n  enabled: true\n").unwrap();
 
         assert_eq!(
-            patches,
-            vec![
-                json!({"ui-theme": {"preference": "light"}}),
-                json!({"ui-theme": {"preference": "dark"}}),
+            load_cli_patches(&[base, local]).await.unwrap(),
+            [
+                serde_json::json!({"feature": {"enabled": false}}),
+                serde_json::json!({"feature": {"enabled": true}}),
             ]
         );
         let _ = fs::remove_dir_all(root);
     }
 
-    #[tokio::test]
-    async fn yaml_patch_rejects_non_object_documents() {
-        let root = patch_dir("invalid-patch");
-        let patch = root.join("invalid.yml");
-        fs::write(&patch, "- not\n- a mapping\n").expect("invalid patch writes");
-
-        let error = load_cli_patches(&[patch])
-            .await
-            .expect_err("array patch must fail before host boot");
-
-        assert_eq!(error.class, ExitClass::Usage);
-        assert!(error.message.contains("YAML mapping"));
-        let _ = fs::remove_dir_all(root);
-    }
     #[test]
     fn installed_client_roots_include_only_declared_plugins() {
         let data = patch_dir("installed-client-roots");

@@ -504,6 +504,17 @@ impl AgentModeRegistry {
     pub fn resolve(&self, id: impl AsRef<str>) -> Result<ResolvedMode, TessivumError> {
         Ok(self.location(id)?.resolved)
     }
+    pub fn allows_plugin_source(&self, path: &Path) -> Result<bool, TessivumError> {
+        let path = fs::canonicalize(path)
+            .map_err(|error| io_error("resolving mode plugin source", path, error))?;
+        Ok(self.locations()?.into_iter().any(|location| {
+            location
+                .resolved
+                .plugin_sources
+                .values()
+                .any(|source| source == &path)
+        }))
+    }
     pub fn read(&self, id: impl AsRef<str>) -> Result<AgentModeDocument, TessivumError> {
         let location = self.location(id)?;
         let content = match &location.document_path {
@@ -805,8 +816,8 @@ fn builtin_specs() -> Vec<AgentModeSpec> {
     vec![
         AgentModeSpec {
             id: AgentModeId::standard(),
-            name: "标准模式".into(),
-            description: "功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。".into(),
+            name: "Standard".into(),
+            description: "The full native Tessivum tool catalog.".into(),
             prompt: PromptPolicy {
                 complete: false,
                 text: "Use the additive Tessivum persona, workspace instructions, and runtime context.".into(),
@@ -826,8 +837,8 @@ fn builtin_specs() -> Vec<AgentModeSpec> {
         },
         AgentModeSpec {
             id: AgentModeId::ptc(),
-            name: "PTC 模式".into(),
-            description: "具备标准模式的全部能力，并通过 run_code 让模型用一个 JavaScript 程序组合多步操作。".into(),
+            name: "PTC".into(),
+            description: "A programmatic tool-calling mode backed by Bun.".into(),
             prompt: PromptPolicy {
                 complete: false,
                 text: concat!(
@@ -853,8 +864,8 @@ fn builtin_specs() -> Vec<AgentModeSpec> {
         },
         AgentModeSpec {
             id: AgentModeId::minimal(),
-            name: "极简模式".into(),
-            description: "仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。".into(),
+            name: "Minimal".into(),
+            description: "A focused persistent-shell editing mode.".into(),
             prompt: PromptPolicy {
                 complete: true,
                 text: "You are a helpful software engineer assistant.\n\nUse only bash and str_replace_editor to complete the task.".into(),
@@ -875,8 +886,8 @@ fn builtin_specs() -> Vec<AgentModeSpec> {
         },
         AgentModeSpec {
             id: AgentModeId::composition(),
-            name: "创造模式".into(),
-            description: "具备标准模式的全部能力，并提供 Native、WASM 与 Legacy Entry 组合工具。".into(),
+            name: "Composition".into(),
+            description: "A native entry composition-builder mode.".into(),
             prompt: PromptPolicy {
                 complete: false,
                 text: "Use composition tools to define, validate, run, inspect, and stop typed Native, WASM, or Legacy entries. Never execute arbitrary source code.".into(),

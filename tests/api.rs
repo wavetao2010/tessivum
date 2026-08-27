@@ -16,7 +16,7 @@ use parking_lot::Mutex as ParkingMutex;
 use serde_json::{json, Value};
 use tessivum::{
     agent::AgentRegistry,
-    agent_preset::AgentPresetTrust,
+    agent_mode::AgentModeTrust,
     api::{ApiServer, ApiServerConfig, MAX_FRAME_BYTES},
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     bridge::{BridgeServices, DomainBridge},
@@ -3547,27 +3547,58 @@ impl RawWebSocket {
 }
 
 #[tokio::test]
-async fn browser_agent_preset_rpc_is_durable_and_truthful() {
+async fn browser_dynamic_cordis_wire_cannot_execute_code() {
+    let fixture = BrowserStopFixture::new();
+    let runtime = Arc::new(
+        HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
+            .await
+            .unwrap(),
+    );
+    let mut server = ApiServer::bind(runtime.clone()).await.unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let inventory = browser_call(
+        &client,
+        &base,
+        "cordis-inventory",
+        "dynamicCordisRunner/inventory",
+        json!({"args": {}}),
+    )
+    .await;
+    assert_eq!(inventory["result"]["value"], json!([]));
+    let run = browser_call(
+        &client,
+        &base,
+        "cordis-run",
+        "dynamicCordisRunner/runHostHalf",
+        json!({"args": {}}),
+    )
+    .await;
+    assert_eq!(run["result"]["error"]["code"], "cordis-unavailable");
+
+    server.shutdown().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_agent_mode_rpc_is_durable_and_truthful() {
     let fixture = BrowserStopFixture::new();
     let data = fixture.0.join("data");
-    let system_root = fixture.0.join("preset-roots/system");
+    let system_root = fixture.0.join("mode-roots/system");
     let system = system_root.join("base");
     fs::create_dir_all(&system).unwrap();
-    fs::write(system.join("agent.cordis.yml"), "[]\n").unwrap();
     fs::write(
-        system.join("preset.yml"),
-        "name: Base\ndescription: system preset\n",
+        system.join("mode.toml"),
+        "schema = 1\nid = \"base\"\nname = \"Base\"\ndescription = \"system mode\"\n\n[prompt]\ncomplete = false\ntext = \"Base mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n",
     )
     .unwrap();
-    let broken = system_root.join("broken");
-    fs::create_dir_all(&broken).unwrap();
-    fs::write(broken.join("agent.cordis.yml"), "- name:\n").unwrap();
 
     let opened_paths = Arc::new(ParkingMutex::new(Vec::new()));
     let opened = Arc::clone(&opened_paths);
     let runtime = HostRuntime::boot(
         HostConfig::new(&fixture.0, &data)
-            .with_agent_preset_root(&system_root, AgentPresetTrust::System)
+            .with_agent_mode_root(&system_root, AgentModeTrust::System)
             .with_path_opener(Arc::new(move |path: &std::path::Path| {
                 opened.lock().push(path.to_path_buf());
                 Ok(())
@@ -3580,11 +3611,52 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
-    let listed = browser_call(&client, &base, "presets", "agentPreset.list", json!({})).await;
-    assert_eq!(listed["result"]["value"]["presets"][0]["trust"], "system");
-    assert_eq!(listed["result"]["value"]["presets"][0]["isDefault"], true);
+    let listed = browser_call(&client, &base, "modes", "agentPreset.list", json!({})).await;
+    let presets = listed["result"]["value"]["presets"].as_array().unwrap();
+    let standard = presets
+        .iter()
+        .find(|mode| mode["id"] == "standard")
+        .unwrap();
+    assert_eq!(standard["trust"], "system");
+    assert_eq!(standard["isDefault"], true);
+    assert!(presets.iter().any(|mode| mode["id"] == "base"));
     assert_eq!(listed["result"]["value"]["authorable"], true);
     assert_eq!(listed["result"]["value"]["hasDocument"], true);
+    let standard_read = browser_call(
+        &client,
+        &base,
+        "read-standard",
+        "agentPreset.read",
+        json!({"agentPreset":"standard"}),
+    )
+    .await;
+    assert_eq!(standard_read["result"]["value"]["trust"], "system");
+    assert!(standard_read["result"]["value"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("id = \"standard\""));
+    let defaulted = browser_call(
+        &client,
+        &base,
+        "default-minimal",
+        "settings.update",
+        json!({"ns":"agent-presets","patch":{"default":"minimal"}}),
+    )
+    .await;
+    assert_eq!(defaulted["result"]["value"]["value"]["default"], "minimal");
+    let relisted = browser_call(
+        &client,
+        &base,
+        "modes-defaulted",
+        "agentPreset.list",
+        json!({}),
+    )
+    .await;
+    assert!(relisted["result"]["value"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|mode| mode["id"] == "minimal" && mode["isDefault"] == true));
     let copied = browser_call(
         &client,
         &base,
@@ -3597,6 +3669,33 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         copied["result"],
         json!({"ok": true, "value": {"agentPreset": "working"}})
     );
+    let defaulted_custom = browser_call(
+        &client,
+        &base,
+        "default-working",
+        "settings.update",
+        json!({"ns":"agent-presets","patch":{"default":"working"}}),
+    )
+    .await;
+    assert_eq!(defaulted_custom["result"]["ok"], true);
+    let default_remove = browser_call(
+        &client,
+        &base,
+        "remove-default",
+        "agentPreset.remove",
+        json!({"agentPreset":"working"}),
+    )
+    .await;
+    assert_eq!(default_remove["result"]["error"]["code"], "mode-in-use");
+    let reset_default = browser_call(
+        &client,
+        &base,
+        "default-minimal-again",
+        "settings.update",
+        json!({"ns":"agent-presets","patch":{"default":"minimal"}}),
+    )
+    .await;
+    assert_eq!(reset_default["result"]["ok"], true);
     let read = browser_call(
         &client,
         &base,
@@ -3605,16 +3704,16 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"agentPreset":"working"}),
     )
     .await;
-    assert_eq!(
-        read["result"],
-        json!({"ok": true, "value": {
-            "agentPreset": "working",
-            "trust": "user",
-            "content": "[]\n",
-            "name": "Working",
-            "description": "system preset",
-        }})
-    );
+    assert_eq!(read["result"]["ok"], true);
+    let value = &read["result"]["value"];
+    assert_eq!(value["agentPreset"], "working");
+    assert_eq!(value["trust"], "user");
+    assert_eq!(value["name"], "Working");
+    assert_eq!(value["description"], "system mode");
+    assert!(value["content"]
+        .as_str()
+        .unwrap()
+        .contains("name = \"Working\""));
     let opened = browser_call(
         &client,
         &base,
@@ -3628,7 +3727,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"ok": true, "value": {"opened": true}})
     );
     assert_eq!(opened_paths.lock().len(), 1);
-    assert!(opened_paths.lock()[0].ends_with(".agent-presets/working"));
+    assert!(opened_paths.lock()[0].ends_with("data/modes/working/mode.toml"));
     let unknown = browser_call(
         &client,
         &base,
@@ -3637,7 +3736,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"agentPreset":"missing"}),
     )
     .await;
-    assert_eq!(unknown["result"]["error"]["code"], "agent-preset-not-found");
+    assert_eq!(unknown["result"]["error"]["code"], "mode-not-found");
     for (rpc_id, method, payload) in [
         (
             "read-extra",
@@ -3689,7 +3788,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"from":"base","agentPreset":"../escape"}),
     )
     .await;
-    assert_eq!(traversal["result"]["error"]["code"], "agent-preset-invalid");
+    assert_eq!(traversal["result"]["error"]["code"], "mode-invalid-id");
     let readonly = browser_call(
         &client,
         &base,
@@ -3698,10 +3797,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"agentPreset":"base"}),
     )
     .await;
-    assert_eq!(
-        readonly["result"]["error"]["code"],
-        "agent-preset-read-only"
-    );
+    assert_eq!(readonly["result"]["error"]["code"], "mode-read-only");
     let system_document = browser_call(
         &client,
         &base,
@@ -3710,10 +3806,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"agentPreset":"base"}),
     )
     .await;
-    assert_eq!(
-        system_document["result"]["error"]["code"],
-        "agent-preset-read-only"
-    );
+    assert_eq!(system_document["result"]["error"]["code"], "mode-read-only");
 
     let created = browser_call(
         &client,
@@ -3739,18 +3832,18 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
     let invalid = browser_call(
         &client,
         &base,
-        "invalid-preset",
+        "invalid-mode",
         "agentPreset.select",
-        json!({"sessionId":"preset-cold","agentPreset":"broken"}),
+        json!({"sessionId":"preset-cold","agentPreset":"missing"}),
     )
     .await;
-    assert_eq!(invalid["result"]["error"]["code"], "agent-preset-invalid");
+    assert_eq!(invalid["result"]["error"]["code"], "mode-not-found");
     assert!(!handle
         .events(SessionId::from("preset-cold"), 0)
         .await
         .unwrap()
         .iter()
-        .any(|event| event.event_type == "agent-preset/selected"));
+        .any(|event| event.event_type == "agent-mode/selected"));
     let selected = browser_call(
         &client,
         &base,
@@ -3768,9 +3861,24 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         .await
         .unwrap();
     assert!(selected_events.iter().any(|event| {
-        event.event_type == "agent-preset/selected"
-            && event.data == json!({"agentPreset": "working"})
+        event.event_type == "agent-mode/selected" && event.data == json!({"agentMode": "working"})
     }));
+    let skill = fixture.0.join(".agents/skills/demo");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nBody\n",
+    )
+    .unwrap();
+    let skills = browser_call(
+        &client,
+        &base,
+        "disabled-mode-skills",
+        "skill.list",
+        json!({"sessionId":"preset-cold"}),
+    )
+    .await;
+    assert_eq!(skills["result"]["value"]["skills"], json!([]));
     let listed_sessions =
         browser_call(&client, &base, "selected-list", "session.list", json!({})).await;
     assert_eq!(
@@ -3796,7 +3904,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         json!({"sessionId":"preset-cold","agentPreset":"working"}),
     )
     .await;
-    assert_eq!(locked["result"]["error"]["code"], "agent-preset-locked");
+    assert_eq!(locked["result"]["error"]["code"], "mode-selection-locked");
 
     server.shutdown().await.unwrap();
     runtime.shutdown().await.unwrap();
@@ -3809,7 +3917,7 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         .await
         .unwrap()
         .iter()
-        .any(|event| event.event_type == "agent-preset/selected"));
+        .any(|event| event.event_type == "agent-mode/selected"));
     let mut server = ApiServer::bind(Arc::new(handle)).await.unwrap();
     let base = format!("http://{}", server.local_addr());
     let removed = browser_call(
@@ -3828,10 +3936,10 @@ async fn browser_agent_preset_rpc_is_durable_and_truthful() {
         .unwrap();
     assert!(!runtime
         .handle()
-        .agent_preset_list()
+        .agent_mode_list()
         .await
         .unwrap()
         .iter()
-        .any(|preset| preset.id == "working"));
+        .any(|mode| mode.id == "working"));
     runtime.shutdown().await.unwrap();
 }

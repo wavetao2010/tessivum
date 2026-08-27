@@ -34,7 +34,7 @@ test('sends the exact Minimal Agent Mode prompt and schemas through the native a
     expect(history.ok).toBe(true)
     const events = history.value?.events ?? []
     const header = events.find(({ event }) => event.type === 'request/header')?.event.data.header
-    expect(header?.system).toBe('You are a helpful software engineer assistant.')
+    expect(header?.system).toBe('You are a helpful software engineer assistant.\n\nUse only bash and str_replace_editor to complete the task.')
     expect(header?.tools?.map(tool => tool.name)).toEqual(['bash', 'str_replace_editor'])
     expect(events.some(({ event }) => event.type === 'assistant/message' || event.type === 'assistant/chunk')).toBe(true)
     harness.assertClean()

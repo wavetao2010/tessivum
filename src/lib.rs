@@ -5,7 +5,6 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod agent_mode;
-pub mod agent_preset;
 pub mod api;
 pub mod approval;
 pub mod attachments;
@@ -18,7 +17,6 @@ pub mod compaction;
 pub mod compatible_api;
 pub mod composition;
 pub mod credentials;
-pub mod dynamic_cordis;
 pub mod error;
 pub mod filesystem;
 pub mod frontend;

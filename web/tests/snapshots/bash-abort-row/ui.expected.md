@@ -1,6 +1,8 @@
 - banner:
   - navigation "Session hierarchy":
     - 'button "Run two shell commands: wait" [disabled]'
+  - img
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

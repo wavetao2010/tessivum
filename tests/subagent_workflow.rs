@@ -1065,7 +1065,10 @@ async fn nonworkspace_service_inherits_parent_mode_and_rejects_cwd_override() {
 
     let mut explicit_request = request("explicit-mode-child");
     explicit_request.agent_mode = Some(AgentModeId::composition());
-    let (_, explicit_child) = parent.start(explicit_request, cancellation()).await.unwrap();
+    let (_, explicit_child) = parent
+        .start(explicit_request, cancellation())
+        .await
+        .unwrap();
     assert_eq!(
         harness
             .persistence

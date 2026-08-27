@@ -11,6 +11,8 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tessivum_core::{
     ActivationState, ContextHandle, Entry, EntryId, EntryOptions, EntryTree, FiberState,
     LoaderRuntime, PackageResolver, ResolvedPackage, RuntimeHandle, RuntimeKind, Scope,
@@ -234,8 +236,9 @@ struct DescriptorRecord {
 }
 
 struct ActiveComposition {
-    handle: Box<dyn RuntimeHandle>,
+    handle: Option<Box<dyn RuntimeHandle>>,
     scope: Scope,
+    scope_finished: bool,
 }
 
 impl CompositionRegistry {
@@ -291,40 +294,78 @@ impl CompositionRegistry {
         );
         Ok(())
     }
+    /// Reclaims an attachment left by a failed session construction, then attaches the retry.
+    pub async fn attach_session_replacing_stale(
+        &self,
+        owner: SessionId,
+        context: ContextHandle,
+    ) -> Result<(), TessivumError> {
+        let error = match self.attach_session(owner.clone(), context.clone()) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.code == "COMPOSITION_SESSION_ALREADY_ATTACHED" => error,
+            Err(error) => return Err(error),
+        };
+        let stale = self.session(&owner)?;
+        self.dispose_session(&owner).await.map_err(|cleanup| {
+            composition_error(
+                "COMPOSITION_STALE_SESSION_DISPOSE_FAILED",
+                "a stale composition session could not be reclaimed",
+                json!({"owner": owner, "attach": error.to_string(), "cleanup": cleanup.to_string()}),
+            )
+        })?;
+        stale.context.scope().dispose().await.map_err(|cleanup| {
+            composition_error(
+                "COMPOSITION_STALE_SESSION_DISPOSE_FAILED",
+                "a stale composition session scope could not be reclaimed",
+                json!({"owner": owner, "attach": error.to_string(), "cleanup": cleanup.to_string()}),
+            )
+        })?;
+        self.attach_session(owner, context)
+    }
 
     /// Disposes every live entry before removing the session's registry view.
     pub async fn dispose_session(&self, owner: &SessionId) -> Result<(), TessivumError> {
-        let session = lock(&self.inner.sessions).remove(owner).ok_or_else(|| {
-            composition_error(
-                "COMPOSITION_SESSION_UNAVAILABLE",
-                "the composition registry is not attached to this session",
-                json!({"owner": owner}),
-            )
-        })?;
+        let session = self.session(owner)?;
         let mut descriptors = session.descriptors.lock().await;
         let mut failures = Vec::new();
-        for record in descriptors.values_mut() {
-            if let Some(mut active) = record.active.take() {
-                if let Err(error) = active.handle.dispose().await {
-                    failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
-                }
-                if let Err(error) = active.scope.dispose().await {
-                    failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
-                }
-                record.lifecycle = CompositionLifecycle::Validated;
-                record.fiber_state = Some(FiberState::Disposed);
-                record.last_scope_state = Some(FiberState::Disposed);
+        for (id, record) in descriptors.iter_mut() {
+            if record.active.is_none() {
+                continue;
             }
+            let entry_failures = dispose_active(record).await;
+            if entry_failures.is_empty() {
+                continue;
+            }
+            let summary = entry_failures.join("; ");
+            let error = composition_error(
+                "COMPOSITION_STOP_FAILED",
+                "one or more composition resources could not be disposed cleanly",
+                json!({
+                    "id": id,
+                    "runtime": record.descriptor.entry.runtime.as_str(),
+                    "package": bounded(&record.descriptor.entry.package, MAX_COMPOSITION_PACKAGE_BYTES),
+                    "failures": entry_failures,
+                }),
+            );
+            failures.push(format!("{id}: {summary}"));
+            record.last_failure = Some(failure(&error));
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(composition_error(
+        drop(descriptors);
+        if !failures.is_empty() {
+            return Err(composition_error(
                 "COMPOSITION_SESSION_DISPOSE_FAILED",
                 "one or more composition resources could not be disposed cleanly",
                 json!({"owner": owner, "failures": failures}),
-            ))
+            ));
         }
+        let mut sessions = lock(&self.inner.sessions);
+        if sessions
+            .get(owner)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            sessions.remove(owner);
+        }
+        Ok(())
     }
 
     pub fn register_tools(&self, tools: &ToolRuntime) -> Result<CompositionTools, TessivumError> {
@@ -434,9 +475,9 @@ impl CompositionRegistry {
         let entry = match descriptors.get(id) {
             Some(record) => {
                 require_transition(record, "validate", CompositionLifecycle::Draft)?;
-                record.entry.clone()
+                runtime_entry(owner, &record.entry)
             }
-            None => return Err(composition_not_found(id)),
+            None => return Err(Self::composition_not_found(id)),
         };
         let result = self.validate_entry(&session.context, &entry).await;
         let record = descriptors
@@ -470,9 +511,9 @@ impl CompositionRegistry {
         let entry = match descriptors.get(id) {
             Some(record) => {
                 require_transition(record, "run", CompositionLifecycle::Validated)?;
-                record.entry.clone()
+                runtime_entry(owner, &record.entry)
             }
-            None => return Err(composition_not_found(id)),
+            None => return Err(Self::composition_not_found(id)),
         };
         let (runtime, package) = match self.resolve_entry(&entry).await {
             Ok(prepared) => prepared,
@@ -551,7 +592,11 @@ impl CompositionRegistry {
         record.fiber_state = Some(FiberState::Active);
         record.last_scope_state = Some(scope.state());
         record.last_failure = None;
-        record.active = Some(ActiveComposition { handle, scope });
+        record.active = Some(ActiveComposition {
+            handle: Some(handle),
+            scope,
+            scope_finished: false,
+        });
         Ok(snapshot(owner, record))
     }
 
@@ -565,7 +610,7 @@ impl CompositionRegistry {
         let session = self.session(owner)?;
         let mut descriptors = session.descriptors.lock().await;
         let Some(record) = descriptors.get_mut(id) else {
-            return Err(composition_not_found(id));
+            return Err(Self::composition_not_found(id));
         };
         if record.lifecycle == CompositionLifecycle::Validated {
             return Ok(snapshot(owner, record));
@@ -573,22 +618,8 @@ impl CompositionRegistry {
         require_transition(record, "stop", CompositionLifecycle::Active)?;
         let runtime = record.descriptor.entry.runtime;
         let package = record.descriptor.entry.package.clone();
-        let mut active = record
-            .active
-            .take()
-            .expect("active lifecycle always retains its Core runtime handle");
-        let mut failures = Vec::new();
-        if let Err(error) = active.handle.dispose().await {
-            failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
-        }
-        if let Err(error) = active.scope.dispose().await {
-            failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
-        }
-        record.lifecycle = CompositionLifecycle::Validated;
-        record.fiber_state = Some(FiberState::Disposed);
-        record.last_scope_state = Some(active.scope.state());
+        let failures = dispose_active(record).await;
         if failures.is_empty() {
-            record.last_failure = None;
             Ok(snapshot(owner, record))
         } else {
             let error = composition_error(
@@ -619,7 +650,7 @@ impl CompositionRegistry {
         let rows = match id {
             Some(id) => match descriptors.get(id) {
                 Some(record) => vec![snapshot(owner, record)],
-                None => return Err(composition_not_found(id)),
+                None => return Err(Self::composition_not_found(id)),
             },
             None => descriptors
                 .values()
@@ -754,6 +785,48 @@ impl CompositionRegistry {
             json!({"id": bounded(id, MAX_COMPOSITION_ID_BYTES)}),
         )
     }
+}
+
+fn runtime_entry(owner: &SessionId, entry: &Entry) -> Entry {
+    let mut runtime = entry.clone();
+    runtime.options.id = EntryId::new(format!(
+        "composition-{:x}-{}",
+        Sha256::digest(owner.as_str().as_bytes()),
+        entry.options.id.as_str(),
+    ))
+    .expect("hashed session namespace and validated descriptor id form a Core identifier");
+    runtime
+}
+
+async fn dispose_active(record: &mut DescriptorRecord) -> Vec<String> {
+    let mut active = record
+        .active
+        .take()
+        .expect("active lifecycle always retains its Core runtime handle or terminal scope");
+    let mut failures = Vec::new();
+    if let Some(handle) = active.handle.as_mut() {
+        match handle.dispose().await {
+            Ok(()) => active.handle = None,
+            Err(error) => failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES)),
+        }
+    }
+    if failures.is_empty() && !active.scope_finished {
+        let result = active.scope.dispose().await;
+        // Core Scope disposers are one-shot: an error is terminal and has no retained ownership.
+        active.scope_finished = true;
+        if let Err(error) = result {
+            failures.push(bounded(&error.to_string(), MAX_FAILURE_TEXT_BYTES));
+        }
+    }
+    record.last_scope_state = Some(active.scope.state());
+    if failures.is_empty() && active.handle.is_none() && active.scope_finished {
+        record.lifecycle = CompositionLifecycle::Validated;
+        record.fiber_state = Some(FiberState::Disposed);
+        record.last_failure = None;
+    } else {
+        record.active = Some(active);
+    }
+    failures
 }
 
 #[derive(Clone, Copy)]
@@ -1099,7 +1172,7 @@ fn define_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
 
@@ -1129,10 +1202,20 @@ mod tests {
         }
     }
 
-
     struct FixturePlugin {
         live: Arc<AtomicUsize>,
         fail_start: bool,
+        fail_stop: Arc<AtomicBool>,
+        fail_scope: bool,
+        active: bool,
+    }
+
+    impl Drop for FixturePlugin {
+        fn drop(&mut self) {
+            if self.active {
+                self.live.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
     }
 
     impl NativePlugin for FixturePlugin {
@@ -1147,12 +1230,33 @@ mod tests {
 
         fn start<'a>(
             &'a mut self,
-            _context: ContextHandle,
+            context: ContextHandle,
             _config: &'a Value,
         ) -> NativePluginFuture<'a> {
+            self.active = true;
             let live = Arc::clone(&self.live);
             let fail_start = self.fail_start;
+            let scope_registration = if self.fail_scope {
+                context
+                    .scope()
+                    .add_effect(
+                        "fixture scope failure",
+                        Box::new(|| {
+                            Box::pin(async {
+                                Err(tessivum_core::CoreError::Plugin {
+                                    phase: "dispose",
+                                    message: "fixture scope failure".into(),
+                                })
+                            })
+                        }),
+                    )
+                    .map(|_| ())
+                    .map_err(NativePluginError::from)
+            } else {
+                Ok(())
+            };
             Box::pin(async move {
+                scope_registration?;
                 live.fetch_add(1, Ordering::AcqRel);
                 if fail_start {
                     return Err(NativePluginError::plugin(
@@ -1174,7 +1278,17 @@ mod tests {
 
         fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
             let live = Arc::clone(&self.live);
+            let failed = self.fail_stop.load(Ordering::Acquire);
+            if !failed {
+                self.active = false;
+            }
             Box::pin(async move {
+                if failed {
+                    return Err(NativePluginError::plugin(
+                        tessivum_core::NativePluginPhase::Stop,
+                        "fixture stop failure",
+                    ));
+                }
                 live.fetch_sub(1, Ordering::AcqRel);
                 Ok(())
             })
@@ -1189,6 +1303,23 @@ mod tests {
         live: Arc<AtomicUsize>,
         fail_start: bool,
     ) -> (CompositionRegistry, Arc<AtomicUsize>) {
+        registry_with_failures(live, fail_start, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn registry_with_failures(
+        live: Arc<AtomicUsize>,
+        fail_start: bool,
+        fail_stop: Arc<AtomicBool>,
+    ) -> (CompositionRegistry, Arc<AtomicUsize>) {
+        registry_with_cleanup_failures(live, fail_start, fail_stop, false)
+    }
+
+    fn registry_with_cleanup_failures(
+        live: Arc<AtomicUsize>,
+        fail_start: bool,
+        fail_stop: Arc<AtomicBool>,
+        fail_scope: bool,
+    ) -> (CompositionRegistry, Arc<AtomicUsize>) {
         let instantiated = Arc::new(AtomicUsize::new(0));
         let factory_calls = Arc::clone(&instantiated);
         let mut native = NativePluginRuntime::new();
@@ -1198,6 +1329,9 @@ mod tests {
                 FixturePlugin {
                     live: Arc::clone(&live),
                     fail_start,
+                    fail_stop: Arc::clone(&fail_stop),
+                    fail_scope,
+                    active: false,
                 }
             })
             .unwrap();
@@ -1234,6 +1368,39 @@ mod tests {
         let mut descriptor = descriptor("fixture-entry");
         descriptor.config = json!({"script": "opaque registered-plugin config"});
         descriptor.validate().unwrap();
+    }
+    #[tokio::test]
+    async fn stale_session_attachment_is_disposed_before_retry() {
+        let registry = CompositionRegistry::new(
+            Arc::new(Resolver),
+            std::iter::empty::<Arc<dyn LoaderRuntime>>(),
+        )
+        .unwrap();
+        let owner = SessionId::from("stale-owner");
+        let stale = ContextHandle::root();
+        let stale_disposed = Arc::new(AtomicBool::new(false));
+        let disposed = Arc::clone(&stale_disposed);
+        stale
+            .scope()
+            .add_effect(
+                "stale session probe",
+                Box::new(move || {
+                    disposed.store(true, Ordering::Release);
+                    Box::pin(async { Ok(()) })
+                }),
+            )
+            .unwrap();
+        registry.attach_session(owner.clone(), stale).unwrap();
+
+        let replacement = ContextHandle::root();
+        registry
+            .attach_session_replacing_stale(owner.clone(), replacement.clone())
+            .await
+            .unwrap();
+
+        assert!(stale_disposed.load(Ordering::Acquire));
+        registry.dispose_session(&owner).await.unwrap();
+        replacement.scope().dispose().await.unwrap();
     }
 
     #[tokio::test]
@@ -1379,6 +1546,133 @@ mod tests {
             Some("COMPOSITION_START_FAILED")
         );
         root.scope().dispose().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_stop_retains_ownership_until_retry_succeeds() {
+        let root = ContextHandle::root();
+        let live = Arc::new(AtomicUsize::new(0));
+        let fail_stop = Arc::new(AtomicBool::new(true));
+        let registry = registry_with_failures(Arc::clone(&live), false, Arc::clone(&fail_stop)).0;
+        let owner = SessionId::from("owner");
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
+        registry
+            .define(&owner, descriptor("fixture-entry"))
+            .await
+            .unwrap();
+        registry.validate(&owner, "fixture-entry").await.unwrap();
+        registry.run(&owner, "fixture-entry").await.unwrap();
+
+        assert_eq!(
+            registry
+                .stop(&owner, "fixture-entry")
+                .await
+                .unwrap_err()
+                .code,
+            "COMPOSITION_STOP_FAILED"
+        );
+        assert_eq!(live.load(Ordering::Acquire), 0);
+        let failed = registry
+            .inspect(&owner, Some("fixture-entry"))
+            .await
+            .unwrap()
+            .descriptors
+            .pop()
+            .unwrap();
+        assert_eq!(failed.lifecycle, CompositionLifecycle::Active);
+        assert_eq!(
+            registry
+                .run(&owner, "fixture-entry")
+                .await
+                .unwrap_err()
+                .code,
+            "COMPOSITION_INVALID_TRANSITION"
+        );
+
+        fail_stop.store(false, Ordering::Release);
+        let stopped = registry.stop(&owner, "fixture-entry").await.unwrap();
+        assert_eq!(stopped.lifecycle, CompositionLifecycle::Validated);
+        assert_eq!(live.load(Ordering::Acquire), 0);
+        registry.run(&owner, "fixture-entry").await.unwrap();
+        fail_stop.store(true, Ordering::Release);
+        assert_eq!(
+            registry.dispose_session(&owner).await.unwrap_err().code,
+            "COMPOSITION_SESSION_DISPOSE_FAILED"
+        );
+        assert_eq!(
+            registry
+                .inspect(&owner, Some("fixture-entry"))
+                .await
+                .unwrap()
+                .descriptors[0]
+                .lifecycle,
+            CompositionLifecycle::Active
+        );
+        fail_stop.store(false, Ordering::Release);
+        registry.dispose_session(&owner).await.unwrap();
+        root.scope().dispose().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_scope_failures_release_the_entry_after_each_phase_is_acknowledged() {
+        let root = ContextHandle::root();
+        let live = Arc::new(AtomicUsize::new(0));
+        let registry = registry_with_cleanup_failures(
+            Arc::clone(&live),
+            false,
+            Arc::new(AtomicBool::new(false)),
+            true,
+        )
+        .0;
+        let owner = SessionId::from("owner");
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
+        registry
+            .define(&owner, descriptor("fixture-entry"))
+            .await
+            .unwrap();
+        registry.validate(&owner, "fixture-entry").await.unwrap();
+        registry.run(&owner, "fixture-entry").await.unwrap();
+
+        assert_eq!(
+            registry
+                .stop(&owner, "fixture-entry")
+                .await
+                .unwrap_err()
+                .code,
+            "COMPOSITION_STOP_FAILED"
+        );
+        assert_eq!(
+            registry
+                .inspect(&owner, Some("fixture-entry"))
+                .await
+                .unwrap()
+                .descriptors[0]
+                .lifecycle,
+            CompositionLifecycle::Active
+        );
+        assert_eq!(
+            registry
+                .stop(&owner, "fixture-entry")
+                .await
+                .unwrap_err()
+                .code,
+            "COMPOSITION_STOP_FAILED"
+        );
+        assert_eq!(
+            registry
+                .stop(&owner, "fixture-entry")
+                .await
+                .unwrap()
+                .lifecycle,
+            CompositionLifecycle::Validated
+        );
+        assert_eq!(live.load(Ordering::Acquire), 0);
+        registry.dispose_session(&owner).await.unwrap();
+        assert!(root.scope().dispose().await.is_err());
     }
 
     #[tokio::test]

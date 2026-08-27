@@ -199,13 +199,9 @@ async fn run_headless_validated(
         let registry = AgentRegistry::new(sessions.clone());
         scope.registry = Some(registry.clone());
         scope.registry_service = Some(registry.clone().publish(&scope.root)?);
-        scope.factory_registration = Some(registry.register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            prompt,
-            tools,
-            modes,
-            config.agent_mode.clone(),
-        )))?);
+        scope.factory_registration = Some(registry.register_factory(Arc::new(
+            AgentLoopFactory::new(llm, prompt, tools, modes, config.agent_mode.clone()),
+        ))?);
 
         let options = AgentOptions {
             provider: config.provider.clone(),

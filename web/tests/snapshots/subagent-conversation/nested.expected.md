@@ -5,6 +5,8 @@
     - button "event-sourcing researcher"
     - text: /
     - button "example editor" [disabled]
+  - img
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

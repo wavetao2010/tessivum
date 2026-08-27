@@ -50,7 +50,7 @@ use tokio::{
 #[cfg(test)]
 use crate::protocol::SurfaceOp;
 use crate::{
-    agent_preset::composition_contains_plugin,
+    agent_mode::{AgentModeId, AgentModeTrust},
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
     attachments::{AttachmentId, AttachmentLimits, AttachmentRef},
     bridge::{
@@ -881,6 +881,11 @@ fn compat_host_error(error: TessivumError) -> CompatError {
             message: error.message,
             details: error.details,
         },
+        "CORDIS_UNAVAILABLE" => CompatError {
+            code: "cordis-unavailable".into(),
+            message: error.message,
+            details: error.details,
+        },
         "queue-item-not-found"
         | "steer-unavailable"
         | "subagent-ownership"
@@ -904,9 +909,9 @@ fn compat_preset_error(error: TessivumError) -> CompatError {
     if error.code == "CANCELLED" {
         return compat_host_error(error);
     }
-    if error.code.starts_with("agent-preset-") {
+    if error.code.starts_with("AGENT_MODE_") || error.code.starts_with("MODE_") {
         return CompatError {
-            code: error.code,
+            code: error.code.to_ascii_lowercase().replace('_', "-"),
             message: error.message,
             details: error.details,
         };
@@ -2674,18 +2679,15 @@ async fn compat_dispatch(
                     message: "session was not found".into(),
                     details: json!({"sessionId": args.session_id}),
                 })?;
-            let supports_filesystem = match session.agent_preset {
-                Some(preset) => match state.host.agent_preset_read(preset).await {
-                    Ok(document) => composition_contains_plugin(
-                        &document.content,
-                        "@deepseek-ai/dsh-skill-filesystem",
-                    )
-                    .unwrap_or(false),
-                    Err(_) => false,
-                },
-                None => true,
-            };
-            let Some(cwd) = session.cwd.filter(|_| supports_filesystem) else {
+            if !state
+                .host
+                .agent_mode_skills_enabled(session.agent_mode.map(AgentModeId::into_string))
+                .await
+                .map_err(compat_host_error)?
+            {
+                return Ok(json!({"skills": []}));
+            }
+            let Some(cwd) = session.cwd else {
                 return Ok(json!({"skills": []}));
             };
             let root = std::path::PathBuf::from(cwd).join(".agents/skills");
@@ -2718,23 +2720,28 @@ async fn compat_dispatch(
             let _: CompatEmptyPayload = compat_decode(payload)?;
             let presets = state
                 .host
-                .agent_preset_list()
+                .agent_mode_list()
                 .await
                 .map_err(compat_preset_error)?;
-            let (authorable, has_document) = state.host.agent_preset_capabilities();
+            let (authorable, has_document) = state.host.agent_mode_capabilities();
             Ok(json!({"presets": presets, "authorable": authorable, "hasDocument": has_document}))
         }
         "agentPreset.read" => {
             let args: CompatAgentPresetRef = compat_decode(payload)?;
             compat_require_nonblank("agentPreset", &args.agent_preset)?;
-            serde_json::to_value(
-                state
-                    .host
-                    .agent_preset_read(args.agent_preset)
-                    .await
-                    .map_err(compat_preset_error)?,
-            )
-            .map_err(|error| CompatError::internal(error.to_string()))
+            let document = state
+                .host
+                .agent_mode_read(args.agent_preset)
+                .await
+                .map_err(compat_preset_error)?;
+            Ok(json!({
+                "agentPreset": document.id,
+                "trust": if document.trust == AgentModeTrust::User { "user" } else { "system" },
+                "content": document.content,
+                "name": document.name,
+                "description": document.description,
+                "builtIn": document.built_in,
+            }))
         }
         "agentPreset.copy" => {
             let args: CompatAgentPresetCopy = compat_decode(payload)?;
@@ -2742,7 +2749,7 @@ async fn compat_dispatch(
             compat_require_nonblank("agentPreset", &args.agent_preset)?;
             let agent_preset = state
                 .host
-                .agent_preset_copy(args.from, args.agent_preset, args.name)
+                .agent_mode_copy(args.from, args.agent_preset, args.name)
                 .await
                 .map_err(compat_preset_error)?;
             Ok(json!({"agentPreset": agent_preset}))
@@ -2752,7 +2759,7 @@ async fn compat_dispatch(
             compat_require_nonblank("agentPreset", &args.agent_preset)?;
             state
                 .host
-                .agent_preset_remove(args.agent_preset)
+                .agent_mode_remove(args.agent_preset)
                 .await
                 .map_err(compat_preset_error)?;
             Ok(json!({}))
@@ -2763,7 +2770,7 @@ async fn compat_dispatch(
             serde_json::to_value(
                 state
                     .host
-                    .agent_preset_open_document(args.agent_preset)
+                    .agent_mode_open_document(args.agent_preset)
                     .await
                     .map_err(compat_preset_error)?,
             )
@@ -2776,7 +2783,7 @@ async fn compat_dispatch(
             let session_id = args.session_id.clone();
             let agent_preset = state
                 .host
-                .agent_preset_select(args.session_id, args.agent_preset)
+                .agent_mode_select(args.session_id, args.agent_preset)
                 .await
                 .map_err(compat_preset_error)?;
             if let Some(session) = compat_data(&state.compat).sessions.get_mut(&session_id) {
@@ -3781,7 +3788,7 @@ async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
     data.sessions.retain(|id, _| live_ids.contains(id));
     for session in sessions {
         let projection = projections.remove(&session.session_id).flatten();
-        let agent_preset = session.agent_preset.clone();
+        let agent_preset = session.agent_mode.clone().map(|mode| mode.into_string());
         let entry = data
             .sessions
             .entry(session.session_id.clone())
@@ -3933,7 +3940,7 @@ async fn compat_session_create(
             cwd: persisted.cwd,
             parent_session_id: persisted.parent_session,
             origin: persisted.origin,
-            agent_preset: persisted.agent_preset,
+            agent_preset: persisted.agent_mode.map(|mode| mode.into_string()),
             projections: None,
         };
         compat_data(&state.compat)
@@ -3998,7 +4005,7 @@ async fn compat_session_create(
         cwd: persisted.cwd.or_else(|| Some(requested_cwd.1.clone())),
         parent_session_id: persisted.parent_session,
         origin: persisted.origin,
-        agent_preset: persisted.agent_preset,
+        agent_preset: persisted.agent_mode.map(|mode| mode.into_string()),
         projections: None,
     };
     compat_data(&state.compat)

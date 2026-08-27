@@ -127,7 +127,9 @@ struct SessionHeaderWire {
     seed_length: Option<u64>,
     origin: Option<SessionOrigin>,
     delegation_depth: Option<u64>,
+    #[serde(alias = "agent_mode")]
     agent_mode: Option<AgentModeId>,
+    #[serde(alias = "agent_preset")]
     agent_preset: Option<String>,
 }
 

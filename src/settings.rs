@@ -761,9 +761,14 @@ impl YamlSettingsProvider {
             options.mode(0o600);
         }
         match options.open(&self.path).await {
-            Ok(file) => file.sync_all().await.map_err(|error| {
-                SettingsError::Persistence(format!("sync settings document: {error}"))
-            })?,
+            Ok(mut file) => {
+                file.write_all(b"{}\n").await.map_err(|error| {
+                    SettingsError::Persistence(format!("initialize settings document: {error}"))
+                })?;
+                file.sync_all().await.map_err(|error| {
+                    SettingsError::Persistence(format!("sync settings document: {error}"))
+                })?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(SettingsError::Persistence(format!(

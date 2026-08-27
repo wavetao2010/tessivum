@@ -15,9 +15,11 @@ function normalize(snapshot: string): string {
   return snapshot
     .replaceAll(modeRoot, '{{modeRoot}}')
     .split('\n')
-    .map(line => line.includes('alert: "无法加载 Agent 模式。')
-      ? `${line.slice(0, line.indexOf('alert:'))}alert: "{{modeError}}"`
-      : line)
+    .map(line => line.includes('- code: {{modeRoot}}/')
+      ? `${line.replace('- code: ', "- code: '")}'`
+      : line.includes('alert: "无法加载 Agent 模式。')
+        ? `${line.slice(0, line.indexOf('alert:'))}alert: "{{modeError}}"`
+        : line)
     .join('\n')
     .trim()
 }
@@ -80,8 +82,10 @@ test('Agent Mode authoring copies, edits, copies again, and deletes Host-owned m
   expect(copied).toContain('id = "my-copy"')
   expect(copied).toContain('name = "我的模式"')
 
-  for (const [name, id] of [['我的模式', 'my-mode'], ['my-copy', 'my-copy']] as const) {
-    await settings.getByRole('button', { name: `删除: ${name}` }).click()
+  for (const id of ['my-mode', 'my-copy']) {
+    const idCode = harness.page.locator('code').filter({ hasText: new RegExp(`^${id}$`) })
+    const row = settings.getByRole('listitem').filter({ has: idCode })
+    await row.getByRole('button', { name: /^删除:/ }).click()
     const confirm = harness.page.getByRole('dialog', { name: '删除该 Agent 模式？' })
     await confirm.getByRole('button', { name: '删除', exact: true }).click()
     await confirm.waitFor({ state: 'detached' })

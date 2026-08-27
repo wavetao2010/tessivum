@@ -10,13 +10,18 @@ use sha2::{Digest, Sha256};
 use tessivum::{
     agent::AgentRegistry,
     bridge::BridgeServices,
-    legacy::LegacyProfile,
+    composition::{
+        CompositionDescriptor, CompositionEntryReference, CompositionRegistry, CompositionRuntime,
+    },
+    legacy::{LegacyProfile, ProductPackageResolver},
     llm::LlmRuntime,
     plugins::PluginRouter,
     session::{MemorySessionPersistence, SessionStore},
     system_prompt::SystemPrompt,
     tools::ToolRuntime,
+    SessionId,
 };
+use tessivum_core::{ContextHandle, LoaderRuntime, PackageResolver};
 use tessivum_node_bridge::{ClientConfig, FrameKind, HostCommand};
 
 const TIMER_PACKAGE_HASH: &str = "ecb8ac09dfd326400c1b9893415cbc92077ce8409b0cb8cdcd45dc3ac9f1b0bc";
@@ -339,4 +344,78 @@ async fn vendored_timer_loads_unchanged_through_the_legacy_profile_and_reaps_aft
         "ACTIVE"
     );
     shutdown.expect("profile cleans up the active generation after host disconnect");
+}
+
+#[tokio::test]
+async fn legacy_compositions_with_the_same_descriptor_id_are_session_isolated() {
+    let core = core_root();
+    let vendor = vendor_root();
+    let package = TemporaryTimerPackage::new(&vendor);
+    let noop = package.root.join("noop");
+    fs::create_dir_all(&noop).unwrap();
+    fs::write(
+        noop.join("package.json"),
+        r#"{"name":"legacy-composition-noop","type":"module","main":"index.js"}"#,
+    )
+    .unwrap();
+    fs::write(noop.join("index.js"), "export default function noop() {}\n").unwrap();
+    let command = HostCommand::new("bun")
+        .arg("run")
+        .arg(core.join("node/compat-host/src/index.ts"))
+        .current_dir(core.join("node/compat-host"))
+        .env("CORDIS_VENDOR_ROOT", &vendor);
+    let profile = LegacyProfile::new(
+        command,
+        ClientConfig {
+            handshake_timeout: Duration::from_secs(30),
+            ..ClientConfig::default()
+        },
+        bridge_services(),
+    )
+    .unwrap();
+    profile.start().unwrap();
+    let runtime: Arc<dyn LoaderRuntime> = Arc::new(profile.runtime().unwrap());
+    let resolver: Arc<dyn PackageResolver> = Arc::new(
+        ProductPackageResolver::new()
+            .confine_to(&package.root)
+            .unwrap(),
+    );
+    let registry = CompositionRegistry::new(resolver, [runtime]).unwrap();
+    let roots = [ContextHandle::root(), ContextHandle::root()];
+    let owners = [SessionId::from("left"), SessionId::from("right")];
+    let source = noop.to_string_lossy().into_owned();
+
+    for (owner, root) in owners.iter().zip(&roots) {
+        registry
+            .attach_session(owner.clone(), root.clone())
+            .unwrap();
+        registry
+            .define(
+                owner,
+                CompositionDescriptor {
+                    id: "shared-plugin".into(),
+                    entry: CompositionEntryReference {
+                        runtime: CompositionRuntime::Legacy,
+                        package: source.clone(),
+                    },
+                    config: json!({}),
+                },
+            )
+            .await
+            .unwrap();
+        registry.validate(owner, "shared-plugin").await.unwrap();
+    }
+    for owner in &owners {
+        let running = registry.run(owner, "shared-plugin").await.unwrap();
+        assert_eq!(running.descriptor.id, "shared-plugin");
+        assert_eq!(running.core.entry.options.id.as_str(), "shared-plugin");
+    }
+    for owner in &owners {
+        registry.stop(owner, "shared-plugin").await.unwrap();
+        registry.dispose_session(owner).await.unwrap();
+    }
+    for root in roots {
+        root.scope().dispose().await.unwrap();
+    }
+    profile.shutdown().await.unwrap();
 }

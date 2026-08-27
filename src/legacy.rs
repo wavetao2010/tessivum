@@ -655,10 +655,15 @@ fn read_wasm_artifact(path: &Path) -> Result<Vec<u8>, LoaderError> {
 /// closes the usual package-path escape hatch: symlinks are resolved before the
 /// containment check, so `../` and an in-root symlink cannot select a package
 /// outside the configured product tree.
+type PackageLocationAllowlist = Arc<dyn Fn(&str, &Path, RuntimeKind) -> bool + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ProductPackageResolver {
     router: Arc<PluginRouter>,
     root: Option<PathBuf>,
+    native_packages: Arc<BTreeSet<String>>,
+    legacy_node_modules: Option<PathBuf>,
+    allow_location: Option<PackageLocationAllowlist>,
 }
 
 impl Default for ProductPackageResolver {
@@ -672,6 +677,9 @@ impl ProductPackageResolver {
         Self {
             router: Arc::new(PluginRouter::new()),
             root: std::fs::canonicalize(".").ok(),
+            native_packages: Arc::new(BTreeSet::new()),
+            legacy_node_modules: None,
+            allow_location: None,
         }
     }
 
@@ -679,6 +687,9 @@ impl ProductPackageResolver {
         Self {
             router: Arc::new(router),
             root: std::fs::canonicalize(".").ok(),
+            native_packages: Arc::new(BTreeSet::new()),
+            legacy_node_modules: None,
+            allow_location: None,
         }
     }
 
@@ -697,6 +708,23 @@ impl ProductPackageResolver {
         self.root = Some(root);
         Ok(self)
     }
+    pub fn with_native_packages(mut self, packages: impl IntoIterator<Item = String>) -> Self {
+        self.native_packages = Arc::new(packages.into_iter().collect());
+        self
+    }
+
+    pub fn with_legacy_node_modules(mut self, root: impl Into<PathBuf>) -> Self {
+        self.legacy_node_modules = Some(root.into());
+        self
+    }
+
+    pub fn allow_location_with(
+        mut self,
+        allow: impl Fn(&str, &Path, RuntimeKind) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.allow_location = Some(Arc::new(allow));
+        self
+    }
 
     pub fn inspect(
         &self,
@@ -711,10 +739,30 @@ impl ProductPackageResolver {
         specifier: &str,
         runtime: RuntimeKind,
     ) -> Result<ResolvedPackage, LoaderError> {
-        let package = self
-            .router
-            .package(Path::new(specifier))
-            .map_err(router_error)?;
+        if runtime == RuntimeKind::Native {
+            if !self.native_packages.contains(specifier) {
+                return Err(LoaderError::Validation(format!(
+                    "no native plugin factory is registered for {specifier}"
+                )));
+            }
+            return Ok(ResolvedPackage {
+                specifier: specifier.into(),
+                location: specifier.into(),
+            });
+        }
+
+        let legacy_package = (runtime == RuntimeKind::LegacyNode)
+            .then(|| {
+                self.legacy_node_modules
+                    .as_ref()
+                    .zip(legacy_package_relative(specifier))
+                    .map(|(root, relative)| root.join(relative))
+            })
+            .flatten();
+        let package_path = legacy_package
+            .as_deref()
+            .unwrap_or_else(|| Path::new(specifier));
+        let package = self.router.package(package_path).map_err(router_error)?;
         let route = self
             .router
             .route(&package, Some(plugin_runtime(runtime)))
@@ -735,10 +783,16 @@ impl ProductPackageResolver {
                 "package {specifier:?} resolved to a non-absolute location {location:?}"
             )));
         }
-        let root = self.root.as_ref().ok_or_else(|| {
-            LoaderError::Validation("could not establish a canonical package root".into())
-        })?;
-        if !location.starts_with(root) {
+        let inside_root = self
+            .root
+            .as_ref()
+            .is_some_and(|root| location.starts_with(root));
+        let explicitly_allowed = legacy_package.is_some()
+            || self
+                .allow_location
+                .as_ref()
+                .is_some_and(|allow| allow(specifier, &location, runtime));
+        if !inside_root && !explicitly_allowed {
             return Err(LoaderError::Validation(format!(
                 "package {specifier:?} resolves outside the configured package root"
             )));
@@ -747,6 +801,26 @@ impl ProductPackageResolver {
             specifier: specifier.into(),
             location: location.to_string_lossy().into_owned(),
         })
+    }
+}
+
+fn legacy_package_relative(specifier: &str) -> Option<PathBuf> {
+    let segment = |value: &str| {
+        !value.is_empty()
+            && value != "."
+            && value != ".."
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~')
+            })
+    };
+    if let Some(scoped) = specifier.strip_prefix('@') {
+        let mut parts = scoped.split('/');
+        let scope = parts.next()?;
+        let package = parts.next()?;
+        (segment(scope) && segment(package) && parts.next().is_none())
+            .then(|| PathBuf::from(format!("@{scope}")).join(package))
+    } else {
+        segment(specifier).then(|| PathBuf::from(specifier))
     }
 }
 
@@ -800,4 +874,76 @@ fn wasm_loader_error(error: WasmPluginError) -> LoaderError {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+mod package_resolver_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    struct TempRoot(PathBuf);
+    impl TempRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("tessivum-resolver-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn resolves_installed_legacy_package_ids_outside_workspace() {
+        let root = TempRoot::new();
+        let confined = root.0.join("workspace");
+        let modules = root.0.join("profile/node_modules");
+        let package = modules.join("@community/example");
+        fs::create_dir_all(&confined).unwrap();
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"@community/example","version":"1.0.0","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "export const apply = () => {};").unwrap();
+        let resolver = ProductPackageResolver::new()
+            .with_legacy_node_modules(modules)
+            .confine_to(confined)
+            .unwrap();
+
+        let resolved = resolver
+            .resolve_package("@community/example", RuntimeKind::LegacyNode)
+            .unwrap();
+
+        assert!(Path::new(&resolved.location).ends_with("@community/example/index.js"));
+    }
+
+    #[test]
+    fn admits_only_explicit_mode_wasm_packages_outside_workspace() {
+        let root = TempRoot::new();
+        let confined = root.0.join("workspace");
+        fs::create_dir_all(&confined).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/wasm/rust-minimal/plugin.json")
+            .canonicalize()
+            .unwrap();
+        let allowed = source.clone();
+        let resolver = ProductPackageResolver::new()
+            .allow_location_with(move |specifier, location, runtime| {
+                runtime == RuntimeKind::Wasm
+                    && Path::new(specifier) == allowed
+                    && location.starts_with(allowed.parent().unwrap())
+            })
+            .confine_to(confined)
+            .unwrap();
+
+        let resolved = resolver
+            .resolve_package(source.to_str().unwrap(), RuntimeKind::Wasm)
+            .unwrap();
+
+        assert!(Path::new(&resolved.location).ends_with("plugin.wasm"));
+    }
 }

@@ -519,17 +519,16 @@ async fn persistent_shell_never_waits_for_closed_stdin() {
     )
     .await
     .unwrap();
-    if closed.is_ok() {
-        assert_eq!(
+    match closed {
+        Ok(_) => assert_eq!(
             shell
                 .run(PersistentShellCommand::new("printf unavailable"))
                 .await
                 .unwrap_err()
                 .code,
             "PERSISTENT_SHELL_CLOSED"
-        );
-    } else {
-        assert_eq!(closed.unwrap_err().code, "PERSISTENT_SHELL_CLOSED");
+        ),
+        Err(error) => assert_eq!(error.code, "PERSISTENT_SHELL_CLOSED"),
     }
     shell.dispose().await;
 }

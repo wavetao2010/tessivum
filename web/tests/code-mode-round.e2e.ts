@@ -39,7 +39,7 @@ test('PTC executes nested tools and renders durable sub-calls', async () => {
   const harness = await RustWebHarness.launch({
     name: 'ptc-mode-round-web-e2e',
     locale: 'en-US',
-    toolsMode: 'code',
+    agentMode: 'ptc',
     replayFixture: sourceFixture,
   })
   try {

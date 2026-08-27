@@ -272,6 +272,10 @@ async fn web_command_combines_explicit_and_installed_client_packages() {
     let (dist, packages) = install_web_half(&fixture);
     let data_dir = fixture.path().join("state");
     fixture.write(
+        "state/plugins/package.json",
+        r#"{"private":true,"dependencies":{"community-clock":"1.0.0"}}"#,
+    );
+    fixture.write(
         "state/plugins/node_modules/community-clock/package.json",
         r#"{"name":"community-clock","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web"}}}"#,
     );
@@ -368,7 +372,8 @@ async fn web_command_combines_explicit_and_installed_client_packages() {
             .expect("community plugin is text"),
         "export const community = true;"
     );
-    assert!(data_dir.join(".agent-presets").is_dir());
+    assert!(data_dir.join("modes").is_dir());
+    assert!(!data_dir.join(".agent-presets").exists());
     assert!(!fixture.path().join(".tessivum").exists());
 
     let cwd = fixture.path().to_string_lossy().into_owned();

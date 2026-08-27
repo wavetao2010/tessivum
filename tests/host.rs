@@ -13,7 +13,7 @@ use futures_util::stream;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tessivum::{
-    agent_preset::AgentPresetTrust,
+    agent_mode::{AgentModeId, AgentModeTrust},
     approval::ApprovalPolicy,
     credentials::{CredentialError, CredentialRef},
     goal::GoalError,
@@ -38,7 +38,9 @@ use tessivum::{
     SessionId, TessivumError,
 };
 use tessivum_core::{
-    CancellationToken, ContextHandle, Entry, EntryId, EntryOptions, EntryTree, RuntimeKind,
+    CancellationToken, ContextHandle, Entry, EntryId, EntryOptions, EntryTree, NativeConfigSchema,
+    NativePlugin, NativePluginDescriptor, NativePluginError, NativePluginFuture, NativePluginPhase,
+    RuntimeKind,
 };
 use uuid::Uuid;
 
@@ -231,6 +233,51 @@ impl HostLlmAdapterFactory for BlockingFactory {
     }
 }
 
+struct RetryDisposePlugin {
+    fail_stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NativePlugin for RetryDisposePlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "retry-dispose".into(),
+            version: "1".into(),
+            dependencies: Vec::new(),
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        let fails = self.fail_stop.swap(false, Ordering::AcqRel);
+        Box::pin(async move {
+            if fails {
+                Err(NativePluginError::plugin(
+                    NativePluginPhase::Stop,
+                    "fixture stop failure",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 fn config(root: &TempDir) -> HostConfig {
     let mut config =
         HostConfig::new(root.path(), root.path().join("data")).with_recorded_replay(REPLAY);
@@ -326,7 +373,7 @@ fn persisted_header(id: &str, cwd: Option<String>) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: Some(0),
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 
@@ -401,16 +448,130 @@ fn profile_patches_have_fixed_precedence() {
     config.bundle_patch = json!({"value":"bundle","nested":{"bundle":true,"winner":"bundle"}});
     config.profile_patch = json!({"value":"profile","nested":{"profile":true,"winner":"profile"}});
     config.home_patch = json!({"value":"home","nested":{"home":true,"winner":"home"}});
-    config.cli_patches = vec![json!({"value":"cli","nested":{"cli":true,"winner":"cli"}})];
+    config.cli_patches = vec![
+        json!({"value":"cli-base","nested":{"cliBase":true,"winner":"cli-base"}}),
+        json!({"value":"cli-local","nested":{"cliLocal":true,"winner":"cli-local"}}),
+    ];
     config.telemetry_patch =
         json!({"value":"telemetry","nested":{"telemetry":true,"winner":"telemetry"}});
     assert_eq!(
         config.compose_profile().unwrap(),
         json!({
             "value":"telemetry",
-            "nested":{"bundle":true,"profile":true,"home":true,"cli":true,"telemetry":true,"winner":"telemetry"}
+            "nested":{"bundle":true,"profile":true,"home":true,"cliBase":true,"cliLocal":true,"telemetry":true,"winner":"telemetry"}
         })
     );
+}
+
+#[tokio::test]
+async fn cli_patch_selects_custom_mode_from_data_root() {
+    let root = TempDir::new();
+    let data = root.path().join("data");
+    let mode = data.join("modes/review");
+    fs::create_dir_all(&mode).unwrap();
+    fs::write(
+        mode.join("mode.toml"),
+        "schema = 1\nid = \"review\"\nname = \"Review\"\ndescription = \"Read-only review\"\n\n[prompt]\ncomplete = true\ntext = \"Review the workspace.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n",
+    )
+    .unwrap();
+    let runtime = HostRuntime::boot(
+        HostConfig::new(root.path(), data)
+            .with_cli_patch(json!({"agent-presets": {"default": "review"}})),
+    )
+    .await
+    .unwrap();
+
+    let modes = runtime.handle().agent_mode_list().await.unwrap();
+    assert!(modes
+        .iter()
+        .any(|mode| mode.id == "review" && mode.is_default));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_mode_default_setting_is_live_and_durable() {
+    let root = TempDir::new();
+    let data = root.path().join("data");
+    let runtime = HostRuntime::boot(HostConfig::new(root.path(), data.clone()))
+        .await
+        .unwrap();
+    let handle = runtime.handle();
+
+    handle
+        .mutate_settings(
+            "agent-presets".into(),
+            HostSettingsMutation::Update {
+                patch: json!({"default": "minimal"}),
+                expected_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(handle
+        .agent_mode_list()
+        .await
+        .unwrap()
+        .iter()
+        .any(|mode| mode.id == "minimal" && mode.is_default));
+    assert_eq!(
+        handle
+            .create_session(SessionId::from("minimal-default"))
+            .await
+            .unwrap()
+            .agent_mode
+            .as_ref()
+            .map(|mode| mode.as_str()),
+        Some("minimal")
+    );
+    runtime.shutdown().await.unwrap();
+
+    let restarted = HostRuntime::boot(HostConfig::new(root.path(), data))
+        .await
+        .unwrap();
+    assert!(restarted
+        .handle()
+        .agent_mode_list()
+        .await
+        .unwrap()
+        .iter()
+        .any(|mode| mode.id == "minimal" && mode.is_default));
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn setting_default_and_removing_the_same_mode_preserve_a_valid_default() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    let handle = runtime.handle();
+    handle
+        .agent_mode_copy("minimal".into(), "race-mode".into(), None)
+        .await
+        .unwrap();
+    let setter = handle.clone();
+    let remover = handle.clone();
+
+    let (set, remove) = tokio::join!(
+        setter.mutate_settings(
+            "agent-presets".into(),
+            HostSettingsMutation::Update {
+                patch: json!({"default": "race-mode"}),
+                expected_revision: None,
+            },
+        ),
+        remover.agent_mode_remove("race-mode".into()),
+    );
+
+    assert_ne!(set.is_ok(), remove.is_ok());
+    let modes = handle.agent_mode_list().await.unwrap();
+    if set.is_ok() {
+        assert!(modes
+            .iter()
+            .any(|mode| mode.id == "race-mode" && mode.is_default));
+    } else {
+        assert!(modes.iter().all(|mode| mode.id != "race-mode"));
+        assert!(modes.iter().any(|mode| mode.is_default));
+    }
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -768,6 +929,54 @@ async fn idle_cancel_is_a_noop_and_session_accepts_next_prompt() {
 }
 
 #[tokio::test]
+async fn repeated_cancel_retries_failed_agent_cleanup() {
+    let root = TempDir::new();
+    let mode_root = root.path().join("mode-roots");
+    let mode = mode_root.join("retry-dispose");
+    fs::create_dir_all(&mode).unwrap();
+    fs::write(
+        mode.join("mode.toml"),
+        "schema = 1\nid = \"retry-dispose\"\nname = \"Retry dispose\"\ndescription = \"cleanup retry fixture\"\n\n[prompt]\ncomplete = false\ntext = \"Retry cleanup.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n\n[[plugins]]\nid = \"fixture\"\nruntime = \"native\"\nsource = \"retry-native\"\n",
+    )
+    .unwrap();
+    let adapter = Arc::new(BlockingAdapter::new());
+    let fail_stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let factory_failure = Arc::clone(&fail_stop);
+    let mut config = HostConfig::new(root.path(), root.path().join("data"))
+        .with_adapter_factory(Arc::new(BlockingFactory(adapter.clone())))
+        .with_agent_mode_root(&mode_root, AgentModeTrust::System)
+        .with_default_agent_mode(AgentModeId::new("retry-dispose").unwrap())
+        .with_native_plugin("retry-native", move || RetryDisposePlugin {
+            fail_stop: Arc::clone(&factory_failure),
+        })
+        .unwrap();
+    config.provider = "cleanup-test".into();
+    config.model = "cleanup-test".into();
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    let handle = runtime.handle();
+    let session = SessionId::from("retry-cleanup");
+    handle.prompt(prompt(session.as_str())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), adapter.started.notified())
+        .await
+        .expect("agent starts");
+
+    assert!(handle
+        .cancel(session.clone(), AgentCancelCause::User)
+        .await
+        .is_err());
+    assert!(!fail_stop.load(Ordering::Acquire));
+    assert!(handle
+        .cancel(session.clone(), AgentCancelCause::User)
+        .await
+        .unwrap());
+    assert_eq!(
+        handle.status(session).await.unwrap(),
+        Some(SessionStatus::Idle)
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_fences_new_admission_and_leaves_no_owned_processes() {
     let root = TempDir::new();
     let runtime = HostRuntime::boot(config(&root)).await.unwrap();
@@ -965,6 +1174,19 @@ async fn permission_setting_is_pinned_only_into_future_sessions() {
     assert_eq!(
         preset(handle.events(second, 0).await.unwrap()),
         "danger-full-access"
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_host_materializes_the_settings_document() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+
+    assert!(root.path().join("data/settings.yaml").is_file());
+    assert_eq!(
+        fs::read_to_string(root.path().join("data/settings.yaml")).unwrap(),
+        "{}\n"
     );
     runtime.shutdown().await.unwrap();
 }
@@ -1491,7 +1713,7 @@ async fn session_search_rename_and_fork_use_durable_workspace_visible_history() 
         .await
         .unwrap();
     assert_eq!(renamed.title, "Durable title");
-    assert_eq!(renamed.seq, 6);
+    assert_eq!(renamed.seq, 7);
     assert_eq!(
         handle
             .fork_session(source.clone(), Some(4))
@@ -1537,7 +1759,7 @@ async fn session_search_rename_and_fork_use_durable_workspace_visible_history() 
     let past_end_child = handle.fork_session(latest, Some(999)).await.unwrap();
     let latest_events = handle.events(latest_child, 0).await.unwrap();
     let past_end_events = handle.events(past_end_child, 0).await.unwrap();
-    assert_eq!(latest_events.len(), 9);
+    assert_eq!(latest_events.len(), 10);
     assert_eq!(
         past_end_events
             .iter()
@@ -1667,7 +1889,7 @@ async fn host_boot_migrates_durable_session_cwds_once() {
                 seed_length: None,
                 origin: None,
                 delegation_depth: Some(0),
-                agent_preset: None,
+                agent_mode: None,
             },
             context.scope().cancellation(),
         )
@@ -1832,7 +2054,7 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
 }
 
 #[tokio::test]
-async fn dynamic_models_report_defaults_without_eager_legacy_migration() {
+async fn dynamic_models_remain_live_after_eager_legacy_mode_migration() {
     let root = TempDir::new();
     let persistence = JsonlSessionPersistence::new(root.path().join("data"));
     let context = ContextHandle::root();
@@ -1853,7 +2075,7 @@ async fn dynamic_models_report_defaults_without_eager_legacy_migration() {
                 seed_length: None,
                 origin: None,
                 delegation_depth: Some(0),
-                agent_preset: None,
+                agent_mode: None,
             },
             context.scope().cancellation(),
         )
@@ -1874,11 +2096,13 @@ async fn dynamic_models_report_defaults_without_eager_legacy_migration() {
             reasoning_effort: None,
         })
     );
-    assert!(handle
+    let migrated = handle
         .events(SessionId::from("legacy-model"), 0)
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(migrated[0].event_type, "agent-mode/selected");
+    assert_eq!(migrated[0].data, json!({"agentMode": "standard"}));
 
     let mut notifications = handle.subscribe();
     handle
@@ -1902,13 +2126,34 @@ async fn dynamic_models_report_defaults_without_eager_legacy_migration() {
             .model,
         "beta"
     );
-    assert!(
+    assert_eq!(
         handle
             .events(SessionId::from("legacy-model"), 0)
             .await
-            .unwrap()
-            .is_empty(),
-        "catalog reads do not migrate legacy sessions"
+            .unwrap(),
+        migrated,
+        "model catalog reads do not append another mode migration"
+    );
+    handle
+        .mutate_settings(
+            "agent-presets".into(),
+            HostSettingsMutation::Update {
+                patch: json!({"default": "minimal"}),
+                expected_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    let legacy = runtime
+        .list_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.session_id == SessionId::from("legacy-model"))
+        .unwrap();
+    assert_eq!(
+        legacy.agent_mode.as_ref().map(|mode| mode.as_str()),
+        Some("standard")
     );
     runtime.shutdown().await.unwrap();
 }
@@ -2273,17 +2518,21 @@ async fn provider_models_uses_active_route_normalizes_exact_wire_and_preserves_h
     runtime.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn preset_opening_is_host_injected_and_rejected_selects_do_not_commit() {
+async fn mode_opening_is_host_injected_and_rejected_selects_do_not_commit() {
     let root = TempDir::new();
-    let system_root = root.path().join("system-presets");
+    let system_root = root.path().join("system-modes");
     let base = system_root.join("base");
     fs::create_dir_all(&base).unwrap();
-    fs::write(base.join("agent.cordis.yml"), "[]\n").unwrap();
+    fs::write(
+        base.join("mode.toml"),
+        "schema = 1\nid = \"base\"\nname = \"Base\"\ndescription = \"system mode\"\n\n[prompt]\ncomplete = false\ntext = \"Base mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n",
+    )
+    .unwrap();
     let opened = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&opened);
     let runtime = HostRuntime::boot(
         HostConfig::new(root.path(), root.path().join("data"))
-            .with_agent_preset_root(&system_root, AgentPresetTrust::System)
+            .with_agent_mode_root(&system_root, AgentModeTrust::System)
             .with_path_opener(Arc::new(move |path: &Path| {
                 seen.lock().push(path.to_path_buf());
                 Ok(())
@@ -2294,14 +2543,14 @@ async fn preset_opening_is_host_injected_and_rejected_selects_do_not_commit() {
     let handle = runtime.handle();
 
     handle
-        .agent_preset_copy("base".into(), "working".into(), None)
+        .agent_mode_copy("base".into(), "working".into(), None)
         .await
         .unwrap();
     assert_eq!(
-        HostApi::agent_preset_open_document(&handle, "working".into())
+        HostApi::agent_mode_open_document(&handle, "working".into())
             .await
             .unwrap(),
-        tessivum::host::HostAgentPresetDocument {
+        tessivum::host::HostAgentModeDocument {
             opened: true,
             path: None,
         }
@@ -2310,34 +2559,34 @@ async fn preset_opening_is_host_injected_and_rejected_selects_do_not_commit() {
         *opened.lock(),
         vec![root
             .path()
-            .join("data/.agent-presets/working")
+            .join("data/modes/working/mode.toml")
             .canonicalize()
             .unwrap()]
     );
     assert_eq!(
-        HostApi::agent_preset_open_document(&handle, "base".into())
+        HostApi::agent_mode_open_document(&handle, "base".into())
             .await
             .unwrap_err()
             .code,
-        "agent-preset-read-only"
+        "MODE_READ_ONLY"
     );
     assert_eq!(opened.lock().len(), 1);
 
-    let session = SessionId::from("preset-rejected");
+    let session = SessionId::from("mode-rejected");
     handle.create_session(session.clone()).await.unwrap();
     assert_eq!(
-        HostApi::agent_preset_select(&handle, session.clone(), "missing".into())
+        HostApi::agent_mode_select(&handle, session.clone(), "missing".into())
             .await
             .unwrap_err()
             .code,
-        "agent-preset-not-found"
+        "MODE_NOT_FOUND"
     );
     assert!(!handle
         .events(session, 0)
         .await
         .unwrap()
         .iter()
-        .any(|event| event.event_type == "agent-preset/selected"));
+        .any(|event| event.event_type == "agent-mode/selected"));
 
     runtime.shutdown().await.unwrap();
 }

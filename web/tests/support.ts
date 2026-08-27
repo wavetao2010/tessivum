@@ -30,7 +30,7 @@ export interface SessionListItem {
 
 export interface RustWebOptions {
   name: string
-  toolsMode?: 'native' | 'code'
+  agentMode?: 'standard' | 'ptc' | 'minimal' | 'composition'
   locale?: string
   remoteAuthority?: string
   timeZoneId?: string
@@ -123,7 +123,6 @@ export class RustWebHarness {
       if (options.remoteAuthority !== undefined) {
         env.TESSIVUM_WEB_TRUSTED_AUTHORITIES = `${options.remoteAuthority}:${new URL(harness.baseUrl).port}`
       }
-      if (options.toolsMode !== undefined) env.TESSIVUM_TOOLS_MODE = options.toolsMode
       if (options.replayRecording !== undefined) {
         const replay = join(root, 'replay.jsonl')
         const recording = typeof options.replayRecording === 'function'
@@ -142,9 +141,15 @@ export class RustWebHarness {
         env.DEEPSEEK_SEARCH_API_KEY_ENV = options.deepSeekSearch.apiKeyEnv
       }
       if (options.replayOverride !== undefined) env.TESSIVUM_REPLAY_OVERRIDE_FILE = options.replayOverride
-      harness.server = Bun.spawn([
+      const command = [
         join(CRATE_ROOT, 'target/debug/tessivum'), 'web', '--data-dir', harness.dataDir,
-      ], {
+      ]
+      if (options.agentMode !== undefined) {
+        const patch = join(root, 'agent-mode.yml')
+        await writeFile(patch, `agent-presets:\n  default: ${options.agentMode}\n`)
+        command.push('--patch', patch)
+      }
+      harness.server = Bun.spawn(command, {
         cwd: workspace,
         env,
         stdout: 'inherit',

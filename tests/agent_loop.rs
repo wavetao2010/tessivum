@@ -2,7 +2,10 @@ use std::{
     collections::VecDeque,
     fs,
     path::PathBuf,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, LazyLock, Mutex,
+    },
 };
 
 use async_trait::async_trait;
@@ -15,6 +18,7 @@ use tessivum::{
     builtin_tools::PersistentShellSessions,
     code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     composition::CompositionRegistry,
+    legacy::ProductPackageResolver,
     llm::{LlmAdapter, LlmRetryPolicy, LlmRuntime, LlmStream, RecordedLlmAdapter},
     session::{MemorySessionPersistence, SessionStore},
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
@@ -27,7 +31,8 @@ use tessivum::{
     ToolSchema,
 };
 use tessivum_core::{
-    CancellationToken, ContextHandle, LoaderError, LoaderFuture, LoaderRuntime, PackageResolver,
+    CancellationToken, ContextHandle, LoaderError, LoaderFuture, LoaderRuntime, NativeConfigSchema,
+    NativePlugin, NativePluginDescriptor, NativePluginFuture, NativePluginRuntime, PackageResolver,
     ResolvedPackage, RuntimeKind,
 };
 
@@ -54,7 +59,6 @@ fn header_with_mode(id: &str, mode: &str) -> SessionHeader {
     header
 }
 
-
 static TEST_MODES_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
     let root = std::env::temp_dir().join(format!("tessivum-agent-loop-{}", std::process::id()));
     for (id, presentation, enabled, bun) in [
@@ -69,11 +73,25 @@ static TEST_MODES_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
             directory.join("mode.toml"),
             format!(
                 "schema = 1\nid = \"{id}\"\nname = \"{id}\"\ndescription = \"agent-loop test mode\"\n\n[prompt]\ncomplete = false\ntext = \"Use the additive Tessivum persona, workspace instructions, and runtime context.\"\n\n[tools]\npresentation = \"{presentation}\"\nenabled = {enabled}\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n{}",
-                bun.then_some("bun = true\n").unwrap_or_default(),
+                if bun { "bun = true\n" } else { "" },
             ),
         )
         .unwrap();
     }
+    let directory = root.join("test-native-plugin");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("mode.toml"),
+        "schema = 1\nid = \"test-native-plugin\"\nname = \"test-native-plugin\"\ndescription = \"declarative native plugin test\"\n\n[prompt]\ncomplete = false\ntext = \"Native plugin mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n\n[[plugins]]\nid = \"fixture\"\nruntime = \"native\"\nsource = \"fixture-native\"\nconfig = { value = 7 }\n",
+    )
+    .unwrap();
+    let directory = root.join("test-missing-plugin");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("mode.toml"),
+        "schema = 1\nid = \"test-missing-plugin\"\nname = \"test-missing-plugin\"\ndescription = \"missing native plugin test\"\n\n[prompt]\ncomplete = false\ntext = \"Missing plugin mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n\n[[plugins]]\nid = \"missing\"\nruntime = \"native\"\nsource = \"missing-native\"\n",
+    )
+    .unwrap();
     root
 });
 
@@ -109,7 +127,11 @@ impl PackageResolver for UnusedResolver {
         _specifier: &'a str,
         _runtime: RuntimeKind,
     ) -> LoaderFuture<'a, ResolvedPackage> {
-        Box::pin(async { Err(LoaderError::Validation("composition resolver was not expected".into())) })
+        Box::pin(async {
+            Err(LoaderError::Validation(
+                "composition resolver was not expected".into(),
+            ))
+        })
     }
 }
 
@@ -121,6 +143,43 @@ fn composition_registry() -> CompositionRegistry {
     .unwrap()
 }
 
+struct LifecyclePlugin {
+    live: Arc<AtomicUsize>,
+}
+
+impl NativePlugin for LifecyclePlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "mode-lifecycle-fixture".into(),
+            version: "1".into(),
+            dependencies: Vec::new(),
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        assert_eq!(config["value"], 7);
+        self.live.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        self.live.fetch_sub(1, Ordering::AcqRel);
+        Box::pin(async { Ok(()) })
+    }
+}
 
 fn ptc_runtime() -> ProcessCodeRuntime {
     ProcessCodeRuntime::new(ProcessCodeRuntimeConfig::ptc_javascript().unwrap()).unwrap()
@@ -1266,7 +1325,6 @@ fn standard_tool_names() -> Vec<&'static str> {
     ]
 }
 
-
 fn options() -> AgentOptions {
     AgentOptions {
         provider: "test".into(),
@@ -1375,6 +1433,9 @@ async fn four_session_runtime_specs_are_isolated() {
         .create(header("mode-standard"), options(), cancellation())
         .await
         .unwrap();
+    assert!(standard.session().events().iter().any(|event| {
+        event.event_type == "agent-mode/selected" && event.data == json!({"agentMode": "standard"})
+    }));
     let mut minimal_header = header("mode-minimal");
     minimal_header.agent_mode = Some(AgentModeId::minimal());
     let minimal = registry
@@ -1393,7 +1454,10 @@ async fn four_session_runtime_specs_are_isolated() {
         .create(ptc_header, options(), cancellation())
         .await
         .unwrap();
-    assert_eq!(format!("{persistent_shells:?}"), "PersistentShellSessions { session_count: 1 }");
+    assert_eq!(
+        format!("{persistent_shells:?}"),
+        "PersistentShellSessions { session_count: 1 }"
+    );
     assert!(compositions
         .inspect(&SessionId::from("mode-composition"), None)
         .await
@@ -1420,41 +1484,46 @@ async fn four_session_runtime_specs_are_isolated() {
     composition_idle.unwrap();
     ptc_idle.unwrap();
 
-    let requests = requests.lock();
-    assert_eq!(
-        tool_names(request_for(&requests, "mode-standard")),
-        standard_tool_names()
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        tool_names(request_for(&requests, "mode-minimal")),
-        ["bash", "str_replace_editor"]
-    );
-    let mut composition_tools = standard_tool_names();
-    composition_tools.extend([
-        "composition_define",
-        "composition_inspect",
-        "composition_run",
-        "composition_stop",
-        "composition_validate",
-    ]);
-    composition_tools.sort_unstable();
-    assert_eq!(
-        tool_names(request_for(&requests, "mode-composition")),
-        composition_tools
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>(),
-    );
-    assert_eq!(tool_names(request_for(&requests, "mode-ptc")), ["run_code"]);
-    drop(requests);
+    {
+        let requests = requests.lock();
+        assert_eq!(
+            tool_names(request_for(&requests, "mode-standard")),
+            standard_tool_names()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            tool_names(request_for(&requests, "mode-minimal")),
+            ["bash", "str_replace_editor"]
+        );
+        let mut composition_tools = standard_tool_names();
+        composition_tools.extend([
+            "composition_define",
+            "composition_inspect",
+            "composition_run",
+            "composition_stop",
+            "composition_validate",
+        ]);
+        composition_tools.sort_unstable();
+        assert_eq!(
+            tool_names(request_for(&requests, "mode-composition")),
+            composition_tools
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(tool_names(request_for(&requests, "mode-ptc")), ["run_code"]);
+        drop(requests);
+    }
     standard.dispose().await.unwrap();
     minimal.dispose().await.unwrap();
     composition.dispose().await.unwrap();
     ptc.dispose().await.unwrap();
-    assert_eq!(format!("{persistent_shells:?}"), "PersistentShellSessions { session_count: 0 }");
+    assert_eq!(
+        format!("{persistent_shells:?}"),
+        "PersistentShellSessions { session_count: 0 }"
+    );
     assert_eq!(
         compositions
             .inspect(&SessionId::from("mode-composition"), None)
@@ -1464,6 +1533,101 @@ async fn four_session_runtime_specs_are_isolated() {
         "COMPOSITION_SESSION_UNAVAILABLE"
     );
     root_context.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn mode_plugins_activate_before_agent_start_and_stop_with_the_session() {
+    let live = Arc::new(AtomicUsize::new(0));
+    let factory_live = Arc::clone(&live);
+    let mut native = NativePluginRuntime::new();
+    native
+        .register("fixture-native", move || LifecyclePlugin {
+            live: Arc::clone(&factory_live),
+        })
+        .unwrap();
+    let compositions = CompositionRegistry::new(
+        Arc::new(ProductPackageResolver::new().with_native_packages(["fixture-native".into()])),
+        [Arc::new(native) as Arc<dyn LoaderRuntime>],
+    )
+    .unwrap();
+    let root = ContextHandle::root();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(LlmRuntime::new(), SystemPrompt::new(), ToolRuntime::new())
+                .with_composition_registry(compositions.clone())
+                .with_root_context(root.clone()),
+        ))
+        .unwrap();
+
+    let session = SessionId::from("mode-native-plugin");
+    let agent = registry
+        .create(
+            header_with_mode(session.as_str(), "test-native-plugin"),
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 1);
+    let inspection = compositions
+        .inspect(&session, Some("fixture"))
+        .await
+        .unwrap();
+    assert_eq!(
+        inspection.descriptors[0].lifecycle,
+        tessivum::composition::CompositionLifecycle::Active
+    );
+
+    agent.dispose().await.unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 0);
+    assert_eq!(
+        compositions.inspect(&session, None).await.unwrap_err().code,
+        "COMPOSITION_SESSION_UNAVAILABLE"
+    );
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_mode_plugin_fails_before_agent_start() {
+    let compositions = CompositionRegistry::new(
+        Arc::new(ProductPackageResolver::new()),
+        [Arc::new(NativePluginRuntime::new()) as Arc<dyn LoaderRuntime>],
+    )
+    .unwrap();
+    let root = ContextHandle::root();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(LlmRuntime::new(), SystemPrompt::new(), ToolRuntime::new())
+                .with_composition_registry(compositions.clone())
+                .with_root_context(root.clone()),
+        ))
+        .unwrap();
+    let session = SessionId::from("mode-missing-plugin");
+    let error = match registry
+        .create(
+            header_with_mode(session.as_str(), "test-missing-plugin"),
+            options(),
+            cancellation(),
+        )
+        .await
+    {
+        Ok(_) => panic!("mode unexpectedly started with an unknown plugin"),
+        Err(error) => error,
+    };
+    match error {
+        AgentError::Message(error) => {
+            assert_eq!(error.code, "MODE_PLUGIN_ACTIVATION_FAILED");
+            assert_eq!(error.details["agentMode"], "test-missing-plugin");
+        }
+        other => panic!("unexpected plugin activation error: {other:?}"),
+    }
+    assert_eq!(
+        compositions.inspect(&session, None).await.unwrap_err().code,
+        "COMPOSITION_SESSION_UNAVAILABLE"
+    );
+    root.scope().dispose().await.unwrap();
 }
 
 #[tokio::test]
@@ -1507,16 +1671,18 @@ async fn complete_mode_replaces_host_prompt_while_additive_mode_contributes_once
     minimal.followup(user("minimal")).await.unwrap();
     standard.when_idle().await.unwrap();
     minimal.when_idle().await.unwrap();
-    let requests = requests.lock();
-    assert_eq!(
+    {
+        let requests = requests.lock();
+        assert_eq!(
         request_for(&requests, "prompt-standard").system.as_deref(),
         Some("Use the additive Tessivum persona, workspace instructions, and runtime context.\n\nhost prompt")
     );
-    assert_eq!(
+        assert_eq!(
         request_for(&requests, "prompt-minimal").system.as_deref(),
-        Some("Use only bash and str_replace_editor to complete the task.")
+        Some("You are a helpful software engineer assistant.\n\nUse only bash and str_replace_editor to complete the task.")
     );
-    drop(requests);
+        drop(requests);
+    }
     standard.dispose().await.unwrap();
     minimal.dispose().await.unwrap();
 }
@@ -1573,13 +1739,15 @@ async fn latest_mode_selection_event_overrides_header_and_programmatic_catalog_c
     agent.followup(user("ptc")).await.unwrap();
     agent.when_idle().await.unwrap();
 
-    let requests = requests.lock();
+    {
+        let requests = requests.lock();
 
-    assert_eq!(
-        tool_names(request_for(&requests, "mode-event-wins")),
-        ["run_code"]
-    );
-    drop(requests);
+        assert_eq!(
+            tool_names(request_for(&requests, "mode-event-wins")),
+            ["run_code"]
+        );
+        drop(requests);
+    }
     agent.dispose().await.unwrap();
 }
 
@@ -1637,13 +1805,18 @@ async fn mode_native_tools_must_exist_before_session_start() {
         AgentError::Message(error) => {
             assert_eq!(error.code, "MODE_NATIVE_TOOL_UNAVAILABLE");
             assert_eq!(error.details["agentMode"], "minimal");
-            assert_eq!(error.details["missing"], json!(["bash", "str_replace_editor"]));
+            assert_eq!(
+                error.details["missing"],
+                json!(["bash", "str_replace_editor"])
+            );
         }
         other => panic!("unexpected missing native tool error: {other:?}"),
     }
-    assert_eq!(format!("{persistent_shells:?}"), "PersistentShellSessions { session_count: 0 }");
+    assert_eq!(
+        format!("{persistent_shells:?}"),
+        "PersistentShellSessions { session_count: 0 }"
+    );
 }
-
 
 #[tokio::test]
 async fn native_child_mode_excludes_owner_bound_tools() {

@@ -228,6 +228,8 @@ messageFeedback/delete
 
 Remote contribution 的挂载生命周期、重复 endpoint/namespace 冲突、撤回后调用、取消和返回值验证必须与上游 Gateway 一致；不能把这些方法手工塞入 Core RPC map 后绕过 contribution 语义。
 
+Native Agent Mode cutover intentionally narrows the frozen `dynamicCordisRunner/*` contribution. The routes remain addressable only so the source Browser graph can mount without a private fork: `inventory` returns `[]`, `syncInspectManifest` returns `null`, and every executable or mutating method returns structured `cordis-unavailable`. Tessivum does not run arbitrary Host/Client JavaScript and does not emit dynamic Cordis package/request facts. Typed `composition_*` tools are a Rust-native extension, not an alias for this wire surface.
+
 ## 7. 转发 Host 事件
 
 `host/remote-event` 仅允许以下 11 个事件，payload 保持 `{ event, args }`，不重命名、不投影：
@@ -247,6 +249,8 @@ settings/document-updated
 ```
 
 增加 allowlist 是兼容基线变更；任意 Cordis 事件透传到浏览器是安全缺陷。
+
+The six `cordis/*` names remain accepted by the frozen downlink codec but are not emitted by the Native Agent Mode runtime. `agent-preset/selected` is likewise a Browser compatibility event; Rust persistence and runtime state use `agentMode`.
 
 ## 8. LLM / Agent Loop / Replay 契约
 

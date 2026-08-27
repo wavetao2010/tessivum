@@ -74,8 +74,6 @@ fn upstream_headless_example_keeps_launcher_data_separate_from_task() {
         "tessivum",
         "--profile",
         "headless",
-        "--patch",
-        "base.toml",
         "--data-dir",
         "state",
         "--session",
@@ -96,7 +94,6 @@ fn upstream_headless_example_keeps_launcher_data_separate_from_task() {
         "trip",
     ]);
 
-    assert_eq!(command.patches, vec![PathBuf::from("base.toml")]);
     assert_eq!(command.data_dir, Some(PathBuf::from("state")));
     assert_eq!(command.session.as_deref(), Some("session-7"));
     assert!(command.resume);
@@ -109,25 +106,13 @@ fn upstream_headless_example_keeps_launcher_data_separate_from_task() {
 }
 
 #[test]
-fn repeated_patches_keep_order_and_defaults_select_recorded() {
-    let command = headless(&[
-        "tessivum",
-        "--patch",
-        "base.toml",
-        "--patch=local.toml",
-        "--replay",
-        "recording.jsonl",
-        "ship",
-        "this",
-    ]);
-
+fn patch_option_is_rejected_by_headless() {
     assert_eq!(
-        command.patches,
-        vec![PathBuf::from("base.toml"), PathBuf::from("local.toml")]
+        parse_cli(["tessivum", "--patch", "base.toml", "task"])
+            .unwrap_err()
+            .exit_code(),
+        2
     );
-    assert_eq!(command.provider, "recorded");
-    assert_eq!(command.model, "recorded");
-    assert_eq!(command.task, "ship this");
 }
 
 #[test]
@@ -158,8 +143,8 @@ fn direct_web_and_profile_web_are_the_same_future_command() {
     ] {
         match parse_cli(args.iter().copied()).unwrap().command {
             CliCommand::Web(command) => {
-                assert!(command.patches.is_empty());
                 assert!(command.data_dir.is_none());
+                assert!(command.patches.is_empty());
             }
             command => panic!("expected Web, got {command:?}"),
         }
@@ -181,34 +166,24 @@ fn web_accepts_one_data_directory_option_in_every_supported_position() {
 }
 
 #[test]
-fn web_patch_overlays_keep_argv_order_for_both_web_spellings() {
-    for args in [
-        [
-            "tessivum",
-            "web",
-            "--patch",
-            "base.yml",
-            "--patch=local.yml",
-        ]
-        .as_slice(),
-        [
-            "tessivum",
-            "--profile",
-            "web",
-            "--patch",
-            "base.yml",
-            "--patch=local.yml",
-        ]
-        .as_slice(),
-    ] {
-        match parse_cli(args.iter().copied()).unwrap().command {
-            CliCommand::Web(command) => assert_eq!(
-                command.patches,
-                vec![PathBuf::from("base.yml"), PathBuf::from("local.yml")]
-            ),
-            command => panic!("expected Web, got {command:?}"),
-        }
-    }
+fn web_accepts_ordered_patch_overlays() {
+    let CliCommand::Web(command) = parse_cli([
+        "tessivum",
+        "web",
+        "--patch",
+        "base.yml",
+        "--patch",
+        "local.yaml",
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("expected Web")
+    };
+    assert_eq!(
+        command.patches,
+        [PathBuf::from("base.yml"), PathBuf::from("local.yaml")]
+    );
 }
 
 #[test]

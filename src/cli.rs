@@ -21,8 +21,8 @@ pub enum CliCommand {
 /// Inputs owned by the web launcher profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebCommand {
-    pub patches: Vec<PathBuf>,
     pub data_dir: Option<PathBuf>,
+    pub patches: Vec<PathBuf>,
 }
 
 /// Inputs owned by the SDK launcher profile.
@@ -46,7 +46,6 @@ pub enum PluginAction {
 /// Inputs owned by the headless launcher, independent of service internals.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeadlessCommand {
-    pub patches: Vec<PathBuf>,
     pub data_dir: Option<PathBuf>,
     pub session: Option<String>,
     pub resume: bool,
@@ -184,8 +183,6 @@ enum Profile {
 struct RawCli {
     #[arg(long, value_enum)]
     profile: Option<Profile>,
-    #[arg(long = "patch", value_name = "PATCH", global = true)]
-    patches: Vec<PathBuf>,
     #[arg(long, value_name = "DIR", global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -197,10 +194,16 @@ struct RawCli {
 #[derive(Debug, Subcommand)]
 enum RawCommand {
     Sdk,
-    Web,
+    Web(RawWebCommand),
     Plugin(RawPluginCommand),
     #[command(name = "plugin-report")]
     PluginReport,
+}
+
+#[derive(Debug, Args)]
+struct RawWebCommand {
+    #[arg(long = "patch", value_name = "FILE")]
+    patches: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -251,34 +254,24 @@ where
             ));
         }
         let command = match command {
-            RawCommand::Web => CliCommand::Web(WebCommand {
-                patches: raw.patches,
+            RawCommand::Web(web) => CliCommand::Web(WebCommand {
+                data_dir: raw.data_dir,
+                patches: web.patches,
+            }),
+            RawCommand::Sdk => CliCommand::Sdk(SdkCommand {
                 data_dir: raw.data_dir,
             }),
-            RawCommand::Sdk => {
-                if !raw.patches.is_empty() {
-                    return Err(usage_error("the sdk command does not accept --patch"));
-                }
-                CliCommand::Sdk(SdkCommand {
-                    data_dir: raw.data_dir,
-                })
-            }
-            RawCommand::Plugin(plugin) => {
-                if !raw.patches.is_empty() {
-                    return Err(usage_error("the plugin command does not accept --patch"));
-                }
-                CliCommand::Plugin(PluginCommand {
-                    data_dir: raw.data_dir,
-                    action: match plugin.action {
-                        RawPluginAction::Add { specifier } => PluginAction::Add(specifier),
-                        RawPluginAction::Remove { package } => PluginAction::Remove(package),
-                    },
-                })
-            }
+            RawCommand::Plugin(plugin) => CliCommand::Plugin(PluginCommand {
+                data_dir: raw.data_dir,
+                action: match plugin.action {
+                    RawPluginAction::Add { specifier } => PluginAction::Add(specifier),
+                    RawPluginAction::Remove { package } => PluginAction::Remove(package),
+                },
+            }),
             RawCommand::PluginReport => {
-                if !raw.patches.is_empty() || raw.data_dir.is_some() {
+                if raw.data_dir.is_some() {
                     return Err(usage_error(
-                        "the plugin-report command does not accept --patch or --data-dir",
+                        "the plugin-report command does not accept --data-dir",
                     ));
                 }
                 CliCommand::PluginReport
@@ -296,14 +289,14 @@ where
             }
             Ok(Cli {
                 command: CliCommand::Web(WebCommand {
-                    patches: raw.patches,
                     data_dir: raw.data_dir,
+                    patches: Vec::new(),
                 }),
             })
         }
         Profile::Headless => {
             reject_launcher_options_after_task(&args)?;
-            headless_command(raw.headless, raw.patches, raw.data_dir).map(|command| Cli {
+            headless_command(raw.headless, raw.data_dir).map(|command| Cli {
                 command: CliCommand::Headless(command),
             })
         }
@@ -325,7 +318,6 @@ impl RawHeadlessCommand {
 
 fn headless_command(
     raw: RawHeadlessCommand,
-    patches: Vec<PathBuf>,
     data_dir: Option<PathBuf>,
 ) -> Result<HeadlessCommand, Error> {
     if raw.resume && raw.session.is_none() {
@@ -347,7 +339,6 @@ fn headless_command(
     }
 
     Ok(HeadlessCommand {
-        patches,
         data_dir,
         session: raw.session,
         resume: raw.resume,
@@ -401,7 +392,6 @@ fn is_launcher_option(argument: &str) -> bool {
 fn launcher_option_with_value(argument: &str) -> Option<&str> {
     [
         "--profile",
-        "--patch",
         "--data-dir",
         "--session",
         "--replay",

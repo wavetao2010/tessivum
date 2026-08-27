@@ -81,7 +81,7 @@ fn header(id: &str) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
 }
 

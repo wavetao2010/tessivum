@@ -51,7 +51,7 @@ fn inspection(id: &str, cwd: Option<&Path>) -> SessionInspection {
             seed_length: None,
             origin: None,
             delegation_depth: None,
-            agent_preset: None,
+            agent_mode: None,
         },
         event_count: 0,
         next_seq: 0,

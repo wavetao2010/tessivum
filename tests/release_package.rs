@@ -263,7 +263,12 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
             "archive is missing {path}"
         );
     }
-    for obsolete in [".agent-presets", "agent-presets", "agent.cordis.yml", "preset.yml"] {
+    for obsolete in [
+        ".agent-presets",
+        "agent-presets",
+        "agent.cordis.yml",
+        "preset.yml",
+    ] {
         assert!(
             !listing.lines().any(|entry| entry.contains(obsolete)),
             "archive still contains legacy preset asset {obsolete}"

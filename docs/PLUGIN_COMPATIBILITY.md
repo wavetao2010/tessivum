@@ -1,6 +1,6 @@
 # Tessivum 插件生态兼容方案
 
-> 目标：在 Rust 化 Host/Agent Runtime 的同时保留现有 DeepSeek Harness npm 插件生态，并为新插件建立 Extism/WASM 路径。总体顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，运行时细节见[目标运行时架构](ARCHITECTURE.md)，dshmarket 的版本冻结、HTTP 路由桥和 Profile mutation 门槛见 [Phase 4 计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
+> 目标：在 Rust 化 Host/Agent Runtime 的同时保留现有 DeepSeek Harness npm 插件生态，并为新插件建立 Extism/WASM 路径。总体顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，运行时细节见[目标运行时架构](ARCHITECTURE.md)，Native Mode 与 `agent.cordis.yml` clean cutover 见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)，dshmarket 的版本冻结、HTTP 路由桥和 Profile mutation 门槛见 [Phase 4 计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
 
 ## 1. 结论
 
@@ -58,16 +58,17 @@ export default class MyService extends Service {
 
 Extism JS PDK 使用 QuickJS/WASM，不是 Node：没有 Node API、DOM、真实事件循环、timer、动态 import 或后台任务。因此只适合可打包的纯 JS 逻辑，不能视为 npm Cordis runtime。
 
-## 3. 兼容性的四个层次
+## 3. 兼容性的五个层次
 
 | 层次 | 定义 | 目标 |
 |---|---|---|
-| 配置兼容 | 原 `cordis.yml`/profile 中的 npm 包名仍可识别 | 必须 |
+| Agent Mode 文件兼容 | 原 `agent.cordis.yml` 可直接作为 Tessivum Session Runtime | 不支持；必要时提供一次性 importer 或显式 Legacy DSH 模式 |
+| Profile 配置兼容 | Profile 中的 npm 包名、版本和 client-half 仍可识别 | 必须 |
 | 分发兼容 | 原 npm 包可继续安装和解析 | 必须 |
-| 源码兼容 | 插件无需修改即可运行 | 通过 Legacy Node Host 支持 |
+| 源码兼容 | 插件无需修改即可运行 | 仅对通过固定矩阵的 Legacy Node 插件声明支持 |
 | ABI 兼容 | 原 JS 对象/函数直接进入 Rust/WASM | 不支持，也不应伪装支持 |
 
-兼容声明必须点明层次。禁止用“支持 TypeScript”暗示原 npm 插件可直接进入 Extism。
+兼容声明必须点明层次。禁止用“支持 TypeScript”暗示原 npm 插件可直接进入 Extism，也禁止用“删除 `agent.cordis.yml`”暗示 npm/Browser 插件兼容层被删除。
 
 ## 4. 插件分类与处理
 
@@ -86,6 +87,27 @@ Loader 不能通过扫描源码猜 runtime。选择优先级：
 3. `.wasm` 构件；
 4. 现有 npm/Cordis 包默认 `legacy-node`；
 5. 无法判断则明确失败。
+
+### 4.1 Agent Mode 与插件激活
+
+Agent Mode 配置格式和插件 Runtime 是两条独立轴：
+
+```text
+Native AgentModeSpec / mode.toml
+  → 引用已注册 Native Entry
+  → 引用 cordis.plugin/v1 WASM Entry
+  → 引用活动 pnpm Profile 中的 Legacy npm Entry
+
+pnpm Profile
+  → 决定 Legacy/Browser 包是否已安装
+
+Browser boot graph
+  → 独立发布已安装包的 dsh.client half
+```
+
+删除 Rust 对 `agent.cordis.yml` 的运行时解析后，现有 npm 包仍按 `legacy-node` 路由到真实 Cordis compat-host；新 Mode 只负责决定某个 Session 是否获得该插件经 DomainBridge 发布的 Agent 能力。Profile 级 Browser 插件不因未被 Agent Mode 引用而消失。
+
+Mode Resolver 必须在 Agent 启动前验证 Runtime、安装状态、manifest、权限和受支持服务。需要原始 `agentCore`、`llm`、`systemPrompt`、`sessionStore`、`toolRuntime` 模块或未桥接 JS 对象身份的插件继续明确失败，不能通过 Mode 引用绕过兼容边界。详细迁移、持久字段和验收矩阵见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)。
 
 ## 5. 目标插件 Manifest
 
@@ -457,10 +479,11 @@ Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 ## 16. 兼容方案完成定义
 
 - 冻结的样本 profile 能识别并加载被明确声明支持的 npm 插件；
-- Native Agent 能看到 Legacy 插件注册的工具/提示词；
+- Native Agent 能在其 Mode 明确引用且 DomainBridge 支持时看到 Legacy 插件注册的工具/提示词；
 - Node 崩溃或插件卸载后无残留；
 - 新 WASM 插件 ABI 已冻结；per-plugin manifest permissions 接线前，Host service call 默认拒绝，不能宣称权限生态已完成；
-- 浏览器插件继续工作；
+- 浏览器插件继续工作，且 `dsh.client` boot graph 不依赖 Agent Mode 文件；
 - 社区插件只有通过固定版本矩阵、受限 Host route、Profile 安装和真实 Browser E2E 后才属于兼容范围；当前范围是 `dshmarket@1.29.2` 与 `dsh-better-sidebar@0.16.1`；
+- 删除 `agent.cordis.yml` Runtime Parser 后，Native/WASM/Legacy Node/Browser 四条插件路径仍有独立回归证据；
 - 不支持的插件获得具体、可行动的诊断；
-- 文档明确区分 Node 兼容与 WASM 沙箱，不做误导性安全承诺。
+- 文档明确区分 Mode 文件、Node 源码兼容与 WASM 沙箱，不做误导性兼容或安全承诺。

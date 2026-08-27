@@ -13,6 +13,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 Current implementation foundation:
 
 - Rust Host, Agent, Agent Loop, sessions, tools, system prompt, and provider-neutral LLM runtime;
+- session-owned Native Agent Modes: Standard, PTC, Minimal, Composition, and strict custom `mode.toml` bundles;
 - durable JSONL/SQLite sessions, cold resume, rollback, and bounded transports;
 - Headless CLI plus NDJSON JSON-RPC/ACP SDK with TypeScript and Python clients;
 - HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
@@ -24,7 +25,7 @@ The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline remains complete
 
 - the source Web shell and all 38 composed client packages build from commit `47f943859bef60e4160492346772ded9b24f765a`; Tessivum applies its checked-in compatibility patch before auditing and building the source tree;
 - the Rust `/api` dispatcher implements all 52 frozen Core RPC method names and both Browser WebSocket downlinks;
-- provider-neutral streaming, retry, cancellation, atomic queue/steer, durable sessions, presets, Subagents, Workflow, Native/WASM tools, and JSONL replay are covered by focused Rust contracts;
+- provider-neutral streaming, retry, cancellation, atomic queue/steer, durable sessions, Native Agent Modes, Subagents, Workflow, Native/WASM tools, and JSONL replay are covered by focused Rust contracts;
 - all 69 source-Web Chromium scenarios pass as the behavioral schema/event parity gate.
 
 The authoritative compatibility contract is [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md). Alpha.10–12 architecture and release gates are recorded in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md).
@@ -36,7 +37,10 @@ Rust CLI / HTTP / SDK
         |
 Rust Host + Agent Runtime
         |
-Rust Cordis Core
+Native Agent Mode Registry
+Standard | PTC | Minimal | Composition | custom mode.toml
+        |
+Tessivum Core
    |         |          |
 Native    Extism     Legacy Node
 plugins   boundary   npm/Cordis plugins
@@ -51,6 +55,54 @@ The Host remains authoritative for permissions and durable facts. Legacy Node an
 Tessivum does not export the legacy Host modules `agentCore`, `llm`, `systemPrompt`, `sessionStore`, or `toolRuntime` into Node Cordis contexts. A plugin that requires one of those module names is unsupported: direct lookup stays absent, and a named bridge call must return an explicit `SERVICE_UNAVAILABLE`/`UNKNOWN_SERVICE` error—never a successful no-op, empty model result, or fabricated service.
 
 Supported cross-runtime operations use the bounded, versioned DomainBridge contracts (`agents@1`, `llm@1`, `systemPrompt@1`, `sessions@1`, and `tools@1`). These contracts are not aliases for the omitted legacy modules.
+
+### Native Agent Modes
+
+An Agent Mode is the immutable, session-owned bundle of prompt policy, model-facing tool presentation, native tool allowlist, Skills, planning, compaction, and Native/WASM/Legacy plugin entries. The Rust Host owns resolution and lifecycle; Browser `agentPreset.*` names are frozen wire compatibility only. Tessivum does not execute upstream `agent.cordis.yml` or arbitrary JavaScript mode definitions.
+
+Built-ins:
+
+- **Standard** exposes the Host's available native tool catalog directly.
+- **PTC** exposes one `run_code` tool backed by Bun and a restricted nested native-tool SDK.
+- **Minimal** exposes persistent `bash` plus `str_replace_editor` with a complete replacement prompt.
+- **Composition** adds typed `composition_inspect`, `composition_define`, `composition_validate`, `composition_run`, and `composition_stop` tools; descriptors can reference Native, WASM, or Legacy entries but cannot contain executable source.
+
+Custom modes live at `${TESSIVUM_HOME:-$HOME/.tessivum}/modes/<id>/mode.toml`. For an isolated data root:
+
+```toml
+# /tmp/tessivum-data/modes/review/mode.toml
+schema = 1
+id = "review"
+name = "Review"
+description = "Read-only repository review"
+
+[prompt]
+complete = true
+text = "Review the workspace without modifying it."
+
+[tools]
+presentation = "direct"
+enabled = ["fs.read", "search.glob", "search.grep"]
+
+[capabilities]
+skills = false
+planning = false
+compaction = false
+```
+
+Select it through an ordered CLI patch:
+
+```yaml
+# /tmp/review-mode.yml
+agent-presets:
+  default: review
+```
+
+```bash
+tessivum --data-dir /tmp/tessivum-data web --patch /tmp/review-mode.yml
+```
+
+Later `--patch` files override earlier files recursively. Unknown fields, unknown tool capabilities, duplicate IDs, path escapes, missing required native tools, missing Bun, and unavailable plugin runtimes fail with structured errors; Tessivum does not silently expand or downgrade a mode.
 
 ## Requirements
 

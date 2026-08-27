@@ -3079,7 +3079,6 @@ fn child_header(
     Ok(header)
 }
 
-
 fn completed_parent_seed(events: &[SessionEvent]) -> Vec<SessionEvent> {
     let Some(boundary) = events
         .iter()

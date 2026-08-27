@@ -44,11 +44,20 @@
       }
     },
     {
+      "case": "snake-code",
+      "header": {
+        "version": 0,
+        "id": "phase5-legacy-snake-code",
+        "createdAt": 4,
+        "agent_preset": "code"
+      }
+    },
+    {
       "case": "unknown-custom",
       "header": {
         "version": 0,
         "id": "phase5-legacy-custom",
-        "createdAt": 4,
+        "createdAt": 5,
         "agentPreset": "repository-maintainer"
       }
     }

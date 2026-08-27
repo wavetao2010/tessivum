@@ -13,7 +13,10 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tessivum_core::{ContextHandle, CoreError, EntryTree, Loader, PackageResolver, ServiceHandle};
+use tessivum_core::{
+    CancellationToken, ContextHandle, CoreError, EntryTree, Loader, LoaderRuntime, NativePlugin,
+    NativePluginFactory, NativePluginRuntime, PackageResolver, ServiceHandle,
+};
 use tessivum_extism::{Capability, CapabilityHandler, CapabilityRegistry, ResourceLimits};
 use tessivum_node_bridge::{ClientConfig, HostCommand};
 use thiserror::Error;
@@ -31,9 +34,8 @@ use crate::{
         AgentStatus, InboxReservationResult, InboxTarget, InboxUpdate,
     },
     agent_loop::AgentLoopFactory,
-    agent_preset::{
-        AgentPresetDocument, AgentPresetRoot, AgentPresetService, AgentPresetSummary,
-        AgentPresetTrust,
+    agent_mode::{
+        AgentModeDocument, AgentModeId, AgentModeRegistry, AgentModeRoot, AgentModeTrust,
     },
     approval::{
         ApprovalAsked, ApprovalDecision, ApprovalError, ApprovalNotification, ApprovalRequested,
@@ -45,14 +47,16 @@ use crate::{
         AttachmentId, AttachmentInput, AttachmentLimits, AttachmentRef, AttachmentStore,
     },
     bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
-    builtin_tools::{BashJobOwners, BuiltinTools, BuiltinToolsConfig, HostToolServices},
-    code_runtime::{register_code_tool, CodeRuntime, ProcessCodeRuntime},
+    builtin_tools::{
+        BashJobOwners, BuiltinTools, BuiltinToolsConfig, HostToolServices, PersistentShellSessions,
+    },
+    code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     compaction::{CompactionConfig, CompactionService},
     compatible_api::CompatibleApiAdapter,
+    composition::{CompositionRegistry, CompositionTools},
     credentials::{
         credentials_service_key, CredentialEvent, CredentialRef, Credentials, YamlCredentialFile,
     },
-    dynamic_cordis::{DynamicCordisRegistry, DynamicCordisTools},
     goal::{GoalError, GoalService, GoalToolRouter, GoalTools},
     jobs::{JobObserverRegistration, JobOwner, JobSnapshot, JobTools, LocalJobRegistry},
     legacy::{product_loader, LegacyProfile, ProductPackageResolver, WasmProductRuntime},
@@ -89,8 +93,8 @@ use crate::{
     sandbox::Sandbox,
     schedule::{ScheduleOwner, ScheduleOwners, ScheduleTools},
     session::{
-        session_service_key, RestoreMode, Session, SessionError, SessionPersistence,
-        SessionRawArtifact, SessionStore,
+        session_service_key, RestoreMode, Session, SessionError, SessionInspection,
+        SessionPersistence, SessionRawArtifact, SessionStore,
     },
     session_query::{SessionQuery, SESSION_SEARCH_RESULT_LIMIT},
     settings::{
@@ -112,7 +116,7 @@ use crate::{
     subprocess::SubprocessRuntime,
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     telemetry::TelemetryCoordinator,
-    tools::{ToolRegistration, ToolRestrictions, ToolRuntime},
+    tools::{ToolRegistration, ToolRuntime},
     web::{
         DeepSeekSearchProvider, HttpFetchConfig, HttpFetchProvider, WebFetchProviderRegistration,
         WebRuntime, WebSearchProviderRegistration, DEEPSEEK_SEARCH_PROVIDER,
@@ -538,12 +542,6 @@ const MAX_PROFILE_BYTES: usize = 128;
 const MAX_NOTIFICATIONS: usize = 4_096;
 const MAX_LIVE_SESSIONS: usize = 1_024;
 const MAX_ORPHAN_SWEEP_SESSIONS: usize = 1_024;
-const CODE_MODE_PROMPT: &str = concat!(
-    "## Writing code for run_code\n",
-    "Use the `run_code` tool for model-directed actions. Its JavaScript program receives the native tool ",
-    "SDK as `declare const tools`; call `await tools.<name>(arguments)` for each operation and return a ",
-    "JSON-serializable result.",
-);
 
 const MAX_ORPHAN_SWEEP_ENTRIES: usize = 1_024;
 
@@ -825,8 +823,7 @@ pub struct LegacyHostConfig {
     pub command: HostCommand,
     pub client: ClientConfig,
 }
-
-/// Boot inputs. JSON patches are applied bundle → profile → home → CLI → telemetry.
+/// Boot inputs. Settings patches are applied bundle → profile → home → CLI order → telemetry.
 #[derive(Clone)]
 pub struct HostConfig {
     pub cwd: PathBuf,
@@ -835,8 +832,10 @@ pub struct HostConfig {
     pub settings_path: Option<PathBuf>,
     /// Host-selected writable credentials file. `None` uses `data_dir/credentials.yaml`.
     pub credentials_path: Option<PathBuf>,
-    pub agent_preset_roots: Vec<AgentPresetRoot>,
-    pub include_user_preset_root: bool,
+    pub agent_mode_roots: Vec<AgentModeRoot>,
+    pub include_user_mode_root: bool,
+    pub default_agent_mode: AgentModeId,
+    pub native_plugins: BTreeMap<String, NativePluginFactory>,
     pub profile: String,
     pub provider: String,
     pub model: String,
@@ -864,8 +863,6 @@ pub struct HostConfig {
     pub package_resolver: Option<Arc<dyn PackageResolver>>,
     pub wasm_limits: ResourceLimits,
     pub telemetry: Option<TelemetryCoordinator>,
-    pub code_runtime: Option<ProcessCodeRuntime>,
-    pub dynamic_cordis: bool,
 }
 
 impl std::fmt::Debug for HostConfig {
@@ -876,8 +873,10 @@ impl std::fmt::Debug for HostConfig {
             .field("data_dir", &self.data_dir)
             .field("settings_path", &self.settings_path)
             .field("credentials_path", &self.credentials_path)
-            .field("agent_preset_roots", &self.agent_preset_roots)
-            .field("include_user_preset_root", &self.include_user_preset_root)
+            .field("agent_mode_roots", &self.agent_mode_roots)
+            .field("include_user_mode_root", &self.include_user_mode_root)
+            .field("default_agent_mode", &self.default_agent_mode)
+            .field("native_plugins", &self.native_plugins.len())
             .field("has_path_opener", &self.path_opener.is_some())
             .field("profile", &self.profile)
             .field("provider", &self.provider)
@@ -912,8 +911,10 @@ impl HostConfig {
             data_dir: data_dir.into(),
             settings_path: None,
             credentials_path: None,
-            agent_preset_roots: Vec::new(),
-            include_user_preset_root: true,
+            agent_mode_roots: Vec::new(),
+            include_user_mode_root: true,
+            default_agent_mode: AgentModeId::standard(),
+            native_plugins: BTreeMap::new(),
             profile: "default".into(),
             provider: "recorded".into(),
             model: "recorded".into(),
@@ -941,8 +942,6 @@ impl HostConfig {
             legacy_host: None,
             wasm_limits: ResourceLimits::default(),
             telemetry: None,
-            code_runtime: None,
-            dynamic_cordis: false,
         }
     }
     pub fn with_settings_path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -977,32 +976,52 @@ impl HostConfig {
         self.adapter_factory = Some(factory);
         self
     }
-    pub fn with_agent_preset_root(
-        mut self,
-        path: impl Into<PathBuf>,
-        trust: AgentPresetTrust,
-    ) -> Self {
-        self.agent_preset_roots.push(AgentPresetRoot {
+    pub fn with_agent_mode_root(mut self, path: impl Into<PathBuf>, trust: AgentModeTrust) -> Self {
+        self.agent_mode_roots.push(AgentModeRoot {
             path: path.into(),
             trust,
         });
         self
     }
-    pub fn with_include_user_preset_root(mut self, include: bool) -> Self {
-        self.include_user_preset_root = include;
+    pub fn with_include_user_mode_root(mut self, include: bool) -> Self {
+        self.include_user_mode_root = include;
         self
     }
-
-    pub fn with_approval_required_tool(mut self, tool: impl Into<String>) -> Self {
-        self.approval_required_tools.insert(tool.into());
+    pub fn with_default_agent_mode(mut self, mode: AgentModeId) -> Self {
+        self.default_agent_mode = mode;
         self
+    }
+    pub fn with_native_plugin<P, F>(
+        mut self,
+        package: impl Into<String>,
+        factory: F,
+    ) -> Result<Self, TessivumError>
+    where
+        P: NativePlugin + 'static,
+        F: Fn() -> P + Send + Sync + 'static,
+    {
+        let package = package.into();
+        if package.trim().is_empty() || self.native_plugins.contains_key(&package) {
+            return Err(TessivumError::new(
+                "NATIVE_PLUGIN_REGISTRATION_INVALID",
+                "native plugin package must be nonblank and unique",
+                "host",
+                json!({"package": package}),
+            ));
+        }
+        self.native_plugins.insert(
+            package,
+            Arc::new(move || Box::new(factory()) as Box<dyn NativePlugin>),
+        );
+        Ok(self)
     }
     pub fn with_cli_patch(mut self, patch: Value) -> Self {
         self.cli_patches.push(patch);
         self
     }
-    pub fn with_dynamic_cordis(mut self, enabled: bool) -> Self {
-        self.dynamic_cordis = enabled;
+
+    pub fn with_approval_required_tool(mut self, tool: impl Into<String>) -> Self {
+        self.approval_required_tools.insert(tool.into());
         self
     }
     pub fn compose_profile(&self) -> Result<Value, HostError> {
@@ -1236,7 +1255,7 @@ pub struct HostSessionInfo {
     pub cwd: Option<String>,
     pub parent_session: Option<SessionId>,
     pub origin: Option<SessionOrigin>,
-    pub agent_preset: Option<String>,
+    pub agent_mode: Option<AgentModeId>,
     pub event_count: u64,
     pub blank: bool,
 }
@@ -1270,10 +1289,23 @@ pub struct HostDescriptor {
     pub model: String,
     pub max_tokens: Option<u64>,
 }
-/// Exact result of opening a user-authored preset directory.
+/// Browser-compatible summary backed by one native Agent Mode.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HostAgentPresetDocument {
+pub struct HostAgentModeSummary {
+    pub id: String,
+    pub trust: String,
+    pub is_default: bool,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
+}
+
+/// Exact result of opening a user-authored mode document.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostAgentModeDocument {
     pub opened: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -1550,7 +1582,7 @@ pub trait HostApi: Send + Sync {
             cwd: None,
             parent_session: None,
             origin: None,
-            agent_preset: None,
+            agent_mode: None,
             event_count: 0,
             blank: true,
         })
@@ -1725,83 +1757,89 @@ pub trait HostApi: Send + Sync {
             } => settings.mutate(&namespace, ops, expected_revision).await,
         }
     }
-    async fn agent_preset_list(&self) -> Result<Vec<AgentPresetSummary>, TessivumError> {
+    async fn agent_mode_list(&self) -> Result<Vec<HostAgentModeSummary>, TessivumError> {
         Ok(Vec::new())
     }
-    async fn agent_preset_read(
+    async fn agent_mode_read(
         &self,
-        _agent_preset: String,
-    ) -> Result<AgentPresetDocument, TessivumError> {
+        _agent_mode: String,
+    ) -> Result<AgentModeDocument, TessivumError> {
         Err(TessivumError::new(
-            "AGENT_PRESET_NOT_FOUND",
-            "agent preset was not found",
+            "MODE_NOT_FOUND",
+            "agent mode was not found",
             "host",
             Value::Null,
         ))
     }
-    async fn agent_preset_copy(
+    async fn agent_mode_skills_enabled(
+        &self,
+        _agent_mode: Option<String>,
+    ) -> Result<bool, TessivumError> {
+        Ok(false)
+    }
+    async fn agent_mode_copy(
         &self,
         _from: String,
-        _agent_preset: String,
+        _agent_mode: String,
         _name: Option<String>,
     ) -> Result<String, TessivumError> {
         Err(TessivumError::new(
-            "AGENT_PRESET_UNSUPPORTED",
-            "agent preset authoring is unavailable",
+            "MODE_AUTHORING_UNAVAILABLE",
+            "agent mode authoring is unavailable",
             "host",
             Value::Null,
         ))
     }
-    async fn agent_preset_remove(&self, _agent_preset: String) -> Result<(), TessivumError> {
+    async fn agent_mode_remove(&self, _agent_mode: String) -> Result<(), TessivumError> {
         Err(TessivumError::new(
-            "AGENT_PRESET_UNSUPPORTED",
-            "agent preset authoring is unavailable",
+            "MODE_AUTHORING_UNAVAILABLE",
+            "agent mode authoring is unavailable",
             "host",
             Value::Null,
         ))
     }
-    async fn agent_preset_path(
+    async fn agent_mode_path(
         &self,
-        _agent_preset: String,
+        _agent_mode: String,
     ) -> Result<(String, String), TessivumError> {
         Err(TessivumError::new(
-            "AGENT_PRESET_NOT_FOUND",
-            "agent preset was not found",
+            "MODE_NOT_FOUND",
+            "agent mode was not found",
             "host",
             Value::Null,
         ))
     }
-    async fn agent_preset_open_document(
+    async fn agent_mode_open_document(
         &self,
-        agent_preset: String,
-    ) -> Result<HostAgentPresetDocument, TessivumError> {
-        let (trust, path) = self.agent_preset_path(agent_preset.clone()).await?;
+        agent_mode: String,
+    ) -> Result<HostAgentModeDocument, TessivumError> {
+        let (trust, path) = self.agent_mode_path(agent_mode.clone()).await?;
         if trust != "user" {
             return Err(TessivumError::new(
-                "agent-preset-read-only",
-                "system presets are read-only",
+                "MODE_READ_ONLY",
+                "built-in and system modes are read-only",
                 "host",
-                json!({"agentPreset": agent_preset, "reason": "system presets are read-only"}),
+                json!({"agentMode": agent_mode, "reason": "mode is read-only"}),
             ));
         }
-        Ok(HostAgentPresetDocument {
+        Ok(HostAgentModeDocument {
             opened: false,
             path: Some(path),
         })
     }
-    async fn agent_preset_select(
+    async fn agent_mode_select(
         &self,
         _session: SessionId,
-        _agent_preset: String,
+        _agent_mode: String,
     ) -> Result<String, TessivumError> {
         Err(TessivumError::new(
-            "AGENT_PRESET_UNSUPPORTED",
-            "agent preset selection is unavailable",
+            "MODE_SELECTION_UNAVAILABLE",
+            "agent mode selection is unavailable",
             "host",
             Value::Null,
         ))
     }
-    fn agent_preset_capabilities(&self) -> (bool, bool) {
+    fn agent_mode_capabilities(&self) -> (bool, bool) {
         (false, false)
     }
     fn descriptor(&self) -> HostDescriptor {
@@ -1920,13 +1958,15 @@ struct HostInner {
     route_resolver: Arc<DynamicRouteResolver>,
     route_state: Mutex<RouteState>,
     route_gate: AsyncMutex<()>,
+    // ponytail: one gate makes default-mode writes and custom-mode removal atomic; mode authoring volume does not justify sharding.
+    agent_mode_gate: AsyncMutex<()>,
 
     cancellation: tessivum_core::CancellationToken,
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
     workspace_registry: WorkspaceRegistry,
     default_workspace_id: Option<WorkspaceId>,
-    agent_presets: Arc<AgentPresetService>,
+    agent_modes: Arc<AgentModeRegistry>,
     message_feedback: MessageFeedbackStore,
     resources: Arc<SessionResourceResolver>,
     registry: AgentRegistry,
@@ -1941,13 +1981,11 @@ struct HostInner {
     skill_providers: Mutex<BTreeMap<PathBuf, SkillProviderRegistration>>,
     job_delivery: JobCompletionDelivery,
     telemetry: Option<TelemetryCoordinator>,
-    code_runtime: Option<ProcessCodeRuntime>,
     subprocesses: SubprocessRuntime,
     legacy: Option<LegacyProfile>,
     loader: AsyncMutex<Option<Loader>>,
     services: Services,
     projections: ProjectionRegistry,
-    dynamic_cordis: Option<DynamicCordisRegistry>,
     goal_tools: GoalToolRouter,
     planning_tools: PlanningToolRouter,
     owned_agents: Mutex<BTreeMap<SessionId, OwnedAgent>>,
@@ -2378,12 +2416,10 @@ struct Services {
     _credentials: ServiceHandle<Arc<Credentials>>,
     _attachments: ServiceHandle<Arc<AttachmentStore>>,
     _telemetry: Option<ServiceHandle<TelemetryCoordinator>>,
-    _code: Option<ServiceHandle<ProcessCodeRuntime>>,
-    _code_tool: Option<ToolRegistration>,
     _question_tool: ToolRegistration,
     _prompt_registration: Option<PromptRegistration>,
     _builtin_tools: BuiltinTools,
-    _dynamic_cordis_tools: Option<DynamicCordisTools>,
+    _composition_tools: CompositionTools,
     _goal_tools: GoalTools,
     _planning_tools: PlanningTools,
     _factory: AgentFactoryRegistration,
@@ -2417,8 +2453,16 @@ impl Drop for Admission {
 }
 
 impl HostRuntime {
-    pub async fn boot(config: HostConfig) -> Result<Self, HostError> {
+    pub async fn boot(mut config: HostConfig) -> Result<Self, HostError> {
         let profile = config.compose_profile()?;
+        if let Some(default) = profile
+            .get("agent-presets")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("default"))
+            .and_then(Value::as_str)
+        {
+            config.default_agent_mode = AgentModeId::new(default).map_err(HostError::Runtime)?;
+        }
         let cwd = config
             .cwd
             .canonicalize()
@@ -2461,29 +2505,32 @@ impl HostRuntime {
                 "data_dir is not a directory".into(),
             ));
         }
-        let mut preset_roots = config.agent_preset_roots.clone();
-        let implicit_user_preset_root = data_dir.join(".agent-presets");
-        let authoring_root = if config.include_user_preset_root {
-            preset_roots.push(AgentPresetRoot {
-                path: implicit_user_preset_root.clone(),
-                trust: AgentPresetTrust::User,
+        let mut mode_roots = config.agent_mode_roots.clone();
+        let implicit_user_mode_root = data_dir.join("modes");
+        let authoring_root = if config.include_user_mode_root {
+            mode_roots.push(AgentModeRoot {
+                path: implicit_user_mode_root.clone(),
+                trust: AgentModeTrust::User,
             });
-            Some(implicit_user_preset_root)
+            Some(implicit_user_mode_root)
         } else {
-            preset_roots
+            mode_roots
                 .iter()
-                .find(|root| root.trust == AgentPresetTrust::User)
+                .find(|root| root.trust == AgentModeTrust::User)
                 .map(|root| root.path.clone())
         };
-        if let Some(user_preset_root) = &authoring_root {
-            tokio::fs::create_dir_all(user_preset_root)
+        if let Some(user_mode_root) = &authoring_root {
+            tokio::fs::create_dir_all(user_mode_root)
                 .await
                 .map_err(|source| HostError::CreateDataDir {
-                    path: user_preset_root.clone(),
+                    path: user_mode_root.clone(),
                     source,
                 })?;
         }
-        let agent_presets = Arc::new(AgentPresetService::with_roots(preset_roots, authoring_root));
+        let agent_modes = Arc::new(AgentModeRegistry::with_roots(mode_roots, authoring_root));
+        agent_modes
+            .resolve(&config.default_agent_mode)
+            .map_err(HostError::Runtime)?;
 
         let settings_path = host_file_path(
             &data_dir,
@@ -2509,7 +2556,61 @@ impl HostRuntime {
         let settings = Arc::new(Settings::new(Arc::new(YamlSettingsProvider::new(
             settings_path,
         ))));
+        settings
+            .prepare_document()
+            .await
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let settings_service = root.provide(settings_service_key(), Arc::clone(&settings))?;
+        let mode_settings_base = profile
+            .get("agent-presets")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let mode_registry = Arc::clone(&agent_modes);
+        settings
+            .register(
+                SettingsRegistration::new(
+                    "agent-presets",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "default": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9-]*$"
+                            }
+                        },
+                        "required": ["default"],
+                        "additionalProperties": false
+                    }),
+                    json!({"default": config.default_agent_mode.as_str()}),
+                    mode_settings_base,
+                )
+                .with_validator(Arc::new(move |value| {
+                    let id = value
+                        .get("default")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            TessivumError::new(
+                                "INVALID_AGENT_MODE_SETTINGS",
+                                "agent-presets.default must name an Agent Mode",
+                                "settings",
+                                json!({"namespace": "agent-presets"}),
+                            )
+                        })?;
+                    mode_registry.resolve(id).map(|_| ())
+                })),
+            )
+            .await
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let configured_default = settings
+            .get("agent-presets")
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?
+            .value
+            .get("default")
+            .and_then(Value::as_str)
+            .expect("registered Agent Mode settings have a default")
+            .to_owned();
+        config.default_agent_mode =
+            AgentModeId::new(configured_default).map_err(HostError::Runtime)?;
         let credentials = Arc::new(Credentials::new(Arc::new(YamlCredentialFile::new(
             credentials_path,
         ))));
@@ -2630,19 +2731,6 @@ impl HostRuntime {
             ))
             .await
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-        let preset_base = profile
-            .get("agent-presets")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        settings
-            .register(SettingsRegistration::new(
-                "agent-presets",
-                json!({"type": "object", "properties": {"default": {"type": "string"}}, "additionalProperties": false}),
-                json!({"default": "standard"}),
-                preset_base,
-            ))
-            .await
-            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let route_snapshot = settings
             .get(LLM_PI_AI_NAMESPACE)
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
@@ -2673,6 +2761,13 @@ impl HostRuntime {
         let persistence: Arc<dyn SessionPersistence> =
             Arc::new(JsonlSessionPersistence::new(&data_dir));
         let session_inspections = persistence.list(cancellation.clone()).await?;
+        materialize_legacy_agent_modes(
+            persistence.as_ref(),
+            &session_inspections,
+            &config.default_agent_mode,
+            cancellation.clone(),
+        )
+        .await?;
         let workspace_registry = WorkspaceRegistry::open(&data_dir, &cwd, session_inspections)?;
         let default_workspace_id = workspace_registry
             .list()
@@ -2716,14 +2811,7 @@ impl HostRuntime {
         }
         let llm_service = llm.clone().publish(&root)?;
         let prompt = SystemPrompt::new();
-        let system_prompt = if config.code_runtime.is_some() {
-            Some(match config.system_prompt.as_deref() {
-                Some(prompt) => format!("{prompt}\n\n{CODE_MODE_PROMPT}"),
-                None => CODE_MODE_PROMPT.into(),
-            })
-        } else {
-            config.system_prompt.clone()
-        };
+        let system_prompt = config.system_prompt.clone();
         let prompt_registration = system_prompt
             .as_ref()
             .map(|text| prompt.register(PromptSection::new("host", 0, text.clone())))
@@ -2750,16 +2838,6 @@ impl HostRuntime {
         let sandbox = Sandbox::local();
         let sandbox_service = sandbox.clone().publish(&root)?;
         let jobs = LocalJobRegistry::new();
-        let (dynamic_cordis, dynamic_cordis_tools) = if config.dynamic_cordis {
-            let registry = DynamicCordisRegistry::new(notices.clone())
-                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-            let registrations = registry
-                .register_tools(&tools)
-                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-            (Some(registry), Some(registrations))
-        } else {
-            (None, None)
-        };
         let jobs_service = jobs.clone().publish(&root)?;
         let job_owners: BashJobOwners = Arc::new(Mutex::new(BTreeMap::new()));
         let schedule_owners: ScheduleOwners = Arc::new(Mutex::new(BTreeMap::new()));
@@ -2776,6 +2854,7 @@ impl HostRuntime {
                 sandbox,
                 Arc::new(approvals.clone()),
                 Arc::clone(&job_owners),
+                PersistentShellSessions::new(),
                 Arc::clone(&attachments),
                 web,
             ),
@@ -2792,29 +2871,6 @@ impl HostRuntime {
             Arc::clone(&skill_scopes),
             Arc::new(AllowSkillInvocation),
         )?;
-        let approval_restrictions = config
-            .approval_required_tools
-            .iter()
-            .cloned()
-            .fold(ToolRestrictions::new(), ToolRestrictions::ask);
-        let dispatch_tools = if config.approval_required_tools.is_empty() {
-            tools.clone()
-        } else {
-            tools.scoped(approval_restrictions.clone())?
-        };
-        let code_tool = config
-            .code_runtime
-            .as_ref()
-            .map(|runtime| register_code_tool(&tools, dispatch_tools.clone(), runtime.clone()))
-            .transpose()?;
-        let mut agent_tools = if code_tool.is_some() {
-            tools.scoped(ToolRestrictions::allow_only(["run_code"]))?
-        } else {
-            dispatch_tools.clone()
-        };
-        if !config.approval_required_tools.is_empty() && code_tool.is_none() {
-            agent_tools = agent_tools.scoped(approval_restrictions)?;
-        }
         let goal_tools = GoalToolRouter::default();
         let goal_registrations = goal_tools
             .register_tools(&tools)
@@ -2853,30 +2909,6 @@ impl HostRuntime {
         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let workflow_service = workflow.clone().publish(&root)?;
         let workflow_tools = register_workflow_tool(&tools, workflow.clone(), registry.clone())?;
-        let factory = AgentLoopFactory::new(llm.clone(), prompt.clone(), agent_tools)
-            .with_dispatch_tools(tools.clone())
-            .with_approval_required_tools(config.approval_required_tools.clone())
-            .with_presets(Arc::clone(&agent_presets))
-            .with_compaction(compaction)
-            .with_skills(skills.clone(), Arc::clone(&skill_scopes))
-            .with_context_window_resolver({
-                let routes = Arc::clone(&route_resolver.routes);
-                let recorded = config.recorded_replay_context_window;
-                Arc::new(move |provider: &str, model: &str| {
-                    recorded.or_else(|| {
-                        lock(&routes)
-                            .get(provider)
-                            .and_then(|route| route.models.iter().find(|item| item.id == model))
-                            .and_then(|item| item.context_window)
-                    })
-                })
-            });
-        let factory = if code_tool.is_some() {
-            factory.with_code_mode()
-        } else {
-            factory.with_standard_catalog()
-        };
-        let factory = registry.register_factory(Arc::new(factory))?;
         let subagent_provider = subagents
             .register(
                 "native",
@@ -2895,90 +2927,109 @@ impl HostRuntime {
             .as_ref()
             .map(|value| value.clone().publish(&root))
             .transpose()?;
-        let code_service = config
-            .code_runtime
-            .as_ref()
-            .map(|value| value.clone().publish(&root))
-            .transpose()?;
 
-        let needs_legacy = config.entries.as_ref().is_some_and(|entries| {
-            entries
-                .active_entries()
-                .iter()
-                .any(|entry| entry.options.runtime == tessivum_core::RuntimeKind::LegacyNode)
-        });
-        let legacy = if needs_legacy {
-            match (&config.legacy_profile, &config.legacy_host) {
-                (Some(profile), _) => Some(profile.clone()),
-                (None, Some(host)) => Some(
-                    LegacyProfile::new(
-                        host.command.clone(),
-                        host.client.clone(),
-                        BridgeServices::new(
-                            tools.clone(),
-                            prompt.clone(),
-                            llm.clone(),
-                            sessions.clone(),
-                            registry.clone(),
-                        )
-                        .with_settings(Arc::clone(&settings))
-                        .with_credentials(Arc::clone(&credentials))
-                        .with_pnpm_boundary(Arc::new(
-                            PnpmProfileBoundary::new(plugin_profile_root(&config.data_dir))
-                                .map_err(|error| {
-                                    HostError::InvalidConfiguration(error.to_string())
-                                })?,
-                        )),
+        let legacy = match (&config.legacy_profile, &config.legacy_host) {
+            (Some(profile), _) => Some(profile.clone()),
+            (None, Some(host)) => Some(
+                LegacyProfile::new(
+                    host.command.clone(),
+                    host.client.clone(),
+                    BridgeServices::new(
+                        tools.clone(),
+                        prompt.clone(),
+                        llm.clone(),
+                        sessions.clone(),
+                        registry.clone(),
                     )
-                    .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
-                ),
-                (None, None) => None,
-            }
-        } else {
-            None
+                    .with_settings(Arc::clone(&settings))
+                    .with_credentials(Arc::clone(&credentials))
+                    .with_pnpm_boundary(Arc::new(
+                        PnpmProfileBoundary::new(plugin_profile_root(&config.data_dir))
+                            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+                    )),
+                )
+                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+            ),
+            (None, None) => None,
         };
-        let loader = if let Some(entries) = config.entries.clone() {
-            let resolver: Arc<dyn PackageResolver> = match &config.package_resolver {
-                Some(value) => Arc::clone(value),
-                None => Arc::new(
+        if let Some(profile) = &legacy {
+            profile
+                .start()
+                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        }
+        let resolver: Arc<dyn PackageResolver> = match &config.package_resolver {
+            Some(value) => Arc::clone(value),
+            None => {
+                let mode_registry = Arc::clone(&agent_modes);
+                Arc::new(
                     ProductPackageResolver::new()
+                        .with_native_packages(config.native_plugins.keys().cloned())
+                        .with_legacy_node_modules(
+                            plugin_profile_root(&data_dir).join("node_modules"),
+                        )
+                        .allow_location_with(move |specifier, location, runtime| {
+                            runtime == tessivum_core::RuntimeKind::Wasm
+                                && mode_registry
+                                    .allows_plugin_source(std::path::Path::new(specifier))
+                                    .unwrap_or(false)
+                                && std::fs::canonicalize(specifier)
+                                    .ok()
+                                    .and_then(|source| source.parent().map(Path::to_path_buf))
+                                    .is_some_and(|directory| location.starts_with(directory))
+                        })
                         .confine_to(&cwd)
                         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
-                ),
-            };
-            if let Some(profile) = &legacy {
-                profile
-                    .start()
-                    .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-            }
-            let policies = WasmPolicyRegistry::new();
-            let capabilities = Arc::new(CapabilityRegistry::new());
-            let wasm_bridge = DomainBridge::with_policy_registry(
-                BridgeServices::new(
-                    tools,
-                    prompt.clone(),
-                    llm.clone(),
-                    sessions.clone(),
-                    registry.clone(),
                 )
-                .with_settings(Arc::clone(&settings))
-                .with_credentials(Arc::clone(&credentials)),
-                policies.clone(),
+            }
+        };
+        let policies = WasmPolicyRegistry::new();
+        let capabilities = Arc::new(CapabilityRegistry::new());
+        let wasm_bridge = DomainBridge::with_policy_registry(
+            BridgeServices::new(
+                tools.clone(),
+                prompt.clone(),
+                llm.clone(),
+                sessions.clone(),
+                registry.clone(),
             )
+            .with_settings(Arc::clone(&settings))
+            .with_credentials(Arc::clone(&credentials)),
+            policies.clone(),
+        )
+        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        capabilities
+            .register(Capability::ServiceCall, move |request| {
+                CapabilityHandler::call(&wasm_bridge, request)
+            })
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-            capabilities
-                .register(Capability::ServiceCall, move |request| {
-                    CapabilityHandler::call(&wasm_bridge, request)
-                })
+        capabilities.grant(Capability::ServiceCall);
+        let wasm = Arc::new(WasmProductRuntime::new(
+            capabilities,
+            policies,
+            config.wasm_limits.clone(),
+        ));
+        let mut native = NativePluginRuntime::new();
+        for (package, factory) in &config.native_plugins {
+            native
+                .register_boxed(package.clone(), Arc::clone(factory))
                 .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-            capabilities.grant(Capability::ServiceCall);
-            let wasm = Arc::new(WasmProductRuntime::new(
-                capabilities,
-                policies,
-                config.wasm_limits.clone(),
+        }
+        let mut composition_runtimes: Vec<Arc<dyn LoaderRuntime>> =
+            vec![Arc::new(native), wasm.clone()];
+        if let Some(profile) = &legacy {
+            composition_runtimes.push(Arc::new(
+                profile
+                    .runtime()
+                    .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
             ));
-
-            let mut loader = match product_loader(legacy.as_ref(), resolver, wasm) {
+        }
+        let composition = CompositionRegistry::new(Arc::clone(&resolver), composition_runtimes)
+            .map_err(HostError::Runtime)?;
+        let composition_tools = composition
+            .register_tools(&tools)
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let loader = if let Some(entries) = config.entries.clone() {
+            let mut loader = match product_loader(legacy.as_ref(), Arc::clone(&resolver), wasm) {
                 Ok(loader) => loader.with_context(root.clone()),
                 Err(error) => {
                     if let Some(profile) = &legacy {
@@ -3001,6 +3052,39 @@ impl HostRuntime {
         } else {
             None
         };
+        let persistent_shells = builtin_tools.persistent_shell_sessions();
+        let ptc_runtime = ProcessCodeRuntimeConfig::ptc_javascript()
+            .and_then(ProcessCodeRuntime::new)
+            .ok();
+        let mut factory = AgentLoopFactory::new(
+            llm.clone(),
+            prompt.clone(),
+            tools.clone(),
+            Arc::clone(&agent_modes),
+            config.default_agent_mode.clone(),
+        )
+        .with_persistent_shell_sessions(persistent_shells)
+        .with_composition_registry(composition)
+        .with_root_context(root.clone())
+        .with_approval_required_tools(config.approval_required_tools.clone())
+        .with_compaction(compaction)
+        .with_skills(skills.clone(), Arc::clone(&skill_scopes))
+        .with_context_window_resolver({
+            let routes = Arc::clone(&route_resolver.routes);
+            let recorded = config.recorded_replay_context_window;
+            Arc::new(move |provider: &str, model: &str| {
+                recorded.or_else(|| {
+                    lock(&routes)
+                        .get(provider)
+                        .and_then(|route| route.models.iter().find(|item| item.id == model))
+                        .and_then(|item| item.context_window)
+                })
+            })
+        });
+        if let Some(ptc_runtime) = ptc_runtime {
+            factory = factory.with_code_runtime(ptc_runtime);
+        }
+        let factory = registry.register_factory(Arc::new(factory))?;
         let message_feedback =
             MessageFeedbackStore::open(data_dir.join("message-feedback.json")).await?;
         let job_delivery = JobCompletionDelivery::new(
@@ -3054,13 +3138,14 @@ impl HostRuntime {
                 registrations,
             }),
             route_gate: AsyncMutex::new(()),
+            agent_mode_gate: AsyncMutex::new(()),
             cancellation,
             sessions,
             persistence,
             workspace_registry,
             default_workspace_id,
             projections,
-            agent_presets,
+            agent_modes,
             message_feedback,
             resources,
             registry,
@@ -3074,11 +3159,9 @@ impl HostRuntime {
             skill_scopes,
             skill_providers: Mutex::new(BTreeMap::new()),
             telemetry: config.telemetry.clone(),
-            code_runtime: config.code_runtime.clone(),
             subprocesses,
             legacy,
             loader: AsyncMutex::new(loader),
-            dynamic_cordis,
             goal_tools,
             planning_tools,
             services: Services {
@@ -3110,14 +3193,12 @@ impl HostRuntime {
                 _credentials: credentials_service,
                 _attachments: attachments_service,
                 _telemetry: telemetry_service,
-                _code: code_service,
-                _code_tool: code_tool,
                 _prompt_registration: prompt_registration,
                 _question_tool: question_tool,
                 _sandbox: sandbox_service,
                 _builtin_tools: builtin_tools,
-                _dynamic_cordis_tools: dynamic_cordis_tools,
                 _goal_tools: goal_registrations,
+                _composition_tools: composition_tools,
                 _planning_tools: planning_registrations,
                 _factory: factory,
             },
@@ -3162,10 +3243,6 @@ impl HostRuntime {
 }
 
 impl HostHandle {
-    pub(crate) fn dynamic_cordis(&self) -> Option<&DynamicCordisRegistry> {
-        self.inner.dynamic_cordis.as_ref()
-    }
-
     pub fn register_projection(
         &self,
         definition: ProjectionDefinition,
@@ -3176,43 +3253,6 @@ impl HostHandle {
             .map_err(|error| {
                 TessivumError::new(error.code(), error.to_string(), "projection", Value::Null)
             })
-    }
-    async fn append_dynamic_cordis_fact(
-        &self,
-        session_id: SessionId,
-        method: &str,
-        args: Value,
-        result: Value,
-    ) -> Result<(), TessivumError> {
-        let _admission = self.admit().map_err(HostError::wire)?;
-        validate_session(&session_id).map_err(HostError::wire)?;
-        let session = self
-            .inner
-            .sessions
-            .get(&session_id)
-            .ok_or_else(|| HostError::from(SessionError::NotFound(session_id.clone())))
-            .map_err(HostError::wire)?;
-        let args = args.as_object().map_or_else(Map::new, |source| {
-            [
-                "agentId",
-                "pluginId",
-                "packageId",
-                "pluginRunId",
-                "requestId",
-                "mode",
-            ]
-            .into_iter()
-            .filter_map(|key| source.get(key).cloned().map(|value| (key.into(), value)))
-            .collect()
-        });
-        self.append_command_event(
-            &session,
-            "cordis/dynamic",
-            json!({"method": method, "args": args, "result": result}),
-        )
-        .await
-        .map(|_| ())
-        .map_err(HostError::wire)
     }
 
     async fn pick_directory_inner(&self) -> Result<Option<String>, TessivumError> {
@@ -3328,35 +3368,41 @@ impl HostHandle {
         self.inner.path_opener.open_text_file(canonical).await
     }
 
-    pub async fn agent_preset_list(&self) -> Result<Vec<AgentPresetSummary>, HostError> {
-        let mut presets = self
-            .inner
-            .agent_presets
-            .list()
-            .await
-            .map_err(preset_error)?;
-        let configured = self
-            .inner
-            .settings
-            .get("agent-presets")
-            .ok()
-            .and_then(|snapshot| snapshot.value.get("default")?.as_str().map(str::to_owned));
-        let default = configured
-            .filter(|id| presets.iter().any(|preset| preset.id == *id))
-            .or_else(|| presets.first().map(|preset| preset.id.clone()));
-        for preset in &mut presets {
-            preset.is_default = default.as_deref() == Some(&preset.id);
-        }
-        Ok(presets)
-    }
-    pub async fn agent_preset_read(&self, id: String) -> Result<AgentPresetDocument, HostError> {
+    pub async fn agent_mode_list(&self) -> Result<Vec<HostAgentModeSummary>, HostError> {
+        let default = current_default_agent_mode(&self.inner).map_err(mode_error)?;
         self.inner
-            .agent_presets
-            .read(&id)
-            .await
-            .map_err(preset_error)
+            .agent_modes
+            .list()
+            .map_err(mode_error)
+            .map(|modes| {
+                modes
+                    .into_iter()
+                    .map(|mode| HostAgentModeSummary {
+                        is_default: mode.id == default,
+                        id: mode.id.into_string(),
+                        trust: mode_trust_wire(mode.trust).into(),
+                        name: Some(mode.name),
+                        description: Some(mode.description),
+                        broken: None,
+                    })
+                    .collect()
+            })
     }
-    pub async fn agent_preset_copy(
+    pub async fn agent_mode_read(&self, id: String) -> Result<AgentModeDocument, HostError> {
+        self.inner.agent_modes.read(&id).map_err(mode_error)
+    }
+    pub fn agent_mode_skills_enabled(&self, id: Option<String>) -> Result<bool, HostError> {
+        let id = match id {
+            Some(id) => AgentModeId::new(id).map_err(mode_error)?,
+            None => current_default_agent_mode(&self.inner).map_err(mode_error)?,
+        };
+        self.inner
+            .agent_modes
+            .resolve(id)
+            .map(|mode| mode.spec.skills)
+            .map_err(mode_error)
+    }
+    pub async fn agent_mode_copy(
         &self,
         from: String,
         target: String,
@@ -3364,90 +3410,90 @@ impl HostHandle {
     ) -> Result<String, HostError> {
         let _admission = self.admit()?;
         self.inner
-            .agent_presets
+            .agent_modes
             .copy(&from, &target, name)
-            .await
-            .map_err(preset_error)
+            .map(AgentModeId::into_string)
+            .map_err(mode_error)
     }
-    pub async fn agent_preset_remove(&self, id: String) -> Result<(), HostError> {
+    pub async fn agent_mode_remove(&self, id: String) -> Result<(), HostError> {
         let _admission = self.admit()?;
-        self.inner
-            .agent_presets
-            .remove(&id)
-            .await
-            .map_err(preset_error)
+        let _mode_gate = self.inner.agent_mode_gate.lock().await;
+        let id = AgentModeId::new(id).map_err(mode_error)?;
+        if current_default_agent_mode(&self.inner).map_err(mode_error)? == id {
+            return Err(mode_error(TessivumError::new(
+                "MODE_IN_USE",
+                "the default Agent Mode cannot be removed",
+                "agent-mode",
+                json!({"id": id}),
+            )));
+        }
+        self.inner.agent_modes.remove(&id).map_err(mode_error)
     }
-    pub async fn agent_preset_path(&self, id: String) -> Result<(String, String), HostError> {
-        let (trust, path) = self
+    pub async fn agent_mode_path(&self, id: String) -> Result<(String, String), HostError> {
+        let document = self.inner.agent_modes.read(&id).map_err(mode_error)?;
+        let path = self
             .inner
-            .agent_presets
+            .agent_modes
             .path(&id)
-            .await
-            .map_err(preset_error)?;
+            .map_err(mode_error)?
+            .ok_or_else(|| {
+                mode_error(TessivumError::new(
+                    "MODE_READ_ONLY",
+                    "built-in modes have no authorable mode.toml",
+                    "agent-mode",
+                    json!({"id": id}),
+                ))
+            })?;
         Ok((
-            match trust {
-                crate::agent_preset::AgentPresetTrust::System => "system",
-                crate::agent_preset::AgentPresetTrust::User => "user",
-            }
-            .into(),
+            mode_trust_wire(document.trust).into(),
             path.to_string_lossy().into_owned(),
         ))
     }
-    pub async fn agent_preset_open_document(
+    pub async fn agent_mode_open_document(
         &self,
         id: String,
-    ) -> Result<HostAgentPresetDocument, HostError> {
+    ) -> Result<HostAgentModeDocument, HostError> {
         let _admission = self.admit()?;
-        let (trust, path) = self
-            .inner
-            .agent_presets
-            .path(&id)
-            .await
-            .map_err(preset_error)?;
-        if trust != AgentPresetTrust::User {
-            return Err(HostError::Runtime(TessivumError::new(
-                "agent-preset-read-only",
-                "system presets are read-only",
-                "host",
-                json!({"agentPreset": id, "reason": "system presets are read-only"}),
+        let document = self.inner.agent_modes.read(&id).map_err(mode_error)?;
+        if document.trust != AgentModeTrust::User {
+            return Err(mode_error(TessivumError::new(
+                "MODE_READ_ONLY",
+                "built-in and system modes are read-only",
+                "agent-mode",
+                json!({"id": id}),
             )));
         }
-        let path = path.to_string_lossy().into_owned();
+        let path = self
+            .inner
+            .agent_modes
+            .path(&id)
+            .map_err(mode_error)?
+            .expect("user mode has a mode.toml path")
+            .to_string_lossy()
+            .into_owned();
         if let Some(open) = &self.inner.config.path_opener {
             open.open_path(PathBuf::from(&path))
                 .await
                 .map_err(HostError::Runtime)?;
-            return Ok(HostAgentPresetDocument {
+            return Ok(HostAgentModeDocument {
                 opened: true,
                 path: None,
             });
         }
-        Ok(HostAgentPresetDocument {
+        Ok(HostAgentModeDocument {
             opened: false,
             path: Some(path),
         })
     }
 
-    pub async fn agent_preset_select(
+    pub async fn agent_mode_select(
         &self,
         session_id: SessionId,
-        preset: String,
+        mode: String,
     ) -> Result<String, HostError> {
         let _admission = self.admit()?;
-        crate::agent_preset::validate_id_public(&preset).map_err(|reason| {
-            HostError::Runtime(TessivumError::new(
-                "agent-preset-invalid",
-                "agent preset was rejected",
-                "host",
-                json!({"agentPreset": preset, "reason": reason}),
-            ))
-        })?;
-        let _ = self
-            .inner
-            .agent_presets
-            .read(&preset)
-            .await
-            .map_err(preset_error)?;
+        let mode = AgentModeId::new(mode).map_err(mode_error)?;
+        self.inner.agent_modes.resolve(&mode).map_err(mode_error)?;
         let _setup = self.inner.setup.lock().await;
         let session = match self.inner.sessions.get(&session_id) {
             Some(session) => session,
@@ -3464,28 +3510,23 @@ impl HostHandle {
         };
         if let Some(agent) = self.inner.registry.get(&session_id) {
             if agent.status() == AgentStatus::Running {
-                return Err(HostError::Runtime(TessivumError::new(
-                    "agent-preset-locked",
+                return Err(mode_error(TessivumError::new(
+                    "MODE_SELECTION_LOCKED",
                     "session is running",
-                    "host",
-                    json!({"sessionId": session_id, "agentPreset": preset}),
+                    "agent-mode",
+                    json!({"sessionId": session_id, "agentMode": mode}),
                 )));
             }
         }
         let events = session.events();
         if has_model_visible_work(&events) {
-            return Err(HostError::Runtime(TessivumError::new(
-                "agent-preset-locked",
-                "agent preset can only be selected for a blank session",
-                "host",
-                json!({"sessionId": session_id, "agentPreset": preset}),
+            return Err(mode_error(TessivumError::new(
+                "MODE_SELECTION_LOCKED",
+                "agent mode can only be selected for a blank session",
+                "agent-mode",
+                json!({"sessionId": session_id, "agentMode": mode}),
             )));
         }
-        self.inner
-            .agent_presets
-            .prepare_selection(&preset)
-            .await
-            .map_err(preset_error)?;
         if let Some(agent) = self.inner.registry.get(&session_id) {
             self.inner.approvals.cancel_session(&session_id);
             let _ = self
@@ -3496,10 +3537,10 @@ impl HostHandle {
             agent.dispose().await?;
         }
         let event = SessionEvent {
-            event_type: "agent-preset/selected".into(),
+            event_type: "agent-mode/selected".into(),
             seq: session.next_seq()?,
             time: now(),
-            data: crate::agent_preset::selected_event_data(&preset),
+            data: json!({"agentMode": mode}),
             ignorable: Some(true),
             source_event_seqs: None,
             surface_op: None,
@@ -3508,7 +3549,7 @@ impl HostHandle {
             .append(event, self.inner.cancellation.clone())
             .await?;
         self.ensure_relay(session);
-        Ok(preset)
+        Ok(mode.into_string())
     }
     pub fn identity(&self) -> &HostIdentity {
         &self.inner.identity
@@ -4423,7 +4464,14 @@ impl HostHandle {
                     seed_length: Some(seed.len() as u64),
                     origin: None,
                     delegation_depth: source.header.delegation_depth,
-                    agent_preset: source.header.agent_preset.clone(),
+                    agent_mode: Some(
+                        selected_agent_mode_from(
+                            &source.events,
+                            source.header.agent_mode.clone(),
+                            &current_default_agent_mode(&self.inner).map_err(mode_error)?,
+                        )
+                        .map_err(mode_error)?,
+                    ),
                 },
                 seed,
                 self.inner.cancellation.clone(),
@@ -4565,7 +4613,14 @@ impl HostHandle {
                 cwd: header.cwd,
                 parent_session: header.parent_session,
                 origin: header.origin,
-                agent_preset: header.agent_preset,
+                agent_mode: Some(
+                    selected_agent_mode_from(
+                        &events,
+                        header.agent_mode,
+                        &current_default_agent_mode(&self.inner).map_err(mode_error)?,
+                    )
+                    .map_err(mode_error)?,
+                ),
                 event_count,
                 blank: !has_model_visible_work(&events),
             });
@@ -4578,12 +4633,7 @@ impl HostHandle {
         } else {
             self.config_selection()
         };
-        let agent_preset = self
-            .agent_preset_list()
-            .await?
-            .into_iter()
-            .find(|preset| preset.is_default)
-            .map(|preset| preset.id);
+        let agent_mode = Some(current_default_agent_mode(&self.inner).map_err(mode_error)?);
         let session = self
             .inner
             .sessions
@@ -4597,7 +4647,7 @@ impl HostHandle {
                     seed_length: None,
                     origin: None,
                     delegation_depth: Some(0),
-                    agent_preset: agent_preset.clone(),
+                    agent_mode: agent_mode.clone(),
                 },
                 self.inner.cancellation.clone(),
             )
@@ -4625,7 +4675,7 @@ impl HostHandle {
             cwd: Some(cwd),
             parent_session: None,
             origin: None,
-            agent_preset,
+            agent_mode,
             event_count: session.events().len() as u64,
             blank: !has_model_visible_work(&session.events()),
         })
@@ -4902,10 +4952,13 @@ impl HostHandle {
             Err(AgentError::NotFound(_)) => false,
             Err(error) => return Err(error.into()),
         };
+        let cleanup_pending = agent.as_ref().is_some_and(|agent| agent.is_disposed());
         if cancelled {
             if let Some(agent) = &agent {
                 self.publish_queue(session.clone(), agent.inbox());
             }
+        }
+        if cancelled || cleanup_pending {
             lock(&self.inner.state).queue_relayed.remove(&session);
             self.release_owned_agent(&session).await;
             if let Some(agent) = agent {
@@ -4913,7 +4966,7 @@ impl HostHandle {
             }
             self.transition(session, SessionStatus::Idle);
         }
-        Ok(cancelled)
+        Ok(cancelled || cleanup_pending)
     }
 
     async fn read_raw_session_inner(
@@ -5124,11 +5177,6 @@ impl HostHandle {
             owned.schedule.dispose();
         }
         self.inner.workspace_registry.shutdown();
-        if let Some(code) = &self.inner.code_runtime {
-            if let Err(error) = code.dispose().await {
-                failures.push(format!("code: {error}"));
-            }
-        }
         self.inner.subprocesses.shutdown().await;
         for session in self.inner.sessions.list() {
             if let Err(error) = session.flush(self.inner.cancellation.clone()).await {
@@ -5268,32 +5316,30 @@ impl HostHandle {
             .sessions
             .get(&session_id)
             .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
-        let preset = selected_agent_preset(&session).unwrap_or_else(|| "standard".into());
+        let mode = self
+            .inner
+            .agent_modes
+            .resolve(
+                selected_agent_mode(
+                    &session,
+                    &current_default_agent_mode(&self.inner).map_err(mode_error)?,
+                )
+                .map_err(mode_error)?,
+            )
+            .map_err(mode_error)?;
         let mut commands = vec![
             feedback_command_descriptor(),
             goal_command_descriptor(),
             permission_command_descriptor(),
             simple_command_descriptor("export", "Download this Session log as a ZIP archive"),
         ];
-        if self
-            .inner
-            .agent_presets
-            .contains_plugin(&preset, "@deepseek-ai/dsh-command-compact")
-            .await
-            .unwrap_or(false)
-        {
+        if mode.spec.compaction.is_some() {
             commands.push(simple_command_descriptor(
                 "compact",
                 "Compact older conversation history",
             ));
         }
-        if self
-            .inner
-            .agent_presets
-            .contains_plugin(&preset, "@deepseek-ai/dsh-plan-mode")
-            .await
-            .unwrap_or(false)
-        {
+        if mode.spec.planning {
             commands.push(plan_command_descriptor());
         }
         commands.sort_by(|left, right| left.name.cmp(&right.name));
@@ -5808,38 +5854,18 @@ impl HostHandle {
         if let Some(agent) = self.inner.registry.get(session_id) {
             return Ok(agent);
         }
-        let selected_preset = self
-            .events_inner(session_id.clone(), 0)
-            .await?
-            .into_iter()
-            .rev()
-            .find(|event| event.event_type == "agent-preset/selected")
-            .and_then(|event| {
-                event
-                    .data
-                    .get("agentPreset")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            });
-        let agent_preset = selected_preset
-            .clone()
-            .or_else(|| header.agent_preset.clone());
-        if let Some(preset) = &agent_preset {
-            let roster_present = !self
-                .inner
-                .agent_presets
-                .list()
-                .await
-                .map_err(preset_error)?
-                .is_empty();
-            if selected_preset.is_some() || roster_present {
-                self.inner
-                    .agent_presets
-                    .prepare_selection(preset)
-                    .await
-                    .map_err(preset_error)?;
-            }
-        }
+        let events = self.events_inner(session_id.clone(), 0).await?;
+        let agent_mode = selected_agent_mode_from(
+            &events,
+            header.agent_mode.clone(),
+            &current_default_agent_mode(&self.inner).map_err(mode_error)?,
+        )
+        .map_err(mode_error)?;
+        let mode = self
+            .inner
+            .agent_modes
+            .resolve(&agent_mode)
+            .map_err(mode_error)?;
         let selection = self.selection_for_session(session_id).await?;
         let max_tokens = self.inner.config.max_tokens.or_else(|| {
             let state = lock(&self.inner.route_state);
@@ -5857,7 +5883,7 @@ impl HostHandle {
         if lock(&self.inner.owned_agents).len() >= self.inner.config.max_live_sessions {
             return Err(HostError::SessionCapacity);
         }
-        self.enable_session_skills(session_id, &root, agent_preset.as_deref())
+        self.enable_session_skills(session_id, &root, mode.spec.skills)
             .await?;
         let owned = match self
             .inner
@@ -5872,7 +5898,7 @@ impl HostHandle {
                     seed_length: None,
                     origin: None,
                     delegation_depth: Some(0),
-                    agent_preset: agent_preset.clone(),
+                    agent_mode: Some(agent_mode),
                 },
                 AgentOptions {
                     provider: selection.provider,
@@ -6012,24 +6038,10 @@ impl HostHandle {
         &self,
         session_id: &SessionId,
         root: &Path,
-        selected_preset: Option<&str>,
+        enabled: bool,
     ) -> Result<(), HostError> {
-        if let Some(preset) = selected_preset {
-            for plugin in [
-                "@deepseek-ai/dsh-skill-filesystem",
-                "@deepseek-ai/dsh-tool-skill",
-            ] {
-                match self
-                    .inner
-                    .agent_presets
-                    .contains_plugin(preset, plugin)
-                    .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => return Ok(()),
-                    Err(error) => return Err(preset_error(error)),
-                }
-            }
+        if !enabled {
+            return Ok(());
         }
         let skill_root = root.join(".agents").join("skills");
         if skill_root.is_dir() {
@@ -6733,7 +6745,7 @@ impl HostApi for HostHandle {
                 .recognize_session(&session.header.id)
                 .map_err(HostError::from)
                 .map_err(HostError::wire)?;
-            // ponytail: fold activity and preset events on list; add a persistence index if large histories make this measurable.
+            // ponytail: fold activity and mode events on list; add a persistence index if large histories make this measurable.
             let events = self
                 .inner
                 .persistence
@@ -6746,18 +6758,11 @@ impl HostApi for HostHandle {
                 .rev()
                 .find(|event| event.event_type == "user/message")
                 .map_or(session.header.created_at, |event| event.time);
-            let agent_preset = events
-                .iter()
-                .rev()
-                .find(|event| event.event_type == "agent-preset/selected")
-                .and_then(|event| {
-                    event
-                        .data
-                        .get("agentPreset")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-                .or_else(|| session.header.agent_preset.clone());
+            let agent_mode = Some(selected_agent_mode_from(
+                &events,
+                session.header.agent_mode.clone(),
+                &current_default_agent_mode(&self.inner)?,
+            )?);
             listed.push(HostSessionInfo {
                 workspace_id: self
                     .inner
@@ -6771,7 +6776,7 @@ impl HostApi for HostHandle {
                 cwd: session.header.cwd,
                 parent_session: session.header.parent_session,
                 origin: session.header.origin,
-                agent_preset,
+                agent_mode,
                 event_count: session.event_count,
                 blank: !has_model_visible_work(&events),
             });
@@ -6881,56 +6886,59 @@ impl HostApi for HostHandle {
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_list(&self) -> Result<Vec<AgentPresetSummary>, TessivumError> {
-        HostHandle::agent_preset_list(self)
+    async fn agent_mode_list(&self) -> Result<Vec<HostAgentModeSummary>, TessivumError> {
+        HostHandle::agent_mode_list(self)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_read(&self, id: String) -> Result<AgentPresetDocument, TessivumError> {
-        HostHandle::agent_preset_read(self, id)
+    async fn agent_mode_read(&self, id: String) -> Result<AgentModeDocument, TessivumError> {
+        HostHandle::agent_mode_read(self, id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_copy(
+    async fn agent_mode_skills_enabled(&self, id: Option<String>) -> Result<bool, TessivumError> {
+        HostHandle::agent_mode_skills_enabled(self, id).map_err(HostError::wire)
+    }
+    async fn agent_mode_copy(
         &self,
         from: String,
         target: String,
         name: Option<String>,
     ) -> Result<String, TessivumError> {
-        HostHandle::agent_preset_copy(self, from, target, name)
+        HostHandle::agent_mode_copy(self, from, target, name)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_remove(&self, id: String) -> Result<(), TessivumError> {
-        HostHandle::agent_preset_remove(self, id)
+    async fn agent_mode_remove(&self, id: String) -> Result<(), TessivumError> {
+        HostHandle::agent_mode_remove(self, id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_path(&self, id: String) -> Result<(String, String), TessivumError> {
-        HostHandle::agent_preset_path(self, id)
+    async fn agent_mode_path(&self, id: String) -> Result<(String, String), TessivumError> {
+        HostHandle::agent_mode_path(self, id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_open_document(
+    async fn agent_mode_open_document(
         &self,
         id: String,
-    ) -> Result<HostAgentPresetDocument, TessivumError> {
-        HostHandle::agent_preset_open_document(self, id)
+    ) -> Result<HostAgentModeDocument, TessivumError> {
+        HostHandle::agent_mode_open_document(self, id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_select(
+    async fn agent_mode_select(
         &self,
         session: SessionId,
         preset: String,
     ) -> Result<String, TessivumError> {
-        HostHandle::agent_preset_select(self, session, preset)
+        HostHandle::agent_mode_select(self, session, preset)
             .await
             .map_err(HostError::wire)
     }
-    fn agent_preset_capabilities(&self) -> (bool, bool) {
+    fn agent_mode_capabilities(&self) -> (bool, bool) {
         (
-            self.inner.agent_presets.authorable(),
+            self.inner.agent_modes.authorable(),
             self.inner.config.path_opener.is_some(),
         )
     }
@@ -6962,134 +6970,6 @@ impl HostApi for HostHandle {
     }
     fn settings(&self) -> Option<Arc<Settings>> {
         Some(Arc::clone(&self.inner.settings))
-    }
-    fn dynamic_cordis_inventory(&self) -> Result<Value, TessivumError> {
-        Ok(self
-            .dynamic_cordis()
-            .map(DynamicCordisRegistry::inventory)
-            .unwrap_or_else(|| Value::Array(Vec::new())))
-    }
-    async fn dynamic_cordis_run_host_half(&self, args: Value) -> Result<Value, TessivumError> {
-        let registry = self.dynamic_cordis().cloned().ok_or_else(|| {
-            TessivumError::new(
-                "CORDIS_UNAVAILABLE",
-                "dynamic Cordis compatibility is disabled",
-                "cordis",
-                Value::Null,
-            )
-        })?;
-        let session_id =
-            SessionId::from(args.get("agentId").and_then(Value::as_str).ok_or_else(|| {
-                TessivumError::new(
-                    "INVALID_CORDIS_REQUEST",
-                    "agentId is required",
-                    "cordis",
-                    Value::Null,
-                )
-            })?);
-        let result = registry.run_host_half(&args).await?;
-        self.append_dynamic_cordis_fact(session_id, "runHostHalf", args, result.clone())
-            .await?;
-        Ok(result)
-    }
-    async fn dynamic_cordis_call(&self, method: &str, args: Value) -> Result<Value, TessivumError> {
-        let Some(registry) = self.dynamic_cordis().cloned() else {
-            if method == "syncInspectManifest" {
-                return Ok(Value::Null);
-            }
-            return Err(TessivumError::new(
-                "CORDIS_UNAVAILABLE",
-                "dynamic Cordis compatibility is disabled",
-                "cordis",
-                Value::Null,
-            ));
-        };
-        let resolved_request_owner = if method == "resolveRequestRun" {
-            args.get("requestId")
-                .and_then(Value::as_str)
-                .and_then(|request_id| registry.pending_request_owner(request_id))
-        } else {
-            None
-        };
-        let mut result = match method {
-            "getClientCode" => registry.get_client_code(&args),
-            "resolveRequestRun" => registry.resolve_request_run(&args).await,
-            "undefineFromPanel" => registry.undefine_from_panel(&args),
-            "settleUserRun" => registry.settle_user_run(&args).await,
-            "stopFromPanel" => registry.stop_from_panel(&args),
-            "syncInspectManifest" => registry.sync_inspect_manifest(&args),
-            "resolveInspectQuery" => registry.resolve_inspect_query(&args),
-            "reportRenderFailure" => registry.report_render_failure(&args),
-            "reportClientGuardFailure" => registry.report_client_guard_failure(&args),
-            "invoke" => registry.invoke(&args).await,
-            _ => Err(TessivumError::new(
-                "CORDIS_METHOD_NOT_FOUND",
-                "dynamic Cordis method was not found",
-                "cordis",
-                json!({"method": method}),
-            )),
-        }?;
-        let activation_context = result
-            .as_object_mut()
-            .and_then(|object| object.remove("_context"))
-            .and_then(|value| value.as_str().map(str::to_owned));
-        if let (Some(session_id), Some(text)) =
-            (resolved_request_owner.as_ref(), activation_context)
-        {
-            if let Some(agent) = self.inner.registry.get(session_id) {
-                agent
-                    .steer(Message {
-                        id: MessageId::random(),
-                        role: MessageRole::User,
-                        content: vec![ContentBlock::Text { text }],
-                        source: MessageSource::Plugin {
-                            plugin: "cordis-host-runner".into(),
-                            compaction_id: None,
-                            form: None,
-                            sections: None,
-                            summary: None,
-                        },
-                    })
-                    .await
-                    .map_err(|error| {
-                        TessivumError::new(
-                            "CORDIS_AGENT_DELIVERY_FAILED",
-                            error.to_string(),
-                            "cordis",
-                            json!({"sessionId": session_id}),
-                        )
-                    })?;
-            }
-        }
-        let event_session = if method == "resolveRequestRun" {
-            resolved_request_owner
-        } else if matches!(
-            method,
-            "undefineFromPanel"
-                | "settleUserRun"
-                | "stopFromPanel"
-                | "resolveInspectQuery"
-                | "reportRenderFailure"
-                | "reportClientGuardFailure"
-        ) {
-            Some(SessionId::from(
-                args.get("agentId").and_then(Value::as_str).ok_or_else(|| {
-                    TessivumError::new(
-                        "INVALID_CORDIS_REQUEST",
-                        "agentId is required",
-                        "cordis",
-                        Value::Null,
-                    )
-                })?,
-            ))
-        } else {
-            None
-        };
-        if let Some(session_id) = event_session {
-            self.append_dynamic_cordis_fact(session_id, method, args, result.clone())
-                .await?;
-        }
-        Ok(result)
     }
     fn credentials(&self) -> Option<Arc<Credentials>> {
         Some(Arc::clone(&self.inner.credentials))
@@ -7349,63 +7229,65 @@ impl HostApi for HostRuntime {
     ) -> Result<SettingsSnapshot, SettingsError> {
         self.handle.mutate_settings(namespace, mutation).await
     }
-    async fn agent_preset_list(&self) -> Result<Vec<AgentPresetSummary>, TessivumError> {
+    async fn agent_mode_list(&self) -> Result<Vec<HostAgentModeSummary>, TessivumError> {
+        self.handle.agent_mode_list().await.map_err(HostError::wire)
+    }
+    async fn agent_mode_read(&self, id: String) -> Result<AgentModeDocument, TessivumError> {
         self.handle
-            .agent_preset_list()
+            .agent_mode_read(id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_read(&self, id: String) -> Result<AgentPresetDocument, TessivumError> {
+    async fn agent_mode_skills_enabled(&self, id: Option<String>) -> Result<bool, TessivumError> {
         self.handle
-            .agent_preset_read(id)
-            .await
+            .agent_mode_skills_enabled(id)
             .map_err(HostError::wire)
     }
-    async fn agent_preset_copy(
+    async fn agent_mode_copy(
         &self,
         from: String,
         target: String,
         name: Option<String>,
     ) -> Result<String, TessivumError> {
         self.handle
-            .agent_preset_copy(from, target, name)
+            .agent_mode_copy(from, target, name)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_remove(&self, id: String) -> Result<(), TessivumError> {
+    async fn agent_mode_remove(&self, id: String) -> Result<(), TessivumError> {
         self.handle
-            .agent_preset_remove(id)
+            .agent_mode_remove(id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_path(&self, id: String) -> Result<(String, String), TessivumError> {
+    async fn agent_mode_path(&self, id: String) -> Result<(String, String), TessivumError> {
         self.handle
-            .agent_preset_path(id)
+            .agent_mode_path(id)
             .await
             .map_err(HostError::wire)
     }
-    async fn agent_preset_open_document(
+    async fn agent_mode_open_document(
         &self,
         id: String,
-    ) -> Result<HostAgentPresetDocument, TessivumError> {
+    ) -> Result<HostAgentModeDocument, TessivumError> {
         self.handle
-            .agent_preset_open_document(id)
+            .agent_mode_open_document(id)
             .await
             .map_err(HostError::wire)
     }
 
-    async fn agent_preset_select(
+    async fn agent_mode_select(
         &self,
         session: SessionId,
         preset: String,
     ) -> Result<String, TessivumError> {
         self.handle
-            .agent_preset_select(session, preset)
+            .agent_mode_select(session, preset)
             .await
             .map_err(HostError::wire)
     }
-    fn agent_preset_capabilities(&self) -> (bool, bool) {
-        self.handle.agent_preset_capabilities()
+    fn agent_mode_capabilities(&self) -> (bool, bool) {
+        self.handle.agent_mode_capabilities()
     }
     fn descriptor(&self) -> HostDescriptor {
         self.handle.descriptor()
@@ -7506,20 +7388,86 @@ fn goal_command_descriptor() -> HostCommandDescriptor {
     }
 }
 
-fn selected_agent_preset(session: &Session) -> Option<String> {
-    session
-        .events()
-        .into_iter()
+async fn materialize_legacy_agent_modes(
+    persistence: &dyn SessionPersistence,
+    inspections: &[SessionInspection],
+    default_mode: &AgentModeId,
+    cancellation: CancellationToken,
+) -> Result<(), SessionError> {
+    for inspection in inspections {
+        if inspection.header.agent_mode.is_some() {
+            continue;
+        }
+        let events = persistence
+            .read_from(&inspection.header.id, 0, cancellation.clone())
+            .await?;
+        if events
+            .iter()
+            .any(|event| event.event_type == "agent-mode/selected")
+        {
+            continue;
+        }
+        persistence
+            .append(
+                &inspection.header.id,
+                &SessionEvent {
+                    event_type: "agent-mode/selected".into(),
+                    seq: inspection.next_seq,
+                    time: now(),
+                    data: json!({"agentMode": default_mode}),
+                    ignorable: Some(true),
+                    source_event_seqs: None,
+                    surface_op: None,
+                },
+                cancellation.clone(),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn selected_agent_mode(
+    session: &Session,
+    default_mode: &AgentModeId,
+) -> Result<AgentModeId, TessivumError> {
+    selected_agent_mode_from(&session.events(), session.header().agent_mode, default_mode)
+}
+
+fn selected_agent_mode_from(
+    events: &[SessionEvent],
+    header_mode: Option<AgentModeId>,
+    default_mode: &AgentModeId,
+) -> Result<AgentModeId, TessivumError> {
+    let selected = events
+        .iter()
         .rev()
-        .find(|event| event.event_type == "agent-preset/selected")
-        .and_then(|event| {
+        .find(|event| event.event_type == "agent-mode/selected")
+        .map(|event| {
             event
                 .data
-                .get("agentPreset")
+                .get("agentMode")
                 .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    TessivumError::new(
+                        "INVALID_AGENT_MODE_SELECTION",
+                        "agent mode selection must contain agentMode",
+                        "agent-mode",
+                        Value::Null,
+                    )
+                })
+                .and_then(AgentModeId::new)
         })
-        .or_else(|| session.header().agent_preset)
+        .transpose()?;
+    Ok(selected
+        .or(header_mode)
+        .unwrap_or_else(|| default_mode.clone()))
+}
+
+fn mode_trust_wire(trust: AgentModeTrust) -> &'static str {
+    match trust {
+        AgentModeTrust::Builtin | AgentModeTrust::System => "system",
+        AgentModeTrust::User => "user",
+    }
 }
 
 fn parse_command(line: &str) -> Option<(&str, &str)> {
@@ -7565,6 +7513,11 @@ async fn mutate_settings_inner(
         );
     let _route_gate = if routed {
         Some(inner.route_gate.lock().await)
+    } else {
+        None
+    };
+    let _agent_mode_gate = if namespace == "agent-presets" {
+        Some(inner.agent_mode_gate.lock().await)
     } else {
         None
     };
@@ -8810,18 +8763,13 @@ fn validate_config(config: &HostConfig) -> Result<(), HostError> {
             "host capacities are outside their bounds".into(),
         ));
     }
-    if config.cli_patches.len() > 64 {
-        return Err(HostError::InvalidConfiguration(
-            "too many CLI patch layers".into(),
-        ));
-    }
     if config
-        .agent_preset_roots
+        .agent_mode_roots
         .iter()
-        .any(|root| root.path.as_os_str().is_empty())
+        .any(|root| root.path.as_os_str().is_empty() || root.trust == AgentModeTrust::Builtin)
     {
         return Err(HostError::InvalidConfiguration(
-            "agent preset root paths must not be empty".into(),
+            "agent mode roots must be nonempty system or user roots".into(),
         ));
     }
     let needs_legacy = config.entries.as_ref().is_some_and(|entries| {
@@ -8839,6 +8787,11 @@ fn validate_config(config: &HostConfig) -> Result<(), HostError> {
         .wasm_limits
         .validate()
         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+    if config.cli_patches.len() > 64 {
+        return Err(HostError::InvalidConfiguration(
+            "too many CLI patch layers".into(),
+        ));
+    }
     for patch in std::iter::once(&config.bundle_patch)
         .chain(std::iter::once(&config.profile_patch))
         .chain(std::iter::once(&config.home_patch))
@@ -9177,9 +9130,33 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |value| value.as_millis().try_into().unwrap_or(u64::MAX))
 }
-fn preset_error(error: Value) -> HostError {
-    let (code, message, details) = crate::agent_preset::error_parts(&error);
-    HostError::Runtime(TessivumError::new(code, message, "agent-preset", details))
+fn current_default_agent_mode(inner: &HostInner) -> Result<AgentModeId, TessivumError> {
+    let snapshot = inner.settings.get("agent-presets").map_err(|error| {
+        TessivumError::new(
+            "AGENT_MODE_SETTINGS_UNAVAILABLE",
+            "Agent Mode settings are unavailable",
+            "settings",
+            json!({"error": error.to_string()}),
+        )
+    })?;
+    let id = snapshot
+        .value
+        .get("default")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            TessivumError::new(
+                "INVALID_AGENT_MODE_SETTINGS",
+                "agent-presets.default must name an Agent Mode",
+                "settings",
+                json!({"namespace": "agent-presets"}),
+            )
+        })?;
+    let id = AgentModeId::new(id)?;
+    inner.agent_modes.resolve(&id)?;
+    Ok(id)
+}
+fn mode_error(error: TessivumError) -> HostError {
+    HostError::Runtime(error)
 }
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
