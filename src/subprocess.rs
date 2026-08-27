@@ -6,19 +6,22 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+    },
     time::Duration,
 };
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tessivum_core::{ContextHandle, CoreError, ServiceHandle, ServiceKey};
+use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
-    process::{Child, ChildStderr, ChildStdout, Command},
-    sync::Notify,
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    sync::{Mutex as AsyncMutex, Notify},
     time,
 };
 
@@ -474,6 +477,874 @@ impl SubprocessRuntime {
             })
             .collect();
         let _ = join_all(handles).await;
+    }
+}
+
+/// Caller-owned authority check performed before every persistent shell command.
+/// A stale workspace must return an error rather than reuse an old shell.
+#[cfg(unix)]
+pub type PersistentShellLeaseValidator =
+    Arc<dyn Fn() -> Result<(), TessivumError> + Send + Sync + 'static>;
+
+/// Immutable spawn plan for one persistent Unix shell.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistentShellConfig {
+    pub workspace: PathBuf,
+    /// Explicit environment additions/removals after the normal ambient-secret scrub.
+    pub env: BTreeMap<String, Option<String>>,
+    /// Per-stream in-memory tail limit for one command.
+    pub max_output_bytes: usize,
+    pub terminate_grace: Duration,
+}
+
+#[cfg(unix)]
+impl PersistentShellConfig {
+    pub fn new(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            env: BTreeMap::new(),
+            max_output_bytes: DEFAULT_TAIL_BYTES,
+            terminate_grace: Duration::from_millis(500),
+        }
+    }
+}
+
+/// One request evaluated by a [`PersistentShell`].
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+pub struct PersistentShellCommand {
+    pub script: String,
+    pub timeout: Duration,
+    pub cancellation: Option<CancellationToken>,
+}
+
+#[cfg(unix)]
+impl PersistentShellCommand {
+    pub fn new(script: impl Into<String>) -> Self {
+        Self {
+            script: script.into(),
+            timeout: Duration::from_secs(30),
+            cancellation: None,
+        }
+    }
+
+    pub fn cancelled_by(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+}
+
+/// Completed bounded output from one persistent shell command.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistentShellResult {
+    pub exit_code: i32,
+    pub stdout: ProcessOutputSnapshot,
+    pub stderr: ProcessOutputSnapshot,
+}
+
+#[cfg(unix)]
+struct PersistentShellCommandState {
+    nonce: String,
+    state: Mutex<PersistentShellCommandCapture>,
+    done: Notify,
+}
+
+#[cfg(unix)]
+struct PersistentShellCommandCapture {
+    stdout: CapturedOutput,
+    stderr: CapturedOutput,
+    stdout_status: Option<i32>,
+    stderr_status: Option<i32>,
+    error: Option<TessivumError>,
+}
+
+#[cfg(unix)]
+impl PersistentShellCommandState {
+    fn new(nonce: String, max_output_bytes: usize) -> Self {
+        Self {
+            nonce,
+            state: Mutex::new(PersistentShellCommandCapture {
+                stdout: CapturedOutput {
+                    tail: Vec::with_capacity(max_output_bytes.min(8192)),
+                    total_bytes: 0,
+                    spill_path: None,
+                    spill_error: None,
+                },
+                stderr: CapturedOutput {
+                    tail: Vec::with_capacity(max_output_bytes.min(8192)),
+                    total_bytes: 0,
+                    spill_path: None,
+                    spill_error: None,
+                },
+                stdout_status: None,
+                stderr_status: None,
+                error: None,
+            }),
+            done: Notify::new(),
+        }
+    }
+
+    fn append(&self, stdout: bool, bytes: &[u8], max_output_bytes: usize) {
+        let mut state = lock(&self.state);
+        let output = if stdout {
+            &mut state.stdout
+        } else {
+            &mut state.stderr
+        };
+        output.total_bytes += bytes.len() as u64;
+        push_tail(&mut output.tail, bytes, max_output_bytes);
+    }
+
+    fn mark(&self, stdout: bool, status: i32) {
+        let mut state = lock(&self.state);
+        if stdout {
+            state.stdout_status = Some(status);
+        } else {
+            state.stderr_status = Some(status);
+        }
+        self.done.notify_waiters();
+    }
+
+    fn fail(&self, error: TessivumError) -> bool {
+        let mut state = lock(&self.state);
+        if state.stdout_status.is_some()
+            && state.stderr_status.is_some()
+            && state.stdout_status == state.stderr_status
+        {
+            return false;
+        }
+        if state.error.is_none() {
+            state.error = Some(error);
+            self.done.notify_waiters();
+        }
+        true
+    }
+
+    fn result(&self) -> Option<Result<PersistentShellResult, TessivumError>> {
+        let state = lock(&self.state);
+        if let Some(error) = &state.error {
+            return Some(Err(error.clone()));
+        }
+        match (state.stdout_status, state.stderr_status) {
+            (Some(stdout_status), Some(stderr_status)) if stdout_status == stderr_status => {
+                Some(Ok(PersistentShellResult {
+                    exit_code: stdout_status,
+                    stdout: state.stdout.snapshot(),
+                    stderr: state.stderr.snapshot(),
+                }))
+            }
+            (Some(_), Some(_)) => Some(Err(persistent_shell_error(
+                "PERSISTENT_SHELL_PROTOCOL",
+                "persistent shell completion status disagreed across output streams",
+                json!({}),
+            ))),
+            _ => None,
+        }
+    }
+
+    async fn wait(&self) -> Result<PersistentShellResult, TessivumError> {
+        loop {
+            let notified = self.done.notified();
+            if let Some(result) = self.result() {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Session-owned reusable `/bin/sh` with a fixed canonical workspace.
+///
+/// Commands are serialized. Output frames are random per command and removed
+/// from the captured stream; an EOF, replaced shell, or closed stdin fails the
+/// current command and permanently retires the instance rather than waiting for
+/// a marker that cannot arrive.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct PersistentShell {
+    inner: Arc<PersistentShellInner>,
+}
+
+#[cfg(unix)]
+struct PersistentShellInner {
+    pid: u32,
+    validator: PersistentShellLeaseValidator,
+    max_output_bytes: usize,
+    terminate_grace: Duration,
+    stdin: AsyncMutex<Option<ChildStdin>>,
+    serial: AsyncMutex<()>,
+    active: Mutex<Option<Arc<PersistentShellCommandState>>>,
+    termination: Mutex<Option<ProcessTermination>>,
+    done_state: Mutex<Option<ProcessDone>>,
+    done: Notify,
+    closed: AtomicBool,
+    disposed: AtomicBool,
+    cancellation: CancellationToken,
+    dispose_gate: AsyncMutex<()>,
+}
+
+#[cfg(unix)]
+impl fmt::Debug for PersistentShell {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PersistentShell")
+            .field("pid", &self.inner.pid)
+            .field("closed", &self.inner.closed.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
+#[cfg(unix)]
+impl PersistentShell {
+    /// Starts exactly one `/bin/sh -s` using the supplied canonical workspace
+    /// plan. The lease validator is required and runs before the initial spawn
+    /// and every later command.
+    pub async fn start(
+        config: PersistentShellConfig,
+        validate_lease: impl Fn() -> Result<(), TessivumError> + Send + Sync + 'static,
+    ) -> Result<Self, TessivumError> {
+        validate_persistent_shell_config(&config)?;
+        let validator: PersistentShellLeaseValidator = Arc::new(validate_lease);
+        validator()?;
+        let workspace = canonical_cwd(&config.workspace)?;
+        let mut command = Command::new("/bin/sh");
+        command.arg("-s");
+        command.current_dir(workspace);
+        configure_environment(&mut command, &config.env)?;
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().map_err(|error| {
+            persistent_shell_error(
+                "PERSISTENT_SHELL_UNAVAILABLE",
+                "persistent shell could not be spawned",
+                json!({"program": "/bin/sh", "error": error.to_string()}),
+            )
+        })?;
+        let Some(pid) = child.id() else {
+            let _ = child.kill().await;
+            return Err(persistent_shell_error(
+                "PERSISTENT_SHELL_UNAVAILABLE",
+                "persistent shell did not report a process identifier",
+                json!({"program": "/bin/sh"}),
+            ));
+        };
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            let _ = signal_tree(pid, libc::SIGKILL);
+            let _ = child.wait().await;
+            return Err(persistent_shell_error(
+                "PERSISTENT_SHELL_UNAVAILABLE",
+                "persistent shell did not provide required standard streams",
+                json!({"pid": pid}),
+            ));
+        };
+        let inner = Arc::new(PersistentShellInner {
+            pid,
+            validator,
+            max_output_bytes: config.max_output_bytes,
+            terminate_grace: config.terminate_grace,
+            stdin: AsyncMutex::new(Some(stdin)),
+            serial: AsyncMutex::new(()),
+            active: Mutex::new(None),
+            termination: Mutex::new(None),
+            done_state: Mutex::new(None),
+            done: Notify::new(),
+            closed: AtomicBool::new(false),
+            disposed: AtomicBool::new(false),
+            cancellation: CancellationToken::new(),
+            dispose_gate: AsyncMutex::new(()),
+        });
+        let stdout_task = tokio::spawn(drain_persistent_shell_stream(
+            stdout,
+            true,
+            Arc::clone(&inner),
+        ));
+        let stderr_task = tokio::spawn(drain_persistent_shell_stream(
+            stderr,
+            false,
+            Arc::clone(&inner),
+        ));
+        tokio::spawn(reap_persistent_shell(child, stdout_task, stderr_task, Arc::clone(&inner)));
+        Ok(Self { inner })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.inner.pid
+    }
+
+    /// Evaluates one script after the lease remains valid. Calls never overlap.
+    pub async fn run(
+        &self,
+        request: PersistentShellCommand,
+    ) -> Result<PersistentShellResult, TessivumError> {
+        validate_persistent_shell_command(&request)?;
+        let cancellation = request.cancellation.clone();
+        let operation = tokio::select! {
+            biased;
+            _ = self.inner.cancellation.cancelled() => return Err(persistent_shell_disposed()),
+            _ = optional_cancellation(cancellation.clone()) => return Err(persistent_shell_cancelled()),
+            operation = self.inner.serial.lock() => operation,
+        };
+        let result = self.run_locked(&request).await;
+        drop(operation);
+        result
+    }
+
+    async fn run_locked(
+        &self,
+        request: &PersistentShellCommand,
+    ) -> Result<PersistentShellResult, TessivumError> {
+        if self.inner.disposed.load(Ordering::Acquire) {
+            return Err(persistent_shell_disposed());
+        }
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(persistent_shell_closed());
+        }
+        if request
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(persistent_shell_cancelled());
+        }
+        if let Err(error) = (self.inner.validator)() {
+            self.inner.stop(ProcessTermination::Terminated).await;
+            return Err(error);
+        }
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(persistent_shell_closed());
+        }
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let command = Arc::new(PersistentShellCommandState::new(
+            nonce.clone(),
+            self.inner.max_output_bytes,
+        ));
+        *lock(&self.inner.active) = Some(Arc::clone(&command));
+        let frame = persistent_shell_frame(&request.script, &nonce);
+        let write = {
+            let mut stdin = self.inner.stdin.lock().await;
+            let Some(stdin) = stdin.as_mut() else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "persistent shell stdin is closed",
+                ))
+            } else {
+                match stdin.write_all(frame.as_bytes()).await {
+                    Ok(()) => stdin.flush().await,
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        if let Err(error) = write {
+            let failure = persistent_shell_error(
+                "PERSISTENT_SHELL_CLOSED",
+                "persistent shell stdin closed before command completion",
+                json!({"error": error.to_string()}),
+            );
+            command.fail(failure.clone());
+            self.inner.stop(ProcessTermination::Terminated).await;
+            self.inner.clear_active(&command);
+            return Err(failure);
+        }
+        let cancellation = request.cancellation.clone();
+        let result = tokio::select! {
+            biased;
+            _ = self.inner.cancellation.cancelled() => {
+                self.inner.stop(ProcessTermination::Shutdown).await;
+                Err(persistent_shell_disposed())
+            }
+            _ = optional_cancellation(cancellation) => {
+                self.inner.stop(ProcessTermination::Aborted).await;
+                Err(persistent_shell_cancelled())
+            }
+            _ = time::sleep(request.timeout) => {
+                self.inner.stop(ProcessTermination::TimedOut).await;
+                Err(persistent_shell_timed_out(request.timeout))
+            }
+            result = command.wait() => result,
+        };
+        self.inner.clear_active(&command);
+        result
+    }
+
+    /// Cancels the active command and its complete process group.
+    pub async fn cancel(&self) {
+        self.inner.stop(ProcessTermination::Aborted).await;
+    }
+
+    /// Idempotently stops the process group and joins its output drainers.
+    pub async fn dispose(&self) {
+        let _gate = self.inner.dispose_gate.lock().await;
+        if self.inner.disposed.swap(true, Ordering::AcqRel) {
+            self.inner.wait_closed().await;
+            return;
+        }
+        self.inner.cancellation.cancel();
+        self.inner.stop(ProcessTermination::Shutdown).await;
+    }
+}
+
+#[cfg(unix)]
+impl PersistentShellInner {
+    fn clear_active(&self, command: &Arc<PersistentShellCommandState>) {
+        let mut active = lock(&self.active);
+        if active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, command))
+        {
+            *active = None;
+        }
+    }
+
+    fn append(&self, stdout: bool, bytes: &[u8]) {
+        if let Some(command) = lock(&self.active).as_ref() {
+            command.append(stdout, bytes, self.max_output_bytes);
+        }
+    }
+
+    fn mark(&self, stdout: bool, nonce: &str, status: i32) -> bool {
+        let Some(command) = lock(&self.active).as_ref().cloned() else {
+            return false;
+        };
+        if command.nonce != nonce {
+            return false;
+        }
+        command.mark(stdout, status);
+        true
+    }
+
+    fn fail_active(&self, error: TessivumError) -> bool {
+        lock(&self.active)
+            .as_ref()
+            .is_some_and(|command| command.fail(error))
+    }
+
+    fn done(&self) -> Option<ProcessDone> {
+        lock(&self.done_state).clone()
+    }
+
+    async fn wait_closed(&self) {
+        loop {
+            let notified = self.done.notified();
+            if self.done().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn terminated(&self) -> Option<ProcessTermination> {
+        *lock(&self.termination)
+    }
+
+    async fn stop(self: &Arc<Self>, cause: ProcessTermination) {
+        if self.done().is_some() {
+            return;
+        }
+        let first = {
+            let mut termination = lock(&self.termination);
+            if termination.is_some() {
+                false
+            } else {
+                *termination = Some(cause);
+                true
+            }
+        };
+        if !first {
+            self.wait_closed().await;
+            return;
+        }
+        self.closed.store(true, Ordering::Release);
+        self.fail_active(persistent_shell_termination(cause));
+        let _ = signal_tree(self.pid, libc::SIGTERM);
+        let notified = self.done.notified();
+        if self.done().is_none() {
+            tokio::select! {
+                _ = notified => return,
+                _ = time::sleep(self.terminate_grace) => {}
+            }
+        }
+        if self.done().is_none() {
+            let _ = signal_tree(self.pid, libc::SIGKILL);
+        }
+        self.wait_closed().await;
+    }
+
+    fn stream_failed(self: &Arc<Self>, error: TessivumError) {
+        if self.done().is_some() {
+            return;
+        }
+        self.closed.store(true, Ordering::Release);
+        self.fail_active(error);
+        let shell = Arc::clone(self);
+        tokio::spawn(async move {
+            shell.stop(ProcessTermination::Terminated).await;
+        });
+    }
+
+    fn complete(&self, done: ProcessDone) {
+        self.closed.store(true, Ordering::Release);
+        *lock(&self.done_state) = Some(done);
+        self.done.notify_waiters();
+    }
+}
+
+#[cfg(unix)]
+async fn reap_persistent_shell(
+    mut child: Child,
+    stdout_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+    inner: Arc<PersistentShellInner>,
+) {
+    let status = child.wait().await;
+    let incomplete = inner.fail_active(persistent_shell_closed());
+    if incomplete && inner.terminated().is_none() {
+        let _ = signal_tree(inner.pid, libc::SIGTERM);
+        time::sleep(inner.terminate_grace).await;
+        let _ = signal_tree(inner.pid, libc::SIGKILL);
+    }
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    let (exit_code, signal) = match status {
+        Ok(status) => exit_facts(status),
+        Err(_) => (None, None),
+    };
+    inner.complete(ProcessDone {
+        exit_code,
+        signal,
+        termination: inner.terminated(),
+    });
+}
+
+#[cfg(unix)]
+async fn drain_persistent_shell_stream<R>(
+    mut reader: R,
+    stdout: bool,
+    inner: Arc<PersistentShellInner>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut parser = PersistentShellFrameParser::default();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                for token in parser.finish() {
+                    dispatch_persistent_shell_token(&inner, stdout, token);
+                }
+                inner.stream_failed(persistent_shell_closed());
+                return;
+            }
+            Ok(count) => {
+                for token in parser.feed(&buffer[..count]) {
+                    dispatch_persistent_shell_token(&inner, stdout, token);
+                }
+            }
+            Err(error) => {
+                inner.stream_failed(persistent_shell_error(
+                    "PERSISTENT_SHELL_CLOSED",
+                    "persistent shell output stream failed",
+                    json!({"stream": if stdout {"stdout"} else {"stderr"}, "error": error.to_string()}),
+                ));
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn dispatch_persistent_shell_token(
+    inner: &PersistentShellInner,
+    stdout: bool,
+    token: PersistentShellStreamToken,
+) {
+    match token {
+        PersistentShellStreamToken::Data(bytes) => inner.append(stdout, &bytes),
+        PersistentShellStreamToken::Marker {
+            nonce,
+            stdout: marker_stdout,
+            status,
+        } if stdout == marker_stdout && inner.mark(stdout, &nonce, status) => {}
+        PersistentShellStreamToken::Marker {
+            nonce,
+            stdout: marker_stdout,
+            status,
+        } => inner.append(
+            stdout,
+            &persistent_shell_marker_bytes(&nonce, marker_stdout, status),
+        ),
+    }
+}
+
+#[cfg(unix)]
+const PERSISTENT_SHELL_FRAME_PREFIX: &[u8] = b"\x1eTESSIVUM-SHELL:";
+#[cfg(unix)]
+const PERSISTENT_SHELL_FRAME_SUFFIX: &[u8] = b"\x1f\n";
+#[cfg(unix)]
+const MAX_PERSISTENT_SHELL_FRAME_BYTES: usize = 128;
+
+#[cfg(unix)]
+enum PersistentShellStreamToken {
+    Data(Vec<u8>),
+    Marker {
+        nonce: String,
+        stdout: bool,
+        status: i32,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct PersistentShellFrameParser {
+    pending: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl PersistentShellFrameParser {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<PersistentShellStreamToken> {
+        self.pending.extend_from_slice(bytes);
+        let mut tokens = Vec::new();
+        loop {
+            let Some(start) = find_bytes(&self.pending, PERSISTENT_SHELL_FRAME_PREFIX) else {
+                let keep = prefix_suffix_len(&self.pending, PERSISTENT_SHELL_FRAME_PREFIX);
+                self.drain_data(self.pending.len().saturating_sub(keep), &mut tokens);
+                break;
+            };
+            if start != 0 {
+                self.drain_data(start, &mut tokens);
+                continue;
+            }
+            let after_prefix = &self.pending[PERSISTENT_SHELL_FRAME_PREFIX.len()..];
+            let Some(suffix) = find_bytes(after_prefix, PERSISTENT_SHELL_FRAME_SUFFIX) else {
+                if self.pending.len() > MAX_PERSISTENT_SHELL_FRAME_BYTES {
+                    self.drain_data(
+                        self.pending.len() - MAX_PERSISTENT_SHELL_FRAME_BYTES,
+                        &mut tokens,
+                    );
+                }
+                break;
+            };
+            let end = PERSISTENT_SHELL_FRAME_PREFIX.len()
+                + suffix
+                + PERSISTENT_SHELL_FRAME_SUFFIX.len();
+            if end > MAX_PERSISTENT_SHELL_FRAME_BYTES {
+                self.drain_data(1, &mut tokens);
+                continue;
+            }
+            let frame: Vec<_> = self.pending.drain(..end).collect();
+            match parse_persistent_shell_marker(&frame) {
+                Some((nonce, stdout, status)) => tokens.push(PersistentShellStreamToken::Marker {
+                    nonce,
+                    stdout,
+                    status,
+                }),
+                None => tokens.push(PersistentShellStreamToken::Data(frame)),
+            }
+        }
+        tokens
+    }
+
+    fn finish(&mut self) -> Vec<PersistentShellStreamToken> {
+        let bytes = std::mem::take(&mut self.pending);
+        if bytes.is_empty() {
+            Vec::new()
+        } else {
+            vec![PersistentShellStreamToken::Data(bytes)]
+        }
+    }
+
+    fn drain_data(&mut self, count: usize, tokens: &mut Vec<PersistentShellStreamToken>) {
+        if count != 0 {
+            tokens.push(PersistentShellStreamToken::Data(
+                self.pending.drain(..count).collect(),
+            ));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn parse_persistent_shell_marker(bytes: &[u8]) -> Option<(String, bool, i32)> {
+    let middle = bytes
+        .strip_prefix(PERSISTENT_SHELL_FRAME_PREFIX)?
+        .strip_suffix(PERSISTENT_SHELL_FRAME_SUFFIX)?;
+    let text = std::str::from_utf8(middle).ok()?;
+    let mut fields = text.split(':');
+    let nonce = fields.next()?;
+    let stdout = match fields.next()? {
+        "O" => true,
+        "E" => false,
+        _ => return None,
+    };
+    let status = fields.next()?.parse::<i32>().ok()?;
+    if fields.next().is_some()
+        || nonce.len() != 32
+        || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !(0..=255).contains(&status)
+    {
+        return None;
+    }
+    Some((nonce.to_owned(), stdout, status))
+}
+
+#[cfg(unix)]
+fn persistent_shell_marker_bytes(nonce: &str, stdout: bool, status: i32) -> Vec<u8> {
+    let stream = if stdout { "O" } else { "E" };
+    format!("\x1eTESSIVUM-SHELL:{nonce}:{stream}:{status}\x1f\n").into_bytes()
+}
+
+#[cfg(unix)]
+fn persistent_shell_frame(script: &str, nonce: &str) -> String {
+    let variable = format!("_tessivum_shell_status_{nonce}");
+    format!(
+        r#"{{
+{script}
+}}
+{variable}=$?
+command printf '\036TESSIVUM-SHELL:{nonce}:O:%s\037\n' "${variable}"
+command printf '\036TESSIVUM-SHELL:{nonce}:E:%s\037\n' "${variable}" >&2
+"#
+    )
+}
+
+#[cfg(unix)]
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+#[cfg(unix)]
+fn prefix_suffix_len(bytes: &[u8], prefix: &[u8]) -> usize {
+    (1..prefix.len())
+        .rev()
+        .find(|&length| bytes.ends_with(&prefix[..length]))
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+async fn optional_cancellation(cancellation: Option<CancellationToken>) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(unix)]
+fn validate_persistent_shell_config(config: &PersistentShellConfig) -> Result<(), TessivumError> {
+    if config.max_output_bytes > MAX_TAIL_BYTES {
+        return Err(persistent_shell_error(
+            "PERSISTENT_SHELL_OUTPUT_TOO_LARGE",
+            "persistent shell output tail exceeds the limit",
+            json!({"limit": MAX_TAIL_BYTES}),
+        ));
+    }
+    if config.terminate_grace.is_zero() {
+        return Err(persistent_shell_error(
+            "PERSISTENT_SHELL_INVALID_GRACE",
+            "persistent shell termination grace must be positive",
+            json!({}),
+        ));
+    }
+    for (key, value) in &config.env {
+        if key.is_empty()
+            || key.contains('=')
+            || key.contains('\0')
+            || value.as_ref().is_some_and(|value| value.contains('\0'))
+        {
+            return Err(persistent_shell_error(
+                "PERSISTENT_SHELL_INVALID_ENV",
+                "persistent shell environment contains an invalid key or value",
+                json!({"key": key}),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_persistent_shell_command(
+    request: &PersistentShellCommand,
+) -> Result<(), TessivumError> {
+    if request.script.contains('\0') {
+        return Err(persistent_shell_error(
+            "PERSISTENT_SHELL_INVALID_SCRIPT",
+            "persistent shell script must not contain NUL",
+            json!({}),
+        ));
+    }
+    if request.timeout.is_zero() {
+        return Err(persistent_shell_error(
+            "PERSISTENT_SHELL_INVALID_TIMEOUT",
+            "persistent shell command timeout must be positive",
+            json!({}),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn persistent_shell_error(
+    code: &str,
+    message: &str,
+    details: serde_json::Value,
+) -> TessivumError {
+    TessivumError::new(code, message, "persistent-shell", details)
+}
+
+#[cfg(unix)]
+fn persistent_shell_closed() -> TessivumError {
+    persistent_shell_error(
+        "PERSISTENT_SHELL_CLOSED",
+        "persistent shell closed before command completion",
+        json!({}),
+    )
+}
+
+#[cfg(unix)]
+fn persistent_shell_disposed() -> TessivumError {
+    persistent_shell_error(
+        "PERSISTENT_SHELL_DISPOSED",
+        "persistent shell has been disposed",
+        json!({}),
+    )
+}
+
+#[cfg(unix)]
+fn persistent_shell_cancelled() -> TessivumError {
+    persistent_shell_error(
+        "PERSISTENT_SHELL_CANCELLED",
+        "persistent shell command was cancelled",
+        json!({}),
+    )
+}
+
+#[cfg(unix)]
+fn persistent_shell_timed_out(timeout: Duration) -> TessivumError {
+    persistent_shell_error(
+        "PERSISTENT_SHELL_TIMEOUT",
+        "persistent shell command timed out",
+        json!({"timeoutMs": timeout.as_millis()}),
+    )
+}
+
+#[cfg(unix)]
+fn persistent_shell_termination(cause: ProcessTermination) -> TessivumError {
+    match cause {
+        ProcessTermination::TimedOut => persistent_shell_error(
+            "PERSISTENT_SHELL_TIMEOUT",
+            "persistent shell command timed out",
+            json!({}),
+        ),
+        ProcessTermination::Aborted => persistent_shell_cancelled(),
+        ProcessTermination::Shutdown => persistent_shell_disposed(),
+        ProcessTermination::Terminated => persistent_shell_error(
+            "PERSISTENT_SHELL_TERMINATED",
+            "persistent shell was terminated",
+            json!({}),
+        ),
     }
 }
 
