@@ -4,7 +4,7 @@
     - text: /
     - button "event-sourcing researcher" [disabled]
   - img
-  - text: Standard mode
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

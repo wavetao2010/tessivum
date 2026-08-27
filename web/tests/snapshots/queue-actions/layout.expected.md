@@ -2,7 +2,7 @@
   - navigation "Session hierarchy":
     - button "{{workspace}}" [disabled]
   - img
-  - text: Standard mode
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

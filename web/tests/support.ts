@@ -9,7 +9,6 @@ import { chromium, type Browser, type Page } from 'playwright-core'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const CRATE_ROOT = join(HERE, '../..')
 export const UPSTREAM_ROOT = process.env.TESSIVUM_DEEPSEEK_SOURCE ?? join(CRATE_ROOT, '../upstream/deepseek-harness')
-const SHIPPED_PRESETS = join(UPSTREAM_ROOT, 'apps/cli/config/agent-presets')
 export const UPSTREAM_TESTS = join(UPSTREAM_ROOT, 'apps/web/tests')
 const CARGO = process.env.CARGO_BIN ?? 'cargo'
 let build: Promise<void> | undefined
@@ -115,7 +114,6 @@ export class RustWebHarness {
       const env: Record<string, string> = {
         ...process.env as Record<string, string>,
         DEEPSEEK_API_KEY: 'test',
-        TESSIVUM_AGENT_PRESET_ROOT: SHIPPED_PRESETS,
         ...options.env,
         TESSIVUM_WEB_ADDR: harness.baseUrl.slice('http://'.length),
       }

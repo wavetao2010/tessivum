@@ -2,7 +2,7 @@
   - navigation "Session hierarchy":
     - button "Use the bash tool to" [disabled]
   - img
-  - text: Standard mode
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

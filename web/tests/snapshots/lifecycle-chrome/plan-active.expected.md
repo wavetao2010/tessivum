@@ -25,9 +25,9 @@
   - img
   - text: workspace
   - img
-- button "Standard mode":
+- button "Standard":
   - img
-  - text: Standard mode
+  - text: Standard
   - img
 - textbox "Describe what you want to build"
 - button "Commands":

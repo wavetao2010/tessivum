@@ -23,10 +23,10 @@ interface Event {
 
 const PROMPT = 'Using ONE run_code program: run bash `echo CODE_ROUND_OK`, then read the file missing.txt catching its error in the program. Return an object with both outcomes. Then reply DONE and stop.'
 const DESCRIPTION = 'Run bash echo and catch missing file read'
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/code-mode-round')
+const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/ptc-mode-round')
 const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 
-test('code-mode-round executes nested tools and renders durable sub-calls', async () => {
+test('PTC executes nested tools and renders durable sub-calls', async () => {
   const sourceFixture = await fixture('code-mode-round')
   const fixtureDocument = await readFile(sourceFixture, 'utf8')
   const fixturePrompts = fixtureDocument.trim().split('\n').flatMap(line => {
@@ -37,7 +37,7 @@ test('code-mode-round executes nested tools and renders durable sub-calls', asyn
   })
   expect(fixturePrompts).toEqual([PROMPT])
   const harness = await RustWebHarness.launch({
-    name: 'code-mode-round-web-e2e',
+    name: 'ptc-mode-round-web-e2e',
     locale: 'en-US',
     toolsMode: 'code',
     replayFixture: sourceFixture,

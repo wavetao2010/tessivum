@@ -1,0 +1,14 @@
+- dialog "复制 Agent 模式 · 复制自 Minimal":
+  - heading "复制 Agent 模式 · 复制自 Minimal" [level=2]
+  - button "关闭":
+    - img
+  - paragraph: Host 会在你的 Agent 模式目录中写入新的 mode.toml。标识符将成为目录名，事后无法更改。
+  - text: 标识符
+  - textbox "标识符":
+    - /placeholder: my-mode
+  - text: 名称
+  - textbox "名称":
+    - /placeholder: 选择器中显示的名字，缺省用标识符
+  - alert: 请填写模式标识符。
+  - button "取消"
+  - button "创建" [disabled]

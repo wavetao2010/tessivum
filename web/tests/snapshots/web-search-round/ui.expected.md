@@ -2,7 +2,7 @@
   - navigation "Session hierarchy":
     - button "Use web_search to search exactly" [disabled]
   - img
-  - text: Standard mode
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

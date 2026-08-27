@@ -1,0 +1,64 @@
+- dialog "设置":
+  - navigation:
+    - text: 设置
+    - button "通用设置":
+      - img
+      - text: 通用设置
+    - button "模型":
+      - img
+      - text: 模型
+    - button "插件":
+      - img
+      - text: 插件
+    - button "Agent 模式":
+      - img
+      - text: Agent 模式
+  - button "打开配置文件"
+  - button "关闭":
+    - img
+    - text: 关闭
+  - heading "Agent 模式" [level=2]
+  - paragraph: Agent 模式定义一个会话的提示词、工具与能力。复制既有模式，即可创建可编辑的 mode.toml。
+  - heading "内置" [level=3]
+  - list:
+    - listitem:
+      - 'button "当前使用: Standard" [disabled] [pressed]':
+        - text: Standard 内置 当前使用 The full native Tessivum tool catalog.
+        - code: standard
+      - 'button "查看: Standard"':
+        - img
+        - text: 查看
+      - 'button "复制: Standard"':
+        - img
+        - text: 复制
+    - listitem:
+      - 'button "设为默认: PTC"':
+        - text: PTC 内置 A programmatic tool-calling mode backed by Bun.
+        - code: ptc
+      - 'button "查看: PTC"':
+        - img
+        - text: 查看
+      - 'button "复制: PTC"':
+        - img
+        - text: 复制
+    - listitem:
+      - 'button "设为默认: Minimal"':
+        - text: Minimal 内置 A focused persistent-shell editing mode.
+        - code: minimal
+      - 'button "查看: Minimal"':
+        - img
+        - text: 查看
+      - 'button "复制: Minimal"':
+        - img
+        - text: 复制
+    - listitem:
+      - 'button "设为默认: Composition"':
+        - text: Composition 内置 A native entry composition-builder mode.
+        - code: composition
+      - 'button "查看: Composition"':
+        - img
+        - text: 查看
+      - 'button "复制: Composition"':
+        - img
+        - text: 复制
+  - heading "自定义" [level=3]

@@ -10,9 +10,9 @@
     - button "插件":
       - img
       - text: 插件
-    - button "Agent 预设":
+    - button "Agent 模式":
       - img
-      - text: Agent 预设
+      - text: Agent 模式
   - button "打开配置文件"
   - button "关闭":
     - img

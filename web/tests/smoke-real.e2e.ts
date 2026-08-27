@@ -4,7 +4,7 @@ import { RustWebHarness } from './support'
 const WORKSPACE_INSTRUCTION = 'SMOKE_REAL_WORKSPACE_CONTEXT must reach the model request.'
 
 const ROUND = 'SMOKE_REAL_ROUND_COMPLETE'
-const CODE = 'SMOKE_REAL_CODE_COMPLETE'
+const PTC = 'SMOKE_REAL_PTC_COMPLETE'
 
 interface RequestHeader {
   system?: string
@@ -163,18 +163,18 @@ test('the loopback Web host completes a conversation and retains the live surfac
   }
 }, 120_000)
 
-test('code mode projects the shipped SDK tool boundary instead of the native catalog', async () => {
+test('PTC projects the shipped SDK tool boundary instead of the direct native catalog', async () => {
   const harness = await RustWebHarness.launch({
-    name: 'smoke-real-code-web-e2e',
+    name: 'smoke-real-ptc-web-e2e',
     toolsMode: 'code',
-    replayRecording: replayRecording(CODE),
+    replayRecording: replayRecording(PTC),
   })
   try {
     const settled = harness.whenTurnSettled()
-    await harness.page.locator('textarea:enabled').last().fill('Complete the code-mode smoke round.')
+    await harness.page.locator('textarea:enabled').last().fill('Complete the PTC smoke round.')
     await harness.page.getByRole('button', { name: 'Send message', exact: true }).click()
     const sessionId = await settled
-    await harness.page.getByText(CODE, { exact: true }).waitFor({ timeout: 15_000 })
+    await harness.page.getByText(PTC, { exact: true }).waitFor({ timeout: 15_000 })
 
     const history = await harness.rpc<{ events: HistoryEvent[] }>('session.history', { sessionId, maxMessages: 100 })
     expect(history.ok).toBe(true)

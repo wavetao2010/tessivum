@@ -2,7 +2,7 @@
   - navigation "Session hierarchy":
     - button "Begin your reply with the" [disabled]
   - img
-  - text: Standard mode
+  - text: Standard
   - button "Session log":
     - text: Session log
     - img

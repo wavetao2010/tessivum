@@ -1,0 +1,7 @@
+- menu:
+  - menuitem "Standard The full native Tessivum tool catalog.":
+    - text: Standard The full native Tessivum tool catalog.
+    - img
+  - menuitem "PTC A programmatic tool-calling mode backed by Bun."
+  - menuitem "Minimal A focused persistent-shell editing mode."
+  - menuitem "Composition A native entry composition-builder mode."
