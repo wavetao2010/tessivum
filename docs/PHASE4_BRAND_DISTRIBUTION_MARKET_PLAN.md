@@ -646,3 +646,5 @@ Phase 4 完成必须同时满足：
 - Alpha.11 发布后的兼容跟进把 Core 基线推进到 `a1a6d2e5584253391b9962c482f2140263b703bf`：增加 generation-owned WebSocket upgrade proxy、Bun-native `ws` 后端与 native-backed Legacy settings，并用 `dsh-better-sidebar@0.16.1` 的真实 Browser UI、HTTP、WebSocket、设置写入和重启恢复完成验证。
 
 GitHub [`v0.1.0-alpha.11`](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.11) prerelease 已由 `release.yml` run `32945278216` 发布四平台归档、SHA-256 与 Formula。发布后重新下载并验证 Apple Silicon 归档，从该归档安装 `dshmarket@1.29.2`；真实 Chromium 插件市场与 `/dsh-market/status` 通过且无 Browser error。公共 `wavetao2010/homebrew-tap` 的 install/test/uninstall 也已通过。
+
+GitHub [`v0.1.0-alpha.12`](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.12) prerelease 已由 `release.yml` run `33029507732` 发布四平台归档、SHA-256 与 Formula。发布前从本地 Apple Silicon 归档安装 `dsh-better-sidebar@0.16.1`，真实 Browser UI 展示 Files 面板和归档文件，6 个 Sidebar API 请求无失败且 Agent Terminal WebSocket 可建立连接；发布后重新下载归档并通过 SHA-256 与版本检查。公共 `wavetao2010/homebrew-tap` 已更新至 Alpha.12，并由 Homebrew 成功解析与下载。
