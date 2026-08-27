@@ -1,0 +1,189 @@
+{
+  "schema": 1,
+  "legacyPresetIds": [
+    "standard",
+    "code",
+    "minimal",
+    "cordis"
+  ],
+  "calls": [
+    {
+      "case": "list",
+      "request": {
+        "path": "/api/agentPreset.list",
+        "body": {
+          "type": "client-request",
+          "rpcId": "phase5-agent-preset-list",
+          "method": "agentPreset.list",
+          "payload": {}
+        }
+      },
+      "response": {
+        "type": "server-response",
+        "rpcId": "phase5-agent-preset-list",
+        "result": {
+          "ok": true,
+          "value": {
+            "presets": [
+              {
+                "id": "standard",
+                "trust": "system",
+                "isDefault": true,
+                "name": "标准模式",
+                "description": "功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。"
+              },
+              {
+                "id": "code",
+                "trust": "system",
+                "isDefault": false,
+                "name": "PTC 模式",
+                "description": "具备标准模式的全部能力，并通过 Code Mode SDK 呈现工具，让模型用一个 TypeScript 程序组合多步操作。"
+              },
+              {
+                "id": "minimal",
+                "trust": "system",
+                "isDefault": false,
+                "name": "极简模式",
+                "description": "仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。"
+              },
+              {
+                "id": "cordis",
+                "trust": "system",
+                "isDefault": false,
+                "name": "创造模式",
+                "description": "用于创建自定义 Agent preset：具备标准模式的全部能力，并提供运行时检查、插件实验和 preset 创作指导。"
+              }
+            ],
+            "authorable": true,
+            "hasDocument": true
+          }
+        }
+      }
+    },
+    {
+      "case": "read",
+      "request": {
+        "path": "/api/agentPreset.read",
+        "body": {
+          "type": "client-request",
+          "rpcId": "phase5-agent-preset-read",
+          "method": "agentPreset.read",
+          "payload": {
+            "agentPreset": "standard"
+          }
+        }
+      },
+      "response": {
+        "type": "server-response",
+        "rpcId": "phase5-agent-preset-read",
+        "result": {
+          "ok": true,
+          "value": {
+            "agentPreset": "standard",
+            "trust": "system",
+            "content": "# The `standard` agent preset: the full coding agent, mounted once per process.\n#\n# This file is an AGENT-PLANE composition. The roster mounts it ONCE under a\n# standing scope; every session naming it joins by scope parentage, so the\n# tools and prompt sections registered here cover each joined agent while a\n# session's own state stays keyed per Session/Agent inside the plugins. The\n# host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a\n# preset must not own: the registries themselves, the sandbox and approval\n# stack, persistence, and the model route.\n#\n# A service row here MUST sit inside a group carrying an `isolate` realm.\n# Without one it publishes into the root realm, where it is process-global —\n# another preset publishing the same name collides, and a host reader would\n# resolve one preset's instance for every session; `dsh-agent-presets` rejects\n# that at mount. `true` means an entry-local realm: this standing mount's own\n# private instance, apart from every other preset's. (A shared label does NOT\n# pool instances — `provide()` throws on the second registration under the\n# same realm symbol; labels join REALMS, and are not what this file needs.)\n\n# ── identity ────────────────────────────────────────────────────────────────\n\n# The preset's own persona, shadowing the deployment default for this agent.\n# `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.\n- id: persona\n  name: '@deepseek-ai/dsh-persona'\n  config:\n    text: >-\n      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.\n\n- id: agent-instructions\n  name: '@deepseek-ai/dsh-agent-instructions'\n  config:\n    maxBytes: 65536\n\n# ── shell ───────────────────────────────────────────────────────────────────\n\n# `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to\n# publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is\n# the criterion for host-plane ownership — injection resolves before any session\n# exists, so there is no agent to key by. Behind a preset realm those variables\n# never reached the model's shell at all. Both shell tools consume the host\n# registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are\n# host-plane too.\n- id: tool-bash\n  name: '@deepseek-ai/dsh-tool-bash'\n  disabled: !!js process.platform === 'win32'\n\n- id: tool-pwsh\n  name: '@deepseek-ai/dsh-tool-pwsh'\n  disabled: !!js process.platform !== 'win32'\n\n# ── filesystem ──────────────────────────────────────────────────────────────\n\n# Both register into the host `tools` registry and provide nothing, so\n# they need no realm. The `fs` service and its policy stay in the host.\n- id: tool-fs\n  name: '@deepseek-ai/dsh-tool-fs'\n\n- id: tool-fs-search\n  name: '@deepseek-ai/dsh-tool-fs-search'\n  config:\n    sampleOverCapGlobResults: false\n\n# ── background jobs ────────────────────────────────────────────────────────\n\n# Only the model-facing controls. The task REGISTRY stays on the host plane:\n# its producers sit outside any realm this file could put it in — `tool-bash`\n# above resolves it with `ctx.get`, and an entry-local realm here is invisible\n# to every sibling row, so `run_in_background` would answer \"background jobs\n# unavailable\" while these controls sat in the catalog. The registry is keyed by\n# owning agent anyway, so one host instance serves every session. What a preset\n# chooses is whether its agent can collect and stop background work at all.\n- id: tool-jobs\n  name: '@deepseek-ai/dsh-tool-jobs'\n\n# ── skills ──────────────────────────────────────────────────────────────────\n\n# The skill REGISTRY lives in the host composition and is layered per scope:\n# these rows register into THIS preset's layer of it, so they need no realm.\n# `skill-filesystem` contributes local-root discovery for agents on this preset, and\n# `tool-skill` gives them the catalog and loader; the merged catalog also\n# carries whatever the deployment registered globally (repository plugins).\n- id: skill-filesystem\n  name: '@deepseek-ai/dsh-skill-filesystem'\n\n- id: tool-skill\n  name: '@deepseek-ai/dsh-tool-skill'\n\n# ── goals ───────────────────────────────────────────────────────────────────\n\n# Only the model-facing tool. The goal SERVICE, its session driver, and the\n# `/goal` command stay on the host plane: the Gateway serves the goal domain as\n# Remote endpoints whose receiver comes from a generated descriptor, so it\n# resolves `goals` on the host and an entry-local realm here would hide it. The\n# registry is keyed by session anyway, so one host instance serves every\n# session. What a preset chooses is whether its agent can call the goal tool.\n- id: tool-goal\n  name: '@deepseek-ai/dsh-tool-goal'\n\n# ── plan mode ───────────────────────────────────────────────────────────────\n\n# Plan state is per-agent by nature, so an entry-local realm is not a\n# workaround here — it is the correct lifetime.\n- id: planning\n  name: cordis:group\n  group: true\n  isolate:\n    planMode: true\n  config:\n    - id: plan-mode\n      name: '@deepseek-ai/dsh-plan-mode'\n      config:\n        section: |\n              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.\n\n              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.\n\n              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.\n\n              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.\n\n              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.\n\n              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask \"should I proceed?\" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.\n\n# ── compaction ──────────────────────────────────────────────────────────────\n\n# `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must\n# share this realm rather than sit outside it.\n#\n# `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST\n# plane, and the rows here resolve that one instance. It takes no configuration,\n# keys every fold by Session, and owns the context-meter projection units the\n# browser reads for every session — behind a realm those units would come and go\n# with whichever presets happen to be mounted. What a preset chooses is whether\n# its agent compacts at all, which is `compaction-basic` below.\n- id: compaction\n  name: cordis:group\n  group: true\n  isolate:\n    compaction: true\n    toolResultPruner: true\n  config:\n    - id: compaction-basic\n      name: '@deepseek-ai/dsh-compaction-basic'\n\n    - id: command-compact\n      name: '@deepseek-ai/dsh-command-compact'\n\n    - id: tool-result-pruner\n      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'\n      config:\n        thresholdChars: 8192\n        headChars: 4096\n        tailChars: 1024\n\n# ── delegation and workflows ────────────────────────────────────────────────\n\n# The `subagents` registry and its spawn/fork backends live in the HOST\n# composition: the registry is a process singleton whose cross-session queries\n# the api-proxy serves to the browser, and a provider name may only be\n# registered once. This preset contributes the delegation TOOLS, which resolve\n# that host registry.\n#\n# `workflows` is different — nothing outside an agent reads it — so every row\n# that reaches it shares one entry-local realm here, and a consumer left\n# outside would resolve a host registry this preset does not populate.\n#\n# `tool-subagent-report` is host-plane for the same reason as the registry,\n# not because a preset may not want it: it registers a CONTINUABLE SETUP on\n# that singleton rather than a tool this agent calls, and the setup list is\n# not scope-aware — one copy per mounted preset means every child gets\n# `report` registered once per live session, which throws on the second.\n- id: delegation\n  name: cordis:group\n  group: true\n  isolate:\n    workflowEngine: true\n  config:\n    - id: tool-subagent-control\n      name: '@deepseek-ai/dsh-tool-subagent-control'\n\n    - id: tool-subagent-list-agents\n      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'\n\n    - id: tool-subagent\n      name: '@deepseek-ai/dsh-tool-subagent'\n      config:\n        provider: spawn\n        toolName: subagent\n        backgroundMode: continuable\n\n    - id: tool-subagent-fork\n      name: '@deepseek-ai/dsh-tool-subagent'\n      config:\n        provider: fork\n        toolName: subagent_fork\n        backgroundMode: continuable\n\n    # Product providers are host-plane singletons. Copy this preset, then\n    # remove `disabled` from either ordinary tool row to expose that product\n    # only to agents composed from the copy.\n    - id: tool-subagent-codex\n      name: '@deepseek-ai/dsh-tool-subagent'\n      disabled: true\n      config:\n        provider: codex\n        toolName: subagent_codex\n        enableRunInBackground: false\n        maxDepth: provider-managed\n\n    - id: tool-subagent-claude-code\n      name: '@deepseek-ai/dsh-tool-subagent'\n      disabled: true\n      config:\n        provider: claude-code\n        toolName: subagent_claude_code\n        enableRunInBackground: false\n        maxDepth: provider-managed\n\n    - id: workflow-worker-thread\n      name: '@deepseek-ai/dsh-workflow-worker-thread'\n      config:\n        provider: spawn\n\n    - id: tool-workflow\n      name: '@deepseek-ai/dsh-tool-workflow'\n\n    - id: tool-ralph\n      name: '@deepseek-ai/dsh-tool-ralph'\n      config:\n        subagentProvider: spawn\n        maxRounds: 64\n\n# ── remaining model-facing rows ─────────────────────────────────────────────\n\n- id: tool-ask-user\n  name: '@deepseek-ai/dsh-tool-ask-user'\n\n- id: tool-todo\n  name: '@deepseek-ai/dsh-tool-todo'\n  config:\n    allowParallelInProgress: true\n\n# The `web` service and its search provider stay in the host composition; only\n# the model-facing tool is per-session.\n- id: tool-web\n  name: '@deepseek-ai/dsh-tool-web'\n  config:\n    fetch: false\n    searchTimeoutMs: 60000\n",
+            "name": "标准模式",
+            "description": "功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。"
+          }
+        }
+      }
+    },
+    {
+      "case": "copy",
+      "request": {
+        "path": "/api/agentPreset.copy",
+        "body": {
+          "type": "client-request",
+          "rpcId": "phase5-agent-preset-copy",
+          "method": "agentPreset.copy",
+          "payload": {
+            "from": "standard",
+            "agentPreset": "phase5-copy",
+            "name": "Phase Five Copy"
+          }
+        }
+      },
+      "response": {
+        "type": "server-response",
+        "rpcId": "phase5-agent-preset-copy",
+        "result": {
+          "ok": true,
+          "value": {
+            "agentPreset": "phase5-copy"
+          }
+        }
+      }
+    },
+    {
+      "case": "open-document",
+      "request": {
+        "path": "/api/agentPreset.openDocument",
+        "body": {
+          "type": "client-request",
+          "rpcId": "phase5-agent-preset-open-document",
+          "method": "agentPreset.openDocument",
+          "payload": {
+            "agentPreset": "phase5-copy"
+          }
+        }
+      },
+      "response": {
+        "type": "server-response",
+        "rpcId": "phase5-agent-preset-open-document",
+        "result": {
+          "ok": true,
+          "value": {
+            "opened": true
+          }
+        }
+      }
+    },
+    {
+      "case": "select",
+      "request": {
+        "path": "/api/agentPreset.select",
+        "body": {
+          "type": "client-request",
+          "rpcId": "phase5-agent-preset-select",
+          "method": "agentPreset.select",
+          "payload": {
+            "sessionId": "phase5-browser-session",
+            "agentPreset": "cordis"
+          }
+        }
+      },
+      "response": {
+        "type": "server-response",
+        "rpcId": "phase5-agent-preset-select",
+        "result": {
+          "ok": true,
+          "value": {
+            "agentPreset": "cordis"
+          }
+        }
+      }
+    },
+    {
+      "case": "remove",
+      "request": {
+        "path": "/api/agentPreset.remove",
+        "body": {
+          "type": "client-request",
+          "rpcId": "phase5-agent-preset-remove",
+          "method": "agentPreset.remove",
+          "payload": {
+            "agentPreset": "phase5-copy"
+          }
+        }
+      },
+      "response": {
+        "type": "server-response",
+        "rpcId": "phase5-agent-preset-remove",
+        "result": {
+          "ok": true,
+          "value": {}
+        }
+      }
+    }
+  ]
+}

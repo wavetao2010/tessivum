@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "legacyPresetIds": [
+    "standard",
+    "code",
+    "minimal",
+    "cordis"
+  ],
+  "headers": [
+    {
+      "case": "standard",
+      "header": {
+        "version": 0,
+        "id": "phase5-legacy-standard",
+        "createdAt": 0,
+        "agentPreset": "standard"
+      }
+    },
+    {
+      "case": "code",
+      "header": {
+        "version": 0,
+        "id": "phase5-legacy-code",
+        "createdAt": 1,
+        "agentPreset": "code"
+      }
+    },
+    {
+      "case": "minimal",
+      "header": {
+        "version": 0,
+        "id": "phase5-legacy-minimal",
+        "createdAt": 2,
+        "agentPreset": "minimal"
+      }
+    },
+    {
+      "case": "cordis",
+      "header": {
+        "version": 0,
+        "id": "phase5-legacy-cordis",
+        "createdAt": 3,
+        "agentPreset": "cordis"
+      }
+    },
+    {
+      "case": "unknown-custom",
+      "header": {
+        "version": 0,
+        "id": "phase5-legacy-custom",
+        "createdAt": 4,
+        "agentPreset": "repository-maintainer"
+      }
+    }
+  ]
+}

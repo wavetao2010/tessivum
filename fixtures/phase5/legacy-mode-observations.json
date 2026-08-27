@@ -1,0 +1,216 @@
+{
+  "schema": 1,
+  "legacyPresetIds": [
+    "standard",
+    "code",
+    "minimal",
+    "cordis"
+  ],
+  "status": "observed-legacy-behavior-not-target-contract",
+  "hostGlobalSwitch": {
+    "name": "codeRuntime",
+    "whenAbsent": {
+      "factory": "standardCatalog",
+      "modelToolPresentation": "direct"
+    },
+    "whenPresent": {
+      "factory": "codeMode",
+      "modelToolPresentation": "run_code"
+    },
+    "knownHostGlobalDefects": [
+      {
+        "id": "code-runtime-presentation-is-host-global",
+        "affectedLegacyPresetIds": [
+          "standard",
+          "minimal",
+          "cordis"
+        ],
+        "observation": "Enabling the Host code runtime changes every selected preset's model-facing catalog to run_code; selection alone does not choose presentation.",
+        "notDesiredBehavior": true
+      },
+      {
+        "id": "optional-tools-are-host-global",
+        "affectedLegacyPresetIds": [
+          "standard",
+          "code",
+          "cordis"
+        ],
+        "observation": "Additive presets gain Cordis and schedule tools from the Host-global optional catalog even when their preset composition did not contribute them.",
+        "notDesiredBehavior": true
+      }
+    ]
+  },
+  "observations": [
+    {
+      "legacyPreset": "standard",
+      "sessionHeader": {
+        "agentPreset": "standard"
+      },
+      "prompt": {
+        "completePersona": false,
+        "modelHeaderSource": "host-additive",
+        "text": null
+      },
+      "toolsWhenCodeRuntimeAbsent": [
+        "ask_user_question",
+        "bash",
+        "cordis_define",
+        "cordis_inspect_list",
+        "cordis_inspect_query",
+        "cordis_inspect_self",
+        "cordis_run",
+        "cordis_stop",
+        "create_goal",
+        "edit",
+        "exit_plan_mode",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "jobs.kill",
+        "jobs.list",
+        "jobs.read",
+        "jobs.wait",
+        "list_agents",
+        "ralph",
+        "read",
+        "read_image",
+        "schedule_create",
+        "schedule_delete",
+        "schedule_list",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "web_search",
+        "workflow",
+        "write"
+      ],
+      "toolsWhenCodeRuntimePresent": [
+        "run_code"
+      ]
+    },
+    {
+      "legacyPreset": "code",
+      "sessionHeader": {
+        "agentPreset": "code"
+      },
+      "prompt": {
+        "completePersona": false,
+        "modelHeaderSource": "host-additive",
+        "text": null
+      },
+      "toolsWhenCodeRuntimeAbsent": [
+        "ask_user_question",
+        "bash",
+        "cordis_define",
+        "cordis_inspect_list",
+        "cordis_inspect_query",
+        "cordis_inspect_self",
+        "cordis_run",
+        "cordis_stop",
+        "create_goal",
+        "edit",
+        "exit_plan_mode",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "jobs.kill",
+        "jobs.list",
+        "jobs.read",
+        "jobs.wait",
+        "list_agents",
+        "ralph",
+        "read",
+        "read_image",
+        "schedule_create",
+        "schedule_delete",
+        "schedule_list",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "web_search",
+        "workflow",
+        "write"
+      ],
+      "toolsWhenCodeRuntimePresent": [
+        "run_code"
+      ]
+    },
+    {
+      "legacyPreset": "minimal",
+      "sessionHeader": {
+        "agentPreset": "minimal"
+      },
+      "prompt": {
+        "completePersona": true,
+        "modelHeaderSource": "preset-complete-persona",
+        "text": "You are a helpful software engineer assistant."
+      },
+      "toolsWhenCodeRuntimeAbsent": [
+        "bash",
+        "str_replace_editor"
+      ],
+      "toolsWhenCodeRuntimePresent": [
+        "run_code"
+      ]
+    },
+    {
+      "legacyPreset": "cordis",
+      "sessionHeader": {
+        "agentPreset": "cordis"
+      },
+      "prompt": {
+        "completePersona": false,
+        "modelHeaderSource": "host-additive",
+        "text": null
+      },
+      "toolsWhenCodeRuntimeAbsent": [
+        "ask_user_question",
+        "bash",
+        "cordis_define",
+        "cordis_inspect_list",
+        "cordis_inspect_query",
+        "cordis_inspect_self",
+        "cordis_run",
+        "cordis_stop",
+        "create_goal",
+        "edit",
+        "exit_plan_mode",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "jobs.kill",
+        "jobs.list",
+        "jobs.read",
+        "jobs.wait",
+        "list_agents",
+        "ralph",
+        "read",
+        "read_image",
+        "schedule_create",
+        "schedule_delete",
+        "schedule_list",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "web_search",
+        "workflow",
+        "write"
+      ],
+      "toolsWhenCodeRuntimePresent": [
+        "run_code"
+      ]
+    }
+  ]
+}
