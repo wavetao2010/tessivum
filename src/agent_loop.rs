@@ -20,7 +20,8 @@ use crate::{
         AgentCancelCause, AgentError, AgentFactory, AgentOptions, AgentRuntime, AgentStatus, Inbox,
         InboxClaimReservation,
     },
-    agent_preset::{error_parts as preset_error_parts, AgentPresetService},
+    agent_mode::{AgentModeId, AgentModeRegistry, ToolCapabilityId, ToolPresentation},
+    code_runtime::{register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE},
     compaction::{CompactionOutcome, CompactionService, CompactionTrigger},
     llm::{BlockAssembler, LlmRuntime},
     permissions::runtime_context,
@@ -32,61 +33,12 @@ use crate::{
     session::Session,
     skills::{model_catalog, skill_result_tag, SkillRuntime, SkillSessionScopes},
     system_prompt::{PromptSection, SystemPrompt},
-    tools::{ToolOutput, ToolRestrictions, ToolRunContext, ToolRuntime},
+    tools::{ToolOutput, ToolRegistration, ToolRestrictions, ToolRunContext, ToolRuntime},
     TessivumError,
 };
 
 /// Resolves the advertised prompt capacity for an exact provider/model route.
 pub type ContextWindowResolver = Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
-const STANDARD_TOOL_NAMES: &[&str] = &[
-    "ask_user_question",
-    "bash",
-    "cordis_define",
-    "cordis_inspect_list",
-    "cordis_inspect_query",
-    "cordis_inspect_self",
-    "cordis_run",
-    "cordis_stop",
-    "create_goal",
-    "edit",
-    "exit_plan_mode",
-    "get_goal",
-    "glob",
-    "grep",
-    "interrupt_agent",
-    "jobs.kill",
-    "jobs.list",
-    "jobs.read",
-    "jobs.wait",
-    "list_agents",
-    "ralph",
-    "read",
-    "read_image",
-    "schedule_create",
-    "schedule_delete",
-    "schedule_list",
-    "send_message",
-    "skill",
-    "subagent",
-    "subagent_fork",
-    "todo_write",
-    "update_goal",
-    "web_search",
-    "workflow",
-    "write",
-];
-
-const HOST_GLOBAL_OPTIONAL_TOOL_NAMES: &[&str] = &[
-    "cordis_define",
-    "cordis_inspect_list",
-    "cordis_inspect_query",
-    "cordis_inspect_self",
-    "cordis_run",
-    "cordis_stop",
-    "schedule_create",
-    "schedule_delete",
-    "schedule_list",
-];
 const CHILD_OWNER_BOUND_TOOL_NAMES: &[&str] = &[
     "ask_user_question",
     "bash",
@@ -111,15 +63,14 @@ const CHILD_OWNER_BOUND_TOOL_NAMES: &[&str] = &[
 pub struct AgentLoopFactory {
     llm: LlmRuntime,
     prompt: SystemPrompt,
-    tools: ToolRuntime,
-    dispatch_tools: ToolRuntime,
-    presets: Option<Arc<AgentPresetService>>,
-    code_mode: bool,
+    native_tools: ToolRuntime,
+    modes: Arc<AgentModeRegistry>,
+    default_mode: AgentModeId,
+    code_runtime: Option<ProcessCodeRuntime>,
     approval_required_tools: BTreeSet<String>,
     compaction: Option<CompactionService>,
     skills: Option<(SkillRuntime, SkillSessionScopes)>,
     context_window: Option<ContextWindowResolver>,
-    standard_catalog: bool,
     max_parallel_tool_calls: usize,
     max_steps: u64,
 }
@@ -135,38 +86,31 @@ impl AgentLoopFactory {
     pub const DEFAULT_MAX_PARALLEL_TOOL_CALLS: usize = 4;
     pub const DEFAULT_MAX_STEPS: u64 = 32;
 
-    pub fn new(llm: LlmRuntime, prompt: SystemPrompt, tools: ToolRuntime) -> Self {
+    pub fn new(
+        llm: LlmRuntime,
+        prompt: SystemPrompt,
+        native_tools: ToolRuntime,
+        modes: Arc<AgentModeRegistry>,
+        default_mode: AgentModeId,
+    ) -> Self {
         Self {
             llm,
             prompt,
-            dispatch_tools: tools.clone(),
-            tools,
-            presets: None,
-            code_mode: false,
+            native_tools,
+            modes,
+            default_mode,
+            code_runtime: None,
             approval_required_tools: BTreeSet::new(),
             compaction: None,
             skills: None,
-            standard_catalog: false,
             context_window: None,
             max_parallel_tool_calls: Self::DEFAULT_MAX_PARALLEL_TOOL_CALLS,
             max_steps: Self::DEFAULT_MAX_STEPS,
         }
     }
 
-    /// Supplies the unrestricted native dispatcher used for non-Code catalogs.
-    pub fn with_dispatch_tools(mut self, dispatch_tools: ToolRuntime) -> Self {
-        self.dispatch_tools = dispatch_tools;
-        self
-    }
-
-    pub fn with_presets(mut self, presets: Arc<AgentPresetService>) -> Self {
-        self.presets = Some(presets);
-        self
-    }
-
-    /// Keeps the model-facing catalog at `run_code` while native tools dispatch underneath it.
-    pub fn with_code_mode(mut self) -> Self {
-        self.code_mode = true;
+    pub fn with_code_runtime(mut self, code_runtime: ProcessCodeRuntime) -> Self {
+        self.code_runtime = Some(code_runtime);
         self
     }
 
@@ -185,10 +129,6 @@ impl AgentLoopFactory {
         self
     }
 
-    pub fn with_standard_catalog(mut self) -> Self {
-        self.standard_catalog = true;
-        self
-    }
     pub fn with_context_window_resolver(mut self, resolver: ContextWindowResolver) -> Self {
         self.context_window = Some(resolver);
         self
@@ -225,89 +165,7 @@ impl AgentFactory for AgentLoopFactory {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
-        let selected_preset = session
-            .events()
-            .into_iter()
-            .rev()
-            .find(|event| event.event_type == "agent-preset/selected")
-            .and_then(|event| {
-                event
-                    .data
-                    .get("agentPreset")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| session.header().agent_preset);
-        let catalog = match (selected_preset.as_deref(), &self.presets) {
-            (Some(preset), Some(presets)) => {
-                let catalog = presets.model_catalog(preset).await.map_err(|error| {
-                    let (code, message, details) = preset_error_parts(&error);
-                    AgentError::Message(TessivumError::new(code, message, "agent-preset", details))
-                })?;
-                Some(catalog)
-            }
-            _ => None,
-        };
-        let mut tool_names = catalog.as_ref().map(|catalog| catalog.tools.clone());
-        match &mut tool_names {
-            Some(names)
-                if catalog
-                    .as_ref()
-                    .and_then(|catalog| catalog.complete_system.as_ref())
-                    .is_none() =>
-            {
-                if self.standard_catalog {
-                    names.extend(
-                        HOST_GLOBAL_OPTIONAL_TOOL_NAMES
-                            .iter()
-                            .map(|name| (*name).to_owned()),
-                    );
-                }
-            }
-            None if self.standard_catalog => {
-                tool_names = Some(
-                    STANDARD_TOOL_NAMES
-                        .iter()
-                        .map(|name| (*name).to_owned())
-                        .collect(),
-                );
-            }
-            _ => {}
-        }
-        if session.header().origin == Some(SessionOrigin::Subagent) {
-            if let Some(names) = &mut tool_names {
-                names.retain(|name| !CHILD_OWNER_BOUND_TOOL_NAMES.contains(&name.as_str()));
-            }
-        }
-        let skills_enabled = self
-            .skills
-            .as_ref()
-            .is_some_and(|(_, scopes)| lock(scopes).contains_key(&session.id()));
-        let tools = match tool_names {
-            Some(_) if self.code_mode => self.tools.clone(),
-            Some(names) => {
-                let approval_required = self
-                    .approval_required_tools
-                    .iter()
-                    .filter(|name| names.contains(*name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let restrictions = approval_required
-                    .into_iter()
-                    .fold(ToolRestrictions::allow_only(names), ToolRestrictions::ask);
-                self.dispatch_tools
-                    .scoped(restrictions)
-                    .map_err(AgentError::Message)?
-            }
-            None => self.tools.clone(),
-        };
-        let tools = if skills_enabled {
-            tools
-        } else {
-            tools
-                .scoped(ToolRestrictions::new().deny("skill"))
-                .map_err(AgentError::Message)?
-        };
+        let runtime = SessionRuntimeSpec::resolve(self, &session)?;
         Ok(AgentLoop::spawn(
             session,
             options,
@@ -315,15 +173,148 @@ impl AgentFactory for AgentLoopFactory {
             cancellation,
             self.llm.clone(),
             self.prompt.clone(),
-            catalog.and_then(|catalog| catalog.complete_system),
-            tools,
-            self.compaction.clone(),
-            self.skills.clone(),
+            runtime,
             self.context_window.clone(),
             self.max_parallel_tool_calls,
             self.max_steps,
         ))
     }
+}
+
+/// Immutable mode policy and model-facing runtime for one live session.
+struct SessionRuntimeSpec {
+    prompt: ModePrompt,
+    tools: ToolRuntime,
+    compaction: Option<CompactionService>,
+    skills: Option<(SkillRuntime, SkillSessionScopes)>,
+    _tool_registrations: Vec<ToolRegistration>,
+}
+
+struct ModePrompt {
+    complete: bool,
+    section: PromptSection,
+}
+
+impl SessionRuntimeSpec {
+    fn resolve(factory: &AgentLoopFactory, session: &Session) -> Result<Self, AgentError> {
+        let mode_id = selected_mode(session, &factory.default_mode)?;
+        let mode = factory
+            .modes
+            .resolve(mode_id.as_str())
+            .map_err(AgentError::Message)?;
+        let mode_id = mode.spec.id.clone();
+        let mode_prompt = mode.spec.prompt.clone();
+        let skills_enabled = mode.spec.skills;
+        let compaction_enabled = mode.spec.compaction.is_some();
+        let presentation = mode.spec.presentation;
+        let available = factory
+            .native_tools
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<BTreeSet<_>>();
+        let mut names = mode
+            .nested_tools
+            .iter()
+            .filter(|name| available.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !mode.spec.planning {
+            let planning_tools = [ToolCapabilityId::PlanExit, ToolCapabilityId::PlanTodo]
+                .into_iter()
+                .flat_map(ToolCapabilityId::native_tools)
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            names.retain(|name| !planning_tools.contains(name));
+        }
+        if session.header().origin == Some(SessionOrigin::Subagent) {
+            names.retain(|name| !CHILD_OWNER_BOUND_TOOL_NAMES.contains(&name.as_str()));
+        }
+        let approval_required = factory
+            .approval_required_tools
+            .iter()
+            .filter(|name| names.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let restrictions = approval_required
+            .into_iter()
+            .fold(ToolRestrictions::allow_only(names), ToolRestrictions::ask);
+        let native_tools = factory
+            .native_tools
+            .scoped(restrictions)
+            .map_err(AgentError::Message)?;
+        let skills = factory.skills.as_ref().filter(|(_, scopes)| {
+            skills_enabled && lock(scopes).contains_key(&session.id())
+        });
+        let native_tools = if skills.is_some() {
+            native_tools
+        } else {
+            native_tools
+                .scoped(ToolRestrictions::new().deny("skill"))
+                .map_err(AgentError::Message)?
+        };
+        let (tools, registrations) = match presentation {
+            ToolPresentation::Direct => (native_tools, Vec::new()),
+            ToolPresentation::Programmatic => {
+                let code_runtime = factory.code_runtime.clone().ok_or_else(|| {
+                    AgentError::Message(TessivumError::new(
+                        PTC_RUNTIME_UNAVAILABLE,
+                        "programmatic mode requires an available PTC runtime",
+                        "agent-loop",
+                        json!({"agentMode": mode_id.as_str()}),
+                    ))
+                })?;
+                let tools = ToolRuntime::new();
+                let registration = register_code_tool(&tools, native_tools, code_runtime)
+                    .map_err(AgentError::Message)?;
+                (tools, vec![registration])
+            }
+        };
+        Ok(Self {
+            prompt: ModePrompt {
+                complete: mode_prompt.complete,
+                section: PromptSection::new(
+                    format!("agent-mode/{mode_id}"),
+                    0,
+                    mode_prompt.text,
+                ),
+            },
+            tools,
+            compaction: compaction_enabled
+                .then(|| factory.compaction.clone())
+                .flatten(),
+            skills: skills.cloned(),
+            _tool_registrations: registrations,
+        })
+    }
+}
+
+fn selected_mode(session: &Session, default_mode: &AgentModeId) -> Result<AgentModeId, AgentError> {
+    let selected = session
+        .events()
+        .into_iter()
+        .rev()
+        .find(|event| event.event_type == "agent-mode/selected")
+        .map(|event| {
+            let value = event
+                .data
+                .get("agentMode")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    AgentError::Message(TessivumError::new(
+                        "MODE_SELECTION_INVALID",
+                        "agent-mode/selected requires an agentMode string",
+                        "agent-loop",
+                        event.data,
+                    ))
+                })?;
+            AgentModeId::new(value).map_err(AgentError::Message)
+        })
+        .transpose()?;
+    Ok(selected
+        .or_else(|| session.header().agent_mode)
+        .unwrap_or_else(|| default_mode.clone()))
 }
 
 /// A single-session driver. One persistent worker waits for coalesced wakeups.
@@ -350,10 +341,7 @@ struct Inner {
     finalization: CancellationToken,
     llm: LlmRuntime,
     prompt: SystemPrompt,
-    prompt_override: Option<String>,
-    tools: ToolRuntime,
-    compaction: Option<CompactionService>,
-    skills: Option<(SkillRuntime, SkillSessionScopes)>,
+    runtime: SessionRuntimeSpec,
     context_window: Option<ContextWindowResolver>,
     max_parallel_tool_calls: usize,
     max_steps: u64,
@@ -382,10 +370,7 @@ impl AgentLoop {
         cancellation: CancellationToken,
         llm: LlmRuntime,
         prompt: SystemPrompt,
-        prompt_override: Option<String>,
-        tools: ToolRuntime,
-        compaction: Option<CompactionService>,
-        skills: Option<(SkillRuntime, SkillSessionScopes)>,
+        runtime: SessionRuntimeSpec,
         context_window: Option<ContextWindowResolver>,
         max_parallel_tool_calls: usize,
         max_steps: u64,
@@ -403,10 +388,7 @@ impl AgentLoop {
             finalization: ContextHandle::root().scope().cancellation(),
             llm,
             prompt,
-            prompt_override,
-            tools,
-            compaction,
-            skills,
+            runtime,
             context_window,
             max_parallel_tool_calls,
             max_steps,
@@ -610,7 +592,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
         if inner.cancellation.is_cancelled() {
             return close_cancelled_step(inner, turn, step).await;
         }
-        if let Some(compaction) = &inner.compaction {
+        if let Some(compaction) = &inner.runtime.compaction {
             let has_prior_request = inner
                 .session
                 .events()
@@ -640,20 +622,26 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             }
         }
 
-        let assembly = inner
-            .prompt
-            .assemble(Vec::<PromptSection>::new(), inner.tools.schemas())
-            .map_err(|error| AgentError::Runtime(error.to_string()))?;
+        let tool_schemas = inner.runtime.tools.schemas();
+        let (system, tools) = if inner.runtime.prompt.complete {
+            (Some(inner.runtime.prompt.section.text.clone()), tool_schemas)
+        } else {
+            let assembly = inner
+                .prompt
+                .assemble([&inner.runtime.prompt.section], tool_schemas)
+                .map_err(|error| AgentError::Runtime(error.to_string()))?;
+            (
+                (!assembly.text.is_empty()).then_some(assembly.text),
+                assembly.tools,
+            )
+        };
         let mut request = GenerateRequest {
             provider: inner.options.provider.clone(),
             model: inner.options.model.clone(),
             reasoning_effort: inner.options.reasoning_effort.clone(),
             messages: request_messages(inner),
-            system: inner
-                .prompt_override
-                .clone()
-                .or_else(|| (!assembly.text.is_empty()).then_some(assembly.text.clone())),
-            tools: (!assembly.tools.is_empty()).then_some(assembly.tools.clone()),
+            system,
+            tools: (!tools.is_empty()).then_some(tools),
             temperature: None,
             max_tokens: inner.options.max_tokens,
             stop: None,
@@ -907,7 +895,7 @@ async fn append_skill_context(
     step: u64,
     messages: &[Message],
 ) -> Result<(), AgentError> {
-    let Some((skills, scopes)) = &inner.skills else {
+    let Some((skills, scopes)) = &inner.runtime.skills else {
         return Ok(());
     };
     let Some(cwd) = lock(scopes).get(&inner.session.id()).cloned() else {
@@ -1167,7 +1155,7 @@ fn is_context_overflow(code: &str) -> bool {
 async fn compact_context_overflow(
     inner: &Inner,
 ) -> Result<bool, crate::compaction::CompactionError> {
-    let Some(compaction) = &inner.compaction else {
+    let Some(compaction) = &inner.runtime.compaction else {
         return Ok(false);
     };
     Ok(matches!(
@@ -1232,7 +1220,7 @@ async fn run_tools(
 
     let session = inner.session.id();
     let cancellation = inner.cancellation.clone();
-    let tools = inner.tools.clone();
+    let tools = inner.runtime.tools.clone();
     let outputs = stream::iter(calls.into_iter().enumerate().map(|(index, (call, name, raw))| {
         let tools = tools.clone();
         let session = session.clone();

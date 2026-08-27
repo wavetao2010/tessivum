@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    fs,
     sync::{Arc, Mutex},
 };
 
@@ -8,17 +7,20 @@ use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::{json, Value};
 use tessivum::{
-    agent::{AgentCancelCause, AgentOptions, AgentRegistry},
+    agent::{AgentCancelCause, AgentError, AgentOptions, AgentRegistry},
     agent_loop::AgentLoopFactory,
-    agent_preset::AgentPresetService,
+    agent_mode::{AgentModeId, AgentModeRegistry},
+    code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
     llm::{LlmAdapter, LlmRetryPolicy, LlmRuntime, LlmStream, RecordedLlmAdapter},
     session::{MemorySessionPersistence, SessionStore},
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     tools::{
-        ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext, ToolRuntime,
+        ToolApproval, ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext,
+        ToolRuntime,
     },
     ContentBlock, FinishReason, GenerateRequest, LlmFailure, Message, MessageRole, MessageSource,
     SessionEvent, SessionHeader, SessionId, SessionOrigin, StreamChunk, SurfaceOp, ToolCallId,
+    ToolSchema,
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 
@@ -36,8 +38,20 @@ fn header(id: &str) -> SessionHeader {
         seed_length: None,
         origin: None,
         delegation_depth: None,
-        agent_preset: None,
+        agent_mode: None,
     }
+}
+
+fn modes() -> Arc<AgentModeRegistry> {
+    Arc::new(AgentModeRegistry::with_roots(Vec::new(), None))
+}
+
+fn factory(llm: LlmRuntime, prompt: SystemPrompt, tools: ToolRuntime) -> AgentLoopFactory {
+    AgentLoopFactory::new(llm, prompt, tools, modes(), AgentModeId::standard())
+}
+
+fn ptc_runtime() -> ProcessCodeRuntime {
+    ProcessCodeRuntime::new(ProcessCodeRuntimeConfig::ptc_javascript().unwrap()).unwrap()
 }
 
 fn user(id: &str) -> Message {
@@ -164,14 +178,14 @@ fn tool_turn() -> Vec<StreamChunk> {
         StreamChunk::ToolCallDelta {
             index: 0,
             id: ToolCallId::from("call-1"),
-            name: Some("echo".into()),
+            name: Some("read".into()),
             arguments_delta: r#"{"value":"round-trip"}"#.into(),
         },
         StreamChunk::BlockEnd {
             index: 0,
             block: ContentBlock::ToolCall {
                 id: ToolCallId::from("call-1"),
-                name: "echo".into(),
+                name: "read".into(),
                 arguments: r#"{"value":"round-trip"}"#.into(),
             },
         },
@@ -209,19 +223,15 @@ async fn durable_events(adapter: Arc<dyn LlmAdapter>) -> Vec<SessionEvent> {
     let tools = ToolRuntime::new();
     let _tool = tools
         .register(ToolDefinition::new(
-            "echo",
-            "echoes",
+            "read",
+            "reads",
             json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
             Echo,
         ))
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            tools,
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), tools)))
         .unwrap();
     let agent = registry
         .create(
@@ -356,19 +366,15 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
     let tools = ToolRuntime::new();
     let _tool = tools
         .register(ToolDefinition::new(
-            "echo",
-            "echoes",
+            "read",
+            "reads",
             json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
             Echo,
         ))
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            tools,
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), tools)))
         .unwrap();
     let agent = registry
         .create(
@@ -437,9 +443,10 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
         json!({
             "header": {
                 "config": {"provider": "test", "model": "deterministic"},
+                "system": "Use the additive Tessivum persona, workspace instructions, and runtime context.",
                 "tools": [{
-                    "name": "echo",
-                    "description": "echoes",
+                    "name": "read",
+                    "description": "reads",
                     "parameters": {"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}
                 }]
             },
@@ -475,11 +482,7 @@ async fn durable_inbox_claims_precede_their_fifo_user_messages() {
     let _provider = llm.register("test", Arc::new(adapter)).unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .create(
@@ -553,8 +556,8 @@ async fn changed_effective_header_emits_change_event() {
     let registrations = Arc::new(Mutex::new(None));
     let _tool = tools
         .register(ToolDefinition::new(
-            "echo",
-            "echoes",
+            "read",
+            "reads",
             json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
             PromptChangingEcho {
                 prompt: prompt.clone(),
@@ -564,7 +567,7 @@ async fn changed_effective_header_emits_change_event() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(llm, prompt, tools)))
+        .register_factory(Arc::new(factory(llm, prompt, tools)))
         .unwrap();
     let agent = registry
         .create(
@@ -610,7 +613,10 @@ async fn changed_effective_header_emits_change_event() {
         vec!["header", "reason"]
     );
     assert_ne!(headers[0].data["header"], headers[1].data["header"]);
-    assert_eq!(headers[1].data["header"]["system"], "changed");
+    assert_eq!(
+        headers[1].data["header"]["system"],
+        "Use the additive Tessivum persona, workspace instructions, and runtime context.\n\nchanged"
+    );
     agent.dispose().await.unwrap();
 }
 
@@ -646,11 +652,7 @@ async fn preloaded_request_header_makes_first_runtime_header_resume() {
     let _provider = llm.register("test", Arc::new(adapter)).unwrap();
     let registry = AgentRegistry::new(store);
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .resume(
@@ -678,7 +680,10 @@ async fn preloaded_request_header_makes_first_runtime_header_resume() {
     assert_eq!(
         headers[1].data,
         json!({
-            "header": {"config": {"provider": "test", "model": "deterministic"}},
+            "header": {
+                "config": {"provider": "test", "model": "deterministic"},
+                "system": "Use the additive Tessivum persona, workspace instructions, and runtime context."
+            },
             "reason": "resume"
         })
     );
@@ -702,11 +707,7 @@ async fn retry_preserves_partial_chunks_without_committing_or_executing_them() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .create(
@@ -773,11 +774,7 @@ async fn retry_budget_is_reconstructed_from_the_durable_ledger() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .create(
@@ -845,11 +842,7 @@ async fn cancellation_during_backoff_wins_without_starting_another_attempt() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .create(
@@ -904,11 +897,7 @@ async fn cancellation_during_provider_wait_closes_one_step_and_turn() {
     let _provider = llm.register("test", Arc::new(BlockingAdapter)).unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .create(
@@ -978,7 +967,7 @@ async fn cancellation_during_tool_wait_settles_the_started_call_once() {
     let tools = ToolRuntime::new();
     let _tool = tools
         .register(ToolDefinition::new(
-            "echo",
+            "read",
             "waits",
             json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
             BlockingTool,
@@ -986,11 +975,7 @@ async fn cancellation_during_tool_wait_settles_the_started_call_once() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            tools,
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), tools)))
         .unwrap();
     let agent = registry
         .create(
@@ -1066,11 +1051,7 @@ async fn failed_tool_stream_never_starts_durable_tool_lifecycle() {
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(AgentLoopFactory::new(
-            llm,
-            SystemPrompt::new(),
-            ToolRuntime::new(),
-        )))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), ToolRuntime::new())))
         .unwrap();
     let agent = registry
         .create(
@@ -1135,28 +1116,6 @@ async fn failed_tool_stream_never_starts_durable_tool_lifecycle() {
     agent.dispose().await.unwrap();
 }
 
-const MINIMAL_COMPOSITION: &str = r#"
-- name: '@deepseek-ai/dsh-persona'
-  config:
-    text: You are a helpful software engineer assistant.
-    complete: true
-- name: cordis:group
-  group: true
-  config:
-    - name: '@deepseek-ai/dsh-tool-bash-persistent'
-    - name: '@deepseek-ai/dsh-tool-str-replace-editor'
-    - name: '@deepseek-ai/dsh-tool-fs'
-      disabled: true
-"#;
-
-const MINIMAL_WITHOUT_SHELL: &str = r#"
-- name: '@deepseek-ai/dsh-persona'
-  config:
-    text: You are a helpful software engineer assistant.
-    complete: true
-- name: '@deepseek-ai/dsh-tool-str-replace-editor'
-"#;
-
 fn install_tools(runtime: &ToolRuntime, names: &[&str]) -> Vec<tessivum::tools::ToolRegistration> {
     names
         .iter()
@@ -1165,7 +1124,7 @@ fn install_tools(runtime: &ToolRuntime, names: &[&str]) -> Vec<tessivum::tools::
                 .register(ToolDefinition::new(
                     *name,
                     *name,
-                    json!({"type":"object","properties":{},"additionalProperties":false}),
+                    json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}),
                     Echo,
                 ))
                 .unwrap()
@@ -1173,40 +1132,60 @@ fn install_tools(runtime: &ToolRuntime, names: &[&str]) -> Vec<tessivum::tools::
         .collect()
 }
 
-async fn request_once(registry: &AgentRegistry, mut session: SessionHeader, preset: Option<&str>) {
-    session.agent_preset = preset.map(str::to_owned);
-    let agent = registry
-        .create(
-            session,
-            AgentOptions {
-                provider: "test".into(),
-                model: "deterministic".into(),
-                reasoning_effort: None,
-                max_tokens: None,
+fn options() -> AgentOptions {
+    AgentOptions {
+        provider: "test".into(),
+        model: "deterministic".into(),
+        reasoning_effort: None,
+        max_tokens: None,
+    }
+}
+
+fn tool_names(request: &GenerateRequest) -> Vec<String> {
+    request
+        .tools
+        .as_ref()
+        .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+fn request_for<'a>(requests: &'a [GenerateRequest], session: &str) -> &'a GenerateRequest {
+    requests
+        .iter()
+        .find(|request| request.session_id.as_ref().is_some_and(|id| id.as_str() == session))
+        .unwrap()
+}
+
+fn run_code_turn(code: &str) -> Vec<StreamChunk> {
+    let arguments = json!({"description":"nested test","code":code}).to_string();
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: "tool-call".into(),
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: ToolCallId::from("code-call"),
+            name: Some("run_code".into()),
+            arguments_delta: arguments.clone(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: ToolCallId::from("code-call"),
+                name: "run_code".into(),
+                arguments,
             },
-            cancellation(),
-        )
-        .await
-        .unwrap();
-    agent.followup(user("request")).await.unwrap();
-    agent.when_idle().await.unwrap();
-    agent.dispose().await.unwrap();
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+            replay_state: None,
+        },
+    ]
 }
 
 #[tokio::test]
-async fn copied_minimal_preset_owns_its_prompt_and_tools_after_edits() {
-    let root =
-        std::env::temp_dir().join(format!("tessivum-preset-catalog-{}", uuid::Uuid::new_v4()));
-    let system = root.join("system");
-    let user = root.join("user");
-    fs::create_dir_all(system.join("minimal")).unwrap();
-    fs::write(system.join("minimal/agent.cordis.yml"), MINIMAL_COMPOSITION).unwrap();
-    let presets = Arc::new(AgentPresetService::new(system.clone(), user.clone()));
-    presets
-        .copy("minimal", "renamed-minimal", None)
-        .await
-        .unwrap();
-
+async fn four_session_runtime_specs_are_isolated() {
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let llm = LlmRuntime::new();
     let _provider = llm
@@ -1215,73 +1194,126 @@ async fn copied_minimal_preset_owns_its_prompt_and_tools_after_edits() {
             Arc::new(RecordingAdapter {
                 requests: Arc::clone(&requests),
                 streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([
-                    text_turn("first"),
-                    text_turn("second"),
+                    text_turn("standard"),
+                    text_turn("minimal"),
+                    text_turn("composition"),
+                    text_turn("ptc"),
                 ]))),
             }),
         )
         .unwrap();
+    let tools = ToolRuntime::new();
+    let _tools = install_tools(
+        &tools,
+        &[
+            "bash",
+            "composition_define",
+            "composition_inspect",
+            "composition_run",
+            "composition_stop",
+            "composition_validate",
+            "exit_plan_mode",
+            "read",
+            "str_replace_editor",
+            "todo_write",
+        ],
+    );
     let prompt = SystemPrompt::new();
     let _host_prompt = prompt
         .register(PromptSection::new("host", 0, "host prompt"))
         .unwrap();
-    let tools = ToolRuntime::new();
-    let _tools = install_tools(&tools, &["bash", "str_replace_editor", "read"]);
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
         .register_factory(Arc::new(
-            AgentLoopFactory::new(llm, prompt, tools.clone())
-                .with_dispatch_tools(tools)
-                .with_presets(Arc::clone(&presets))
-                .with_standard_catalog(),
+            AgentLoopFactory::new(
+                llm,
+                prompt,
+                tools,
+                modes(),
+                AgentModeId::standard(),
+            )
+            .with_code_runtime(ptc_runtime()),
         ))
         .unwrap();
 
-    request_once(&registry, header("copied-minimal"), Some("renamed-minimal")).await;
-    fs::write(
-        user.join("renamed-minimal/agent.cordis.yml"),
-        MINIMAL_WITHOUT_SHELL,
-    )
-    .unwrap();
-    request_once(&registry, header("removed-tool"), Some("renamed-minimal")).await;
+    let standard = registry
+        .create(header("mode-standard"), options(), cancellation())
+        .await
+        .unwrap();
+    let mut minimal_header = header("mode-minimal");
+    minimal_header.agent_mode = Some(AgentModeId::minimal());
+    let minimal = registry
+        .create(minimal_header, options(), cancellation())
+        .await
+        .unwrap();
+    let mut composition_header = header("mode-composition");
+    composition_header.agent_mode = Some(AgentModeId::composition());
+    let composition = registry
+        .create(composition_header, options(), cancellation())
+        .await
+        .unwrap();
+    let mut ptc_header = header("mode-ptc");
+    ptc_header.agent_mode = Some(AgentModeId::ptc());
+    let ptc = registry
+        .create(ptc_header, options(), cancellation())
+        .await
+        .unwrap();
+
+    let (standard_result, minimal_result, composition_result, ptc_result) = tokio::join!(
+        standard.followup(user("standard")),
+        minimal.followup(user("minimal")),
+        composition.followup(user("composition")),
+        ptc.followup(user("ptc")),
+    );
+    standard_result.unwrap();
+    minimal_result.unwrap();
+    composition_result.unwrap();
+    ptc_result.unwrap();
+    let (standard_idle, minimal_idle, composition_idle, ptc_idle) = tokio::join!(
+        standard.when_idle(),
+        minimal.when_idle(),
+        composition.when_idle(),
+        ptc.when_idle(),
+    );
+    standard_idle.unwrap();
+    minimal_idle.unwrap();
+    composition_idle.unwrap();
+    ptc_idle.unwrap();
 
     let requests = requests.lock();
     assert_eq!(
-        requests[0].system.as_deref(),
-        Some("You are a helpful software engineer assistant.")
+        tool_names(request_for(&requests, "mode-standard")),
+        ["bash", "exit_plan_mode", "read", "str_replace_editor", "todo_write"]
     );
     assert_eq!(
-        requests[0]
-            .tools
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
+        tool_names(request_for(&requests, "mode-minimal")),
         ["bash", "str_replace_editor"]
     );
     assert_eq!(
-        requests[1]
-            .tools
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        ["str_replace_editor"]
+        tool_names(request_for(&requests, "mode-composition")),
+        [
+            "bash",
+            "composition_define",
+            "composition_inspect",
+            "composition_run",
+            "composition_stop",
+            "composition_validate",
+            "exit_plan_mode",
+            "read",
+            "str_replace_editor",
+            "todo_write",
+        ]
     );
+    assert_eq!(tool_names(request_for(&requests, "mode-ptc")), ["run_code"]);
     drop(requests);
-    let _ = fs::remove_dir_all(root);
+    standard.dispose().await.unwrap();
+    minimal.dispose().await.unwrap();
+    composition.dispose().await.unwrap();
+    ptc.dispose().await.unwrap();
 }
 
 #[tokio::test]
-async fn code_mode_minimal_keeps_the_run_code_catalog_without_broadening() {
-    let root = std::env::temp_dir().join(format!("tessivum-code-preset-{}", uuid::Uuid::new_v4()));
-    let system = root.join("system");
-    let user = root.join("user");
-    fs::create_dir_all(system.join("minimal")).unwrap();
-    fs::write(system.join("minimal/agent.cordis.yml"), MINIMAL_COMPOSITION).unwrap();
-    let presets = Arc::new(AgentPresetService::new(system.clone(), user.clone()));
+async fn complete_mode_replaces_host_prompt_while_additive_mode_contributes_once() {
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let llm = LlmRuntime::new();
     let _provider = llm
@@ -1289,43 +1321,54 @@ async fn code_mode_minimal_keeps_the_run_code_catalog_without_broadening() {
             "test",
             Arc::new(RecordingAdapter {
                 requests: Arc::clone(&requests),
-                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn("ok")]))),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([
+                    text_turn("standard"),
+                    text_turn("minimal"),
+                ]))),
             }),
         )
         .unwrap();
     let tools = ToolRuntime::new();
-    let _tools = install_tools(&tools, &["bash", "str_replace_editor", "run_code"]);
-    let direct = tools
-        .scoped(tessivum::tools::ToolRestrictions::allow_only(["run_code"]))
+    let _tools = install_tools(&tools, &["bash", "read", "str_replace_editor"]);
+    let prompt = SystemPrompt::new();
+    let _host_prompt = prompt
+        .register(PromptSection::new("host", 0, "host prompt"))
         .unwrap();
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(
-            AgentLoopFactory::new(llm, SystemPrompt::new(), direct)
-                .with_dispatch_tools(tools)
-                .with_presets(presets)
-                .with_code_mode(),
-        ))
+        .register_factory(Arc::new(factory(llm, prompt, tools)))
+        .unwrap();
+    let standard = registry
+        .create(header("prompt-standard"), options(), cancellation())
+        .await
+        .unwrap();
+    let mut minimal_header = header("prompt-minimal");
+    minimal_header.agent_mode = Some(AgentModeId::minimal());
+    let minimal = registry
+        .create(minimal_header, options(), cancellation())
+        .await
         .unwrap();
 
-    request_once(&registry, header("code-minimal"), Some("minimal")).await;
+    standard.followup(user("standard")).await.unwrap();
+    minimal.followup(user("minimal")).await.unwrap();
+    standard.when_idle().await.unwrap();
+    minimal.when_idle().await.unwrap();
     let requests = requests.lock();
     assert_eq!(
-        requests[0]
-            .tools
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        ["run_code"]
+        request_for(&requests, "prompt-standard").system.as_deref(),
+        Some("Use the additive Tessivum persona, workspace instructions, and runtime context.\n\nhost prompt")
+    );
+    assert_eq!(
+        request_for(&requests, "prompt-minimal").system.as_deref(),
+        Some("Use only bash and str_replace_editor to complete the task.")
     );
     drop(requests);
-    let _ = fs::remove_dir_all(root);
+    standard.dispose().await.unwrap();
+    minimal.dispose().await.unwrap();
 }
 
 #[tokio::test]
-async fn native_child_requests_exclude_owner_bound_tools() {
+async fn latest_mode_selection_event_overrides_header_and_programmatic_catalog_cannot_recurse() {
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let llm = LlmRuntime::new();
     let _provider = llm
@@ -1333,7 +1376,84 @@ async fn native_child_requests_exclude_owner_bound_tools() {
             "test",
             Arc::new(RecordingAdapter {
                 requests: Arc::clone(&requests),
-                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn("ok")]))),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn("ptc")]))),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let _tools = install_tools(&tools, &["read", "run_code"]);
+    let store = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let registry = AgentRegistry::new(store.clone());
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(llm, SystemPrompt::new(), tools).with_code_runtime(ptc_runtime()),
+        ))
+        .unwrap();
+    let mut selected = header("mode-event-wins");
+    selected.agent_mode = Some(AgentModeId::minimal());
+    selected.seed_length = Some(1);
+    store
+        .create_seeded(
+            selected,
+            vec![SessionEvent {
+                event_type: "agent-mode/selected".into(),
+                seq: 0,
+                time: 0,
+                data: json!({"agentMode":"ptc"}),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: None,
+            }],
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let agent = registry
+        .resume(SessionId::from("mode-event-wins"), options(), cancellation())
+        .await
+        .unwrap();
+    agent.followup(user("ptc")).await.unwrap();
+    agent.when_idle().await.unwrap();
+
+    let requests = requests.lock();
+
+    assert_eq!(tool_names(request_for(&requests, "mode-event-wins")), ["run_code"]);
+    drop(requests);
+    agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn programmatic_mode_requires_configured_code_runtime() {
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(factory(
+            LlmRuntime::new(),
+            SystemPrompt::new(),
+            ToolRuntime::new(),
+        )))
+        .unwrap();
+    let mut selected = header("missing-ptc-runtime");
+    selected.agent_mode = Some(AgentModeId::ptc());
+    let error = match registry.create(selected, options(), cancellation()).await {
+        Ok(_) => panic!("programmatic mode unexpectedly started without a code runtime"),
+        Err(error) => error,
+    };
+    match error {
+        AgentError::Message(error) => assert_eq!(error.code, "PTC_RUNTIME_UNAVAILABLE"),
+        other => panic!("unexpected programmatic setup error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn native_child_mode_excludes_owner_bound_tools() {
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let llm = LlmRuntime::new();
+    let _provider = llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn("child")]))),
             }),
         )
         .unwrap();
@@ -1360,25 +1480,144 @@ async fn native_child_requests_exclude_owner_bound_tools() {
     );
     let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
     let _factory = registry
-        .register_factory(Arc::new(
-            AgentLoopFactory::new(llm, SystemPrompt::new(), tools.clone())
-                .with_dispatch_tools(tools)
-                .with_standard_catalog(),
-        ))
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), tools)))
         .unwrap();
     let mut child = header("native-child");
     child.origin = Some(SessionOrigin::Subagent);
-    request_once(&registry, child, None).await;
-
-    let requests = requests.lock();
+    let child = registry.create(child, options(), cancellation()).await.unwrap();
+    child.followup(user("child")).await.unwrap();
+    child.when_idle().await.unwrap();
     assert_eq!(
-        requests[0]
-            .tools
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
+        tool_names(&requests.lock()[0]),
         ["read"]
     );
+    child.dispose().await.unwrap();
+}
+
+struct AlwaysApprove;
+
+#[async_trait]
+impl ToolApproval for AlwaysApprove {
+    async fn approve(
+        &self,
+        _context: &ToolRunContext,
+        _schema: &ToolSchema,
+        _arguments: &Value,
+    ) -> Result<Option<bool>, tessivum::TessivumError> {
+        Ok(Some(true))
+    }
+}
+
+#[tokio::test]
+async fn programmatic_nested_tools_preserve_denial_and_approval() {
+    for approved in [false, true] {
+        let llm = LlmRuntime::new();
+        let _provider = llm
+            .register(
+                "test",
+                Arc::new(DeterministicAdapter {
+                    streams: Arc::new(Mutex::new(VecDeque::from([
+                        run_code_turn("return await tools.read({value: 'nested'});"),
+                        text_turn("done"),
+                    ]))),
+                }),
+            )
+            .unwrap();
+        let tools = ToolRuntime::new();
+        if approved {
+            tools.set_approval(Some(Arc::new(AlwaysApprove)));
+        }
+        let _tool = tools
+            .register(ToolDefinition::new(
+                "read",
+                "read",
+                json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}),
+                Echo,
+            ))
+            .unwrap();
+        let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+        let _factory = registry
+            .register_factory(Arc::new(
+                factory(llm, SystemPrompt::new(), tools)
+                    .with_code_runtime(ptc_runtime())
+                    .with_approval_required_tools(["read".into()]),
+            ))
+            .unwrap();
+        let mut selected = header(if approved { "nested-approval" } else { "nested-denial" });
+        selected.agent_mode = Some(AgentModeId::ptc());
+        let agent = registry.create(selected, options(), cancellation()).await.unwrap();
+        agent.followup(user("nested")).await.unwrap();
+        agent.when_idle().await.unwrap();
+        let result = agent
+            .session()
+            .events()
+            .into_iter()
+            .find(|event| event.event_type == "tool/result")
+            .unwrap();
+        assert_eq!(
+            result.data["meta"]["codeDispatches"][1]["data"]["isError"],
+            json!(!approved)
+        );
+        agent.dispose().await.unwrap();
+    }
+}
+
+struct NotifyingBlockingTool(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl ToolHandler for NotifyingBlockingTool {
+    async fn run(&self, context: ToolRunContext, _arguments: Value) -> ToolHandlerResult {
+        self.0.notify_one();
+        context.cancellation.cancelled().await;
+        Ok(ToolOutput::new(Vec::new(), false, Value::Null))
+    }
+}
+
+#[tokio::test]
+async fn programmatic_nested_tool_cancellation_reaches_the_native_dispatcher() {
+    let llm = LlmRuntime::new();
+    let _provider = llm
+        .register(
+            "test",
+            Arc::new(DeterministicAdapter {
+                streams: Arc::new(Mutex::new(VecDeque::from([run_code_turn(
+                    "return await tools.bash({value: 'wait'});",
+                )]))),
+            }),
+        )
+        .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let tools = ToolRuntime::new();
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "bash",
+            "bash",
+            json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}),
+            NotifyingBlockingTool(Arc::clone(&started)),
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(llm, SystemPrompt::new(), tools).with_code_runtime(ptc_runtime()),
+        ))
+        .unwrap();
+    let mut selected = header("nested-cancel");
+    selected.agent_mode = Some(AgentModeId::ptc());
+    let agent = registry.create(selected, options(), cancellation()).await.unwrap();
+    let wait_for_start = started.notified();
+    agent.followup(user("cancel")).await.unwrap();
+    wait_for_start.await;
+    assert!(agent.cancel(AgentCancelCause::User, false));
+    agent.when_idle().await.unwrap();
+    let events = agent.session().events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "tool/result")
+            .count(),
+        1
+    );
+    assert_eq!(events.last().unwrap().data["reason"]["kind"], "aborted");
+    agent.dispose().await.unwrap();
 }
