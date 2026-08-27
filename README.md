@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.11` is a prerelease, not a production-stable API or data-format promise. It adds Tessivum-owned branding and install channels plus bounded compatibility with `dshmarket@1.29.2` and `dsh-better-sidebar@0.16.1`.
+`v0.1.0-alpha.12` is a prerelease, not a production-stable API or data-format promise. It adds bounded compatibility with `dsh-better-sidebar@0.16.1` on top of the Alpha.11 brand, distribution, and `dshmarket@1.29.2` release.
 
 Current implementation foundation:
 
@@ -27,7 +27,7 @@ The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline remains complete
 - provider-neutral streaming, retry, cancellation, atomic queue/steer, durable sessions, presets, Subagents, Workflow, Native/WASM tools, and JSONL replay are covered by focused Rust contracts;
 - all 69 source-Web Chromium scenarios pass as the behavioral schema/event parity gate.
 
-The authoritative compatibility contract is [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md). Alpha.11 architecture and release gates are recorded in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md).
+The authoritative compatibility contract is [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md). Alpha.10–12 architecture and release gates are recorded in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md).
 
 ## Architecture
 
@@ -73,22 +73,22 @@ tessivum --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates `~/.local/bin/tessivum`:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.11/install.sh
-sh install.sh 0.1.0-alpha.11
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.12/install.sh
+sh install.sh 0.1.0-alpha.12
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.11 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.11), verify the checksum, then run the packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.12 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.12), verify the checksum, then run the packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.11-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.11-$target.tar.gz"
-"./tessivum-0.1.0-alpha.11-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.11-$target/bin/tessivum" web
+sha256sum -c "tessivum-0.1.0-alpha.12-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.12-$target.tar.gz"
+"./tessivum-0.1.0-alpha.12-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.12-$target/bin/tessivum" web
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -198,7 +198,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - Host compatibility npm inputs are exact versions with registry URLs, SHA-512 integrities, file hashes, and licenses in `packaging/host-modules.json`; archives include `THIRD_PARTY_LICENSES.txt` and `release-metadata.json`.
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
-- Checksums detect corruption but are not signatures. Alpha.11 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
+- Checksums detect corruption but are not signatures. Alpha.12 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
 
 ## Verification
 
