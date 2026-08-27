@@ -50,7 +50,6 @@ struct Fixture {
     compat_host: PathBuf,
     host_modules: PathBuf,
     vendor: PathBuf,
-    agent_presets: PathBuf,
     output: PathBuf,
 }
 
@@ -75,18 +74,7 @@ impl Fixture {
             write(vendor.join(package).join("lib/index.js"), "export {}\n");
         }
 
-        let agent_presets = root.join("deepseek/apps/cli/config/agent-presets");
-        for preset in ["standard", "code", "minimal", "cordis"] {
-            write(
-                agent_presets.join(preset).join("agent.cordis.yml"),
-                "plugins: []\n",
-            );
-            write(
-                agent_presets.join(preset).join("preset.yml"),
-                "name: fixture\n",
-            );
-        }
-        write(root.join("deepseek/LICENSE"), "MIT fixture license\n");
+        write(root.join("LICENSE"), "MIT fixture license\n");
 
         let host_modules = root.join("host-modules");
         for (name, version, runtime_entries) in [
@@ -105,7 +93,6 @@ impl Fixture {
             compat_host,
             host_modules,
             vendor,
-            agent_presets,
             output,
         }
     }
@@ -119,7 +106,6 @@ impl Fixture {
             .arg(&self.compat_host)
             .arg(&self.host_modules)
             .arg(&self.vendor)
-            .arg(&self.agent_presets)
             .arg(&self.output)
             .current_dir(repository_root())
             .output()
@@ -244,7 +230,7 @@ fn assert_success(output: Output) {
 }
 
 #[test]
-fn release_archive_contains_the_verified_host_modules_and_licenses() {
+fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() {
     let fixture = Fixture::new();
     assert_success(fixture.package());
 
@@ -270,10 +256,17 @@ fn release_archive_contains_the_verified_host_modules_and_licenses() {
         "share/tessivum/host-modules/node_modules/@deepseek-ai/cosmokit",
         "share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7/LICENSE",
         "share/licenses/@deepseek-ai-schemastery-3.18.1/LICENSE",
+        "share/licenses/deepseek-harness/LICENSE",
     ] {
         assert!(
             listing.lines().any(|entry| entry.ends_with(path)),
             "archive is missing {path}"
+        );
+    }
+    for obsolete in [".agent-presets", "agent-presets", "agent.cordis.yml", "preset.yml"] {
+        assert!(
+            !listing.lines().any(|entry| entry.contains(obsolete)),
+            "archive still contains legacy preset asset {obsolete}"
         );
     }
 
@@ -281,6 +274,11 @@ fn release_archive_contains_the_verified_host_modules_and_licenses() {
     let launcher_text = fs::read_to_string(&launcher).unwrap();
     assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
     assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
+    assert!(!launcher_text.contains("TESSIVUM_AGENT_PRESET_ROOT"));
+    assert!(!launcher_text.contains("agent-presets"));
+    let readme = fs::read_to_string(fixture.stage().join("README.txt")).unwrap();
+    assert!(readme.contains("Native modes are built into Tessivum"));
+    assert!(readme.contains("under modes/"));
     let host_modules = fixture.stage().join("share/tessivum/host-modules");
     let launcher_env = Command::new(&launcher)
         .arg("--host-module-root")

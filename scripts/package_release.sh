@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 8 ]]; then
-  echo "usage: $0 <tag> <target> <binary> <compat-host-dir> <host-module-root> <vendor-dir> <agent-presets-dir> <output-dir>" >&2
+if [[ $# -ne 7 ]]; then
+  echo "usage: $0 <tag> <target> <binary> <compat-host-dir> <host-module-root> <vendor-dir> <output-dir>" >&2
   exit 2
 fi
 
@@ -12,13 +12,12 @@ binary=$3
 compat_host=$4
 host_modules=$5
 vendor=$6
-agent_presets=$7
-output=$8
+output=$7
 version=${tag#v}
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 host_module_manifest="$script_dir/../packaging/host-modules.json"
 compat_modules="$script_dir/../compat/host-modules"
-deepseek_root=$(CDPATH= cd -- "$agent_presets/../../../.." && pwd)
+deepseek_root=$(CDPATH= cd -- "$vendor/.." && pwd)
 
 [[ $tag == v?* ]] || { echo "release tag must start with v and include a version: $tag" >&2; exit 2; }
 case "$target" in
@@ -28,12 +27,6 @@ esac
 [[ -x $binary ]] || { echo "release binary is not executable: $binary" >&2; exit 2; }
 [[ -f $compat_host/src/index.ts ]] || { echo "compat host entry is missing: $compat_host/src/index.ts" >&2; exit 2; }
 [[ -f $vendor/cordis/lib/index.js && -f $vendor/cosmokit/lib/index.js && -f $vendor/loader/lib/index.js ]] || { echo "compiled Cordis vendor entries are missing under: $vendor" >&2; exit 2; }
-for preset in standard code minimal cordis; do
-  [[ -f $agent_presets/$preset/agent.cordis.yml && -f $agent_presets/$preset/preset.yml ]] || {
-    echo "shipped agent preset is incomplete: $agent_presets/$preset" >&2
-    exit 2
-  }
-done
 [[ -f $deepseek_root/LICENSE ]] || { echo "DeepSeek Harness license is missing: $deepseek_root/LICENSE" >&2; exit 2; }
 [[ -f $host_module_manifest ]] || { echo "Host module metadata manifest is missing: $host_module_manifest" >&2; exit 2; }
 python3 "$script_dir/fetch_host_modules.py" "$host_module_manifest" "$host_modules" --verify
@@ -51,7 +44,7 @@ stage="$output/$name"
 rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/libexec" "$stage/share/tessivum/compat-host" \
   "$stage/share/tessivum/host-modules" "$stage/share/tessivum/vendor" \
-  "$stage/share/tessivum/agent-presets" "$stage/share/licenses/deepseek-harness" \
+  "$stage/share/licenses/deepseek-harness" \
   "$stage/share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7" \
   "$stage/share/licenses/@deepseek-ai-schemastery-3.18.1"
 
@@ -69,7 +62,6 @@ ln -s ../../loader "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cordi
 mkdir -p "$stage/share/tessivum/host-modules/node_modules/@deepseek-ai"
 ln -s ../../../vendor/cordis "$stage/share/tessivum/host-modules/node_modules/@deepseek-ai/cordis"
 ln -s ../../../vendor/cosmokit "$stage/share/tessivum/host-modules/node_modules/@deepseek-ai/cosmokit"
-cp -R "$agent_presets"/. "$stage/share/tessivum/agent-presets/"
 cp "$deepseek_root/LICENSE" "$stage/share/licenses/deepseek-harness/LICENSE"
 cp "$host_modules/@deepseek-ai/dsh-settings/LICENSE" \
   "$stage/share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7/LICENSE"
@@ -92,8 +84,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$launcher")/.." && pwd)
 : "${TESSIVUM_COMPAT_HOST:=$root/share/tessivum/compat-host/src/index.ts}"
 : "${TESSIVUM_HOST_MODULE_ROOT:=$root/share/tessivum/host-modules}"
 : "${CORDIS_VENDOR_ROOT:=$root/share/tessivum/vendor}"
-: "${TESSIVUM_AGENT_PRESET_ROOT:=$root/share/tessivum/agent-presets}"
-export TESSIVUM_COMPAT_HOST TESSIVUM_HOST_MODULE_ROOT CORDIS_VENDOR_ROOT TESSIVUM_AGENT_PRESET_ROOT
+export TESSIVUM_COMPAT_HOST TESSIVUM_HOST_MODULE_ROOT CORDIS_VENDOR_ROOT
 exec "$root/libexec/tessivum" "$@"
 LAUNCHER
 chmod +x "$stage/bin/tessivum"
@@ -105,9 +96,10 @@ Run from the unpacked archive:
   ./bin/tessivum --version
   ./bin/tessivum web
 
-The launcher points Agent Presets, Legacy Node compatibility, and the pinned
-Cordis vendor at the packaged assets. Bun 1.3.14+ is needed only when Legacy
-Node plugins run; pnpm is needed only by plugin add/remove. The Web shell is
+The launcher points Legacy Node compatibility and the pinned Cordis vendor at
+the packaged assets. Native modes are built into Tessivum; user modes live in
+the selected data directory under modes/. Bun 1.3.14+ is required for PTC and
+Legacy Node plugins; pnpm is needed only by plugin add/remove. The Web shell is
 embedded in the executable.
 
 This archive is not code-signed or notarized. Verify its adjacent SHA-256 file

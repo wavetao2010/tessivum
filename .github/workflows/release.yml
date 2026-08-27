@@ -114,9 +114,7 @@ jobs:
           repository: deepseek-ai/deepseek-harness
           ref: 47f943859bef60e4160492346772ded9b24f765a
           path: .release/deepseek-harness
-          sparse-checkout: |
-            vendor
-            apps/cli/config/agent-presets
+          sparse-checkout: vendor
 
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
@@ -164,35 +162,106 @@ jobs:
             ".release/tessivum-core/node/compat-host" \
             ".release/host-modules" \
             ".release/deepseek-harness/vendor" \
-            ".release/deepseek-harness/apps/cli/config/agent-presets" \
             dist
+          archive="dist/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}.tar.gz"
           mkdir smoke
-          tar -xzf "dist/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}.tar.gz" -C smoke
-          "smoke/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}/bin/tessivum" --version
-          launcher="smoke/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}/bin/tessivum"
+          tar -xzf "$archive" -C smoke
+          archive_root="smoke/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}"
+          launcher="$archive_root/bin/tessivum"
+          "$launcher" --version
+          if tar -tzf "$archive" | grep -E '(^|/)(\.agent-presets|agent-presets)(/|$)|/(agent\.cordis\.yml|preset\.yml)$'; then
+            echo "archive contains legacy Agent Preset assets" >&2
+            exit 1
+          fi
+          if grep -q 'TESSIVUM_AGENT_PRESET_ROOT' "$launcher"; then
+            echo "launcher exports a legacy Agent Preset root" >&2
+            exit 1
+          fi
+          wait_for_web() {
+            local port=$1 log=$2
+            for _ in {1..100}; do
+              curl -fsS "http://127.0.0.1:$port/" >/dev/null && return
+              sleep 0.1
+            done
+            cat "$log"
+            return 1
+          }
+          native_mode_read() {
+            local port=$1 mode=$2
+            curl -fsS \
+              -H 'content-type: application/json' \
+              -d "{\"type\":\"client-request\",\"rpcId\":\"release-mode-$mode\",\"method\":\"agentPreset.read\",\"payload\":{\"agentPreset\":\"$mode\"}}" \
+              "http://127.0.0.1:$port/api/agentPreset.read"
+          }
+          ptc_path="$PWD/smoke-ptc-path"
+          mkdir "$ptc_path"
+          for command in bun sh dirname readlink; do
+            command_path=$(command -v "$command")
+            ln -s "$command_path" "$ptc_path/$command"
+          done
+          if PATH="$ptc_path" command -v node >/dev/null; then
+            echo "PTC smoke PATH unexpectedly exposes system Node" >&2
+            exit 1
+          fi
+          PATH="$ptc_path" bun --version
+          ptc_log="$PWD/smoke-ptc-web.log"
+          PATH="$ptc_path" TESSIVUM_WEB_ADDR=127.0.0.1:38079 \
+            "$launcher" --data-dir "$PWD/smoke-ptc-state" web >"$ptc_log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          wait_for_web 38079 "$ptc_log"
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"release-ptc-session","method":"session.create","payload":{"sessionId":"release-ptc-session"}}' \
+            http://127.0.0.1:38079/api/session.create \
+            | jq -e '.result.ok == true and .result.value.sessionId == "release-ptc-session"'
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"release-ptc-select","method":"agentPreset.select","payload":{"sessionId":"release-ptc-session","agentPreset":"ptc"}}' \
+            http://127.0.0.1:38079/api/agentPreset.select \
+            | jq -e '.result.ok == true and .result.value == {"agentPreset":"ptc"}'
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"release-native-roster","method":"agentPreset.list","payload":{}}' \
+            http://127.0.0.1:38079/api/agentPreset.list \
+            | jq -e '.result.ok == true and (.result.value.presets | map(.id)) == ["standard", "ptc", "minimal", "composition"]'
+          for mode in standard ptc minimal composition; do
+            mode_json="$(native_mode_read 38079 "$mode")"
+            jq -e --arg mode "$mode" '
+              .result.ok == true
+              and .result.value.agentPreset == $mode
+              and (.result.value.content | type == "string")
+              and (.result.value.content | test("(?m)^schema = 1$"))
+              and (.result.value.content | test("(?m)^id = \\\"" + $mode + "\\\"$"))
+            ' <<<"$mode_json"
+            jq -r '.result.value.content' <<<"$mode_json" >"$PWD/smoke-$mode.mode.toml"
+            mode_hash=$(shasum -a 256 "$PWD/smoke-$mode.mode.toml" | awk '{print $1}')
+            [[ $mode_hash =~ ^[0-9a-f]{64}$ ]]
+            printf '%s schema=1 sha256=%s\n' "$mode" "$mode_hash"
+          done
+          native_mode_read 38079 ptc | jq -e '.result.value.content | test("(?m)^presentation = \\\"programmatic\\\"$") and test("(?m)^bun = true$")'
+          native_mode_read 38079 minimal | jq -e '.result.value.content | test("(?m)^persistent_shell = true$")'
+          native_mode_read 38079 composition | jq -e '.result.value.content | test("(?m)^composition = true$")'
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"type":"client-request","rpcId":"release-user-mode-copy","method":"agentPreset.copy","payload":{"from":"standard","agentPreset":"release-native-mode","name":"Release Native Mode"}}' \
+            http://127.0.0.1:38079/api/agentPreset.copy \
+            | jq -e '.result.ok == true and .result.value == {"agentPreset":"release-native-mode"}'
+          user_mode="$PWD/smoke-ptc-state/modes/release-native-mode/mode.toml"
+          test -f "$user_mode"
+          grep -qx 'schema = 1' "$user_mode"
+          grep -qx 'id = "release-native-mode"' "$user_mode"
+          test ! -e "$PWD/smoke-ptc-state/.agent-presets"
+          kill "$server_pid"
+          wait "$server_pid"
+          trap - EXIT
           "$launcher" --data-dir "$PWD/smoke-state" plugin add "file:$PWD/fixtures/community/timer"
           log="$PWD/smoke-web.log"
           TESSIVUM_WEB_ADDR=127.0.0.1:38080 \
             "$launcher" --data-dir "$PWD/smoke-state" web >"$log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          ready=false
-          for _ in {1..100}; do
-            if curl -fsS http://127.0.0.1:38080/ >/dev/null; then
-              ready=true
-              break
-            fi
-            sleep 0.1
-          done
-          if [[ $ready != true ]]; then
-            cat "$log"
-            exit 1
-          fi
-          curl -fsS \
-            -H 'content-type: application/json' \
-            -d '{"type":"client-request","rpcId":"release-preset-smoke","method":"agentPreset.list","payload":{}}' \
-            http://127.0.0.1:38080/api/agentPreset.list \
-            | jq -e '.result.ok == true and (.result.value.presets | map(.id)) == ["standard", "code", "minimal", "cordis"]'
+          wait_for_web 38080 "$log"
           curl -fsS \
             -H 'content-type: application/json' \
             -d '{"type":"client-request","rpcId":"release-plugin-smoke","method":"pluginInventory/list","payload":{"args":[]}}' \
