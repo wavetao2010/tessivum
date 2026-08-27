@@ -1,6 +1,6 @@
 # Tessivum Phase 5 原生 Agent Mode 与插件组合开发计划
 
-> 状态：`v0.1.0-alpha.13`
+> 状态：`v0.1.0-alpha.13` 已发布
 > 发布日期：2026-08-27
 > 实现基线：`v0.1.0-alpha.13`
 > Core 基线：`tessivum-core v0.1.5` / `a1a6d2e5584253391b9962c482f2140263b703bf`
@@ -610,3 +610,7 @@ Phase 5 只有同时满足以下条件才完成：
 - Browser Wire、69 个 Chromium 场景、两个固定社区插件和发行归档回归全部通过；
 - 旧解析器、全局模式环境变量、动态 Cordis Node Runner 和过时测试已删除；
 - 文档不再把 Mode 文件兼容、npm 源码兼容和 WASM 多语言支持混为一谈。
+
+## 16. 发布记录
+
+GitHub [`v0.1.0-alpha.13`](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.13) prerelease 已由 `release.yml` run `33075758054` 发布四平台归档、对应 SHA-256 与 Formula。首次 run `33073449002` 因发行 smoke 使用非规范 TOML 字段 `persistent_shell` 而失败；修正为 schema-1 的 `persistent-shell` 并增加 Native Mode 规范化输出契约后，四个 target 的版本、归档清理、Bun-only PTC、Native Mode roster/哈希、自定义 Mode root 与 Legacy 社区插件 smoke 全部通过。
