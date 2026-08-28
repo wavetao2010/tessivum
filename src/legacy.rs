@@ -33,7 +33,7 @@ const MARKET_BRIDGE_MAX_FRAME_SIZE: usize = 12 * 1024 * 1024;
 
 use crate::{
     bridge::{
-        BridgeServices, DomainBridge, WasmEffectivePolicy, WasmPolicyRegistration,
+        BridgeLimits, BridgeServices, DomainBridge, WasmEffectivePolicy, WasmPolicyRegistration,
         WasmPolicyRegistry,
     },
     plugins::{
@@ -133,7 +133,13 @@ impl LegacyProfile {
         validate_config(&config)?;
         let request_timeout = config.request_timeout;
         let supervisor = Arc::new(NodeSupervisor::new(command, config)?);
-        let bridge = Arc::new(DomainBridge::new(services)?);
+        let bridge = Arc::new(DomainBridge::with_limits(
+            services,
+            BridgeLimits {
+                max_json_bytes: MARKET_BRIDGE_MAX_FRAME_SIZE,
+                ..BridgeLimits::default()
+            },
+        )?);
         Ok(Self {
             inner: Arc::new(ProfileInner {
                 supervisor,
@@ -155,6 +161,9 @@ impl LegacyProfile {
     /// This does not expose a runtime until the typed bridge handler is set, the
     /// generation is attached, and crash cleanup is registered.
     pub fn start(&self) -> Result<(), LegacyProfileError> {
+        if self.inner.bridge.cleanup_pending() {
+            return Err(LegacyProfileError::CleanupPending);
+        }
         {
             let mut lifecycle = lock(&self.inner.lifecycle);
             match &*lifecycle {
@@ -311,13 +320,13 @@ fn cleanup_profile_generation(inner: &Weak<ProfileInner>, generation: u64) {
     }
 }
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn spawn_heartbeat_monitor(inner: Weak<ProfileInner>, client: BridgeClient, generation: u64) {
     std::thread::spawn(move || loop {
         if generation_client(&inner, generation).is_none() {
             return;
         }
-        let before = client.last_heartbeat();
         if client.heartbeat().is_err() {
             client.close();
             cleanup_profile_generation(&inner, generation);
@@ -327,7 +336,7 @@ fn spawn_heartbeat_monitor(inner: Weak<ProfileInner>, client: BridgeClient, gene
         if generation_client(&inner, generation).is_none() {
             return;
         }
-        if client.last_heartbeat() <= before {
+        if client.last_heartbeat().elapsed() >= HEARTBEAT_TIMEOUT {
             client.close();
             cleanup_profile_generation(&inner, generation);
             return;

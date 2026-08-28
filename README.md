@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.14` is a prerelease, not a production-stable API or data-format promise. It stabilizes Legacy Node plugin loading and route cleanup on top of the session-owned Rust Native Modes introduced in Alpha.13.
+`v0.1.0-alpha.15` is a prerelease, not a production-stable API or data-format promise. It makes `dsh.profile.bundles` the authoritative ordered Host Bundle list, reports real Loader activation to dshmarket, and ships collision-safe `tsv` launcher aliases.
 
 Current implementation foundation:
 
@@ -19,7 +19,7 @@ Current implementation foundation:
 - HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
 - Native/WASM/Browser routing plus a real Legacy Node compat-host over the bounded `cordis.node/v1` bridge and DomainBridge services;
 - Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the frozen upstream `AppWebEntry` source shell;
-- a pnpm-owned plugin profile, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, native-backed Legacy settings, and restart-required activation for the verified community-plugin samples.
+- a pnpm-owned plugin profile with ordered Host Bundle authority, exact Loader/Fiber inventory, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, and verified `dshmarket@1.29.2` plus `dsh-better-sidebar@0.16.1` lifecycle behavior.
 
 The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline remains complete:
 
@@ -29,6 +29,8 @@ The frozen DeepSeek Harness `0.1.0-rc.5` compatibility baseline remains complete
 - all 69 source-Web Chromium scenarios pass as the behavioral schema/event parity gate.
 
 The authoritative compatibility contract is [`docs/COMPATIBILITY_BASELINE.md`](docs/COMPATIBILITY_BASELINE.md). Alpha.10–12 architecture and distribution gates are recorded in [`docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md); Alpha.13 Native Mode release gates are recorded in [`docs/PHASE5_NATIVE_AGENT_MODES_PLAN.md`](docs/PHASE5_NATIVE_AGENT_MODES_PLAN.md).
+
+Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distribution-alias gates are recorded in [`docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md`](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md).
 
 ## Architecture
 
@@ -118,29 +120,30 @@ Prebuilt archives do not require Rust, Git, or a system Node.js. Core Headless/W
 brew tap wavetao2010/tap
 brew install tessivum
 tessivum --version
+tsv --version
 ```
 
 ### No-sudo installer
 
-Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates `~/.local/bin/tessivum`:
+Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates the `tessivum` and `tsv` launchers:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.14/install.sh
-sh install.sh 0.1.0-alpha.14
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.15/install.sh
+sh install.sh 0.1.0-alpha.15
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.14 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.14), verify the checksum, then run the packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.15 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.15), verify the checksum, then run either packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.14-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.14-$target.tar.gz"
-"./tessivum-0.1.0-alpha.14-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.14-$target/bin/tessivum" web
+sha256sum -c "tessivum-0.1.0-alpha.15-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.15-$target.tar.gz"
+"./tessivum-0.1.0-alpha.15-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.15-$target/bin/tsv" --version
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -193,6 +196,8 @@ The Responses adapter sends `store: false`, streams text/reasoning/function call
 
 All package mutations target `${TESSIVUM_HOME:-$HOME/.tessivum}/plugins` and use pnpm. Installs ignore lifecycle scripts unless the profile contains a non-empty, explicit `pnpm.onlyBuiltDependencies` allowlist.
 
+`package.json.dependencies` is the installed-package inventory. `dsh.profile.bundles` is the only Host Bundle enablement and ordering authority. Alpha.15 atomically creates the field once for older profiles; an explicit empty array remains empty. Generic client-only packages stay outside the Host Bundle stack.
+
 ```bash
 tessivum plugin add @scope/package
 tessivum plugin remove @scope/package
@@ -202,7 +207,7 @@ tessivum plugin add dshmarket@1.29.2
 tessivum plugin add dsh-better-sidebar@0.16.1
 tessivum web
 
-Plugin changes are restart-required: stop and restart `tessivum web` after add, update, remove, restore, or an allow-builds change. Tessivum does not expose a global `dsh` shim and does not hot-mount a second Node-side loader state.
+`tessivum` and `tsv` are the same launcher and resolve the same data root. After a CLI mutation—or whenever dshmarket reports “重启后生效”—restart the Web process. dshmarket reads the current Profile plus settled Loader/Fiber inventory; Tessivum does not expose a global `dsh` shim or maintain a second Node-side Loader state.
 
 Legacy plugins and their lifecycle scripts are trusted code running with the user's permissions, not a sandbox. `web.route/v1` registrations remain Rust-owned, same-origin, prefix-restricted, size-bounded, deadline-bounded, cancellable, and generation-scoped. Packaged deployments locate the compatibility host, Cordis vendor, Host modules, and Agent Presets relative to the launcher; source checkouts use their pinned development paths.
 
@@ -234,7 +239,7 @@ The data-root precedence is `--data-dir`, then absolute `TESSIVUM_HOME`, then `$
 test ! -e "$HOME/.tessivum" && mv ./.tessivum "$HOME/.tessivum"
 ```
 
-Alpha.11 makes pnpm the only plugin-profile mutation backend. The first successful mutation removes a legacy `package-lock.json`; `package.json`, `pnpm-lock.yaml`, and `node_modules` are then owned as one profile. Back up `$TESSIVUM_HOME/plugins` (or `$HOME/.tessivum/plugins`) before migration or restore.
+Alpha.11 made pnpm the only plugin-profile mutation backend. Alpha.15 adds the ordered `dsh.profile.bundles` authority without changing dependencies, sessions, settings, or credentials; explicit empty bundle arrays are preserved. Back up `$TESSIVUM_HOME/plugins` (or `$HOME/.tessivum/plugins`) before migration or restore.
 
 Homebrew upgrades switch the program without deleting user data. The no-sudo installer retains versioned program directories; rerunning `sh install.sh <older-version>` atomically repoints the launcher. Binary rollback does not rewrite an Alpha data or plugin profile, so restore the matching backup if the newer release changed it.
 
@@ -250,7 +255,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - Host compatibility npm inputs are exact versions with registry URLs, SHA-512 integrities, file hashes, and licenses in `packaging/host-modules.json`; archives include `THIRD_PARTY_LICENSES.txt` and `release-metadata.json`.
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
-- Checksums detect corruption but are not signatures. Alpha.14 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
+- Checksums detect corruption but are not signatures. Alpha.15 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
 
 ## Verification
 

@@ -209,6 +209,63 @@ impl SessionPersistence for SqliteSessionPersistence {
             .map_err(|error| sqlite_error("commit create", error))
     }
 
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        check_cancellation(&cancellation)?;
+        validate_header(header)?;
+        for (expected, event) in events.iter().enumerate() {
+            event.validate()?;
+            if event.seq != expected as u64 {
+                return Err(SessionError::SequenceGap {
+                    expected: expected as u64,
+                    actual: event.seq,
+                });
+            }
+        }
+        let next_seq = events.len() as u64;
+        let mut connection = lock(&self.connection);
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin seeded create", error))?;
+        let existing = transaction
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![header.id.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| sqlite_error("check existing seeded session", error))?;
+        if existing.is_some() {
+            return Err(SessionError::AlreadyExists(header.id.clone()));
+        }
+        check_cancellation(&cancellation)?;
+        insert_header(&transaction, header)?;
+        transaction
+            .execute(
+                "INSERT INTO persistence_state
+                 (session_id, version, revision, incarnation, next_seq, flush_count)
+                 VALUES (?1, ?2, ?3, 1, ?3, 0)",
+                params![
+                    header.id.as_str(),
+                    STORAGE_VERSION,
+                    to_i64(next_seq, "seed length")?
+                ],
+            )
+            .map_err(|error| sqlite_error("create seeded persistence state", error))?;
+        for event in events {
+            check_cancellation(&cancellation)?;
+            insert_event(&transaction, &header.id, event)?;
+        }
+        check_cancellation(&cancellation)?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit seeded create", error))
+    }
+
     async fn append(
         &self,
         session_id: &SessionId,

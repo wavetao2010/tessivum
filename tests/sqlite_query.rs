@@ -125,6 +125,58 @@ async fn sqlite_commits_exact_dtos_and_rejects_partial_or_concurrent_duplicates(
 }
 
 #[tokio::test]
+async fn sqlite_seed_creation_rolls_back_the_whole_session_on_event_failure() {
+    let root = root();
+    let path = root.join("seeded.sqlite");
+    let persistence = SqliteSessionPersistence::open(&path).unwrap();
+    let mut seeded_header = header("seeded");
+    seeded_header.seed_length = Some(2);
+    let seed = [0, 1].map(|seq| SessionEvent {
+        event_type: "request/header".into(),
+        seq,
+        time: seq,
+        data: json!({}),
+        ignorable: None,
+        source_event_seqs: None,
+        surface_op: None,
+    });
+    let trigger = Connection::open(&path).unwrap();
+    trigger
+        .execute_batch(
+            "CREATE TRIGGER fail_second_seed_event
+             BEFORE INSERT ON events WHEN NEW.seq = 1
+             BEGIN SELECT RAISE(ABORT, 'seed failure'); END;",
+        )
+        .unwrap();
+
+    assert!(persistence
+        .create_seeded(&seeded_header, &seed, cancellation())
+        .await
+        .is_err());
+    assert!(persistence
+        .load(&seeded_header.id, cancellation())
+        .await
+        .unwrap()
+        .is_none());
+
+    trigger
+        .execute_batch("DROP TRIGGER fail_second_seed_event;")
+        .unwrap();
+    persistence
+        .create_seeded(&seeded_header, &seed, cancellation())
+        .await
+        .unwrap();
+    assert_eq!(
+        persistence
+            .read_from(&seeded_header.id, 0, cancellation())
+            .await
+            .unwrap(),
+        seed
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn sqlite_migrates_legacy_mode_storage_and_writes_only_native_columns() {
     let root = root();
     fs::create_dir_all(&root).unwrap();

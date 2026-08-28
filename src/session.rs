@@ -178,6 +178,13 @@ pub trait SessionPersistence: Send + Sync {
         event: &SessionEvent,
         cancellation: CancellationToken,
     ) -> Result<(), SessionError>;
+    /// Creates a session and atomically commits its immutable seed prefix.
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError>;
 
     async fn load(
         &self,
@@ -269,6 +276,39 @@ impl SessionPersistence for MemorySessionPersistence {
             MemorySession {
                 header: header.clone(),
                 events: Vec::new(),
+                flush_count: 0,
+            },
+        );
+        Ok(())
+    }
+
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        check_cancellation(&cancellation)?;
+        validate_header(header)?;
+        for (expected, event) in events.iter().enumerate() {
+            event.validate()?;
+            if event.seq != expected as u64 {
+                return Err(SessionError::SequenceGap {
+                    expected: expected as u64,
+                    actual: event.seq,
+                });
+            }
+        }
+        let mut sessions = lock(&self.sessions);
+        if sessions.contains_key(&header.id) {
+            return Err(SessionError::AlreadyExists(header.id.clone()));
+        }
+        check_cancellation(&cancellation)?;
+        sessions.insert(
+            header.id.clone(),
+            MemorySession {
+                header: header.clone(),
+                events: events.to_vec(),
                 flush_count: 0,
             },
         );
@@ -673,13 +713,8 @@ impl SessionStore {
         )?;
         self.ensure_not_live(&header.id)?;
         self.persistence
-            .create(&header, cancellation.clone())
+            .create_seeded(&header, &seed_events, cancellation)
             .await?;
-        for event in &seed_events {
-            self.persistence
-                .append(&header.id, event, cancellation.clone())
-                .await?;
-        }
         let session = Arc::new(session);
         self.insert_live(header.id, Arc::clone(&session))?;
         Ok(session)
@@ -729,6 +764,31 @@ impl SessionStore {
 
         self.insert_live(session_id.clone(), Arc::clone(&session))?;
         Ok(session)
+    }
+
+    /// Reads a live or durable snapshot without making a cold session resident.
+    pub async fn snapshot(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<(SessionHeader, Vec<SessionEvent>)>, SessionError> {
+        check_cancellation(&cancellation)?;
+        if let Some(session) = self.get(session_id) {
+            return Ok(Some((session.header(), session.events())));
+        }
+        let Some(header) = self
+            .persistence
+            .load(session_id, cancellation.clone())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let events = self
+            .persistence
+            .read_from(session_id, 0, cancellation)
+            .await?;
+        let session = Session::from_committed(header, events, Arc::clone(&self.persistence))?;
+        Ok(Some((session.header(), session.events())))
     }
 
     pub fn get(&self, session_id: &SessionId) -> Option<Arc<Session>> {

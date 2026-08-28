@@ -115,6 +115,33 @@ async fn appends_reopen_in_order_and_confines_traversal_ids() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+#[tokio::test]
+async fn seeded_create_commits_the_full_prefix_in_one_log() {
+    let root = root();
+    for (index, persistence) in [
+        JsonlSessionPersistence::new(&root),
+        JsonlSessionPersistence::zstd(&root),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut head = header(&format!("seeded-{index}"));
+        let events = vec![event(0), event(1), event(2)];
+        head.seed_length = Some(events.len() as u64);
+        persistence
+            .create_seeded(&head, &events, cancellation())
+            .await
+            .unwrap();
+        assert_eq!(
+            persistence
+                .read_from(&head.id, 0, cancellation())
+                .await
+                .unwrap(),
+            events
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
 
 #[tokio::test]
 async fn concurrent_append_and_duplicate_create_are_serialized() {

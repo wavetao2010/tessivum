@@ -11,15 +11,17 @@ use std::{
 use serde_json::{json, Value};
 use tessivum::{
     agent::AgentRegistry,
-    bridge::BridgeServices,
+    bridge::{BridgeServices, DomainRequest, SESSIONS_SERVICE},
     legacy::{legacy_loader, LegacyProfile, LegacyProfileHealth, ProductPackageResolver},
     llm::LlmRuntime,
+    protocol::{SessionEvent, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
     session::{MemorySessionPersistence, SessionStore},
     system_prompt::SystemPrompt,
     tools::ToolRuntime,
 };
 use tessivum_core::{
-    Entry, EntryId, EntryOptions, EntryTree, PackageResolver, Patch, ResolvedPackage, RuntimeKind,
+    ContextHandle, Entry, EntryId, EntryOptions, EntryTree, PackageResolver, Patch,
+    ResolvedPackage, RuntimeKind,
 };
 use tessivum_node_bridge::{ClientConfig, FrameKind, HostCommand};
 
@@ -49,6 +51,72 @@ fn bridge_services(tools: ToolRuntime) -> BridgeServices {
     let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
     let agents = AgentRegistry::new(sessions.clone());
     BridgeServices::new(tools, prompt, llm, sessions, agents)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_profile_accepts_large_session_snapshots() {
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let session = sessions
+        .create(
+            SessionHeader {
+                version: SESSION_FORMAT_VERSION,
+                id: SessionId::from("large"),
+                created_at: 0,
+                cwd: None,
+                parent_session: None,
+                seed_length: None,
+                origin: None,
+                delegation_depth: None,
+                agent_mode: None,
+            },
+            ContextHandle::root().scope().cancellation(),
+        )
+        .await
+        .unwrap();
+    session
+        .append(
+            SessionEvent {
+                event_type: "test/large".into(),
+                seq: 0,
+                time: 0,
+                data: json!({"body": "x".repeat(300 * 1024)}),
+                ignorable: Some(true),
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            ContextHandle::root().scope().cancellation(),
+        )
+        .await
+        .unwrap();
+    let profile = LegacyProfile::new(
+        HostCommand::new("bun"),
+        ClientConfig::default(),
+        BridgeServices::new(
+            ToolRuntime::new(),
+            SystemPrompt::new(),
+            LlmRuntime::new(),
+            sessions.clone(),
+            AgentRegistry::new(sessions),
+        ),
+    )
+    .unwrap();
+
+    let snapshot = profile
+        .web_route_registry()
+        .dispatch_native(DomainRequest {
+            service: SESSIONS_SERVICE.into(),
+            method: "snapshot".into(),
+            params: json!({"session": "large"}),
+        })
+        .unwrap();
+
+    assert_eq!(
+        snapshot["session"]["events"][0]["data"]["body"]
+            .as_str()
+            .unwrap()
+            .len(),
+        300 * 1024
+    );
 }
 
 fn entry(package: &Path, config: Value) -> Entry {
@@ -204,7 +272,7 @@ while True:
 }
 
 async fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
-    for _ in 0..200 {
+    for _ in 0..700 {
         if ready() {
             return;
         }

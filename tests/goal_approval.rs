@@ -118,6 +118,15 @@ impl SessionPersistence for AskedFailingPersistence {
         self.inner.create(header, cancellation).await
     }
 
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.create_seeded(header, events, cancellation).await
+    }
+
     async fn append(
         &self,
         session_id: &SessionId,

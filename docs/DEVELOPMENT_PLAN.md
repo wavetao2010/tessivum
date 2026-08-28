@@ -1,8 +1,8 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移与 Phase 5 原生 Agent Mode clean cutover 已完成
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover 与 Phase 6 DSH Profile 兼容实现已完成；Alpha.15 公开发行验证进行中
 > 计划校准日期：2026-08-28
-> Tessivum 实现基线：`v0.1.0-alpha.14`
+> Tessivum 实现基线：`v0.1.0-alpha.15`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容与 Web 模型配置面
 
@@ -15,6 +15,7 @@
 - [Phase 3 产品能力开发计划](PHASE3_PRODUCT_PLAN.md)：已完成的 Alpha.2 WASM 权限、Alpha.3 Browser 控制面与 Alpha.4 多工作区实施记录。
 - [Phase 4 品牌、分发与社区市场开发计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)：已完成 Alpha.10 独立品牌/可安装分发与 Alpha.11 `dshmarket@1.29.2` 兼容实施。
 - [Phase 5 原生 Agent Mode 与插件组合开发计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)：已完成 Native Mode、`mode.toml`、Session 级能力隔离和 `agent.cordis.yml` clean cutover。
+- [Phase 6 DSH Profile 兼容与 `tsv` 命令开发计划](PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)：已完成 `dsh.profile.bundles` 权威语义、市场状态闭环、统一插件 mutation 与发行命令别名。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。

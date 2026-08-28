@@ -1875,6 +1875,15 @@ impl SessionPersistence for GatedStartPersistence {
         self.inner.create(header, cancellation).await
     }
 
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.create_seeded(header, events, cancellation).await
+    }
+
     async fn append(
         &self,
         session_id: &SessionId,
@@ -2048,6 +2057,15 @@ impl SessionPersistence for FailOneMember {
         cancellation: CancellationToken,
     ) -> Result<(), SessionError> {
         self.inner.create(header, cancellation).await
+    }
+
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.create_seeded(header, events, cancellation).await
     }
 
     async fn append(

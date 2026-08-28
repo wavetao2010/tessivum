@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.0-alpha.15 - 2026-08-28
+
+### Added
+
+- Ordered `dsh.profile.bundles` Host Bundle authority with one-time atomic migration for older profiles and preservation of explicit empty bundle lists.
+- Collision-safe `tsv` aliases in release archives, Homebrew, and the no-sudo installer; `tessivum` remains the canonical command and no `dsh` shim is installed.
+- Native-backed Legacy `agents` compatibility for Side Chat create, resume, messaging, cancellation, and generation-owned disposal.
+
+### Changed
+
+- CLI and dshmarket mutations share one Rust profile reconciliation boundary; installed dependencies, enabled Host Bundles, generic client-only packages, and market-disabled packages remain distinct.
+- The Legacy Host loads only declared bundles in manifest order and exposes settled Loader entry/Fiber inventory, so dshmarket reports `live`, restart-required, disabled, and absent states from runtime facts.
+- Tessivum pins the published `tessivum-core v0.1.6` seed-preserving compatibility release at `3571b75dd79bdcf658d8ad6b86da63005431b21e`.
+
+### Fixed
+
+- Side Chat persists the plugin's exact closed seed, cold-loads durable child snapshots without making them resident, and completes generation-owned child disposal before a replacement generation starts.
+- Every `SessionPersistence` implementation must atomically commit seeded headers and events; JSONL, SQLite, and memory backends satisfy the contract without partial sessions.
+- Long dshmarket pnpm operations use the bounded market bridge limit without weakening other bridge payload limits.
+- Legacy heartbeat, cancellation, crash, restart, and shutdown cleanup leave no stale generation registrations, routes, Loader entries, or Fibers.
+
 ## 0.1.0-alpha.14 - 2026-08-28
 
 ### Fixed

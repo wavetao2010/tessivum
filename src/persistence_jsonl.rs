@@ -216,6 +216,43 @@ impl SessionPersistence for JsonlSessionPersistence {
         };
         self.write_new(&self.new_path(&header.id), &record).await
     }
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        check_cancellation(&cancellation)?;
+        validate_header(header)?;
+        for (expected, event) in events.iter().enumerate() {
+            event.validate()?;
+            if event.seq != expected as u64 {
+                return Err(SessionError::SequenceGap {
+                    expected: expected as u64,
+                    actual: event.seq,
+                });
+            }
+        }
+        let gate = self.gate(&header.id);
+        let _guard = gate.lock().await;
+        check_cancellation(&cancellation)?;
+        if self.existing_path(&header.id).await?.is_some() {
+            return Err(SessionError::AlreadyExists(header.id.clone()));
+        }
+        let mut records = match self.format {
+            JsonlStorageFormat::Raw => header_record(header).into_bytes(),
+            JsonlStorageFormat::Zstd => encode_frame(&header_record(header).into_bytes())?,
+        };
+        for event in events {
+            check_cancellation(&cancellation)?;
+            let record = event_record(event).into_bytes();
+            match self.format {
+                JsonlStorageFormat::Raw => records.extend_from_slice(&record),
+                JsonlStorageFormat::Zstd => records.extend_from_slice(&encode_frame(&record)?),
+            }
+        }
+        self.write_new(&self.new_path(&header.id), &records).await
+    }
 
     async fn append(
         &self,

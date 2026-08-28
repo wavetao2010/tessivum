@@ -796,6 +796,7 @@ mod tests {
             let root = modules.join(name);
             fs::create_dir_all(&root).unwrap();
             fs::write(root.join("package.json"), manifest).unwrap();
+            fs::write(root.join("bundle.yml"), "[]\n").unwrap();
         }
         fs::write(
             profile.join("package.json"),
@@ -843,6 +844,7 @@ mod tests {
             let root = modules.join(name);
             fs::create_dir_all(&root).unwrap();
             fs::write(root.join("package.json"), manifest).unwrap();
+            fs::write(root.join("bundle.yml"), "[]\n").unwrap();
         }
         fs::write(
             profile.join("package.json"),

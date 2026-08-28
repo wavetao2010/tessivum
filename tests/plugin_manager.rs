@@ -7,9 +7,7 @@ use std::{
 use serde_json::json;
 use tessivum::{
     cli::{parse_cli, resolve_data_root, CliCommand},
-    plugin_manager::{
-        enabled_client_plugin_names, load_plugin_entries, plugin_profile_root,
-    },
+    plugin_manager::{enabled_client_plugin_names, load_plugin_entries, plugin_profile_root},
 };
 use tessivum_core::RuntimeKind;
 
@@ -129,7 +127,10 @@ fn absent_bundles_migrate_once_without_losing_unrelated_manifest_fields() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(profile.join("package.json")).unwrap()).unwrap();
     assert_eq!(manifest["preserved"], json!({"answer": 42}));
-    assert_eq!(manifest.pointer("/dsh/profile/bundles"), Some(&json!(["a-bundle", "z-bundle"])));
+    assert_eq!(
+        manifest.pointer("/dsh/profile/bundles"),
+        Some(&json!(["a-bundle", "z-bundle"]))
+    );
     assert_eq!(
         enabled_client_plugin_names(&profile).unwrap(),
         BTreeSet::from(["client-only".to_owned()])
@@ -266,7 +267,13 @@ fn bundle_order_controls_entries_and_duplicate_guard_avoids_a_second_active_moun
 
     let tree = load_plugin_entries(&profile).unwrap().unwrap();
     let entries = tree.entries();
-    assert_eq!(entries.iter().map(|entry| entry.options.id.as_str()).collect::<Vec<_>>(), ["one", "two"]);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.options.id.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two"]
+    );
     assert!(!entries[0].options.disabled);
     assert!(entries[1].options.disabled);
     assert!(entries
@@ -300,7 +307,10 @@ fn write_bundle(profile: &Path, name: &str, client: bool, patch: &str) {
     }
     write_package(profile, name, json!({"dsh": dsh}));
     fs::write(
-        profile.join("node_modules").join(name).join("cordis.patch.yml"),
+        profile
+            .join("node_modules")
+            .join(name)
+            .join("cordis.patch.yml"),
         patch,
     )
     .unwrap();

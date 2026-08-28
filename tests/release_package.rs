@@ -9,7 +9,7 @@ use std::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const TAG: &str = "v0.1.0-alpha.14";
+const TAG: &str = "v0.1.0-alpha.15";
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const DSH_SETTINGS_ENTRIES: &[&str] = &["lib/index.js"];
 const SCHEMASTRY_ENTRIES: &[&str] = &["lib/index.mjs", "lib/index.cjs"];
@@ -60,7 +60,7 @@ impl Fixture {
         let binary = root.join("bin/tessivum");
         write(
             &binary,
-            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.14\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
+            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.15\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
         );
         make_executable(&binary);
 
@@ -114,12 +114,12 @@ impl Fixture {
 
     fn archive(&self) -> PathBuf {
         self.output
-            .join("tessivum-0.1.0-alpha.14-x86_64-unknown-linux-gnu.tar.gz")
+            .join("tessivum-0.1.0-alpha.15-x86_64-unknown-linux-gnu.tar.gz")
     }
 
     fn stage(&self) -> PathBuf {
         self.output
-            .join("tessivum-0.1.0-alpha.14-x86_64-unknown-linux-gnu")
+            .join("tessivum-0.1.0-alpha.15-x86_64-unknown-linux-gnu")
     }
 }
 
@@ -284,9 +284,15 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
 
     let launcher = fixture.stage().join("bin/tessivum");
     let alias = fixture.stage().join("bin/tsv");
-    assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(&alias)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(fs::read_link(&alias).unwrap(), PathBuf::from("tessivum"));
-    assert_eq!(alias.canonicalize().unwrap(), launcher.canonicalize().unwrap());
+    assert_eq!(
+        alias.canonicalize().unwrap(),
+        launcher.canonicalize().unwrap()
+    );
     assert!(fs::symlink_metadata(fixture.stage().join("bin/dsh")).is_err());
     let mut regular_launchers = fs::read_dir(fixture.stage().join("bin"))
         .unwrap()
@@ -305,7 +311,10 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         .collect::<Vec<_>>();
     executable_payloads.sort();
     assert_eq!(executable_payloads, vec![payload.clone()]);
-    assert_eq!(fs::read(&payload).unwrap(), fs::read(&fixture.binary).unwrap());
+    assert_eq!(
+        fs::read(&payload).unwrap(),
+        fs::read(&fixture.binary).unwrap()
+    );
     let launcher_text = fs::read_to_string(&launcher).unwrap();
     assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
     assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
@@ -314,17 +323,29 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
     for argument in ["--version", "--help"] {
         let launcher_output = Command::new(&launcher).arg(argument).output().unwrap();
         let alias_output = Command::new(&alias).arg(argument).output().unwrap();
-        assert!(launcher_output.status.success(), "launcher failed for {argument}");
+        assert!(
+            launcher_output.status.success(),
+            "launcher failed for {argument}"
+        );
         assert!(alias_output.status.success(), "alias failed for {argument}");
-        assert_eq!(launcher_output.stdout, alias_output.stdout, "stdout differs for {argument}");
-        assert_eq!(launcher_output.stderr, alias_output.stderr, "stderr differs for {argument}");
+        assert_eq!(
+            launcher_output.stdout, alias_output.stdout,
+            "stdout differs for {argument}"
+        );
+        assert_eq!(
+            launcher_output.stderr, alias_output.stderr,
+            "stderr differs for {argument}"
+        );
     }
     let readme = fs::read_to_string(fixture.stage().join("README.txt")).unwrap();
     assert!(readme.contains("Native modes are built into Tessivum"));
     assert!(readme.contains("under modes/"));
     let host_modules = fixture.stage().join("share/tessivum/host-modules");
     for command in [&launcher, &alias] {
-        let launcher_env = Command::new(command).arg("--host-module-root").output().unwrap();
+        let launcher_env = Command::new(command)
+            .arg("--host-module-root")
+            .output()
+            .unwrap();
         assert!(launcher_env.status.success());
         assert_eq!(
             String::from_utf8(launcher_env.stdout).unwrap(),

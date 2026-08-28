@@ -1447,6 +1447,7 @@ struct SubagentParentState {
     cleanup_started: AtomicBool,
     cleanup_done: AtomicBool,
     cleanup_results: Mutex<Vec<SubagentRunResult>>,
+    runtime: tokio::runtime::Handle,
 }
 
 struct SubagentAdmissionPermit {
@@ -1516,7 +1517,8 @@ impl SubagentParent {
         request: SubagentStartRequest,
         cancellation: CancellationToken,
     ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
-        self.start_inner(request, cancellation, false).await
+        self.start_inner(request, cancellation, None, false, false)
+            .await
     }
 
     /// Starts a fresh one-shot child seeded from this parent's completed prefix.
@@ -1525,14 +1527,36 @@ impl SubagentParent {
         request: SubagentStartRequest,
         cancellation: CancellationToken,
     ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
-        self.start_inner(request, cancellation, true).await
+        self.start_inner(request, cancellation, None, true, false)
+            .await
+    }
+    /// Starts a continuable child seeded from this parent's completed prefix.
+    pub async fn start_seeded_continuable(
+        &self,
+        request: SubagentStartRequest,
+        cancellation: CancellationToken,
+    ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
+        self.start_inner(request, cancellation, None, true, true)
+            .await
+    }
+
+    pub(crate) async fn start_seeded_continuable_with_seed(
+        &self,
+        request: SubagentStartRequest,
+        seed_events: Vec<SessionEvent>,
+        cancellation: CancellationToken,
+    ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
+        self.start_inner(request, cancellation, Some(seed_events), false, true)
+            .await
     }
 
     async fn start_inner(
         &self,
         request: SubagentStartRequest,
         cancellation: CancellationToken,
+        seed_events: Option<Vec<SessionEvent>>,
         seed_parent_prefix: bool,
+        allow_continuable_seed: bool,
     ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
         let mut permit = match self.state.reserve_admission() {
             Some(permit) => permit,
@@ -1547,7 +1571,9 @@ impl SubagentParent {
                 &self.state.parent,
                 request,
                 cancellation,
+                seed_events,
                 seed_parent_prefix,
+                allow_continuable_seed,
             )
             .await?;
         let admitted = permit.admit_or_queue(activation.clone());
@@ -1593,6 +1619,11 @@ impl SubagentParent {
     pub async fn dispose(&self) -> Vec<SubagentRunResult> {
         self.state.close_and_dispose().await
     }
+
+    pub(crate) fn begin_dispose(&self) {
+        self.state.close_watcher();
+        self.state.begin_cleanup();
+    }
 }
 
 impl SubagentParentState {
@@ -1631,7 +1662,7 @@ impl SubagentParentState {
             return;
         }
         let state = Arc::clone(self);
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let results = cleanup_parent_children(Arc::clone(&state)).await;
             *state.cleanup_results.lock() = results;
             state.cleanup_done.store(true, Ordering::Release);
@@ -2011,7 +2042,10 @@ impl SubagentService {
     /// Derives a parent capability from the live agent generation that owns it.
     pub fn attach(&self, parent: Arc<AgentHandle>) -> Result<SubagentParent, SubagentError> {
         self.inner.require_live_parent(&parent)?;
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| SubagentError::ParentRuntimeRequired)?;
         let state = Arc::new(SubagentParentState {
+            runtime: runtime.clone(),
             service: Arc::downgrade(&self.inner),
             parent: Arc::clone(&parent),
             admissions: Mutex::new(ParentAdmissions {
@@ -2028,8 +2062,6 @@ impl SubagentService {
             cleanup_done: AtomicBool::new(false),
             cleanup_results: Mutex::new(Vec::new()),
         });
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| SubagentError::ParentRuntimeRequired)?;
         let cleanup = Arc::clone(&state);
         let cancellation = parent.cancellation();
         runtime.spawn(async move {
@@ -2740,7 +2772,9 @@ impl SubagentInner {
         parent_agent: &AgentHandle,
         request: SubagentStartRequest,
         cancellation: CancellationToken,
+        provided_seed: Option<Vec<SessionEvent>>,
         seed_parent_prefix: bool,
+        allow_continuable_seed: bool,
     ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
         let parent = self.require_live_parent(parent_agent)?;
         if request.cwd.is_some() {
@@ -2755,7 +2789,10 @@ impl SubagentInner {
         if cancellation.is_cancelled() {
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
-        if seed_parent_prefix && (request.resume || request.mode != SubagentMode::OneShot) {
+        if (provided_seed.is_some() || seed_parent_prefix)
+            && (request.resume
+                || (request.mode != SubagentMode::OneShot && !allow_continuable_seed))
+        {
             return Err(SubagentError::ModeMismatch);
         }
         let provider = self.select_provider(&descriptor)?;
@@ -2769,7 +2806,9 @@ impl SubagentInner {
         if cancellation.is_cancelled() {
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
-        let seed_events = seed_parent_prefix.then(|| completed_parent_seed(&parent.events()));
+        let seed_events = provided_seed
+            .or_else(|| seed_parent_prefix.then(|| completed_parent_seed(&parent.events())));
+        let seeded = seed_events.is_some();
         let parent_header = parent.header();
         let header = child_header(
             &descriptor,
@@ -2797,7 +2836,7 @@ impl SubagentInner {
                 ProviderStart {
                     descriptor: descriptor.clone(),
                     header,
-                    resume: request.resume || seed_parent_prefix,
+                    resume: request.resume || seeded,
                 },
                 cancellation.clone(),
             )

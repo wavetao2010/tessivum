@@ -1411,6 +1411,7 @@ fn is_known_event_type(event_type: &str) -> bool {
             | "job/done"
             | "subagent/contained-start"
             | "subagent/contained-end"
+            | "subagent/descriptor"
             | "tool-workflow/run-start"
             | "tool-workflow/agent-start"
             | "tool-workflow/agent-end"

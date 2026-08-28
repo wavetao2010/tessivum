@@ -2941,6 +2941,7 @@ impl HostRuntime {
                         sessions.clone(),
                         registry.clone(),
                     )
+                    .with_subagents(subagents.clone())
                     .with_settings(Arc::clone(&settings))
                     .with_credentials(Arc::clone(&credentials))
                     .with_pnpm_boundary(Arc::new(

@@ -7,7 +7,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     path::{Component, Path},
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Weak,
+    },
     time::{Duration, Instant},
 };
 
@@ -28,13 +31,17 @@ use tokio::{
 };
 
 use crate::{
-    agent::{AgentAuthority, AgentRegistry, InboxTarget},
+    agent::{AgentAuthority, AgentOptions, AgentRegistry, InboxTarget},
+    agent_mode::AgentModeId,
     credentials::{CredentialRef, Credentials},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream},
     plugins::ServiceMethodPermission,
     protocol::{GenerateRequest, Message, SessionEvent, SessionId, StreamChunk, ToolCallId},
     session::SessionStore,
     settings::Settings,
+    subagent::{
+        SubagentActivation, SubagentMode, SubagentParent, SubagentService, SubagentStartRequest,
+    },
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     tools::{
         ToolDefinition, ToolHandler, ToolOutput, ToolRegistration, ToolRunContext, ToolRuntime,
@@ -568,6 +575,7 @@ pub struct BridgeServices {
     llm: LlmRuntime,
     sessions: SessionStore,
     agents: AgentRegistry,
+    subagents: Option<SubagentService>,
     owner: Option<AgentAuthority>,
     logger: Arc<dyn DomainLogger>,
     settings: Option<Arc<Settings>>,
@@ -592,6 +600,7 @@ impl BridgeServices {
             llm,
             sessions,
             agents,
+            subagents: None,
             owner: None,
             logger: Arc::new(NoopLogger),
             settings: None,
@@ -605,6 +614,10 @@ impl BridgeServices {
     /// Binds every session-bearing method to one exact live agent generation.
     pub fn with_owner(mut self, owner: AgentAuthority) -> Self {
         self.owner = Some(owner);
+        self
+    }
+    pub fn with_subagents(mut self, subagents: SubagentService) -> Self {
+        self.subagents = Some(subagents);
         self
     }
 
@@ -665,6 +678,7 @@ struct BridgeInner {
     web_routes: Mutex<WebRouteRegistry>,
     web_upgrades: Mutex<BTreeMap<String, WebUpgradeRoute>>,
     retired_generations: Mutex<BTreeSet<u64>>,
+    pending_generation_cleanups: AtomicUsize,
 }
 
 struct GenerationState {
@@ -685,7 +699,9 @@ impl Drop for BridgeInner {
     fn drop(&mut self) {
         let states = std::mem::take(self.generations.get_mut());
         for (_, state) in states {
-            cleanup_state(self, state);
+            for parent in cleanup_state(self, state) {
+                parent.begin_dispose();
+            }
         }
     }
 }
@@ -704,6 +720,11 @@ enum NativeRegistration {
     },
     Adapter {
         _registration: LlmProviderRegistration,
+    },
+    Subagent {
+        parent: SubagentParent,
+        activation: SubagentActivation,
+        session: SessionId,
     },
 }
 
@@ -839,8 +860,17 @@ impl DomainBridge {
                 web_routes: Mutex::new(WebRouteRegistry::default()),
                 web_upgrades: Mutex::new(BTreeMap::new()),
                 retired_generations: Mutex::new(BTreeSet::new()),
+                pending_generation_cleanups: AtomicUsize::new(0),
             }),
         })
+    }
+
+    /// Whether a prior current-thread generation is still disposing native resources.
+    pub fn cleanup_pending(&self) -> bool {
+        self.inner
+            .pending_generation_cleanups
+            .load(Ordering::Acquire)
+            != 0
     }
 
     /// Attaches one generation-scoped Node client and installs this bridge as its handler.
@@ -850,6 +880,12 @@ impl DomainBridge {
                 expected: generation.max(1),
                 received: client.generation(),
             });
+        }
+        if self.cleanup_pending() {
+            return Err(remote(
+                "CLEANUP_PENDING",
+                "the prior bridge generation is still disposing resources",
+            ));
         }
         let web_routes_supported = client.supports_extension("web.route/v1");
         let web_upgrades_supported = client.supports_extension("web.upgrade/v1");
@@ -1165,12 +1201,40 @@ impl DomainBridge {
         operation.cancellation.cancel();
         Ok(true)
     }
-    /// Cancels every callback and timer and drops all registration lifetime handles for `generation`.
+    /// Cancels every callback and timer and disposes all generation-owned registrations.
     pub fn cleanup_generation(&self, generation: u64) {
         let state = lock(&self.inner.generations).remove(&generation);
         if let Some(state) = state {
             lock(&self.inner.retired_generations).insert(generation);
-            cleanup_state(&self.inner, state);
+            let parents = cleanup_state(&self.inner, state);
+            if parents.is_empty() {
+                return;
+            }
+            if Handle::try_current().is_ok_and(|handle| {
+                handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+            }) {
+                self.inner
+                    .pending_generation_cleanups
+                    .fetch_add(1, Ordering::AcqRel);
+                let inner = Arc::clone(&self.inner);
+                let handle = inner.handle.clone();
+                handle.spawn(async move {
+                    for parent in parents {
+                        parent.dispose().await;
+                    }
+                    inner
+                        .pending_generation_cleanups
+                        .fetch_sub(1, Ordering::AcqRel);
+                });
+            } else {
+                self.block_on(async move {
+                    for parent in parents {
+                        parent.dispose().await;
+                    }
+                    Ok(())
+                })
+                .expect("generation cleanup runtime is available");
+            }
         }
     }
 
@@ -1242,7 +1306,10 @@ impl DomainBridge {
                 self.sessions(generation, &request.method, request.params)
                     .await
             }
-            AGENTS_SERVICE => self.agents(&request.method, request.params).await,
+            AGENTS_SERVICE => {
+                self.agents(generation, &request.method, request.params)
+                    .await
+            }
             LOGGER_SERVICE => self.logger(&request.method, request.params),
             TIMERS_SERVICE => self.timers(generation, &request.method, request.params),
             SETTINGS_SERVICE => self.settings(&request.method, request.params).await,
@@ -1459,33 +1526,187 @@ impl DomainBridge {
             }
             "snapshot" => {
                 let request: SessionRead = decode(params)?;
-                let session = self
+                let (header, events) = self
                     .inner
                     .services
                     .sessions
-                    .get(&request.session)
-                    .ok_or_else(|| remote("SESSION_NOT_FOUND", "session is not live"))?;
+                    .snapshot(
+                        &request.session,
+                        generation_cancellation(&self.inner, generation)?,
+                    )
+                    .await
+                    .map_err(session_error)?
+                    .ok_or_else(|| remote("SESSION_NOT_FOUND", "session does not exist"))?;
                 Ok(json!({"session": {
-                    "id": session.id(),
-                    "header": session.header(),
-                    "events": session.events(),
+                    "id": request.session,
+                    "header": header,
+                    "events": events,
                 }}))
             }
             _ => unknown_method(SESSIONS_SERVICE, method),
         }
     }
 
-    async fn agents(&self, method: &str, params: Value) -> BridgeResult<Value> {
+    async fn agents(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
         match method {
             "get" => {
                 let request: AgentGet = decode(params)?;
                 self.require_owner(&request.session)?;
-                let agent = self.inner.services.agents.get(&request.session);
-                Ok(json!({
-                    "sessionId": request.session,
-                    "live": agent.is_some(),
-                    "status": agent.as_ref().map(|agent| agent.status()),
-                }))
+                Ok(self.agent_snapshot(&request.session))
+            }
+            "inspectCompat" => {
+                let request: AgentGet = decode(params)?;
+                Ok(self.agent_snapshot(&request.session))
+            }
+            "createCompat" => {
+                let generation = require_node_generation(generation)?;
+                let request: CompatAgentCreate = decode(params)?;
+                nonblank("registrationId", &request.registration_id)?;
+                let subagents = self.inner.services.subagents.as_ref().ok_or_else(|| {
+                    remote(
+                        "SERVICE_UNAVAILABLE",
+                        "native subagent service is unavailable",
+                    )
+                })?;
+                let parent_agent = self
+                    .inner
+                    .services
+                    .agents
+                    .get(&request.parent_session)
+                    .ok_or_else(|| remote("AGENT_NOT_FOUND", "parent session is not running"))?;
+                let parent = subagents
+                    .attach(Arc::new(parent_agent))
+                    .map_err(subagent_error)?;
+                let (_, activation) = parent
+                    .start_seeded_continuable_with_seed(
+                        SubagentStartRequest {
+                            provider: "native".into(),
+                            agent_id: request.label,
+                            child_session_id: request.child_session.clone(),
+                            agent_mode: request.agent_mode,
+                            mode: SubagentMode::Continuable,
+                            capabilities: Vec::new(),
+                            options: request.options,
+                            created_at: request.created_at,
+                            cwd: None,
+                            resume: false,
+                            initial_message: None,
+                        },
+                        request.seed,
+                        generation_cancellation(&self.inner, Some(generation))?,
+                    )
+                    .await
+                    .map_err(subagent_error)?;
+                if let Err(error) = self.add_registration(
+                    generation,
+                    request.registration_id,
+                    NativeRegistration::Subagent {
+                        parent,
+                        activation: activation.clone(),
+                        session: request.child_session.clone(),
+                    },
+                ) {
+                    let _ = activation.dispose().await;
+                    return Err(error);
+                }
+                Ok(self.agent_snapshot(&request.child_session))
+            }
+            "resumeCompat" => {
+                let generation = require_node_generation(generation)?;
+                let request: CompatAgentResume = decode(params)?;
+                nonblank("registrationId", &request.registration_id)?;
+                let subagents = self.inner.services.subagents.as_ref().ok_or_else(|| {
+                    remote(
+                        "SERVICE_UNAVAILABLE",
+                        "native subagent service is unavailable",
+                    )
+                })?;
+                let parent_agent = self
+                    .inner
+                    .services
+                    .agents
+                    .get(&request.parent_session)
+                    .ok_or_else(|| remote("AGENT_NOT_FOUND", "parent session is not running"))?;
+                let parent = subagents
+                    .attach(Arc::new(parent_agent))
+                    .map_err(subagent_error)?;
+                let (_, activation) = parent
+                    .start(
+                        SubagentStartRequest {
+                            provider: "native".into(),
+                            agent_id: "Side chat".into(),
+                            child_session_id: request.child_session.clone(),
+                            agent_mode: request.agent_mode,
+                            mode: SubagentMode::Continuable,
+                            capabilities: Vec::new(),
+                            options: request.options,
+                            created_at: request.created_at,
+                            cwd: None,
+                            resume: true,
+                            initial_message: None,
+                        },
+                        generation_cancellation(&self.inner, Some(generation))?,
+                    )
+                    .await
+                    .map_err(subagent_error)?;
+                if let Err(error) = self.add_registration(
+                    generation,
+                    request.registration_id,
+                    NativeRegistration::Subagent {
+                        parent,
+                        activation: activation.clone(),
+                        session: request.child_session.clone(),
+                    },
+                ) {
+                    let _ = activation.dispose().await;
+                    return Err(error);
+                }
+                Ok(self.agent_snapshot(&request.child_session))
+            }
+            "sendCompat" => {
+                let request: AgentSend = decode(params)?;
+                self.require_compat_child(&request.session)?;
+                self.inner
+                    .services
+                    .agents
+                    .send(
+                        &request.session,
+                        request.message,
+                        request.target,
+                        request.wakeup,
+                    )
+                    .await
+                    .map_err(agent_error)?;
+                Ok(json!({"sent": true}))
+            }
+            "cancelCompat" => {
+                let request: AgentCancel = decode(params)?;
+                self.require_compat_child(&request.session)?;
+                let cancelled = self
+                    .inner
+                    .services
+                    .agents
+                    .cancel(&request.session, request.cause, request.keep_inbox)
+                    .map_err(agent_error)?;
+                Ok(json!({"cancelled": cancelled}))
+            }
+            "disposeCompat" => {
+                let generation = require_node_generation(generation)?;
+                let request: CompatAgentDispose = decode(params)?;
+                let activation = self.subagent_activation(
+                    generation,
+                    &request.registration_id,
+                    &request.session,
+                )?;
+                activation.dispose().await.map_err(subagent_error)?;
+                self.remove_registration(generation, &request.registration_id)
+                    .await?;
+                Ok(json!({"disposed": true}))
             }
             "send" => {
                 let request: AgentSend = decode(params)?;
@@ -1515,6 +1736,60 @@ impl DomainBridge {
                 Ok(json!({"cancelled": cancelled}))
             }
             _ => unknown_method(AGENTS_SERVICE, method),
+        }
+    }
+
+    fn agent_snapshot(&self, session_id: &SessionId) -> Value {
+        let agent = self.inner.services.agents.get(session_id);
+        json!({
+            "sessionId": session_id,
+            "live": agent.is_some(),
+            "status": agent.as_ref().map(|agent| agent.status()),
+            "options": agent.as_ref().map(|agent| agent.options()),
+            "session": self.inner.services.sessions.get(session_id).map(|session| json!({
+                "id": session.id(),
+                "header": session.header(),
+                "events": session.events(),
+            })),
+        })
+    }
+
+    fn require_compat_child(&self, session_id: &SessionId) -> BridgeResult<()> {
+        let session = self
+            .inner
+            .services
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| remote("SESSION_NOT_FOUND", "session is not live"))?;
+        if session.header().parent_session.is_none() {
+            return Err(remote(
+                "OWNER_DENIED",
+                "compatibility agents may control only child sessions",
+            ));
+        }
+        Ok(())
+    }
+
+    fn subagent_activation(
+        &self,
+        generation: u64,
+        registration_id: &str,
+        session_id: &SessionId,
+    ) -> BridgeResult<SubagentActivation> {
+        let states = lock(&self.inner.generations);
+        let state = states
+            .get(&generation)
+            .ok_or_else(|| stale_generation(generation))?;
+        match state.registrations.get(registration_id) {
+            Some(NativeRegistration::Subagent {
+                activation,
+                session,
+                ..
+            }) if session == session_id => Ok(activation.clone()),
+            _ => Err(remote(
+                "OWNER_DENIED",
+                "subagent registration does not own this session",
+            )),
         }
     }
 
@@ -1765,22 +2040,35 @@ impl DomainBridge {
         Ok(())
     }
 
-    fn remove_registration(&self, generation: u64, registration_id: &str) -> BridgeResult<bool> {
-        let mut states = lock(&self.inner.generations);
-        let state = states
-            .get_mut(&generation)
-            .ok_or_else(|| stale_generation(generation))?;
-        if let Some(registration) = state.registrations.remove(registration_id) {
-            drop(registration);
-            return Ok(true);
-        }
-        if let Some(timer) = state.timers.remove(registration_id) {
-            if let Some(task) = timer.task {
-                task.abort();
+    async fn remove_registration(
+        &self,
+        generation: u64,
+        registration_id: &str,
+    ) -> BridgeResult<bool> {
+        let registration = {
+            let mut states = lock(&self.inner.generations);
+            let state = states
+                .get_mut(&generation)
+                .ok_or_else(|| stale_generation(generation))?;
+            if let Some(registration) = state.registrations.remove(registration_id) {
+                Some(Ok(registration))
+            } else {
+                state.timers.remove(registration_id).map(Err)
             }
-            return Ok(true);
+        };
+        match registration {
+            Some(Ok(NativeRegistration::Subagent { parent, .. })) => {
+                parent.dispose().await;
+            }
+            Some(Ok(registration)) => drop(registration),
+            Some(Err(timer)) => {
+                if let Some(task) = timer.task {
+                    task.abort();
+                }
+            }
+            None => return Ok(false),
         }
-        Ok(false)
+        Ok(true)
     }
     fn event_emit(&self, params: Value) -> BridgeResult<Value> {
         let request: EventEmit = decode(params)?;
@@ -1823,7 +2111,7 @@ impl DomainBridge {
                 self.ensure_generation(frame.connection_generation)?;
                 let request: RegistrationDispose = decode(frame.payload)?;
                 Ok(json!({
-                    "removed": self.remove_registration(frame.connection_generation, &request.registration_id)?
+                    "removed": self.remove_registration(frame.connection_generation, &request.registration_id).await?
                 }))
             }
             FrameKind::EventEmit => {
@@ -2080,7 +2368,7 @@ fn remove_timer_if_exact(
     }
 }
 
-fn cleanup_state(inner: &BridgeInner, mut state: GenerationState) {
+fn cleanup_state(inner: &BridgeInner, mut state: GenerationState) -> Vec<SubagentParent> {
     state.cancellation.cancel();
     for (_, operation) in std::mem::take(&mut state.operations) {
         operation.cancellation.cancel();
@@ -2096,8 +2384,20 @@ fn cleanup_state(inner: &BridgeInner, mut state: GenerationState) {
             task.abort();
         }
     }
-    // Dropping these handles is the registration removal operation.
-    state.registrations.clear();
+    std::mem::take(&mut state.registrations)
+        .into_values()
+        .filter_map(|registration| match registration {
+            NativeRegistration::Subagent {
+                parent, activation, ..
+            } => {
+                activation.interrupt();
+                Some(parent)
+            }
+            NativeRegistration::Tool { .. }
+            | NativeRegistration::Prompt { .. }
+            | NativeRegistration::Adapter { .. } => None,
+        })
+        .collect()
 }
 
 fn generation_cancellation(
@@ -2564,6 +2864,9 @@ fn session_error(error: crate::session::SessionError) -> BridgeError {
 fn agent_error(error: crate::agent::AgentError) -> BridgeError {
     remote("AGENT_ERROR", error.to_string())
 }
+fn subagent_error(error: crate::subagent::SubagentError) -> BridgeError {
+    remote(error.code(), error.to_string())
+}
 
 fn settings_error(error: crate::settings::SettingsError) -> BridgeError {
     remote(error.code(), error.to_string())
@@ -2666,6 +2969,38 @@ struct SessionRead {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentGet {
+    session: SessionId,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatAgentCreate {
+    registration_id: String,
+    parent_session: SessionId,
+    child_session: SessionId,
+    #[serde(default)]
+    agent_mode: Option<AgentModeId>,
+    seed: Vec<SessionEvent>,
+    label: String,
+    options: AgentOptions,
+    created_at: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatAgentResume {
+    registration_id: String,
+    parent_session: SessionId,
+    child_session: SessionId,
+    #[serde(default)]
+    agent_mode: Option<AgentModeId>,
+    options: AgentOptions,
+    created_at: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatAgentDispose {
+    registration_id: String,
     session: SessionId,
 }
 

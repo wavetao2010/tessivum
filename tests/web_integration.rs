@@ -273,7 +273,11 @@ async fn web_command_combines_explicit_enabled_and_client_only_packages() {
     let data_dir = fixture.path().join("state");
     fixture.write(
         "state/plugins/package.json",
-        r#"{"private":true,"dependencies":{"community-clock":"1.0.0","disabled-clock":"1.0.0","client-only":"1.0.0","dependency-only":"1.0.0"},"dsh":{"profile":{"bundles":["community-clock"]}}}"#,
+        r#"{"private":true,"dependencies":{"community-clock":"1.0.0","disabled-clock":"1.0.0","client-only":"1.0.0","dependency-only":"1.0.0"},"dsh":{"profile":{"bundles":["community-clock","disabled-clock"]}}}"#,
+    );
+    fixture.write(
+        "state/plugins/.dsh-market/state.json",
+        r#"{"disabled":["disabled-clock"]}"#,
     );
     fixture.write(
         "state/plugins/node_modules/community-clock/package.json",
@@ -385,10 +389,10 @@ async fn web_command_combines_explicit_enabled_and_client_only_packages() {
             .expect("plugin is text"),
         "export const revision = 1;"
     );
-    assert!(
-        entries.iter().any(|entry| entry["id"] == "client-only"),
-        "true client-only packages remain browser roots"
-    );
+    let client_only = entries
+        .iter()
+        .find(|entry| entry["id"] == "client-only")
+        .expect("true client-only browser root");
     assert!(
         !entries.iter().any(|entry| entry["id"] == "disabled-clock"),
         "disabled bundle clients stay out of the browser graph"
@@ -411,6 +415,17 @@ async fn web_command_combines_explicit_enabled_and_client_only_packages() {
             .await
             .expect("community plugin is text"),
         "export const community = true;"
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}{}", client_only["url"].as_str().unwrap()))
+            .send()
+            .await
+            .expect("client-only plugin is served")
+            .text()
+            .await
+            .expect("client-only plugin is text"),
+        "export const clientOnly = true;"
     );
     assert!(data_dir.join("modes").is_dir());
     assert!(!data_dir.join(".agent-presets").exists());

@@ -25,9 +25,10 @@ use tessivum::{
     credentials::{Credentials, YamlCredentialFile},
     llm::LlmRuntime,
     plugins::ServiceMethodPermission,
-    protocol::{SessionHeader, SessionId, SESSION_FORMAT_VERSION},
-    session::{MemorySessionPersistence, Session, SessionStore},
+    protocol::{SessionEvent, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
+    session::{MemorySessionPersistence, Session, SessionPersistence, SessionStore},
     settings::{MemorySettingsProvider, Settings},
+    subagent::{NativeSubagentProvider, SubagentService},
     system_prompt::{PromptSection, SystemPrompt},
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext, ToolRuntime,
@@ -615,6 +616,164 @@ async fn session_bound_services_reject_cross_session_access() {
             })
             .unwrap(),
         json!({"appended": true})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_compat_agents_preserve_seed_cleanup_generation_and_cold_resume() {
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());
+    let sessions = SessionStore::new(Arc::clone(&persistence));
+    let agents = AgentRegistry::new(sessions.clone());
+    let _factory = agents.register_factory(Arc::new(IdleAgentFactory)).unwrap();
+    let parent = agents
+        .create(session_header("parent"), agent_options(), cancellation())
+        .await
+        .unwrap();
+    let subagents =
+        SubagentService::new(agents.clone(), sessions.clone(), Arc::clone(&persistence));
+    let _provider = subagents
+        .register(
+            "native",
+            Arc::new(NativeSubagentProvider::new(agents.clone(), [])),
+        )
+        .unwrap();
+    let bridge = DomainBridge::new(
+        BridgeServices::new(
+            ToolRuntime::new(),
+            SystemPrompt::new(),
+            LlmRuntime::new(),
+            sessions,
+            agents.clone(),
+        )
+        .with_subagents(subagents),
+    )
+    .unwrap();
+    bridge.attach_client(disconnected_client(13), 13).unwrap();
+    let seed = vec![
+        SessionEvent {
+            event_type: "request/header".into(),
+            seq: 0,
+            time: 1,
+            data: json!({"provider": "mock"}),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        },
+        SessionEvent {
+            event_type: "subagent/descriptor".into(),
+            seq: 1,
+            time: 2,
+            data: json!({"label": "Pinned side chat"}),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        },
+    ];
+    let request = |method: &str, registration_id: &str| {
+        let mut params = json!({
+            "registrationId": registration_id,
+            "parentSession": parent.id(),
+            "childSession": "side-chat",
+            "options": agent_options(),
+            "createdAt": 1,
+        });
+        if method == "createCompat" {
+            params["label"] = json!("Pinned side chat");
+            params["seed"] = serde_json::to_value(&seed).unwrap();
+        }
+        DomainRequest {
+            service: AGENTS_SERVICE.into(),
+            method: method.into(),
+            params,
+        }
+    };
+
+    assert_eq!(
+        bridge
+            .dispatch(13, request("createCompat", "side-chat:create"))
+            .unwrap()["live"],
+        true
+    );
+    let child_id = SessionId::from("side-chat");
+    assert_eq!(agents.get(&child_id).unwrap().session().events(), seed);
+
+    bridge.cleanup_generation(13);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while agents.get(&child_id).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let restarted_sessions = SessionStore::new(Arc::clone(&persistence));
+    let restarted_agents = AgentRegistry::new(restarted_sessions.clone());
+    let _restarted_factory = restarted_agents
+        .register_factory(Arc::new(IdleAgentFactory))
+        .unwrap();
+    let _restarted_parent = restarted_agents
+        .resume(parent.id(), agent_options(), cancellation())
+        .await
+        .unwrap();
+    let restarted_subagents = SubagentService::new(
+        restarted_agents.clone(),
+        restarted_sessions.clone(),
+        Arc::clone(&persistence),
+    );
+    let _restarted_provider = restarted_subagents
+        .register(
+            "native",
+            Arc::new(NativeSubagentProvider::new(restarted_agents.clone(), [])),
+        )
+        .unwrap();
+    let restarted_bridge = DomainBridge::new(
+        BridgeServices::new(
+            ToolRuntime::new(),
+            SystemPrompt::new(),
+            LlmRuntime::new(),
+            restarted_sessions.clone(),
+            restarted_agents.clone(),
+        )
+        .with_subagents(restarted_subagents),
+    )
+    .unwrap();
+    restarted_bridge
+        .attach_client(disconnected_client(14), 14)
+        .unwrap();
+
+    assert!(restarted_sessions.get(&child_id).is_none());
+    assert_eq!(
+        restarted_bridge
+            .dispatch(
+                14,
+                DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "snapshot".into(),
+                    params: json!({"session": child_id}),
+                },
+            )
+            .unwrap()["session"]["events"],
+        serde_json::to_value(&seed).unwrap()
+    );
+    assert!(restarted_sessions.get(&child_id).is_none());
+    assert_eq!(
+        restarted_bridge
+            .dispatch(14, request("resumeCompat", "side-chat:resume"))
+            .unwrap()["live"],
+        true
+    );
+    assert_eq!(
+        restarted_bridge
+            .dispatch(
+                14,
+                DomainRequest {
+                    service: AGENTS_SERVICE.into(),
+                    method: "disposeCompat".into(),
+                    params: json!({"registrationId": "side-chat:resume", "session": child_id}),
+                },
+            )
+            .unwrap(),
+        json!({"disposed": true})
     );
 }
 

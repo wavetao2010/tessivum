@@ -179,9 +179,7 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         } else {
             tokio::task::spawn_blocking({
                 let profile = profile.clone();
-                move || {
-                    reconcile_profile(&profile, &snapshot, reconciliation)
-                }
+                move || reconcile_profile(&profile, &snapshot, reconciliation)
             })
             .await
             .map_err(|error| {
@@ -756,7 +754,11 @@ impl ProfileSnapshot {
     fn capture(state: &ProfileState) -> Self {
         Self {
             dependencies: state.dependencies.clone(),
-            bundles: state.bundles.iter().map(|bundle| bundle.name.clone()).collect(),
+            bundles: state
+                .bundles
+                .iter()
+                .map(|bundle| bundle.name.clone())
+                .collect(),
         }
     }
 }
@@ -1024,10 +1026,12 @@ fn write_profile_manifest(path: &Path, manifest: &Value) -> Result<(), PluginMan
             .map_err(|error| io_error(&temporary, error))?;
         file.write_all(&bytes)
             .map_err(|error| io_error(&temporary, error))?;
-        file.sync_all().map_err(|error| io_error(&temporary, error))?;
+        file.sync_all()
+            .map_err(|error| io_error(&temporary, error))?;
         fs::set_permissions(&temporary, metadata.permissions())
             .map_err(|error| io_error(&temporary, error))?;
-        file.sync_all().map_err(|error| io_error(&temporary, error))?;
+        file.sync_all()
+            .map_err(|error| io_error(&temporary, error))?;
         drop(file);
         fs::rename(&temporary, path).map_err(|error| io_error(path, error))?;
         #[cfg(unix)]
@@ -1051,7 +1055,10 @@ fn reconcile_profile(
     let dependencies: BTreeSet<_> = document.dependencies.iter().cloned().collect();
     let mut names = match mode {
         ReconciliationMode::Mutation => snapshot.bundles.clone(),
-        ReconciliationMode::Restore => document.bundles.clone().unwrap_or_else(|| snapshot.bundles.clone()),
+        ReconciliationMode::Restore => document
+            .bundles
+            .clone()
+            .unwrap_or_else(|| snapshot.bundles.clone()),
     };
     names.retain(|name| dependencies.contains(name));
     if matches!(mode, ReconciliationMode::Mutation) {
@@ -1525,15 +1532,49 @@ pub fn installed_plugin_names(profile: &Path) -> Result<BTreeSet<String>, Plugin
         .unwrap_or_default())
 }
 
+fn market_disabled_plugin_names(profile: &Path) -> BTreeSet<String> {
+    let Ok(state) = read_json(
+        &profile.join(".dsh-market").join("state.json"),
+        MAX_PROFILE_MANIFEST_BYTES,
+    ) else {
+        return BTreeSet::new();
+    };
+    let Some(state) = state.as_object() else {
+        return BTreeSet::new();
+    };
+    let Some(disabled) = state.get("disabled").or_else(|| state.get("disabledSkins")) else {
+        return BTreeSet::new();
+    };
+    let Some(disabled) = disabled.as_array() else {
+        return BTreeSet::new();
+    };
+
+    let mut names = BTreeSet::new();
+    for name in disabled.iter().filter_map(Value::as_str) {
+        if !name.is_empty() {
+            names.insert(name.to_owned());
+        }
+    }
+    names
+}
+
 pub fn enabled_client_plugin_names(profile: &Path) -> Result<BTreeSet<String>, PluginManagerError> {
     if !profile.join("package.json").exists() {
         return Ok(BTreeSet::new());
     }
     let _lock = ProfileLock::acquire(profile)?;
     let state = load_profile(profile, true)?;
-    let bundles: BTreeSet<_> = state.bundles.iter().map(|bundle| bundle.name.as_str()).collect();
+    let disabled = market_disabled_plugin_names(profile);
+    let bundles: BTreeSet<_> = state
+        .bundles
+        .iter()
+        .map(|bundle| bundle.name.as_str())
+        .collect();
     let mut names = BTreeSet::new();
     for package in &state.dependencies {
+        if disabled.contains(package) {
+            continue;
+        }
         let root = installed_package_root(profile, package)?;
         let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
         let Some(dsh) = dsh_declaration(&manifest, package)? else {
@@ -1796,11 +1837,7 @@ mod tests {
         }
         set_test_manifest(&profile, &["old"], Some(&["old"]));
         let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true).unwrap());
-        set_test_manifest(
-            &profile,
-            &["first", "second"],
-            Some(&["second", "first"]),
-        );
+        set_test_manifest(&profile, &["first", "second"], Some(&["second", "first"]));
         reconcile_profile(&profile, &snapshot, ReconciliationMode::Restore).unwrap();
         assert_eq!(test_bundles(&profile), vec!["second", "first"]);
         fs::remove_dir_all(profile).unwrap();
@@ -1816,12 +1853,16 @@ mod tests {
         let original = br#"{"dependencies":{}}"#;
         fs::write(&manifest, original).unwrap();
         fs::set_permissions(&profile, fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(write_profile_manifest(&manifest, &json!({"dependencies": {"bundle": "1"}})).is_err());
+        assert!(
+            write_profile_manifest(&manifest, &json!({"dependencies": {"bundle": "1"}})).is_err()
+        );
         fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(fs::read(&manifest).unwrap(), original);
-        assert!(fs::read_dir(&profile)
+        assert!(fs::read_dir(&profile).unwrap().all(|entry| !entry
             .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".tmp")));
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp")));
         fs::remove_dir_all(profile).unwrap();
     }
 
@@ -1835,7 +1876,36 @@ mod tests {
         fs::write(&manifest, br#"{"dependencies":{}}"#).unwrap();
         fs::set_permissions(&manifest, fs::Permissions::from_mode(0o640)).unwrap();
         write_profile_manifest(&manifest, &json!({"dependencies": {}})).unwrap();
-        assert_eq!(fs::metadata(&manifest).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn market_disabled_names_prefer_disabled_and_filter_malformed_members() {
+        let profile = temporary_profile();
+        let market = profile.join(".dsh-market");
+        fs::create_dir_all(&market).unwrap();
+        let state = market.join("state.json");
+
+        fs::write(
+            &state,
+            br#"{"disabled":["one",42,"","one","two"],"disabledSkins":["legacy"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            market_disabled_plugin_names(&profile),
+            BTreeSet::from(["one".to_owned(), "two".to_owned()])
+        );
+
+        fs::write(&state, br#"{"disabledSkins":["legacy",null,"","legacy"]}"#).unwrap();
+        assert_eq!(
+            market_disabled_plugin_names(&profile),
+            BTreeSet::from(["legacy".to_owned()])
+        );
+
         fs::remove_dir_all(profile).unwrap();
     }
 
@@ -1846,10 +1916,7 @@ mod tests {
             .collect();
         let mut manifest = Map::from_iter([("dependencies".into(), Value::Object(dependencies))]);
         if let Some(bundles) = bundles {
-            manifest.insert(
-                "dsh".into(),
-                json!({"profile": {"bundles": bundles}}),
-            );
+            manifest.insert("dsh".into(), json!({"profile": {"bundles": bundles}}));
         }
         fs::write(
             profile.join("package.json"),
