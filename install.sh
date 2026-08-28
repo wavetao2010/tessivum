@@ -58,24 +58,48 @@ case "$bin_dir" in
 esac
 [ "$install_root" != / ] || die "INSTALL_ROOT must not be /"
 [ "$bin_dir" != / ] || die "BIN_DIR must not be /"
+is_managed_link() {
+    [ -L "$1" ] || return 1
+    link_target=$(readlink "$1") || return 1
+    case "$link_target" in
+        "$install_root"/*/bin/tessivum)
+            link_version=${link_target#"$install_root"/}
+            link_version=${link_version%/bin/tessivum}
+            case "$link_version" in
+                ''|.*|*..*|*[!0-9A-Za-z.-]*) return 1 ;;
+            esac
+            [ "$link_target" = "$install_root/$link_version/bin/tessivum" ] || return 1
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+can_replace_link() {
+    if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+        return 0
+    fi
+    is_managed_link "$1"
+}
 
 if [ -n "$uninstall" ]; then
-    executable="$bin_dir/tessivum"
-    if [ -L "$executable" ]; then
-        link_target=$(readlink "$executable")
-        case "$link_target" in
-            "$install_root"/*/bin/tessivum) ;;
-            *) die "refusing to remove an executable not installed under $install_root" ;;
-        esac
-        rm "$executable" || die "cannot remove $executable"
-    elif [ -e "$executable" ]; then
-        die "refusing to remove non-symlink executable $executable"
-    elif [ -e "$install_root" ]; then
+    canonical_link="$bin_dir/tessivum"
+    alias_link="$bin_dir/tsv"
+    if [ -L "$canonical_link" ]; then
+        is_managed_link "$canonical_link" \
+            || die "refusing to remove an executable not installed under $install_root"
+    elif [ -e "$canonical_link" ]; then
+        die "refusing to remove non-symlink executable $canonical_link"
+    elif [ -e "$install_root" ] || [ -L "$install_root" ]; then
         die "refusing to remove $install_root without its managed executable link"
     else
         printf 'Tessivum is already uninstalled from %s\n' "$install_root"
         exit 0
     fi
+    if [ -L "$alias_link" ] && is_managed_link "$alias_link"; then
+        rm "$alias_link" || die "cannot remove $alias_link"
+    fi
+    rm "$canonical_link" || die "cannot remove $canonical_link"
     rm -rf "$install_root" || die "cannot remove $install_root"
     printf 'Uninstalled Tessivum from %s\n' "$install_root"
     exit 0
@@ -116,7 +140,18 @@ mkdir -p "$install_root" "$bin_dir" || die "cannot create install directories"
 staging=$(mktemp -d "$install_root/.tessivum-install.XXXXXX") || die "cannot create staging directory"
 link_staging=
 installed_destination=
+links_pending=
+tessivum_replaced=
+tsv_replaced=
 cleanup() {
+    if [ -n "$links_pending" ]; then
+        [ -z "$tessivum_replaced" ] || rm -f "$bin_dir/tessivum"
+        [ -z "$tsv_replaced" ] || rm -f "$bin_dir/tsv"
+        [ ! -L "$link_staging/previous-tessivum" ] \
+            || mv "$link_staging/previous-tessivum" "$bin_dir/tessivum" || :
+        [ ! -L "$link_staging/previous-tsv" ] \
+            || mv "$link_staging/previous-tsv" "$bin_dir/tsv" || :
+    fi
     rm -rf "$staging"
     [ -z "$link_staging" ] || rm -rf "$link_staging"
     [ -z "$installed_destination" ] || rm -rf "$installed_destination"
@@ -164,16 +199,40 @@ tar -xzf "$archive" -C "$staging" || die "failed to extract archive"
 destination="$install_root/$version"
 if [ -e "$destination" ]; then
     [ -x "$destination/bin/tessivum" ] || die "existing install is invalid: $destination"
-else
+fi
+
+for executable_name in tessivum tsv; do
+    can_replace_link "$bin_dir/$executable_name" \
+        || die "refusing to replace unmanaged link $bin_dir/$executable_name"
+done
+
+if [ ! -e "$destination" ]; then
     mv "$staging/$archive_root" "$destination" || die "failed to install $version"
     installed_destination=$destination
 fi
 
-link_staging=$(mktemp -d "$bin_dir/.tessivum-link.XXXXXX") || die "cannot stage executable link"
-ln -s "$destination/bin/tessivum" "$link_staging/tessivum" || die "cannot create executable link"
-mv -f "$link_staging/tessivum" "$bin_dir/tessivum" || die "cannot update executable link"
+link_staging=$(mktemp -d "$bin_dir/.tessivum-link.XXXXXX") || die "cannot stage executable links"
+for executable_name in tessivum tsv; do
+    ln -s "$destination/bin/tessivum" "$link_staging/$executable_name" \
+        || die "cannot create executable link"
+done
+
+links_pending=1
+if [ -L "$bin_dir/tessivum" ]; then
+    mv "$bin_dir/tessivum" "$link_staging/previous-tessivum" \
+        || die "cannot stage existing executable link"
+fi
+if [ -L "$bin_dir/tsv" ]; then
+    mv "$bin_dir/tsv" "$link_staging/previous-tsv" \
+        || die "cannot stage existing executable link"
+fi
+mv "$link_staging/tessivum" "$bin_dir/tessivum" || die "cannot update executable link"
+tessivum_replaced=1
+mv "$link_staging/tsv" "$bin_dir/tsv" || die "cannot update executable link"
+tsv_replaced=1
+links_pending=
 installed_destination=
-rmdir "$link_staging" || :
+rm -rf "$link_staging" || die "cannot remove executable link staging"
 link_staging=
 
 printf 'Installed Tessivum %s for %s at %s\n' "$version" "$target" "$bin_dir/tessivum"
