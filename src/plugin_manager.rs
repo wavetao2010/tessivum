@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    env, fs, io,
-    io::ErrorKind,
+    env, fs,
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::Arc,
@@ -78,9 +78,14 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         sink: crate::bridge::PnpmOutputSink,
     ) -> Result<crate::bridge::PnpmRunResult, BridgeError> {
         let profile = self.profile.clone();
-        let _lock = tokio::task::spawn_blocking({
+        let (_lock, snapshot) = tokio::task::spawn_blocking({
             let profile = profile.clone();
-            move || ensure_profile(&profile).and_then(|()| ProfileLock::acquire(&profile))
+            move || {
+                let lock = ProfileLock::acquire(&profile)?;
+                ensure_profile(&profile)?;
+                let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
+                Ok::<_, PluginManagerError>((lock, snapshot))
+            }
         })
         .await
         .map_err(|error| BridgeError::Process(format!("pnpm lock worker failed: {error}")))?
@@ -91,6 +96,7 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
             error => BridgeError::Process(error.to_string()),
         })?;
         let args = route_pnpm_args(&request.args, &profile)?;
+        let reconciliation = reconciliation_mode(&request.args);
         let mut command = TokioCommand::new("pnpm");
         command
             .current_dir(&profile)
@@ -170,6 +176,22 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
                 crate::bridge::PnpmOutputStream::Stderr,
                 diagnostic.as_bytes(),
             );
+        } else {
+            tokio::task::spawn_blocking({
+                let profile = profile.clone();
+                move || {
+                    reconcile_profile(&profile, &snapshot, reconciliation)
+                }
+            })
+            .await
+            .map_err(|error| {
+                BridgeError::Process(format!("profile reconciliation worker failed: {error}"))
+            })?
+            .map_err(|error| {
+                BridgeError::Process(format!(
+                    "pnpm completed but Profile activation record was not committed: {error}"
+                ))
+            })?;
         }
         Ok(crate::bridge::PnpmRunResult {
             exit_code: status.code(),
@@ -429,6 +451,7 @@ pub fn mutate_plugins(
     fs::create_dir_all(&profile).map_err(|error| io_error(&profile, error))?;
     let _lock = ProfileLock::acquire(&profile)?;
     ensure_profile(&profile)?;
+    let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
     let cwd = env::current_dir().map_err(|error| io_error(".", error))?;
     let arguments = pnpm_arguments(&mutation);
     let argument: Cow<'_, str> = match &mutation {
@@ -454,7 +477,14 @@ pub fn mutate_plugins(
         return Err(mutation_error(reason, &profile, &mutation));
     }
     remove_legacy_package_lock(&profile)
-        .map_err(|error| mutation_error(error.to_string(), &profile, &mutation))
+        .map_err(|error| mutation_error(error.to_string(), &profile, &mutation))?;
+    reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).map_err(|error| {
+        mutation_error(
+            format!("pnpm completed but Profile activation record was not committed: {error}"),
+            &profile,
+            &mutation,
+        )
+    })
 }
 
 impl ProfileLock {
@@ -669,48 +699,12 @@ pub fn configure_host_plugins(config: &mut HostConfig) -> Result<(), PluginManag
 }
 
 pub fn load_plugin_entries(profile: &Path) -> Result<Option<EntryTree>, PluginManagerError> {
-    let manifest_path = profile.join("package.json");
-    if !manifest_path.exists() {
+    if !profile.join("package.json").exists() {
         return Ok(None);
     }
-    let manifest = read_json(&manifest_path, MAX_PROFILE_MANIFEST_BYTES)?;
-    let dependencies = manifest
-        .get("dependencies")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            PluginManagerError::Invalid("plugin profile dependencies must be an object".into())
-        })?;
-    if dependencies.is_empty() {
-        return Ok(None);
-    }
-
-    let router = PluginRouter::new();
-    let mut entries = BTreeMap::<String, Entry>::new();
-    let mut order = Vec::new();
-    for package in dependencies.keys() {
-        let root = package_root(profile, package)?;
-        let package_manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
-        if let Some(patch) = package_manifest
-            .pointer("/dsh/bundle/patch")
-            .and_then(Value::as_str)
-        {
-            apply_bundle(profile, &root, patch, &router, &mut entries, &mut order)?;
-        } else if let Some(entry) = package_entry(profile, package, None, &router)? {
-            let id = entry.options.id.as_str().to_owned();
-            if entries.insert(id.clone(), entry).is_none() {
-                order.push(id);
-            }
-        }
-    }
-    let tree = EntryTree {
-        entries: order
-            .into_iter()
-            .filter_map(|id| entries.remove(&id))
-            .collect(),
-        groups: Vec::new(),
-    };
-    tree.validate()
-        .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
+    let _lock = ProfileLock::acquire(profile)?;
+    let state = load_profile(profile, true)?;
+    let tree = build_bundle_entries(&state)?;
     Ok((!tree.entries.is_empty()).then_some(tree))
 }
 
@@ -723,6 +717,355 @@ fn ensure_profile(profile: &Path) -> Result<(), PluginManagerError> {
             b"{\n  \"name\": \"tessivum-plugins\",\n  \"private\": true,\n  \"dependencies\": {}\n}\n",
         )
         .map_err(|error| io_error(&manifest, error))?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ProfileBundle {
+    name: String,
+    package_root: PathBuf,
+    patch: String,
+}
+
+struct ProfileDocument {
+    manifest: Value,
+    dependencies: Vec<String>,
+    bundles: Option<Vec<String>>,
+}
+
+struct ProfileState {
+    profile: PathBuf,
+    dependencies: BTreeSet<String>,
+    bundles: Vec<ProfileBundle>,
+}
+
+#[derive(Clone)]
+struct ProfileSnapshot {
+    dependencies: BTreeSet<String>,
+    bundles: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ReconciliationMode {
+    Mutation,
+    Restore,
+}
+
+impl ProfileSnapshot {
+    fn capture(state: &ProfileState) -> Self {
+        Self {
+            dependencies: state.dependencies.clone(),
+            bundles: state.bundles.iter().map(|bundle| bundle.name.clone()).collect(),
+        }
+    }
+}
+
+fn reconciliation_mode(args: &[String]) -> ReconciliationMode {
+    if args.iter().any(|argument| argument == "install") {
+        ReconciliationMode::Restore
+    } else {
+        ReconciliationMode::Mutation
+    }
+}
+
+fn load_profile(profile: &Path, migrate: bool) -> Result<ProfileState, PluginManagerError> {
+    let mut document = read_profile_document(profile)?;
+    let dependencies = document.dependencies.iter().cloned().collect();
+    let bundles = match document.bundles.clone() {
+        Some(names) => {
+            let bundles = resolve_profile_bundles(profile, &dependencies, &names)?;
+            validate_bundle_sequence(profile, &bundles)?;
+            bundles
+        }
+        None if migrate => {
+            let bundles = derive_profile_bundles(profile, &document.dependencies)?;
+            validate_bundle_sequence(profile, &bundles)?;
+            let names = bundles.iter().map(|bundle| bundle.name.clone()).collect();
+            set_profile_bundles(&mut document.manifest, names)?;
+            write_profile_manifest(&profile.join("package.json"), &document.manifest)?;
+            bundles
+        }
+        None => Vec::new(),
+    };
+    Ok(ProfileState {
+        profile: profile.to_path_buf(),
+        dependencies,
+        bundles,
+    })
+}
+
+fn read_profile_document(profile: &Path) -> Result<ProfileDocument, PluginManagerError> {
+    let manifest = read_json(&profile.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+    let dependencies = manifest
+        .get("dependencies")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            PluginManagerError::Invalid("plugin profile dependencies must be an object".into())
+        })?
+        .keys()
+        .cloned()
+        .collect();
+    Ok(ProfileDocument {
+        bundles: profile_bundle_names(&manifest)?,
+        manifest,
+        dependencies,
+    })
+}
+
+fn profile_bundle_names(manifest: &Value) -> Result<Option<Vec<String>>, PluginManagerError> {
+    let Some(dsh) = manifest.get("dsh") else {
+        return Ok(None);
+    };
+    let dsh = dsh.as_object().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile dsh must be an object".into())
+    })?;
+    let Some(profile) = dsh.get("profile") else {
+        return Ok(None);
+    };
+    let profile = profile.as_object().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile dsh.profile must be an object".into())
+    })?;
+    let Some(bundles) = profile.get("bundles") else {
+        return Ok(None);
+    };
+    let bundles = bundles.as_array().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile dsh.profile.bundles must be an array".into())
+    })?;
+    let mut names = Vec::with_capacity(bundles.len());
+    let mut seen = BTreeSet::new();
+    for bundle in bundles {
+        let name = bundle.as_str().ok_or_else(|| {
+            PluginManagerError::Invalid(
+                "plugin profile dsh.profile.bundles must contain only strings".into(),
+            )
+        })?;
+        if !seen.insert(name) {
+            return Err(PluginManagerError::Invalid(format!(
+                "plugin profile dsh.profile.bundles contains duplicate {name:?}"
+            )));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(Some(names))
+}
+
+fn resolve_profile_bundles(
+    profile: &Path,
+    dependencies: &BTreeSet<String>,
+    names: &[String],
+) -> Result<Vec<ProfileBundle>, PluginManagerError> {
+    let mut bundles = Vec::with_capacity(names.len());
+    for name in names {
+        if !dependencies.contains(name) {
+            return Err(PluginManagerError::Invalid(format!(
+                "plugin profile bundle {name:?} is not an installed dependency"
+            )));
+        }
+        let package_root = installed_package_root(profile, name)?;
+        let manifest = read_json(
+            &package_root.join("package.json"),
+            MAX_PROFILE_MANIFEST_BYTES,
+        )?;
+        let patch = bundle_patch(&manifest, name)?.ok_or_else(|| {
+            PluginManagerError::Invalid(format!(
+                "plugin profile bundle {name:?} does not declare dsh.bundle.patch"
+            ))
+        })?;
+        safe_join(&package_root, patch)?;
+        bundles.push(ProfileBundle {
+            name: name.clone(),
+            package_root,
+            patch: patch.to_owned(),
+        });
+    }
+    Ok(bundles)
+}
+
+fn derive_profile_bundles(
+    profile: &Path,
+    dependencies: &[String],
+) -> Result<Vec<ProfileBundle>, PluginManagerError> {
+    let mut bundles = Vec::new();
+    for name in dependencies {
+        let package_root = installed_package_root(profile, name)?;
+        let manifest = read_json(
+            &package_root.join("package.json"),
+            MAX_PROFILE_MANIFEST_BYTES,
+        )?;
+        let Some(patch) = bundle_patch(&manifest, name)? else {
+            continue;
+        };
+        safe_join(&package_root, patch)?;
+        bundles.push(ProfileBundle {
+            name: name.clone(),
+            package_root,
+            patch: patch.to_owned(),
+        });
+    }
+    Ok(bundles)
+}
+
+fn validate_bundle_sequence(
+    profile: &Path,
+    bundles: &[ProfileBundle],
+) -> Result<(), PluginManagerError> {
+    let state = ProfileState {
+        profile: profile.to_path_buf(),
+        dependencies: BTreeSet::new(),
+        bundles: bundles.to_vec(),
+    };
+    build_bundle_entries(&state).map(|_| ())
+}
+
+fn build_bundle_entries(profile: &ProfileState) -> Result<EntryTree, PluginManagerError> {
+    let router = PluginRouter::new();
+    let mut entries = BTreeMap::<String, Entry>::new();
+    let mut order = Vec::new();
+    for bundle in &profile.bundles {
+        apply_bundle(
+            &profile.profile,
+            &bundle.package_root,
+            &bundle.patch,
+            &router,
+            &mut entries,
+            &mut order,
+        )?;
+    }
+    let tree = EntryTree {
+        entries: order
+            .into_iter()
+            .filter_map(|id| entries.remove(&id))
+            .collect(),
+        groups: Vec::new(),
+    };
+    tree.validate()
+        .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
+    Ok(tree)
+}
+
+fn bundle_patch<'a>(
+    manifest: &'a Value,
+    package: &str,
+) -> Result<Option<&'a str>, PluginManagerError> {
+    let Some(dsh) = dsh_declaration(manifest, package)? else {
+        return Ok(None);
+    };
+    let Some(bundle) = dsh.get("bundle") else {
+        return Ok(None);
+    };
+    let bundle = bundle.as_object().ok_or_else(|| {
+        PluginManagerError::Invalid(format!("{package} dsh.bundle must be an object"))
+    })?;
+    let patch = bundle.get("patch").and_then(Value::as_str).ok_or_else(|| {
+        PluginManagerError::Invalid(format!("{package} dsh.bundle.patch must be a string"))
+    })?;
+    Ok(Some(patch))
+}
+
+fn dsh_declaration<'a>(
+    manifest: &'a Value,
+    package: &str,
+) -> Result<Option<&'a Map<String, Value>>, PluginManagerError> {
+    let Some(dsh) = manifest.get("dsh") else {
+        return Ok(None);
+    };
+    dsh.as_object().map(Some).ok_or_else(|| {
+        PluginManagerError::Invalid(format!("{package} dsh declaration must be an object"))
+    })
+}
+
+fn package_declares_bundle(profile: &Path, package: &str) -> Result<bool, PluginManagerError> {
+    let package_root = installed_package_root(profile, package)?;
+    let manifest = read_json(
+        &package_root.join("package.json"),
+        MAX_PROFILE_MANIFEST_BYTES,
+    )?;
+    let Some(patch) = bundle_patch(&manifest, package)? else {
+        return Ok(false);
+    };
+    safe_join(&package_root, patch)?;
+    Ok(true)
+}
+
+fn set_profile_bundles(manifest: &mut Value, names: Vec<String>) -> Result<(), PluginManagerError> {
+    let root = manifest.as_object_mut().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile manifest must be an object".into())
+    })?;
+    let dsh = root.entry("dsh").or_insert_with(|| json!({}));
+    let dsh = dsh.as_object_mut().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile dsh must be an object".into())
+    })?;
+    let profile = dsh.entry("profile").or_insert_with(|| json!({}));
+    let profile = profile.as_object_mut().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile dsh.profile must be an object".into())
+    })?;
+    profile.insert(
+        "bundles".into(),
+        Value::Array(names.into_iter().map(Value::String).collect()),
+    );
+    Ok(())
+}
+
+fn write_profile_manifest(path: &Path, manifest: &Value) -> Result<(), PluginManagerError> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
+        PluginManagerError::Invalid(format!("plugin profile cannot be encoded: {error}"))
+    })?;
+    let metadata = fs::metadata(path).map_err(|error| io_error(path, error))?;
+    let parent = path.parent().ok_or_else(|| {
+        PluginManagerError::Invalid("plugin profile manifest has no parent directory".into())
+    })?;
+    let temporary = parent.join(format!(".package.json-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| io_error(&temporary, error))?;
+        file.write_all(&bytes)
+            .map_err(|error| io_error(&temporary, error))?;
+        file.sync_all().map_err(|error| io_error(&temporary, error))?;
+        fs::set_permissions(&temporary, metadata.permissions())
+            .map_err(|error| io_error(&temporary, error))?;
+        file.sync_all().map_err(|error| io_error(&temporary, error))?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|error| io_error(path, error))?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| io_error(parent, error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn reconcile_profile(
+    profile: &Path,
+    snapshot: &ProfileSnapshot,
+    mode: ReconciliationMode,
+) -> Result<(), PluginManagerError> {
+    let mut document = read_profile_document(profile)?;
+    let dependencies: BTreeSet<_> = document.dependencies.iter().cloned().collect();
+    let mut names = match mode {
+        ReconciliationMode::Mutation => snapshot.bundles.clone(),
+        ReconciliationMode::Restore => document.bundles.clone().unwrap_or_else(|| snapshot.bundles.clone()),
+    };
+    names.retain(|name| dependencies.contains(name));
+    if matches!(mode, ReconciliationMode::Mutation) {
+        for name in &document.dependencies {
+            if !snapshot.dependencies.contains(name) && package_declares_bundle(profile, name)? {
+                names.push(name.clone());
+            }
+        }
+    }
+    let bundles = resolve_profile_bundles(profile, &dependencies, &names)?;
+    validate_bundle_sequence(profile, &bundles)?;
+    if document.bundles.as_ref() != Some(&names) {
+        set_profile_bundles(&mut document.manifest, names)?;
+        write_profile_manifest(&profile.join("package.json"), &document.manifest)?;
     }
     Ok(())
 }
@@ -834,7 +1177,7 @@ fn package_entry(
     declared: Option<(&str, &Map<String, Value>)>,
     router: &PluginRouter,
 ) -> Result<Option<Entry>, PluginManagerError> {
-    let root = package_root(profile, package)?;
+    let root = installed_package_root(profile, package)?;
     let route = router
         .resolve(
             &root,
@@ -872,12 +1215,7 @@ fn package_entry(
         group: None,
     };
     apply_entry_override_options(&mut options, row)?;
-    Ok(Some(Entry::new(
-        fs::canonicalize(&root)
-            .map_err(|error| io_error(&root, error))?
-            .to_string_lossy(),
-        options,
-    )))
+    Ok(Some(Entry::new(root.to_string_lossy(), options)))
 }
 
 fn apply_entry_override(
@@ -932,6 +1270,21 @@ fn package_root(profile: &Path, package: &str) -> Result<PathBuf, PluginManagerE
         )));
     }
     Ok(profile.join("node_modules").join(package))
+}
+
+fn installed_package_root(profile: &Path, package: &str) -> Result<PathBuf, PluginManagerError> {
+    let package_root = package_root(profile, package)?;
+    let package_root =
+        fs::canonicalize(&package_root).map_err(|error| io_error(&package_root, error))?;
+    let profile_root = fs::canonicalize(profile).map_err(|error| io_error(profile, error))?;
+    let modules = profile.join("node_modules");
+    let modules = fs::canonicalize(&modules).map_err(|error| io_error(&modules, error))?;
+    if !modules.starts_with(&profile_root) || !package_root.starts_with(&modules) {
+        return Err(PluginManagerError::Invalid(format!(
+            "package {package:?} escapes the plugin profile"
+        )));
+    }
+    Ok(package_root)
 }
 
 fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, PluginManagerError> {
@@ -1172,6 +1525,30 @@ pub fn installed_plugin_names(profile: &Path) -> Result<BTreeSet<String>, Plugin
         .unwrap_or_default())
 }
 
+pub fn enabled_client_plugin_names(profile: &Path) -> Result<BTreeSet<String>, PluginManagerError> {
+    if !profile.join("package.json").exists() {
+        return Ok(BTreeSet::new());
+    }
+    let _lock = ProfileLock::acquire(profile)?;
+    let state = load_profile(profile, true)?;
+    let bundles: BTreeSet<_> = state.bundles.iter().map(|bundle| bundle.name.as_str()).collect();
+    let mut names = BTreeSet::new();
+    for package in &state.dependencies {
+        let root = installed_package_root(profile, package)?;
+        let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+        let Some(dsh) = dsh_declaration(&manifest, package)? else {
+            continue;
+        };
+        if !dsh.contains_key("client") {
+            continue;
+        }
+        if !dsh.contains_key("bundle") || bundles.contains(package.as_str()) {
+            names.insert(package.clone());
+        }
+    }
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,6 +1724,151 @@ mod tests {
             Path::new("cordis.patch.yml"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn reconciliation_appends_only_new_bundles_and_prunes_removed_dependencies() {
+        let profile = temporary_profile();
+        write_test_package(&profile, "disabled", true);
+        write_test_package(&profile, "new-bundle", true);
+        write_test_package(&profile, "client-only", false);
+        write_test_package(&profile, "unrelated", false);
+        set_test_manifest(&profile, &["disabled"], Some(&["disabled"]));
+        let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true).unwrap());
+
+        set_test_manifest(
+            &profile,
+            &["disabled", "new-bundle", "client-only"],
+            Some(&["disabled"]),
+        );
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).unwrap();
+        assert_eq!(test_bundles(&profile), vec!["disabled", "new-bundle"]);
+
+        set_test_manifest(
+            &profile,
+            &["disabled", "new-bundle", "client-only", "unrelated"],
+            Some(&["disabled", "new-bundle"]),
+        );
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).unwrap();
+        assert_eq!(test_bundles(&profile), vec!["disabled", "new-bundle"]);
+
+        set_test_manifest(
+            &profile,
+            &["new-bundle", "client-only", "unrelated"],
+            Some(&["disabled", "new-bundle"]),
+        );
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).unwrap();
+        assert_eq!(test_bundles(&profile), vec!["new-bundle"]);
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn market_and_cli_reconciliation_have_the_same_stable_append() {
+        let profile = temporary_profile();
+        write_test_package(&profile, "existing", true);
+        write_test_package(&profile, "added", true);
+        set_test_manifest(&profile, &["existing"], Some(&["existing"]));
+        let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true).unwrap());
+        set_test_manifest(&profile, &["existing", "added"], Some(&["existing"]));
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).unwrap();
+        let cli_bundles = test_bundles(&profile);
+
+        set_test_manifest(&profile, &["existing", "added"], Some(&["existing"]));
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).unwrap();
+        assert_eq!(test_bundles(&profile), cli_bundles);
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn restore_keeps_the_manifest_bundle_order() {
+        let profile = temporary_profile();
+        for package in ["old", "first", "second"] {
+            write_test_package(&profile, package, true);
+        }
+        set_test_manifest(&profile, &["old"], Some(&["old"]));
+        let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true).unwrap());
+        set_test_manifest(
+            &profile,
+            &["first", "second"],
+            Some(&["second", "first"]),
+        );
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Restore).unwrap();
+        assert_eq!(test_bundles(&profile), vec!["second", "first"]);
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_atomic_profile_replacement_preserves_the_original_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let profile = temporary_profile();
+        let manifest = profile.join("package.json");
+        let original = br#"{"dependencies":{}}"#;
+        fs::write(&manifest, original).unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(write_profile_manifest(&manifest, &json!({"dependencies": {"bundle": "1"}})).is_err());
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(fs::read(&manifest).unwrap(), original);
+        assert!(fs::read_dir(&profile)
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".tmp")));
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_profile_replacement_preserves_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let profile = temporary_profile();
+        let manifest = profile.join("package.json");
+        fs::write(&manifest, br#"{"dependencies":{}}"#).unwrap();
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o640)).unwrap();
+        write_profile_manifest(&manifest, &json!({"dependencies": {}})).unwrap();
+        assert_eq!(fs::metadata(&manifest).unwrap().permissions().mode() & 0o777, 0o640);
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    fn set_test_manifest(profile: &Path, dependencies: &[&str], bundles: Option<&[&str]>) {
+        let dependencies = dependencies
+            .iter()
+            .map(|name| ((*name).to_owned(), Value::String("1.0.0".into())))
+            .collect();
+        let mut manifest = Map::from_iter([("dependencies".into(), Value::Object(dependencies))]);
+        if let Some(bundles) = bundles {
+            manifest.insert(
+                "dsh".into(),
+                json!({"profile": {"bundles": bundles}}),
+            );
+        }
+        fs::write(
+            profile.join("package.json"),
+            serde_json::to_vec(&Value::Object(manifest)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_test_package(profile: &Path, name: &str, bundle: bool) {
+        let package = profile.join("node_modules").join(name);
+        fs::create_dir_all(&package).unwrap();
+        let manifest = if bundle {
+            json!({"name": name, "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}})
+        } else {
+            json!({"name": name, "dsh": {"client": {"platform": "web"}}})
+        };
+        fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        if bundle {
+            fs::write(package.join("cordis.patch.yml"), "[]\n").unwrap();
+        }
+    }
+
+    fn test_bundles(profile: &Path) -> Vec<String> {
+        read_profile_document(profile).unwrap().bundles.unwrap()
     }
 
     fn temporary_profile() -> PathBuf {
