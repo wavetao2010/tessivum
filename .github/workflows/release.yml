@@ -255,7 +255,7 @@ jobs:
           kill "$server_pid"
           wait "$server_pid"
           trap - EXIT
-          "$launcher" --data-dir "$PWD/smoke-state" plugin add "file:$PWD/fixtures/community/timer"
+          "$launcher" --data-dir "$PWD/smoke-state" plugin add "file:$PWD/fixtures/release/timer-bundle"
           log="$PWD/smoke-web.log"
           TESSIVUM_WEB_ADDR=127.0.0.1:38080 \
             "$launcher" --data-dir "$PWD/smoke-state" web >"$log" 2>&1 &
@@ -266,7 +266,12 @@ jobs:
             -H 'content-type: application/json' \
             -d '{"type":"client-request","rpcId":"release-plugin-smoke","method":"pluginInventory/list","payload":{"args":[]}}' \
             http://127.0.0.1:38080/api/pluginInventory/list \
-            | jq -e '.result.ok == true and any(.result.value.entries[]; .moduleName == "@cordisjs/plugin-timer" and .enabled == true and .fiberPhase == "active")'
+            | jq -e '.result.ok == true and any(.result.value.entries[]; .moduleName == "@tessivum/release-timer-bundle" and .enabled == true and .fiberPhase == "active")'
+          curl -fsS \
+            -H 'content-type: application/json' \
+            -d '{"requestId":"release-shutdown-smoke","args":{}}' \
+            http://127.0.0.1:38080/api/host/shutdown \
+            | jq -e '.ok == true'
           kill "$server_pid"
           wait "$server_pid"
           trap - EXIT

@@ -1,0 +1,3 @@
+- insert:
+    - id: release-timer
+      name: '@tessivum/release-timer-bundle'

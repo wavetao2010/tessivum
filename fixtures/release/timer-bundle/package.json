@@ -1,0 +1,15 @@
+{
+  "name": "@tessivum/release-timer-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@cordisjs/plugin-timer": "file:../../community/timer"
+  }
+}
