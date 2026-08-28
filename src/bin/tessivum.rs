@@ -26,7 +26,7 @@ use tessivum::{
     llm::LlmAdapter,
     openai_responses::OpenAiResponsesAdapter,
     plugin_manager::{
-        configure_host_plugins, installed_plugin_names, mutate_plugins, plugin_profile_root,
+        configure_host_plugins, enabled_client_plugin_names, mutate_plugins, plugin_profile_root,
         PluginMutation,
     },
     settings::Settings,
@@ -382,20 +382,17 @@ fn web_frontend(
         },
         |paths| env::split_paths(&paths).collect(),
     );
-    package_roots.extend(installed_client_package_roots(data_dir)?);
+    package_roots.extend(enabled_client_package_roots(data_dir)?);
     frontend
         .scan_packages(package_roots)
         .map_err(|error| Diagnostic::runtime("WEB_CLIENT_PACKAGES_FAILED", error))?;
     Ok((frontend, tap, embedded))
 }
-fn installed_client_package_roots(data_dir: &Path) -> Result<Vec<PathBuf>, Diagnostic> {
+fn enabled_client_package_roots(data_dir: &Path) -> Result<Vec<PathBuf>, Diagnostic> {
     let profile = plugin_profile_root(data_dir);
-    let installed = profile.join("node_modules");
-    if !installed.is_dir() {
-        return Ok(Vec::new());
-    }
-    let names = installed_plugin_names(&profile)
+    let names = enabled_client_plugin_names(&profile)
         .map_err(|error| Diagnostic::runtime("WEB_CLIENT_PACKAGES_FAILED", error))?;
+    let installed = profile.join("node_modules");
     Ok(names
         .into_iter()
         .map(|name| installed.join(name))
@@ -777,21 +774,89 @@ mod tests {
     }
 
     #[test]
-    fn installed_client_roots_include_only_declared_plugins() {
-        let data = patch_dir("installed-client-roots");
+    fn browser_roots_respect_explicit_bundle_selection() {
+        let data = patch_dir("explicit-browser-roots");
         let profile = plugin_profile_root(&data);
         let modules = profile.join("node_modules");
-        fs::create_dir_all(modules.join("plugin-a")).unwrap();
-        fs::create_dir_all(modules.join("dependency-only")).unwrap();
+        for (name, manifest) in [
+            (
+                "enabled-bundle",
+                r#"{"name":"enabled-bundle","dsh":{"bundle":{"patch":"./bundle.yml"},"client":{"platform":"web"}}}"#,
+            ),
+            (
+                "disabled-bundle",
+                r#"{"name":"disabled-bundle","dsh":{"bundle":{"patch":"./bundle.yml"},"client":{"platform":"web"}}}"#,
+            ),
+            (
+                "client-only",
+                r#"{"name":"client-only","dsh":{"client":{"platform":"web"}}}"#,
+            ),
+            ("dependency-only", r#"{"name":"dependency-only"}"#),
+        ] {
+            let root = modules.join(name);
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("package.json"), manifest).unwrap();
+        }
         fs::write(
             profile.join("package.json"),
-            r#"{"dependencies":{"plugin-a":"1.0.0"}}"#,
+            r#"{"dependencies":{"enabled-bundle":"1.0.0","disabled-bundle":"1.0.0","client-only":"1.0.0","dependency-only":"1.0.0"},"dsh":{"profile":{"bundles":["enabled-bundle"]}}}"#,
         )
         .unwrap();
 
         assert_eq!(
-            installed_client_package_roots(&data).unwrap(),
-            vec![modules.join("plugin-a")]
+            enabled_client_package_roots(&data).unwrap(),
+            vec![modules.join("client-only"), modules.join("enabled-bundle")]
+        );
+
+        fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"enabled-bundle":"1.0.0","disabled-bundle":"1.0.0","client-only":"1.0.0","dependency-only":"1.0.0"},"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            enabled_client_package_roots(&data).unwrap(),
+            vec![modules.join("client-only")]
+        );
+        let _ = fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn browser_roots_migrate_bundle_selection_without_dependency_leaks() {
+        let data = patch_dir("migrated-browser-roots");
+        let profile = plugin_profile_root(&data);
+        let modules = profile.join("node_modules");
+        for (name, manifest) in [
+            (
+                "first-bundle",
+                r#"{"name":"first-bundle","dsh":{"bundle":{"patch":"./bundle.yml"},"client":{"platform":"web"}}}"#,
+            ),
+            (
+                "second-bundle",
+                r#"{"name":"second-bundle","dsh":{"bundle":{"patch":"./bundle.yml"},"client":{"platform":"web"}}}"#,
+            ),
+            (
+                "client-only",
+                r#"{"name":"client-only","dsh":{"client":{"platform":"web"}}}"#,
+            ),
+            ("dependency-only", r#"{"name":"dependency-only"}"#),
+        ] {
+            let root = modules.join(name);
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("package.json"), manifest).unwrap();
+        }
+        fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"first-bundle":"1.0.0","dependency-only":"1.0.0","second-bundle":"1.0.0","client-only":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            enabled_client_package_roots(&data).unwrap(),
+            vec![
+                modules.join("client-only"),
+                modules.join("first-bundle"),
+                modules.join("second-bundle"),
+            ]
         );
         let _ = fs::remove_dir_all(data);
     }

@@ -267,21 +267,49 @@ fn web_command_rejects_a_missing_distribution_before_host_boot() {
 }
 
 #[tokio::test]
-async fn web_command_combines_explicit_and_installed_client_packages() {
+async fn web_command_combines_explicit_enabled_and_client_only_packages() {
     let fixture = Fixture::new("command");
     let (dist, packages) = install_web_half(&fixture);
     let data_dir = fixture.path().join("state");
     fixture.write(
         "state/plugins/package.json",
-        r#"{"private":true,"dependencies":{"community-clock":"1.0.0"}}"#,
+        r#"{"private":true,"dependencies":{"community-clock":"1.0.0","disabled-clock":"1.0.0","client-only":"1.0.0","dependency-only":"1.0.0"},"dsh":{"profile":{"bundles":["community-clock"]}}}"#,
     );
     fixture.write(
         "state/plugins/node_modules/community-clock/package.json",
-        r#"{"name":"community-clock","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web"}}}"#,
+        r#"{"name":"community-clock","exports":{"./client":"./dist/client.js"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+    );
+    fixture.write(
+        "state/plugins/node_modules/community-clock/cordis.patch.yml",
+        "[]\n",
     );
     fixture.write(
         "state/plugins/node_modules/community-clock/dist/client.js",
         "export const community = true;",
+    );
+    fixture.write(
+        "state/plugins/node_modules/disabled-clock/package.json",
+        r#"{"name":"disabled-clock","exports":{"./client":"./dist/client.js"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+    );
+    fixture.write(
+        "state/plugins/node_modules/disabled-clock/cordis.patch.yml",
+        "[]\n",
+    );
+    fixture.write(
+        "state/plugins/node_modules/disabled-clock/dist/client.js",
+        "export const disabled = true;",
+    );
+    fixture.write(
+        "state/plugins/node_modules/client-only/package.json",
+        r#"{"name":"client-only","exports":{"./client":"./dist/client.js"},"dsh":{"client":{"platform":"web"}}}"#,
+    );
+    fixture.write(
+        "state/plugins/node_modules/client-only/dist/client.js",
+        "export const clientOnly = true;",
+    );
+    fixture.write(
+        "state/plugins/node_modules/dependency-only/package.json",
+        r#"{"name":"dependency-only"}"#,
     );
     let package_paths = std::env::join_paths([packages]).expect("package path list encodes");
     let mut child = ChildCleanup(Some(
@@ -356,6 +384,18 @@ async fn web_command_combines_explicit_and_installed_client_packages() {
             .await
             .expect("plugin is text"),
         "export const revision = 1;"
+    );
+    assert!(
+        entries.iter().any(|entry| entry["id"] == "client-only"),
+        "true client-only packages remain browser roots"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry["id"] == "disabled-clock"),
+        "disabled bundle clients stay out of the browser graph"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry["id"] == "dependency-only"),
+        "dependency-only packages do not leak into the browser graph"
     );
     let community = entries
         .iter()
