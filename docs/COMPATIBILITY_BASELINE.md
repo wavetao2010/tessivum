@@ -301,7 +301,7 @@ LLM 与 Agent Loop 是独立兼容层，不得以“能生成文本”替代以�
 
 Node 兼容层只服务于显式 `legacy-node` 插件；Rust Host 主路径和原生/WASM 插件不得依赖 Node。
 
-Alpha.13 的 Core 实现基线固定为 `tessivum-core v0.1.5` / `a1a6d2e5584253391b9962c482f2140263b703bf`。
+Alpha.14 的 Core 实现基线固定为 `tessivum-core v0.1.5` / `37dcaa5520d3b36a7b117650164406bc813e3046`。
 
 ### 9.1 Transport 与帧
 

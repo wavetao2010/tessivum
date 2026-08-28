@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-alpha.14 - 2026-08-28
+
+### Fixed
+
+- Legacy Node heartbeats bypass serialized plugin operations, preventing long plugin loads from being mistaken for a disconnected compatibility host.
+- Generation-owned HTTP routes are removed before process reaping, preventing stale Browser requests from repeatedly reaching a closed bridge.
+
 ## 0.1.0-alpha.13 - 2026-08-27
 
 ### Added

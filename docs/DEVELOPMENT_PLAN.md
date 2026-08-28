@@ -1,8 +1,8 @@
 # Tessivum 二阶段开发计划
 
 > 状态：两阶段迁移与 Phase 5 原生 Agent Mode clean cutover 已完成
-> 计划校准日期：2026-08-27
-> Tessivum 实现基线：`v0.1.0-alpha.13`
+> 计划校准日期：2026-08-28
+> Tessivum 实现基线：`v0.1.0-alpha.14`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容与 Web 模型配置面
 
@@ -593,7 +593,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.13`，包含 Phase 5 clean cutover。Standard/PTC/Minimal/Composition 已由 Rust Native Mode Registry 解析并按 Session 固化；`mode.toml` 是唯一模式文件，Native/WASM/Legacy Node/Browser 四类插件平面继续保留。Rust Runtime 不再读取或执行 `preset.yml`、`agent.cordis.yml` 与动态 Cordis Node Runner。冻结 RPC、69 个 Chromium 场景和社区插件回归继续分别以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)、[`WEB_E2E_PORT_CHECKLIST.md`](WEB_E2E_PORT_CHECKLIST.md) 与 [`PLUGIN_COMPATIBILITY.md`](PLUGIN_COMPATIBILITY.md) 为门槛。
+当前实现基线为 `v0.1.0-alpha.14`，包含 Phase 5 clean cutover 与 Legacy Node plugin-load heartbeat/route cleanup 修复。Standard/PTC/Minimal/Composition 已由 Rust Native Mode Registry 解析并按 Session 固化；`mode.toml` 是唯一模式文件，Native/WASM/Legacy Node/Browser 四类插件平面继续保留。Rust Runtime 不再读取或执行 `preset.yml`、`agent.cordis.yml` 与动态 Cordis Node Runner。冻结 RPC、69 个 Chromium 场景和社区插件回归继续分别以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)、[`WEB_E2E_PORT_CHECKLIST.md`](WEB_E2E_PORT_CHECKLIST.md) 与 [`PLUGIN_COMPATIBILITY.md`](PLUGIN_COMPATIBILITY.md) 为门槛。
 
 ## 14.1 Alpha.9 发布记录
 

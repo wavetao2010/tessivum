@@ -9,7 +9,7 @@ use std::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const TAG: &str = "v0.1.0-alpha.13";
+const TAG: &str = "v0.1.0-alpha.14";
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const DSH_SETTINGS_ENTRIES: &[&str] = &["lib/index.js"];
 const SCHEMASTRY_ENTRIES: &[&str] = &["lib/index.mjs", "lib/index.cjs"];
@@ -60,7 +60,7 @@ impl Fixture {
         let binary = root.join("bin/tessivum");
         write(
             &binary,
-            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.13\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
+            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.14\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
         );
         make_executable(&binary);
 
@@ -114,12 +114,12 @@ impl Fixture {
 
     fn archive(&self) -> PathBuf {
         self.output
-            .join("tessivum-0.1.0-alpha.13-x86_64-unknown-linux-gnu.tar.gz")
+            .join("tessivum-0.1.0-alpha.14-x86_64-unknown-linux-gnu.tar.gz")
     }
 
     fn stage(&self) -> PathBuf {
         self.output
-            .join("tessivum-0.1.0-alpha.13-x86_64-unknown-linux-gnu")
+            .join("tessivum-0.1.0-alpha.14-x86_64-unknown-linux-gnu")
     }
 }
 

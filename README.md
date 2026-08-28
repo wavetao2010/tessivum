@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.13` is a prerelease, not a production-stable API or data-format promise. It replaces inferred Agent Presets with session-owned Rust Native Modes while preserving the Native, WASM, Legacy Node, and Browser plugin planes.
+`v0.1.0-alpha.14` is a prerelease, not a production-stable API or data-format promise. It stabilizes Legacy Node plugin loading and route cleanup on top of the session-owned Rust Native Modes introduced in Alpha.13.
 
 Current implementation foundation:
 
@@ -125,22 +125,22 @@ tessivum --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates `~/.local/bin/tessivum`:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.13/install.sh
-sh install.sh 0.1.0-alpha.13
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.14/install.sh
+sh install.sh 0.1.0-alpha.14
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.13 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.13), verify the checksum, then run the packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.14 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.14), verify the checksum, then run the packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.13-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.13-$target.tar.gz"
-"./tessivum-0.1.0-alpha.13-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.13-$target/bin/tessivum" web
+sha256sum -c "tessivum-0.1.0-alpha.14-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.14-$target.tar.gz"
+"./tessivum-0.1.0-alpha.14-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.14-$target/bin/tessivum" web
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -250,7 +250,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - Host compatibility npm inputs are exact versions with registry URLs, SHA-512 integrities, file hashes, and licenses in `packaging/host-modules.json`; archives include `THIRD_PARTY_LICENSES.txt` and `release-metadata.json`.
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
-- Checksums detect corruption but are not signatures. Alpha.13 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
+- Checksums detect corruption but are not signatures. Alpha.14 binaries are not code-signed or notarized; verify the release tag, checksum asset, and repository origin before execution.
 
 ## Verification
 
