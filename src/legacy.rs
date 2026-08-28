@@ -191,17 +191,16 @@ impl LegacyProfile {
             self.stop_failed_start(generation);
             return Err(error.into());
         }
-        // BridgeClient currently has one disconnect callback. Replace the
-        // supervisor's callback only after registering its cleanup, then run
-        // supervisor shutdown ourselves so its generation teardown is never
-        // lost if another bridge participant replaced that callback.
+        // BridgeClient currently has one disconnect callback. Detach the
+        // generation before process reaping can block so stale web routes stop
+        // accepting requests as soon as the connection is lost.
         let disconnect = cleanup;
         client.set_disconnect_handler(move |_| {
+            cleanup_profile_generation(&disconnect, generation);
             if let Some(inner) = disconnect.upgrade() {
                 let supervisor = Arc::clone(&inner.supervisor);
                 let _ = supervisor.shutdown();
             }
-            cleanup_profile_generation(&disconnect, generation);
         });
 
         let mut lifecycle = lock(&self.inner.lifecycle);
