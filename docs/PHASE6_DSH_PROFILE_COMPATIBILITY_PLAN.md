@@ -1,6 +1,6 @@
 # Tessivum Phase 6 DSH Profile 兼容与 `tsv` 命令开发计划
 
-> 状态：实现与本地验收已完成，Alpha.15 公开发行验证进行中
+> 状态：已完成
 > 计划日期：2026-08-28
 > 实现基线：`v0.1.0-alpha.14`
 > 目标发布：`v0.1.0-alpha.15`
@@ -568,4 +568,4 @@ Phase 6 只有同时满足以下条件才完成：
 - 上游 source Web 的 239 个测试文件、3163 个测试通过，类型检查通过；69/69 个 Chromium 迁移场景通过。
 - 四平台发行归档、本地 Formula、no-sudo 安装、升级、碰撞拒绝和卸载夹具通过；归档内 `tsv` 与 `tessivum` 为同一文件，未复制第二个二进制。
 - 真实 Alpha.14 Profile 已完成 Alpha.15 原子迁移及 Alpha.14 二进制回滚；pnpm lock、Session、Settings、Credentials 和 Workspace 文件哈希在升级前后保持一致。
-- 剩余发布门槛仅为 GitHub Alpha.15 prerelease、Homebrew Tap 更新与公开产物真实安装；完成后再将本页状态改为“已完成”。
+- GitHub Alpha.15 prerelease 已由 workflow `33162329115` 发布九个公开资产（四平台归档、四个 SHA-256 和 Formula）；Homebrew Tap `c5de6af` 通过严格 audit，公开 Formula 已从 Alpha.14 升级安装到 Alpha.15，`brew test`、真实 Bundle 激活和有序关闭均通过。

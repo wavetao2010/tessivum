@@ -1,7 +1,6 @@
 class Tessivum < Formula
   desc "Rust-native AI agent harness"
   homepage "https://github.com/wavetao2010/tessivum"
-  version "@VERSION@"
 
   depends_on "bun"
   depends_on "pnpm"
