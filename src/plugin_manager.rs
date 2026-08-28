@@ -96,7 +96,7 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
             error => BridgeError::Process(error.to_string()),
         })?;
         let args = route_pnpm_args(&request.args, &profile)?;
-        let reconciliation = reconciliation_mode(&request.args);
+        let reconciliation = reconciliation_mode(&args);
         let mut command = TokioCommand::new("pnpm");
         command
             .current_dir(&profile)
@@ -762,7 +762,7 @@ impl ProfileSnapshot {
 }
 
 fn reconciliation_mode(args: &[String]) -> ReconciliationMode {
-    if args.iter().any(|argument| argument == "install") {
+    if args.first().is_some_and(|argument| argument == "install") {
         ReconciliationMode::Restore
     } else {
         ReconciliationMode::Mutation
@@ -1661,16 +1661,21 @@ mod tests {
                 "--ignore-scripts",
             ]
         );
+        assert!(matches!(
+            reconciliation_mode(&["add".into(), "install".into()]),
+            ReconciliationMode::Mutation
+        ));
+        let install_args = route_pnpm_args(
+            &[
+                "--no-frozen-lockfile".into(),
+                "--config.minimumReleaseAge=0".into(),
+                "install".into(),
+            ],
+            &profile,
+        )
+        .unwrap();
         assert_eq!(
-            route_pnpm_args(
-                &[
-                    "--no-frozen-lockfile".into(),
-                    "--config.minimumReleaseAge=0".into(),
-                    "install".into(),
-                ],
-                &profile,
-            )
-            .unwrap(),
+            install_args,
             vec![
                 "install",
                 "--no-frozen-lockfile",
@@ -1680,6 +1685,10 @@ mod tests {
                 "--ignore-scripts",
             ]
         );
+        assert!(matches!(
+            reconciliation_mode(&install_args),
+            ReconciliationMode::Restore
+        ));
         assert_eq!(
             route_pnpm_args(
                 &["remove".into(), "-w".into(), "dsh-example".into()],
