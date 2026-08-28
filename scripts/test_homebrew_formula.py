@@ -58,7 +58,12 @@ def main() -> None:
         assert 'desc "Rust-native AI agent harness"' in formula
         assert formula.index('depends_on "bun"') < formula.index("on_macos do")
         assert 'libexec.install Dir["*"]' in formula
-        assert 'bin.install_symlink libexec/"bin/tessivum"' in formula
+        assert formula.count('bin.install_symlink libexec/"bin/tessivum"') == 2
+        assert 'bin.install_symlink libexec/"bin/tessivum" => "tsv"' in formula
+        assert "bin.install " not in formula
+        assert "dsh" not in formula
+        assert 'shell_output("#{bin}/tessivum --version"), shell_output("#{bin}/tsv --version")' in formula
+        assert 'shell_output("#{bin}/tessivum --help"), shell_output("#{bin}/tsv --help")' in formula
 
         for target, digest in digests.items():
             assert f"tessivum-{VERSION}-{target}.tar.gz" in formula

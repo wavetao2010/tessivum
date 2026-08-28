@@ -60,7 +60,7 @@ impl Fixture {
         let binary = root.join("bin/tessivum");
         write(
             &binary,
-            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.14\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
+            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.14\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
         );
         make_executable(&binary);
 
@@ -242,6 +242,9 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
     assert!(listing.status.success());
     let listing = String::from_utf8(listing.stdout).unwrap();
     for path in [
+        "bin/tessivum",
+        "bin/tsv",
+        "libexec/tessivum",
         "share/tessivum/host-modules/INVENTORY.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/package.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/lib/index.js",
@@ -274,26 +277,60 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
             "archive still contains legacy preset asset {obsolete}"
         );
     }
+    assert!(
+        !listing.lines().any(|entry| entry.ends_with("bin/dsh")),
+        "archive contains obsolete dsh launcher"
+    );
 
     let launcher = fixture.stage().join("bin/tessivum");
+    let alias = fixture.stage().join("bin/tsv");
+    assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_link(&alias).unwrap(), PathBuf::from("tessivum"));
+    assert_eq!(alias.canonicalize().unwrap(), launcher.canonicalize().unwrap());
+    assert!(fs::symlink_metadata(fixture.stage().join("bin/dsh")).is_err());
+    let mut regular_launchers = fs::read_dir(fixture.stage().join("bin"))
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    regular_launchers.sort();
+    assert_eq!(regular_launchers, vec![launcher.clone()]);
+    let payload = fixture.stage().join("libexec/tessivum");
+    let mut executable_payloads = fs::read_dir(fixture.stage().join("libexec"))
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    executable_payloads.sort();
+    assert_eq!(executable_payloads, vec![payload.clone()]);
+    assert_eq!(fs::read(&payload).unwrap(), fs::read(&fixture.binary).unwrap());
     let launcher_text = fs::read_to_string(&launcher).unwrap();
     assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
     assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
     assert!(!launcher_text.contains("TESSIVUM_AGENT_PRESET_ROOT"));
     assert!(!launcher_text.contains("agent-presets"));
+    for argument in ["--version", "--help"] {
+        let launcher_output = Command::new(&launcher).arg(argument).output().unwrap();
+        let alias_output = Command::new(&alias).arg(argument).output().unwrap();
+        assert!(launcher_output.status.success(), "launcher failed for {argument}");
+        assert!(alias_output.status.success(), "alias failed for {argument}");
+        assert_eq!(launcher_output.stdout, alias_output.stdout, "stdout differs for {argument}");
+        assert_eq!(launcher_output.stderr, alias_output.stderr, "stderr differs for {argument}");
+    }
     let readme = fs::read_to_string(fixture.stage().join("README.txt")).unwrap();
     assert!(readme.contains("Native modes are built into Tessivum"));
     assert!(readme.contains("under modes/"));
     let host_modules = fixture.stage().join("share/tessivum/host-modules");
-    let launcher_env = Command::new(&launcher)
-        .arg("--host-module-root")
-        .output()
-        .unwrap();
-    assert!(launcher_env.status.success());
-    assert_eq!(
-        String::from_utf8(launcher_env.stdout).unwrap(),
-        format!("{}\n", host_modules.display()),
-    );
+    for command in [&launcher, &alias] {
+        let launcher_env = Command::new(command).arg("--host-module-root").output().unwrap();
+        assert!(launcher_env.status.success());
+        assert_eq!(
+            String::from_utf8(launcher_env.stdout).unwrap(),
+            format!("{}\n", host_modules.display()),
+        );
+    }
     for (package, target) in [
         ("cordis", "../../../vendor/cordis"),
         ("cosmokit", "../../../vendor/cosmokit"),

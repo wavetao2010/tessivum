@@ -88,6 +88,7 @@ export TESSIVUM_COMPAT_HOST TESSIVUM_HOST_MODULE_ROOT CORDIS_VENDOR_ROOT
 exec "$root/libexec/tessivum" "$@"
 LAUNCHER
 chmod +x "$stage/bin/tessivum"
+ln -s tessivum "$stage/bin/tsv"
 
 cat > "$stage/README.txt" <<EOF
 Tessivum $version ($target)

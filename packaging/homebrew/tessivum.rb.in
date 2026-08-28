@@ -29,9 +29,11 @@ class Tessivum < Formula
   def install
     libexec.install Dir["*"]
     bin.install_symlink libexec/"bin/tessivum"
+    bin.install_symlink libexec/"bin/tessivum" => "tsv"
   end
 
   test do
-    system "#{bin}/tessivum", "--version"
+    assert_equal shell_output("#{bin}/tessivum --version"), shell_output("#{bin}/tsv --version")
+    assert_equal shell_output("#{bin}/tessivum --help"), shell_output("#{bin}/tsv --help")
   end
 end
