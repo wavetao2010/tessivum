@@ -9,8 +9,10 @@ use std::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const TAG: &str = "v0.1.0-alpha.16";
+const TAG: &str = "v0.1.0-alpha.17";
 const TARGET: &str = "x86_64-unknown-linux-gnu";
+const MARKET_VERSION: &str = "0.1.0-alpha.17";
+const MARKET_FILENAME: &str = "tessivum-market-0.1.0-alpha.17.tgz";
 const DSH_SETTINGS_ENTRIES: &[&str] = &["lib/index.js"];
 const SCHEMASTRY_ENTRIES: &[&str] = &["lib/index.mjs", "lib/index.cjs"];
 
@@ -50,6 +52,8 @@ struct Fixture {
     compat_host: PathBuf,
     host_modules: PathBuf,
     vendor: PathBuf,
+    market_root: PathBuf,
+    market_tgz: PathBuf,
     output: PathBuf,
 }
 
@@ -60,7 +64,7 @@ impl Fixture {
         let binary = root.join("bin/tessivum");
         write(
             &binary,
-            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.16\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\nesac\n",
+            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.17\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\n  --market-tarball) printf '%s\\n' \"$TESSIVUM_MARKET_TARBALL\" ;;\n  --market-sha256-file) printf '%s\\n' \"$TESSIVUM_MARKET_SHA256_FILE\" ;;\nesac\n",
         );
         make_executable(&binary);
 
@@ -85,6 +89,10 @@ impl Fixture {
         }
         write_inventory(&host_modules);
 
+        let market_root = root.join("market");
+        let market_tgz = root.join(MARKET_FILENAME);
+        write_market_tgz(&market_root, &market_tgz, MARKET_VERSION, market_provenance());
+
         let output = root.join("dist");
         fs::create_dir_all(&output).unwrap();
         Self {
@@ -93,11 +101,17 @@ impl Fixture {
             compat_host,
             host_modules,
             vendor,
+            market_root,
+            market_tgz,
             output,
         }
     }
 
     fn package(&self) -> Output {
+        self.package_with_market(&self.market_tgz)
+    }
+
+    fn package_with_market(&self, market_tgz: &Path) -> Output {
         Command::new("bash")
             .arg(repository_root().join("scripts/package_release.sh"))
             .arg(TAG)
@@ -106,20 +120,25 @@ impl Fixture {
             .arg(&self.compat_host)
             .arg(&self.host_modules)
             .arg(&self.vendor)
+            .arg(market_tgz)
             .arg(&self.output)
             .current_dir(repository_root())
             .output()
             .unwrap()
     }
 
+    fn rewrite_market(&self, version: &str, provenance: Value) {
+        write_market_tgz(&self.market_root, &self.market_tgz, version, provenance);
+    }
+
     fn archive(&self) -> PathBuf {
         self.output
-            .join("tessivum-0.1.0-alpha.16-x86_64-unknown-linux-gnu.tar.gz")
+            .join("tessivum-0.1.0-alpha.17-x86_64-unknown-linux-gnu.tar.gz")
     }
 
     fn stage(&self) -> PathBuf {
         self.output
-            .join("tessivum-0.1.0-alpha.16-x86_64-unknown-linux-gnu")
+            .join("tessivum-0.1.0-alpha.17-x86_64-unknown-linux-gnu")
     }
 }
 
@@ -162,6 +181,57 @@ fn write_module(root: &Path, name: &str, version: &str, runtime_entries: &[&str]
 
 fn sha256(path: &Path) -> String {
     format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+}
+
+fn market_provenance() -> Value {
+    json!({
+        "repository": "https://github.com/dsh-market/dsh-market",
+        "version": "1.38.1",
+        "commit": "df2a16b1ed2dfaf1f2505e184e738c0d6d428945",
+        "tarballIntegrity": "sha512-Z9VleLtCXwk5OlbSJKayWtbMaKACL8JUMyb/JHpErS4N3q//GJS+cgOhhxNkZYmXxB8/lv9IbhX1CBzlMhJeJg==",
+        "license": "MIT",
+    })
+}
+
+fn write_market_tgz(root: &Path, tarball: &Path, version: &str, provenance: Value) {
+    let package = root.join("package");
+    let upstream = provenance.clone();
+    let _ = fs::remove_dir_all(root);
+    write(
+        package.join("package.json"),
+        serde_json::to_vec(&json!({
+            "name": "tessivum-market",
+            "version": version,
+            "license": "MIT",
+            "tessivum": {"provenance": provenance},
+        }))
+        .unwrap(),
+    );
+    write(
+        package.join("UPSTREAM.json"),
+        serde_json::to_vec(&upstream).unwrap(),
+    );
+    write(
+        package.join("LICENSE.upstream"),
+        fs::read(repository_root().join("packaging/licenses/dsh-market/LICENSE")).unwrap(),
+    );
+    let output = Command::new("tar")
+        .arg("-C")
+        .arg(root)
+        .args(["-czf"])
+        .arg(tarball)
+        .arg("package")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture market archive failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    write(
+        PathBuf::from(format!("{}.sha256", tarball.display())),
+        format!("{}  {MARKET_FILENAME}\n", sha256(tarball)),
+    );
 }
 
 fn inventory_row(
@@ -245,6 +315,10 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         "bin/tessivum",
         "bin/tsv",
         "libexec/tessivum",
+        "share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz",
+        "share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz.sha256",
+        "share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz.source.json",
+        "share/licenses/tessivum-market-0.1.0-alpha.17/LICENSE",
         "share/tessivum/host-modules/INVENTORY.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/package.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/lib/index.js",
@@ -315,9 +389,38 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         fs::read(&payload).unwrap(),
         fs::read(&fixture.binary).unwrap()
     );
+    let market_tgz = fixture
+        .stage()
+        .join("share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz");
+    let market_checksum = PathBuf::from(format!("{}.sha256", market_tgz.display()));
+    assert_eq!(fs::read(&market_tgz).unwrap(), fs::read(&fixture.market_tgz).unwrap());
+    assert_eq!(
+        fs::read(&market_checksum).unwrap(),
+        fs::read(PathBuf::from(format!("{}.sha256", fixture.market_tgz.display()))).unwrap(),
+    );
+    assert_eq!(
+        fs::read(fixture.stage().join(
+            "share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz.source.json",
+        ))
+        .unwrap(),
+        fs::read(repository_root().join("packaging/market-source.json")).unwrap(),
+    );
+    assert_eq!(
+        fs::read(
+            fixture
+                .stage()
+                .join("share/licenses/tessivum-market-0.1.0-alpha.17/LICENSE"),
+        )
+        .unwrap(),
+        fs::read(repository_root().join("packaging/licenses/dsh-market/LICENSE")).unwrap(),
+    );
     let launcher_text = fs::read_to_string(&launcher).unwrap();
     assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
     assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
+    assert!(launcher_text.contains("TESSIVUM_MARKET_TARBALL"));
+    assert!(launcher_text.contains("$root/share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz"));
+    assert!(launcher_text.contains("TESSIVUM_MARKET_SHA256_FILE"));
+    assert!(launcher_text.contains("tessivum-market-0.1.0-alpha.17.tgz.sha256"));
     assert!(!launcher_text.contains("TESSIVUM_AGENT_PRESET_ROOT"));
     assert!(!launcher_text.contains("agent-presets"));
     for argument in ["--version", "--help"] {
@@ -342,15 +445,18 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
     assert!(readme.contains("under modes/"));
     let host_modules = fixture.stage().join("share/tessivum/host-modules");
     for command in [&launcher, &alias] {
-        let launcher_env = Command::new(command)
-            .arg("--host-module-root")
-            .output()
-            .unwrap();
-        assert!(launcher_env.status.success());
-        assert_eq!(
-            String::from_utf8(launcher_env.stdout).unwrap(),
-            format!("{}\n", host_modules.display()),
-        );
+        for (argument, expected) in [
+            ("--host-module-root", &host_modules),
+            ("--market-tarball", &market_tgz),
+            ("--market-sha256-file", &market_checksum),
+        ] {
+            let launcher_env = Command::new(command).arg(argument).output().unwrap();
+            assert!(launcher_env.status.success());
+            assert_eq!(
+                String::from_utf8(launcher_env.stdout).unwrap(),
+                format!("{}\n", expected.display()),
+            );
+        }
     }
     for (package, target) in [
         ("cordis", "../../../vendor/cordis"),
@@ -401,6 +507,20 @@ fn corrupt_inventory_path(fixture: &Fixture) {
     write(path, serde_json::to_vec_pretty(&inventory).unwrap());
 }
 
+fn corrupt_market_hash(fixture: &Fixture) {
+    write(&fixture.market_tgz, "tampered\n");
+}
+
+fn corrupt_market_version(fixture: &Fixture) {
+    fixture.rewrite_market("0.0.0", market_provenance());
+}
+
+fn corrupt_market_source(fixture: &Fixture) {
+    let mut provenance = market_provenance();
+    provenance["commit"] = json!("0000000000000000000000000000000000000000");
+    fixture.rewrite_market(MARKET_VERSION, provenance);
+}
+
 #[test]
 fn release_package_rejects_invalid_host_module_provenance_before_archiving() {
     for corrupt in [
@@ -420,6 +540,30 @@ fn release_package_rejects_invalid_host_module_provenance_before_archiving() {
         assert!(
             !fixture.archive().exists(),
             "invalid host modules produced an archive: {}",
+            fixture.archive().display(),
+        );
+    }
+}
+
+#[test]
+fn release_package_rejects_tampered_market_provenance_before_archiving() {
+    for corrupt in [
+        corrupt_market_hash as fn(&Fixture),
+        corrupt_market_version,
+        corrupt_market_source,
+    ] {
+        let fixture = Fixture::new();
+        corrupt(&fixture);
+        let output = fixture.package();
+        assert!(
+            !output.status.success(),
+            "package_release.sh accepted invalid market package:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            !fixture.archive().exists(),
+            "invalid market package produced an archive: {}",
             fixture.archive().display(),
         );
     }

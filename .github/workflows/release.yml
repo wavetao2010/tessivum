@@ -82,9 +82,41 @@ jobs:
             web/client-packages
           if-no-files-found: error
 
+  market:
+    name: Build first-party market
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.7.0
+
+      - name: Install, check, and pack first-party market
+        working-directory: plugins/market
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run check
+          mkdir -p "$GITHUB_WORKSPACE/.release/market"
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE/.release/market"
+          market_tgz="$GITHUB_WORKSPACE/.release/market/tessivum-market-${RELEASE_TAG#v}.tgz"
+          test -f "$market_tgz"
+          (
+            cd "$(dirname "$market_tgz")"
+            shasum -a 256 "$(basename "$market_tgz")" > "$(basename "$market_tgz").sha256"
+          )
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: tessivum-market
+          path: .release/market
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.target }}
-    needs: web
+    needs: [web, market]
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +161,11 @@ jobs:
 
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
+          name: tessivum-market
+          path: .release/market
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
           name: host-modules
           path: .release/host-modules
       - name: Restore compiled Cordis runtime
@@ -162,6 +199,7 @@ jobs:
             ".release/tessivum-core/node/compat-host" \
             ".release/host-modules" \
             ".release/deepseek-harness/vendor" \
+            ".release/market/tessivum-market-${RELEASE_TAG#v}.tgz" \
             dist
           archive="dist/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}.tar.gz"
           mkdir smoke
@@ -169,6 +207,43 @@ jobs:
           archive_root="smoke/tessivum-${RELEASE_TAG#v}-${{ matrix.target }}"
           launcher="$archive_root/bin/tessivum"
           "$launcher" --version
+          market_tgz="$archive_root/share/tessivum/plugins/tessivum-market-${RELEASE_TAG#v}.tgz"
+          market_checksum="$market_tgz.sha256"
+          market_source="$market_tgz.source.json"
+          market_license="$archive_root/share/licenses/tessivum-market-${RELEASE_TAG#v}/LICENSE"
+          test -f "$market_tgz"
+          test -f "$market_checksum"
+          test -f "$market_source"
+          test -f "$market_license"
+          (
+            cd "$(dirname "$market_tgz")"
+            if command -v sha256sum >/dev/null; then
+              sha256sum -c "$(basename "$market_checksum")"
+            else
+              shasum -a 256 -c "$(basename "$market_checksum")"
+            fi
+          )
+          market_provenance="$(jq -ce --arg version "${RELEASE_TAG#v}" '
+            if . == {
+              "format": 1,
+              "package": {"name": "tessivum-market", "version": $version, "license": "MIT"},
+              "upstream": {
+                "repository": "https://github.com/dsh-market/dsh-market",
+                "version": "1.38.1",
+                "commit": "df2a16b1ed2dfaf1f2505e184e738c0d6d428945",
+                "tarballIntegrity": "sha512-Z9VleLtCXwk5OlbSJKayWtbMaKACL8JUMyb/JHpErS4N3q//GJS+cgOhhxNkZYmXxB8/lv9IbhX1CBzlMhJeJg==",
+                "license": "MIT"
+              }
+            } then .upstream else error("invalid market source inventory") end
+          ' "$market_source")"
+          tar -xOzf "$market_tgz" package/package.json | jq -e --arg version "${RELEASE_TAG#v}" --argjson provenance "$market_provenance" '
+            .name == "tessivum-market"
+            and .version == $version
+            and .license == "MIT"
+            and .tessivum.provenance == $provenance
+          '
+          tar -xOzf "$market_tgz" package/UPSTREAM.json | jq -e --argjson provenance "$market_provenance" '. == $provenance'
+          tar -xOzf "$market_tgz" package/LICENSE.upstream | cmp -s - "$market_license"
           if tar -tzf "$archive" | grep -E '(^|/)(\.agent-presets|agent-presets)(/|$)|/(agent\.cordis\.yml|preset\.yml)$'; then
             echo "archive contains legacy Agent Preset assets" >&2
             exit 1
