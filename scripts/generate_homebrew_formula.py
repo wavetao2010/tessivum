@@ -40,7 +40,7 @@ def release_files(tag: str, directory: Path) -> tuple[str, dict[str, str]]:
         raise ValueError("release archives must contain exactly the four supported targets")
 
     expected_checksums = {f"{archive}.sha256" for archive in expected_archives}
-    checksums = {path.name for path in directory.glob("*.sha256")}
+    checksums = {path.name for path in directory.glob(f"tessivum-{version}-*.tar.gz.sha256")}
     if checksums != expected_checksums:
         raise ValueError("release checksums must contain exactly one file for each supported target")
 

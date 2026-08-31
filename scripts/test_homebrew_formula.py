@@ -45,6 +45,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         digests = fixture(directory)
+        (directory / f"tessivum-market-{VERSION}.tgz.sha256").write_text("market checksum\n", encoding="utf-8")
         result = generate(directory)
         assert result.returncode == 0, result.stderr
         formula = (directory / "tessivum.rb").read_text(encoding="utf-8")
