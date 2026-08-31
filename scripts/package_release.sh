@@ -116,7 +116,7 @@ cp "$host_modules/@deepseek-ai/schemastery/LICENSE" \
   "$stage/share/licenses/@deepseek-ai-schemastery-3.18.1/LICENSE"
 cp "$market_license" "$stage/share/licenses/tessivum-market-$version/LICENSE"
 
-cat > "$stage/bin/tessivum" <<'LAUNCHER'
+sed "s|@MARKET_FILENAME@|$market_filename|g" > "$stage/bin/tessivum" <<'LAUNCHER'
 #!/usr/bin/env sh
 set -eu
 launcher=$0
@@ -131,10 +131,11 @@ done
 root=$(CDPATH= cd -- "$(dirname -- "$launcher")/.." && pwd)
 : "${TESSIVUM_COMPAT_HOST:=$root/share/tessivum/compat-host/src/index.ts}"
 : "${TESSIVUM_HOST_MODULE_ROOT:=$root/share/tessivum/host-modules}"
-: "${TESSIVUM_MARKET_TARBALL:=$root/share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz}"
-: "${TESSIVUM_MARKET_SHA256_FILE:=$root/share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz.sha256}"
+: "${TESSIVUM_MARKET_TARBALL:=$root/share/tessivum/plugins/@MARKET_FILENAME@}"
+: "${TESSIVUM_MARKET_SHA256_FILE:=$root/share/tessivum/plugins/@MARKET_FILENAME@.sha256}"
+: "${TESSIVUM_MARKET_SOURCE_FILE:=$root/share/tessivum/plugins/@MARKET_FILENAME@.source.json}"
 : "${CORDIS_VENDOR_ROOT:=$root/share/tessivum/vendor}"
-export TESSIVUM_COMPAT_HOST TESSIVUM_HOST_MODULE_ROOT TESSIVUM_MARKET_TARBALL TESSIVUM_MARKET_SHA256_FILE CORDIS_VENDOR_ROOT
+export TESSIVUM_COMPAT_HOST TESSIVUM_HOST_MODULE_ROOT TESSIVUM_MARKET_TARBALL TESSIVUM_MARKET_SHA256_FILE TESSIVUM_MARKET_SOURCE_FILE CORDIS_VENDOR_ROOT
 exec "$root/libexec/tessivum" "$@"
 LAUNCHER
 chmod +x "$stage/bin/tessivum"

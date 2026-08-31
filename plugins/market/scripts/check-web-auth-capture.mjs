@@ -57,11 +57,11 @@ export function checkAuthenticatedBrowserLane(paths = []) {
     failures.push(...scan('package.json scripts.test:web', testWeb))
   }
 
-  const workflow = readFileSync(resolve(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
-  if (!workflow.includes('npm run test:web')) {
-    failures.push('.github/workflows/ci.yml: Web E2E must run through npm run test:web')
+  const workflow = readFileSync(resolve(ROOT, '..', '..', '.github', 'workflows', 'ci.yml'), 'utf8')
+  if (!workflow.includes('bun test ./tests/migrated.test.ts')) {
+    failures.push('../../.github/workflows/ci.yml: Browser E2E must run through the product scenario suite')
   }
-  failures.push(...scan('.github/workflows/ci.yml', workflow))
+  failures.push(...scan('../../.github/workflows/ci.yml', workflow))
   return failures
 }
 

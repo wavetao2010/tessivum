@@ -1,8 +1,0 @@
-{
-  "name": "tessivum-market-offline-profile-fixture",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "tessivum-market": "file:./tessivum-market-0.1.0-alpha.17.tgz"
-  }
-}

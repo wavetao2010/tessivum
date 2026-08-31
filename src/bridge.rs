@@ -31,7 +31,7 @@ use tokio::{
 };
 
 use crate::{
-    agent::{AgentAuthority, AgentOptions, AgentRegistry, InboxTarget},
+    agent::{AgentAuthority, AgentOptions, AgentRegistry, AgentStatus, InboxTarget},
     agent_mode::AgentModeId,
     credentials::{CredentialRef, Credentials},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream},
@@ -59,6 +59,7 @@ pub const LOGGER_SERVICE: &str = "logger@1";
 pub const TIMERS_SERVICE: &str = "timers@1";
 pub const SETTINGS_SERVICE: &str = "settings@1";
 pub const CREDENTIALS_SERVICE: &str = "credentials@1";
+pub const HOST_LIFECYCLE_SERVICE: &str = "hostLifecycle@1";
 const MAX_WEB_ROUTES: usize = 256;
 const MAX_WEB_HEADERS: usize = 64;
 const MAX_WEB_HEADER_BYTES: usize = 16 * 1024;
@@ -560,6 +561,10 @@ pub trait DomainLogger: Send + Sync {
 pub trait DomainEventSink: Send + Sync {
     fn emit(&self, event: &str, payload: &Value) -> Result<Value, TessivumError>;
 }
+/// Host-owned process lifecycle boundary. Plugins can request, never parameterize, a restart.
+pub trait HostLifecycle: Send + Sync {
+    fn restart(&self) -> Result<(), TessivumError>;
+}
 
 #[derive(Default)]
 struct NoopLogger;
@@ -583,6 +588,7 @@ pub struct BridgeServices {
     event_sink: Option<Arc<dyn DomainEventSink>>,
     permitted_events: Arc<BTreeSet<String>>,
     pnpm: Option<Arc<dyn PnpmBoundary>>,
+    host_lifecycle: Option<Arc<dyn HostLifecycle>>,
 }
 
 impl BridgeServices {
@@ -608,6 +614,7 @@ impl BridgeServices {
             event_sink: None,
             permitted_events: Arc::new(BTreeSet::new()),
             pnpm: None,
+            host_lifecycle: None,
         }
     }
 
@@ -650,6 +657,12 @@ impl BridgeServices {
     /// Installs the profile-owned package-operation boundary.
     pub fn with_pnpm_boundary(mut self, boundary: Arc<dyn PnpmBoundary>) -> Self {
         self.pnpm = Some(boundary);
+        self
+    }
+
+    /// Installs the optional product-owned restart boundary.
+    pub fn with_host_lifecycle(mut self, lifecycle: Arc<dyn HostLifecycle>) -> Self {
+        self.host_lifecycle = Some(lifecycle);
         self
     }
 }
@@ -1314,10 +1327,46 @@ impl DomainBridge {
             TIMERS_SERVICE => self.timers(generation, &request.method, request.params),
             SETTINGS_SERVICE => self.settings(&request.method, request.params).await,
             CREDENTIALS_SERVICE => self.credentials(&request.method, request.params).await,
+            HOST_LIFECYCLE_SERVICE => {
+                self.host_lifecycle(generation, &request.method, request.params)
+            }
             _ => Err(remote(
                 "UNKNOWN_SERVICE",
                 "service is not exposed by DomainBridge",
             )),
+        }
+    }
+
+    fn host_lifecycle(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        require_node_generation(generation)?;
+        let lifecycle = self.inner.services.host_lifecycle.as_ref().ok_or_else(|| {
+            remote(
+                "SERVICE_NOT_FOUND",
+                "host lifecycle service is not configured",
+            )
+        })?;
+        match method {
+            "restart" => {
+                decode_empty(params)?;
+                if self
+                    .inner
+                    .services
+                    .agents
+                    .list()
+                    .iter()
+                    .any(|agent| agent.status() == AgentStatus::Running)
+                {
+                    return Err(remote("HOST_BUSY", "active agents prevent restart"));
+                }
+                lifecycle.restart().map_err(tessivum_error)?;
+                Ok(json!({"accepted": true}))
+            }
+            _ => unknown_method(HOST_LIFECYCLE_SERVICE, method),
         }
     }
 
@@ -3524,5 +3573,87 @@ mod alpha11_tests {
             json!({"cancelled": false})
         );
         assert!(running.await.expect("runner task joins").is_ok());
+    }
+    struct TestLifecycle {
+        calls: Arc<AtomicUsize>,
+        failure: Option<&'static str>,
+    }
+
+    impl HostLifecycle for TestLifecycle {
+        fn restart(&self) -> Result<(), TessivumError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            match self.failure {
+                Some(code) => Err(TessivumError::new(
+                    code,
+                    "restart rejected",
+                    "hostLifecycle",
+                    Value::Null,
+                )),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn lifecycle_frame(generation: u64, request_id: u64, params: Value) -> Frame {
+        Frame::request(
+            generation,
+            request_id,
+            FrameKind::ServiceCall,
+            json!({
+                "service": HOST_LIFECYCLE_SERVICE,
+                "method": "restart",
+                "params": params,
+            }),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_lifecycle_is_optional_fixed_and_preserves_rejections() {
+        let absent = bridge();
+        attach(&absent, 1);
+        assert_eq!(
+            remote_code(
+                BridgeHandler::handle(&absent, lifecycle_frame(1, 1, json!({})))
+                    .expect_err("missing lifecycle is typed"),
+            ),
+            "SERVICE_NOT_FOUND"
+        );
+
+        for (failure, expected) in [
+            (None, None),
+            (Some("HOST_SHUTTING_DOWN"), Some("HOST_SHUTTING_DOWN")),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRuntime::new();
+            let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+            let agents = AgentRegistry::new(sessions.clone());
+            let configured = DomainBridge::new(
+                BridgeServices::new(
+                    tools,
+                    SystemPrompt::new(),
+                    LlmRuntime::new(),
+                    sessions,
+                    agents,
+                )
+                .with_host_lifecycle(Arc::new(TestLifecycle {
+                    calls: Arc::clone(&calls),
+                    failure,
+                })),
+            )
+            .expect("bridge constructs");
+            attach(&configured, 1);
+            let result = BridgeHandler::handle(&configured, lifecycle_frame(1, 2, json!({})));
+            match expected {
+                None => assert_eq!(result.unwrap(), json!({"accepted": true})),
+                Some(code) => assert_eq!(remote_code(result.unwrap_err()), code),
+            }
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert!(BridgeHandler::handle(
+                &configured,
+                lifecycle_frame(1, 3, json!({"command": "rm -rf /"})),
+            )
+            .is_err());
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
     }
 }

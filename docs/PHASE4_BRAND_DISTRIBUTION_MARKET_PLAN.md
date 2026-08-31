@@ -342,6 +342,8 @@ Activation:                   restart-required
 
 升级 dshmarket 前必须单独更新 package/peer/route/CLI 行为快照。文档不得把该矩阵外推为所有版本兼容。
 
+Alpha.16 将 `dsh-dream-skin@8.30.1` 加入已测试兼容目标。永久 fixture 声明精确 package name/version，提供 `/dream-skin/api` Host 持久化路由和 Browser client。这个版本 pin 只定义测试证据，不是运行时安装 allowlist；实现不得因 package 名或版本不等于该 fixture 而拒绝安装。
+
 ### 9.2 Legacy `webServer` 有界 facade
 
 `dshmarket` 使用 `webServer.register({ kind, path, handler })` 注册 HTTP 路由。Tessivum 不启动第二个 Node HTTP listener；Rust Axum 仍是唯一监听者。
@@ -377,7 +379,7 @@ v1 不提供：
 - Node 自行 listen；
 - 绕过 Host/Origin 或 body limit。
 
-Tessivum 产品 policy 只允许固定兼容样本注册其自有前缀：`/dsh-market`、`/sidebar` 与 `/dream-skin`。Core transport 负责 framed callback、取消和 generation cleanup；产品仓库负责 Axum 路由、前缀 allowlist、HTTP DTO 与 authority。
+Tessivum 产品 policy 只允许固定兼容样本注册其自有根：`/dsh-market`、`/sidebar` 与 `/dream-skin`。每个根仅匹配根本身或后接 `/` 的路径段边界；例如 `/dream-skin/api` 合法，`/dream-skin-evil` 不合法。其他所有 Legacy 命名空间和越界前缀均在注册前以结构化 `INVALID_ROUTE_PATH` 拒绝，不会进入 Node handler 或打开泛用途由面。Core transport 负责 framed callback、取消和 generation cleanup；产品仓库负责 Axum 路由、前缀 allowlist、HTTP DTO 与 authority。
 
 ### 9.3 Host-owned Profile 与包管理服务
 

@@ -46,7 +46,7 @@ use crate::{
         attachments_service_key, decode_inline_image, AttachmentData, AttachmentError,
         AttachmentId, AttachmentInput, AttachmentLimits, AttachmentRef, AttachmentStore,
     },
-    bridge::{BridgeServices, DomainBridge, WasmPolicyRegistry},
+    bridge::{BridgeServices, DomainBridge, HostLifecycle, WasmPolicyRegistry},
     builtin_tools::{
         BashJobOwners, BuiltinTools, BuiltinToolsConfig, HostToolServices, PersistentShellSessions,
     },
@@ -860,6 +860,7 @@ pub struct HostConfig {
     pub entries: Option<EntryTree>,
     pub legacy_profile: Option<LegacyProfile>,
     pub legacy_host: Option<LegacyHostConfig>,
+    pub host_lifecycle: Option<Arc<dyn HostLifecycle>>,
     pub package_resolver: Option<Arc<dyn PackageResolver>>,
     pub wasm_limits: ResourceLimits,
     pub telemetry: Option<TelemetryCoordinator>,
@@ -940,6 +941,7 @@ impl HostConfig {
             legacy_profile: None,
             package_resolver: None,
             legacy_host: None,
+            host_lifecycle: None,
             wasm_limits: ResourceLimits::default(),
             telemetry: None,
         }
@@ -2930,27 +2932,29 @@ impl HostRuntime {
 
         let legacy = match (&config.legacy_profile, &config.legacy_host) {
             (Some(profile), _) => Some(profile.clone()),
-            (None, Some(host)) => Some(
-                LegacyProfile::new(
-                    host.command.clone(),
-                    host.client.clone(),
-                    BridgeServices::new(
-                        tools.clone(),
-                        prompt.clone(),
-                        llm.clone(),
-                        sessions.clone(),
-                        registry.clone(),
-                    )
-                    .with_subagents(subagents.clone())
-                    .with_settings(Arc::clone(&settings))
-                    .with_credentials(Arc::clone(&credentials))
-                    .with_pnpm_boundary(Arc::new(
-                        PnpmProfileBoundary::new(plugin_profile_root(&config.data_dir))
-                            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
-                    )),
+            (None, Some(host)) => {
+                let mut services = BridgeServices::new(
+                    tools.clone(),
+                    prompt.clone(),
+                    llm.clone(),
+                    sessions.clone(),
+                    registry.clone(),
                 )
-                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
-            ),
+                .with_subagents(subagents.clone())
+                .with_settings(Arc::clone(&settings))
+                .with_credentials(Arc::clone(&credentials))
+                .with_pnpm_boundary(Arc::new(
+                    PnpmProfileBoundary::new(plugin_profile_root(&config.data_dir))
+                        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+                ));
+                if let Some(lifecycle) = &config.host_lifecycle {
+                    services = services.with_host_lifecycle(Arc::clone(lifecycle));
+                }
+                Some(
+                    LegacyProfile::new(host.command.clone(), host.client.clone(), services)
+                        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+                )
+            }
             (None, None) => None,
         };
         if let Some(profile) = &legacy {

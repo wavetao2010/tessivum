@@ -23,13 +23,16 @@ function fixedCatalog(): FixedCatalog {
 /** Merge release-fixed first-party entries with the live DSH community registry. */
 export function marketCatalog(community: Registry): Registry {
   const firstParty = fixedCatalog()
+  const firstPartyNames = new Set(firstParty.plugins.flatMap(plugin => [plugin.name, plugin.npm].filter((name): name is string => typeof name === 'string')))
   const plugins = [
     ...firstParty.plugins,
-    ...community.plugins.map(plugin => ({
-      ...plugin,
-      catalogSource: 'dsh-community' as const,
-      tessivumCompatibility: plugin.tessivumCompatibility === 'verified' ? 'verified' as const : 'unverified' as const,
-    })),
+    ...community.plugins
+      .filter(plugin => !firstPartyNames.has(plugin.name) && (plugin.npm === undefined || plugin.npm === null || !firstPartyNames.has(plugin.npm)))
+      .map(plugin => ({
+        ...plugin,
+        catalogSource: 'dsh-community' as const,
+        tessivumCompatibility: plugin.tessivumCompatibility === 'verified' ? 'verified' as const : 'unverified' as const,
+      })),
   ]
   return {
     ...community,

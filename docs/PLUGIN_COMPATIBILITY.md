@@ -1,6 +1,6 @@
 # Tessivum 插件生态兼容方案
 
-> 目标：在 Rust 化 Host/Agent Runtime 的同时保留现有 DeepSeek Harness npm 插件生态，并为新插件建立 Extism/WASM 路径。总体顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，运行时细节见[目标运行时架构](ARCHITECTURE.md)，Native Mode 与 `agent.cordis.yml` clean cutover 见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)，dshmarket 的版本冻结、HTTP 路由桥和 Profile mutation 门槛见 [Phase 4 计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
+> 目标：在 Rust 化 Host/Agent Runtime 的同时保留现有 DeepSeek Harness npm 插件生态，并为新插件建立 Extism/WASM 路径。总体顺序见[二阶段开发计划](DEVELOPMENT_PLAN.md)，运行时细节见[目标运行时架构](ARCHITECTURE.md)，Native Mode 与 `agent.cordis.yml` clean cutover 见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)，当前 Profile authority 与 mutation 语义见 [Phase 6 计划](PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)，早期 dshmarket HTTP Bridge 架构记录见 [Phase 4 计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
 
 ## 1. 结论
 
@@ -421,6 +421,8 @@ WASM 权限至少覆盖：
 
 Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 
+Alpha.16 的 Legacy `web.route/v1` 注册只接受 `/dsh-market`、`/sidebar`、`/dream-skin` 三个根命名空间及其路径段后代；其他根、编码绕过和相似前缀必须结构化拒绝。固定版本是已验证的兼容目标，不是运行时安装白名单。
+
 ## 14. 测试矩阵
 
 ### 14.1 Legacy 样本
@@ -442,6 +444,8 @@ Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 - `dshmarket@1.29.2`：Profile mutation、HTTP prefix route、Browser client bundle 与重启激活；
 - `dsh-better-sidebar@0.16.1`：Host/Browser 双半插件、HTTP prefix route、WebSocket upgrade、native-backed settings 写入及重启恢复。
 - `dsh-dream-skin@8.30.1`：Host/Browser 双半插件、`/dream-skin/api` 有界状态持久化路由与浏览器主题 bundle；
+
+`tessivum-market@0.1.0-alpha.17` 是另行验证的第一方 Host + Browser 双半插件：保留 `dshmarket@1.38.1` 的固定 MIT 来源与 DSH 社区目录，增加 Tessivum 产品身份、精确版本更新、旧 `dshmarket` 事务迁移、Host-owned 重启和发行物校验。它不扩大上述未修改社区包的固定版本矩阵；实现与证据见 [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 
 ### 14.2 WASM 样本
 

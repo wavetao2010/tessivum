@@ -13,6 +13,7 @@ use tessivum::{
     api::{ApiServer, ApiServerConfig},
     frontend::FrontendStatic,
     host::{HostApi, HostConfig, HostRuntime},
+    plugin_manager::configure_host_plugins,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -73,6 +74,27 @@ fn install_web_half(fixture: &Fixture) -> (PathBuf, PathBuf) {
         "export const revision = 1;",
     );
     (fixture.path().join("dist"), fixture.path().join("packages"))
+}
+
+fn install_dream_skin_profile(fixture: &Fixture) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/community/dream-skin");
+    let package = Path::new("data/plugins/node_modules/dsh-dream-skin");
+    fixture.write(
+        "data/plugins/package.json",
+        r#"{"private":true,"dependencies":{"dsh-dream-skin":"8.30.1"},"dsh":{"profile":{"bundles":["dsh-dream-skin"]}}}"#,
+    );
+    for relative in [
+        "package.json",
+        "cordis.patch.yml",
+        "lib/index.js",
+        "lib/client.js",
+    ] {
+        fixture.write(
+            package.join(relative),
+            &fs::read_to_string(source.join(relative)).expect("dream skin fixture is readable"),
+        );
+    }
+    fixture.path().join("data/plugins")
 }
 
 fn boot_graph(html: &str) -> Value {
@@ -1218,4 +1240,180 @@ async fn durable_multi_workspace_api_survives_restart_and_preserves_isolation() 
         .any(|session| session["sessionId"] == "multi-one"));
     resumed_server.shutdown().await.unwrap();
     resumed.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dream_skin_profile_routes_persist_through_host_restart() {
+    let fixture = Fixture::new("dream-skin");
+    let profile = install_dream_skin_profile(&fixture);
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(profile.join("node_modules/dsh-dream-skin/package.json"))
+            .expect("dream skin manifest reads"),
+    )
+    .expect("dream skin manifest is JSON");
+    assert_eq!(manifest["name"], "dsh-dream-skin");
+    assert_eq!(manifest["version"], "8.30.1");
+    assert_eq!(manifest["dsh"]["bundle"]["patch"], "./cordis.patch.yml");
+
+    fixture.write(
+        "dist/index.html",
+        "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>",
+    );
+    let frontend = FrontendStatic::new(fixture.path().join("dist")).expect("distribution is valid");
+    let graph = frontend
+        .scan_packages([profile.join("node_modules")])
+        .expect("dream skin browser package is discovered");
+    let client_entry = graph
+        .entries
+        .iter()
+        .find(|entry| entry.id == "dsh-dream-skin")
+        .expect("dream skin client is in the boot graph");
+
+    let home = fixture.path().join("dream-skin-home");
+    let mut config = host_config(&fixture);
+    config.cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    configure_host_plugins(&mut config).expect("dream skin profile configures");
+    config.cwd = fixture.path().to_path_buf();
+    config
+        .legacy_host
+        .as_mut()
+        .expect("profile creates a Legacy Node host")
+        .command
+        .env
+        .push((
+            std::ffi::OsString::from("DSH_HOME"),
+            home.clone().into_os_string(),
+        ));
+
+    let runtime = HostRuntime::boot(config.clone())
+        .await
+        .expect("dream skin Host runtime boots");
+    let handle = runtime.handle();
+    let web_routes = handle
+        .web_route_registry()
+        .expect("Legacy Node host exposes web routes");
+    let mut server = ApiServer::bind_with_web_routes(
+        Arc::new(handle),
+        ApiServerConfig {
+            bind_addr: "127.0.0.1:0".parse().expect("loopback address"),
+            frontend: Some(frontend.clone()),
+        },
+        Vec::new(),
+        Some(web_routes),
+    )
+    .await
+    .expect("web server binds");
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let index = client
+        .get(&base)
+        .send()
+        .await
+        .expect("boot graph is served")
+        .text()
+        .await
+        .expect("boot graph is text");
+    let boot = boot_graph(&index);
+    let boot_entry = boot["entries"]
+        .as_array()
+        .expect("boot entries")
+        .iter()
+        .find(|entry| entry["id"] == "dsh-dream-skin")
+        .expect("dream skin entry is booted");
+    assert_eq!(boot_entry["url"], client_entry.url);
+    assert_eq!(
+        client
+            .get(format!("{base}{}", client_entry.url))
+            .send()
+            .await
+            .expect("dream skin client is served")
+            .text()
+            .await
+            .expect("dream skin client is text"),
+        "export const dreamSkinClient = 'dsh-dream-skin@8.30.1';\n"
+    );
+
+    let state = json!({"skin": "aurora", "wallpaper": "data:image/png;base64,c2tpbg=="});
+    assert_eq!(
+        client
+            .post(format!("{base}/dream-skin/api"))
+            .json(&json!({"method": "set", "patch": state.clone()}))
+            .send()
+            .await
+            .expect("dream skin state saves")
+            .json::<Value>()
+            .await
+            .expect("dream skin save response is JSON"),
+        json!({"ok": true})
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(
+            &fs::read_to_string(home.join("dream-skin.json")).expect("state reaches DSH_HOME"),
+        )
+        .expect("saved state is JSON"),
+        state
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/dream-skin/api"))
+            .json(&json!({"method": "get"}))
+            .send()
+            .await
+            .expect("dream skin state loads")
+            .json::<Value>()
+            .await
+            .expect("dream skin state is JSON"),
+        json!({"ok": true, "value": state})
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/dream-skin-evil"))
+            .json(&json!({"method": "set", "patch": state.clone()}))
+            .send()
+            .await
+            .expect("unsupported namespace never reaches Legacy route")
+            .status(),
+        reqwest::StatusCode::METHOD_NOT_ALLOWED
+    );
+
+    server.shutdown().await.expect("server drains sockets");
+    runtime.shutdown().await.expect("host shuts down");
+
+    let resumed = HostRuntime::boot(config)
+        .await
+        .expect("dream skin Host runtime restarts");
+    let resumed_handle = resumed.handle();
+    let resumed_routes = resumed_handle
+        .web_route_registry()
+        .expect("restarted Legacy Node host exposes web routes");
+    let mut resumed_server = ApiServer::bind_with_web_routes(
+        Arc::new(resumed_handle),
+        ApiServerConfig {
+            bind_addr: "127.0.0.1:0".parse().expect("loopback address"),
+            frontend: Some(frontend),
+        },
+        Vec::new(),
+        Some(resumed_routes),
+    )
+    .await
+    .expect("restarted web server binds");
+    let resumed_base = format!("http://{}", resumed_server.local_addr());
+    assert_eq!(
+        client
+            .post(format!("{resumed_base}/dream-skin/api"))
+            .json(&json!({"method": "get"}))
+            .send()
+            .await
+            .expect("persisted dream skin state loads")
+            .json::<Value>()
+            .await
+            .expect("persisted dream skin state is JSON"),
+        json!({"ok": true, "value": state})
+    );
+    resumed_server
+        .shutdown()
+        .await
+        .expect("restarted server drains sockets");
+    resumed.shutdown().await.expect("restarted host shuts down");
 }

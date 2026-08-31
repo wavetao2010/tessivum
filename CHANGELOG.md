@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.17 - 2026-08-31
+
+### Added
+
+- `tessivum-market`, derived from the MIT-licensed `dshmarket@1.38.1` source, as a first-party Host + Browser plugin with retained upstream provenance and license files.
+- Checksum-verified market tarballs in release archives and GitHub release assets, with immutable copies under the user data root.
+- Native Host + Bun client + Chromium coverage for first install, category and theme discovery, and profile snapshot restoration.
+
+### Changed
+
+- Packaged Web startup transactionally installs or upgrades the matching market release and replaces legacy `dshmarket`/`dsh-market` dependency and bundle entries while preserving market state.
+- Market update mutations consume the exact version and registry selected by the latest check; first-party self-update and self-removal are rejected.
+- Tessivum pins `tessivum-core v0.1.6` revision `4c3d7b7769e43e2eb228ebf43d46bef6119c4574` for the market integration release.
+
 ## 0.1.0-alpha.16 - 2026-08-31
 
 ### Added
@@ -10,6 +24,7 @@
 
 - Legacy web routes are restricted to the supported `/dsh-market`, `/sidebar`, and `/dream-skin` namespaces.
 - Tessivum pins the `tessivum-core v0.1.6` route-policy revision at `7150b20df296e52403de00f36fdc1dd9bf93edde`.
+- Process shutdown keeps a bounded ten-second drain window so real Legacy plugin disposers can finish before forced exit; packaged smoke rejects forced or failed shutdown.
 
 ## 0.1.0-alpha.15 - 2026-08-28
 

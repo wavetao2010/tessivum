@@ -195,7 +195,7 @@ describe('Anywhere Labs install boundary (#215, #219, #272)', () => {
     // offers instead accepts ONLY `name@1.2.3` — not a bare name, which is
     // what the market sends for a registry plugin. Read from their published
     // validateExternalMarketInstallArgs, not assumed.
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ version: '2.3.4' }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ 'dist-tags': { latest: '2.3.4' } }), { status: 200 })))
     const { service, plain, boundary } = boundaryService()
     const runtime = createDesktopPluginRuntime(service, profileFixture(), '/tmp', 10_000)
     await runtime.runPlugin('web', ['add', 'example-plugin'])

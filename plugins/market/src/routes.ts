@@ -22,6 +22,7 @@ import { createGroup, deleteGroup, removeFromGroups, renameGroup, setGroupMember
 import { dshHostInfo } from './dsh-install.ts'
 import { configurePersistentLog, exportLogs, logEvent, readPersistentLog } from './log.ts'
 import { marketFetch } from './net.ts'
+import { readJsonBody, sameOrigin, sendJson } from './http.ts'
 import { diagnosePackageManifests } from './diagnostics.ts'
 import {
   BOOT_ID, cancelActive, probePnpm, progress, provisionPnpm, runDshPlugin,
@@ -292,7 +293,7 @@ export function mountMarketRoutes(
   const checkedNpmTargets = new Map<string, { targetVersion: string; publishedAt: string | null; registryOrigin: string }>()
   const rememberCheckedTargets = (updates: Record<string, UpdateStatus>): void => {
     for (const [name, update] of Object.entries(updates)) {
-      if (update.kind !== 'npm' || update.targetVersion == null || update.registryOrigin === undefined) continue
+      if (update.kind === 'github' || update.targetVersion == null || update.registryOrigin === undefined) continue
       checkedNpmTargets.set(name, {
         targetVersion: update.targetVersion,
         publishedAt: update.publishedAt ?? null,
@@ -969,6 +970,11 @@ export function mountMarketRoutes(
             sendJson(response, 400, { schema: UPDATE_API_V1_SCHEMA, error: 'a valid package name is required' })
             return
           }
+          const targetVersion = typeof body.targetVersion === 'string' && body.targetVersion !== '' ? body.targetVersion : null
+          if (targetVersion === null) {
+            sendJson(response, 400, { schema: UPDATE_API_V1_SCHEMA, error: 'targetVersion is required' })
+            return
+          }
           if (operationsV1.hasActive()) {
             sendJson(response, 409, {
               schema: UPDATE_API_V1_SCHEMA,
@@ -994,11 +1000,21 @@ export function mountMarketRoutes(
             })
             return
           }
+          const checkedUpdates = await checkUpdates(config.profile, true, activeProfileDir)
+          rememberCheckedTargets(checkedUpdates)
+          if (checkedUpdates[packageName]?.targetVersion !== targetVersion) {
+            sendJson(response, 409, {
+              schema: UPDATE_API_V1_SCHEMA,
+              error: 'the registry target changed; check updates again',
+              failure: { code: 'TARGET_CHANGED', message: 'the registry target changed; check updates again', retryable: true },
+            })
+            return
+          }
           const operation = operationsV1.create(packageName, installedVersion)
           operationsV1.start(operation.operationId)
           void invokeLegacy('/dsh-market/update', request, 'POST', {
             name: packageName,
-            ...(typeof body.targetVersion === 'string' ? { targetVersion: body.targetVersion } : {}),
+            targetVersion,
             ...(body.force === true ? { force: true } : {}),
           }).then(({ status, payload }) => {
             operationsV1.finish(
@@ -2042,7 +2058,7 @@ export function mountMarketRoutes(
           try {
             const registry = await loadRegistry()
             for (const [name, spec] of Object.entries(installed)) {
-              if (!spec.toLowerCase().startsWith('file:')) continue
+              if (!isLocalSpec(spec)) continue
               const evidence = readInstalledRepoEvidence(config.profile, name, spec, activeProfileDir)
               const entry = findCatalogEntryForLocal(registry.plugins, name, evidence.identities, evidence.hints)
               const target = entry === null ? null : restoreTargetForLocal(entry, evidence.identities)
@@ -2121,10 +2137,6 @@ export function mountMarketRoutes(
               sendJson(response, 400, { error: 'restore 只适用于 link:/file: 的本地开发安装。 / Restore only applies to locally developed link:/file: installs.' })
               return
             }
-            if (restore && SELF_NAMES.has(name) && spec.toLowerCase().startsWith('link:')) {
-              sendJson(response, 400, { error: '市场的本地开发链接不会被线上版本替换。 / The market\'s local development link is never replaced by an online release.' })
-              return
-            }
             if (isLocalSpec(spec)) {
               if (!restore) {
                 sendJson(response, 400, { error: 'locally linked plugins update from their checkout' })
@@ -2178,7 +2190,7 @@ export function mountMarketRoutes(
               ? githubUpdateTarget(spec)
               : codeloadRepo === null ? null : `github:${codeloadRepo}`
             const isGit = gitSpec !== null
-            const npmName = !isGit && (restore ? (NPM_NAME_RE.test(spec) ? spec : null) : name)
+            const npmName = isGit ? null : (restore ? (NPM_NAME_RE.test(spec) ? spec : null) : name)
             let expectedNpmVersion: string | null = null
             let target: string
             if (npmName !== null) {
@@ -2423,17 +2435,12 @@ export function mountMarketRoutes(
                 }
               }
             }
-            // Diagnose the stale outcome with EVIDENCE (#45 by @ayingQAQ):
-            // only blame pnpm's fresh-release wait when the target's latest
-            // release really is young; otherwise be honest that the cause is
-            // unconfirmed. Git installs never hit the age gate.
-            const youngRelease = stale && !isGit ? await latestPublishedRecently(name) : false
-            const staleReason = stale ? (youngRelease === true ? 'release-age' : 'unknown') : null
-            const staleError = !stale
-              ? null
-              : staleReason === 'release-age'
-                ? '这个新版本刚发布不久。为了安全，系统默认会等它发布满一天后再安装——刚发布的版本偶尔会被发现问题然后撤回。可以明天再试，或点「立即更新」不再等待。 / This version was just released; for safety, installs normally wait about a day after a release. Try again tomorrow, or click "Update now" to install it right away.'
-                : '更新命令执行完成，但版本没有变化，原因未能确认。点「立即更新」重试通常能解决；若仍不行，请导出日志反馈。 / The update command completed but the version did not change; the cause could not be confirmed. Clicking "Update now" to retry usually resolves it — if not, export the log and report it.'
+            // Release age was checked against the exact version before mutation.
+            // A stale result here has another cause; do not relabel it from mutable registry state.
+            const staleReason = stale ? 'unknown' : null
+            const staleError = stale
+              ? '更新命令执行完成，但版本没有变化，原因未能确认。点「立即更新」重试通常能解决；若仍不行，请导出日志反馈。 / The update command completed but the version did not change; the cause could not be confirmed. Clicking "Update now" to retry usually resolves it — if not, export the log and report it.'
+              : null
             // Actionable, because the user's own recovery is the right one:
             // the bad artifact is cached under its integrity hash, so a plain
             // re-add reuses it — the package has to be removed first.
@@ -2565,7 +2572,7 @@ export function mountMarketRoutes(
           response.end()
           return
         }
-        if (!sameOrigin(request)) {
+        if (!sameOrigin(request) || !trustedDownloadRequest(request)) {
           sendJson(response, 403, { error: 'untrusted origin' })
           return
         }
@@ -2753,7 +2760,7 @@ export function mountMarketRoutes(
             // has a concrete thing to go fix, so an override would only help
             // them break their next boot.
             const force = body.force === true
-            if (name === 'dsh-market' || name === 'dshmarket') {
+            if (SELF_NAMES.has(name)) {
               sendJson(response, 400, { error: 'the market cannot uninstall itself; use the dsh CLI' })
               return
             }

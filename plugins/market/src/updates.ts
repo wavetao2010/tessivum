@@ -288,7 +288,7 @@ export async function checkUpdates(
   await Promise.all(Object.entries(installed).map(async ([name, spec]) => {
     const version = readInstalledVersion(profile, name, activeProfileDir)
     const normalizedSpec = spec.toLowerCase()
-    if (normalizedSpec.startsWith('file:')) {
+    if (normalizedSpec.startsWith('file:') || normalizedSpec.startsWith('link:')) {
       const onlineSource = onlineSourceFor.get(name)
       if (onlineSource !== undefined) {
         const target = await fetchNpmTarget(onlineSource)
@@ -301,10 +301,6 @@ export async function checkUpdates(
         }
         return
       }
-      result[name] = { kind: 'linked', version, current: null, latest: null, updateAvailable: false }
-      return
-    }
-    if (normalizedSpec.startsWith('link:')) {
       result[name] = { kind: 'linked', version, current: null, latest: null, updateAvailable: false }
       return
     }

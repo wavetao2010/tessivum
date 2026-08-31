@@ -6,6 +6,7 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['tests/**/*.spec.ts', 'tests/**/*.spec.tsx'],
+    setupFiles: ['./tests/setup.ts'],
     exclude: ['tests/**/*.compat.spec.ts', '**/node_modules/**'],
     pool: 'forks',
     testTimeout: 20_000,

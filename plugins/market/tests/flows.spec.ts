@@ -425,6 +425,14 @@ function createTestbed(
   // through a REAL proxy. Specs that care about the mirrors set it.
   const dispose = mountMarketRoutes(host as never, { profile: 'web', region: 'global', ...config }, runtime, () => agents)
   async function dispatch(method: string, path: string, body?: unknown, options?: { crossOrigin?: boolean }) {
+    if (method === 'POST' && path === '/dsh-market/update' && body !== null && typeof body === 'object') {
+      const update = body as { name?: unknown; targetVersion?: unknown }
+      if (typeof update.name === 'string' && fake.npm[update.name] !== undefined && !Object.hasOwn(update, 'targetVersion')) {
+        const checked = await dispatch('GET', '/dsh-market/updates?force=1')
+        const targetVersion = checked.json.updates?.[update.name]?.targetVersion
+        if (typeof targetVersion === 'string') body = { ...update, targetVersion }
+      }
+    }
     const handler = routes.get(path.split('?')[0])
     if (handler === undefined) throw new Error(`no route: ${path}`)
     const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
@@ -483,7 +491,6 @@ beforeEach(() => {
   fake.bundlesBeforeFallbackAdd = null
   fake.running = false
   fake.calls = []
-  restartCalls.count = 0
   hot.mounts = []
   hot.disabled = new Set()
   hot.groups = {}
@@ -531,7 +538,7 @@ describe('host-provided profile and package-operation seams', () => {
     const provision = vi.fn(() => Promise.resolve({ ok: true }))
     const cancel = vi.fn(() => true)
     bed = createTestbed(
-      { profile: '工作 profile', profileDirectory: explicitDir, allowRestart: false },
+      { profile: '工作 profile', profileDirectory: explicitDir },
       { runPlugin: vi.fn() as never, probePnpm: probe, provisionPnpm: provision, cancelActive: cancel },
     )
 
@@ -545,10 +552,10 @@ describe('host-provided profile and package-operation seams', () => {
     expect(exportedManifest.json.dependencies).toEqual({ 'desktop-only': '1.0.0' })
     const status = await bed.dispatch('GET', '/dsh-market/status')
     expect(status.json).toMatchObject({
-      pnpm: true, restart: false, selfManaged: false, installed: { 'desktop-only': '1.0.0' },
+      pnpm: true, restart: false, lifecycle: null, installed: { 'desktop-only': '1.0.0' },
     })
     writeFileSync(join(explicitDir, 'package.json'), '{"dependencies":{"desktop-only":"1.0.0","dshmarket":"1.26.0"}}')
-    expect((await bed.dispatch('GET', '/dsh-market/status')).json.selfManaged).toBe(true)
+    expect((await bed.dispatch('GET', '/dsh-market/status')).json.installed).toMatchObject({ dshmarket: '1.26.0' })
     expect(probe).toHaveBeenCalledTimes(2)
     expect((await bed.dispatch('POST', '/dsh-market/setup-pnpm', {})).json.ok).toBe(true)
     expect(provision).toHaveBeenCalledOnce()
@@ -587,7 +594,7 @@ describe('host-provided profile and package-operation seams', () => {
     writeFileSync(join(explicitDir, 'node_modules', 'dsh-blue-whale', 'package.json'), '{"name":"dsh-blue-whale"}')
     writeFileSync(join(explicitDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
     fake.profileDir = explicitDir
-    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir, allowRestart: false })
+    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir })
 
     const approve = await bed.dispatch('POST', '/dsh-market/approve-builds', { packages: ['dsh-blue-whale'] })
     expect(approve.status).toBe(200)
@@ -610,7 +617,7 @@ describe('host-provided profile and package-operation seams', () => {
       versions: { '1.0.0': { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] } },
     }
     fake.failAfterWriteStderrOnce = '[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/ghost: Not Found - 404'
-    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir, allowRestart: false })
+    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir })
 
     const result = await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/dsh-loop' })
     expect(result.status).toBe(502)
@@ -638,8 +645,8 @@ describe('host-provided profile and package-operation seams', () => {
       },
     }
     fake.failAfterWriteStderrOnce = '[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/ghost: Not Found - 404'
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.2.0' }), { status: 200 })))
-    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir, allowRestart: false })
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.2.0' } }), { status: 200 })))
+    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir })
 
     const result = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
     expect(result.status).toBe(502)
@@ -660,7 +667,7 @@ describe('host-provided profile and package-operation seams', () => {
     }))
     writeFileSync(join(explicitDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
     fake.profileDir = explicitDir
-    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir, allowRestart: false })
+    bed = createTestbed({ profile: '工作 profile', profileDirectory: explicitDir })
 
     const result = await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/a2/dsh-usage-stats' })
     expect(result.status).toBe(400)
@@ -1075,7 +1082,7 @@ describe('update flow — no npm publishing required', () => {
     await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/dsh-loop' })
   })
 
-  function advanceNpmLatest(version: string, publishedHoursAgo = 1): void {
+  function advanceNpmLatest(version: string, publishedHoursAgo = 48): void {
     fake.npm['dsh-loop'].latest = version
     fake.npm['dsh-loop'].versions[version] = { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] }
     const publishedAt = new Date(Date.now() - publishedHoursAgo * 3_600_000).toISOString()
@@ -1124,26 +1131,12 @@ describe('update flow — no npm publishing required', () => {
 
     expect(r.status).toBe(502)
     expect(r.json).toMatchObject({ ok: false, failureCode: 'DOWNGRADE_DETECTED' })
-    expect(String(r.json.error)).toMatch(/拒绝降级|downgrade was rejected/)
+    expect(String(r.json.error)).toMatch(/below installed|低于已安装/)
     expect(installedSpec('dsh-loop')).toBe('^1.0.0')
     const installed = JSON.parse(readFileSync(join(fake.profileDir, 'node_modules', 'dsh-loop', 'package.json'), 'utf8')) as { version?: string }
     expect(installed.version).toBe('1.0.0')
   })
 
-  it('accepts a release published while the install was still running', async () => {
-    advanceNpmLatest('1.2.0')
-    fake.npm['dsh-loop'].versions['1.2.1'] = { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] }
-    // The author publishes 1.2.1 while pnpm is still downloading 1.2.0. A big
-    // plugin leaves minutes of window for that, and rolling the update back
-    // would report a good, newer build as a failure.
-    fake.resolvedNpmVersionOnce = '1.2.1'
-
-    const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
-
-    expect(r.json).toMatchObject({ ok: true })
-    const installed = JSON.parse(readFileSync(join(fake.profileDir, 'node_modules', 'dsh-loop', 'package.json'), 'utf8')) as { version?: string }
-    expect(installed.version).toBe('1.2.1')
-  })
 
   it('rejects and rolls back when pnpm resolves a newer but unexpected release', async () => {
     advanceNpmLatest('1.2.0')
@@ -1216,7 +1209,7 @@ describe('update flow — no npm publishing required', () => {
     fake.gate = new Promise<void>((resolvePromise) => { release = resolvePromise })
 
     const accepted = await bed.dispatch('POST', '/dsh-market/api/v1/updates', {
-      packageName: 'dsh-loop',
+      packageName: 'dsh-loop', targetVersion: '1.2.0',
     })
     expect(accepted.status).toBe(202)
     expect(accepted.json.operation).toMatchObject({
@@ -1228,7 +1221,7 @@ describe('update flow — no npm publishing required', () => {
     const operationId = String(accepted.json.operation.operationId)
 
     const concurrent = await bed.dispatch('POST', '/dsh-market/api/v1/updates', {
-      packageName: 'dsh-loop',
+      packageName: 'dsh-loop', targetVersion: '1.2.0',
     })
     expect(concurrent.status).toBe(409)
     expect(concurrent.json.failure).toMatchObject({ code: 'OPERATION_BUSY', retryable: true })
@@ -1259,7 +1252,7 @@ describe('update flow — no npm publishing required', () => {
       list: () => [{ id: 'main', status: 'running' }],
     })
     const accepted = await guarded.dispatch('POST', '/dsh-market/api/v1/updates', {
-      packageName: 'dsh-loop',
+      packageName: 'dsh-loop', targetVersion: '1.2.0',
     })
     expect(accepted.status).toBe(202)
     const operationId = String(accepted.json.operation.operationId)
@@ -1292,9 +1285,9 @@ describe('update flow — no npm publishing required', () => {
       },
       artifacts: ['lib/index.js'],
     }
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.2.0' }), { status: 200 })))
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.2.0' } }), { status: 200 })))
 
-    const accepted = await bed.dispatch('POST', '/dsh-market/api/v1/updates', { packageName: 'dsh-loop' })
+    const accepted = await bed.dispatch('POST', '/dsh-market/api/v1/updates', { packageName: 'dsh-loop', targetVersion: '1.2.0' })
     const operationId = String(accepted.json.operation.operationId)
     let completed = await bed.dispatch('GET', `/dsh-market/api/v1/operations?operationId=${operationId}`)
     for (let attempt = 0; attempt < 30 && completed.json.operation.state === 'running'; attempt += 1) {
@@ -1446,7 +1439,7 @@ describe('update flow — no npm publishing required', () => {
     // entry and dsh web would not start at all.
     fake.npm['dsh-loop'].latest = '1.3.0'
     fake.npm['dsh-loop'].versions['1.3.0'] = { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: [] }
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.3.0' }), { status: 200 })))
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.3.0' } }), { status: 200 })))
 
     const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
     expect(r.json.ok).toBe(false)
@@ -1492,7 +1485,7 @@ describe('update flow — no npm publishing required', () => {
         'cordis.patch.yml': '- insert:\n    - id: loop-id\n      name: dsh-loop\n    - id: loop-id\n      name: dsh-loop\n',
       },
     }
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.4.0' }), { status: 200 })))
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.4.0' } }), { status: 200 })))
 
     const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
     expect(r.status).toBe(502)
@@ -1530,7 +1523,7 @@ describe('update flow — no npm publishing required', () => {
         'cordis.patch.yml': '- insert:\n    - id: loop-id\n      name: dsh-loop\n    - id: loop-id\n      name: dsh-loop\n',
       },
     }
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.4.0' }), { status: 200 })))
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.4.0' } }), { status: 200 })))
     fake.failInstallOnce = true
 
     const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
@@ -1554,7 +1547,7 @@ describe('update flow — no npm publishing required', () => {
       },
       artifacts: ['lib/index.js'],
     }
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.2.0' }), { status: 200 })))
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.2.0' } }), { status: 200 })))
 
     const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
     expect(r.status).toBe(200)
@@ -1717,25 +1710,19 @@ describe('update flow — no npm publishing required', () => {
     expect(fake.calls.some(c => c.includes('dsh-loop@latest'))).toBe(false)
   })
 
-  it('surfaces the silent fresh-release hold as an actionable error, and force applies it (#22)', async () => {
-    advanceNpmLatest('1.2.0') // published 1h ago — inside the safety window
-    fake.staleUpdates = true // pnpm keeps 1.0.0 and exits 0
-    const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
-    expect(r.status).toBe(502)
-    expect(r.json.ok).toBe(false)
-    expect(r.json.stale).toBe(true)
-    // Evidence-backed diagnosis (#45): the release really is young.
-    expect(r.json.staleReason).toBe('release-age')
-    expect(String(r.json.error)).toMatch(/立即更新|Update now/)
-    expect(installedSpec('dsh-loop')).toBe('^1.0.0')
+  it('blocks a fresh release before pnpm and force installs the checked exact version', async () => {
+    advanceNpmLatest('1.2.0', 1)
+    const callsBefore = fake.calls.length
+    const blocked = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
+    expect(blocked.status).toBe(409)
+    expect(blocked.json).toMatchObject({ ok: false, failureCode: 'RELEASE_TOO_FRESH', retryable: true })
+    expect(typeof blocked.json.retryAfter).toBe('string')
+    expect(fake.calls).toHaveLength(callsBefore)
 
-    // The user clicks 「立即更新」: force bypasses the wait for THIS command only.
-    fake.staleUpdates = false
     const forced = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop', force: true })
     expect(forced.status).toBe(200)
     expect(installedSpec('dsh-loop')).toBe('^1.2.0')
-    const lastAdd = fake.calls[fake.calls.length - 1]
-    expect(lastAdd).toContain('--config.minimumReleaseAge=0')
+    expect(fake.calls[fake.calls.length - 1]).toContain('dsh-loop@1.2.0')
   })
 
   it('restores the previous build when an update fails after pnpm wrote new files (#65 follow-up)', async () => {
@@ -1850,7 +1837,7 @@ describe('update flow — no npm publishing required', () => {
     expect(r.status).toBe(409)
     expect(r.json).toMatchObject({ ok: false, busy: true })
     expect(runPlugin.mock.calls).toEqual([
-      ['web', ['add', 'dsh-loop@latest']],
+      ['web', ['add', 'dsh-loop@1.2.0']],
       ['web', ['store', 'path']],
     ])
     expect(installedSpec('dsh-loop')).toBe('^1.0.0')
@@ -1932,21 +1919,25 @@ describe('local-dev restore flow', () => {
     await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/dsh-loop' })
     fake.npm['dsh-loop'].latest = '1.2.0'
     fake.npm['dsh-loop'].versions['1.2.0'] = { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] }
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: '1.2.0' } }), { status: 200 })))
     const manifestPath = join(fake.profileDir, 'package.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> }
     manifest.dependencies['dsh-loop'] = 'link:../dsh-loop-dev'
+
     writeFileSync(manifestPath, JSON.stringify(manifest))
+    const checked = await bed.dispatch('GET', '/dsh-market/updates?force=1')
+    expect(checked.json.updates['dsh-loop']).toMatchObject({ targetVersion: '1.2.0', restoreRequired: true })
 
     const blocked = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
     expect(blocked.status).toBe(400)
     expect(String(blocked.json.error)).toMatch(/locally linked/)
     expect(installedSpec('dsh-loop')).toBe('link:../dsh-loop-dev')
 
-    const restored = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop', restore: true })
+    const restored = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop', targetVersion: '1.2.0', restore: true })
     expect(restored.status, String(restored.json.error ?? '')).toBe(200)
     expect(restored.json.ok).toBe(true)
     expect(installedSpec('dsh-loop')).toBe('^1.2.0')
-    expect(fake.calls.some(call => call[0] === 'add' && call.includes('dsh-loop@latest'))).toBe(true)
+    expect(fake.calls.some(call => call[0] === 'add' && call.includes('dsh-loop@1.2.0'))).toBe(true)
   })
 
   it('keeps #path: when restoring a monorepo checkout onto a collection-root catalog row', async () => {
@@ -2054,8 +2045,8 @@ describe('local-dev restore flow', () => {
       dependencies: { dshmarket: 'link:../dshmarket-dev' },
     }))
     const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dshmarket', restore: true })
-    expect(r.status).toBe(400)
-    expect(String(r.json.error)).toMatch(/local development link/)
+    expect(r.status).toBe(403)
+    expect(r.json.failureCode).toBe('MARKET_SELF_MUTATION_FORBIDDEN')
     expect(installedSpec('dshmarket')).toBe('link:../dshmarket-dev')
   })
 
@@ -2283,59 +2274,6 @@ describe('duplicate alias guard (#27)', () => {
   })
 })
 
-describe('market self-update', () => {
-  it('switches a locally packaged market to its newer online release', async () => {
-    await bed.dispatch('POST', '/dsh-market/channel', { channel: 'stable' })
-    fake.npm['dshmarket'] = {
-      latest: '1.0.3',
-      versions: { '1.0.3': { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] } },
-    }
-    await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/dsh-market/dsh-market' })
-    const manifestPath = join(fake.profileDir, 'package.json')
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> }
-    manifest.dependencies['dshmarket'] = 'file:/packages/dshmarket-1.0.3.tgz'
-    writeFileSync(manifestPath, JSON.stringify(manifest))
-    const packagePath = join(fake.profileDir, 'node_modules', 'dshmarket', 'package.json')
-    const installedPackage = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>
-    installedPackage.repository = { type: 'git', url: 'https://github.com/dsh-market/dsh-market.git' }
-    writeFileSync(packagePath, JSON.stringify(installedPackage))
-    fake.npm['dshmarket'].latest = '1.2.3'
-    fake.npm['dshmarket'].versions['1.2.3'] = {
-      manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'],
-    }
-    vi.stubGlobal('fetch', (url: string) => String(url).includes('registry.npmjs.org')
-      ? Promise.resolve(new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 }))
-      : Promise.reject(new Error('unexpected fetch')))
-
-    const updates = await bed.dispatch('GET', '/dsh-market/updates?force=1')
-    expect(updates.json.updates['dshmarket']).toMatchObject({
-      current: '1.0.3', latest: '1.2.3', updateAvailable: true, restoreRequired: true,
-    })
-    const result = await bed.dispatch('POST', '/dsh-market/update', { name: 'dshmarket', restore: true })
-    expect(result.status, String(result.json.error ?? '')).toBe(200)
-    expect(installedSpec('dshmarket')).toBe('^1.2.3')
-  })
-
-  it('the market updates itself through the same flow', async () => {
-    // Pin the channel: with no choice on record it is derived from the
-    // RUNNING build, and this repo carries a prerelease version while a beta
-    // is in flight — which would send this test down the beta dist-tag it
-    // has no fixture for. The channel's own behaviour is covered separately.
-    await bed.dispatch('POST', '/dsh-market/channel', { channel: 'stable' })
-    fake.npm['dshmarket'] = { latest: '1.0.3', versions: { '1.0.3': { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] } } }
-    await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/dsh-market/dsh-market' })
-    fake.npm['dshmarket'].latest = '1.2.3'
-    fake.npm['dshmarket'].versions['1.2.3'] = { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] }
-    vi.stubGlobal('fetch', (url: string) => String(url).includes('registry.npmjs.org')
-      ? Promise.resolve(new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 }))
-      : Promise.reject(new Error('unexpected fetch')))
-    const updates = await bed.dispatch('GET', '/dsh-market/updates?force=1')
-    expect(updates.json.updates['dshmarket'].updateAvailable).toBe(true)
-    const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dshmarket' })
-    expect(r.status).toBe(200)
-    expect(installedSpec('dshmarket')).toBe('^1.2.3')
-  })
-})
 
 describe('theme update and uninstall', () => {
   beforeEach(async () => {
@@ -2577,51 +2515,59 @@ describe('externally removed hot mounts (#29)', () => {
   })
 })
 
-describe('one-click restart guards (#14)', () => {
-  it('delegates the public v1 restart route to the guarded restart executor', async () => {
+describe('Host-owned restart', () => {
+  const configured = () => {
+    const restart = vi.fn(async () => ({ accepted: true as const }))
+    const hostLifecycle = { product: { name: 'Tessivum' as const, command: 'tessivum web' as const }, restart }
+    return { hostLifecycle, restart }
+  }
+
+  it('delegates the public v1 route to the Host lifecycle facade', async () => {
+    bed.dispose()
+    const { hostLifecycle, restart } = configured()
+    bed = createTestbed({ hostLifecycle })
     const result = await bed.dispatch('POST', '/dsh-market/api/v1/restart', {})
     expect(result.status).toBe(202)
     expect(result.json).toMatchObject({
       schema: 'dsh-market/update-api/v1',
-      result: { ok: true },
+      result: { accepted: true },
     })
-    expect(restartCalls.count).toBe(1)
+    expect(restart).toHaveBeenCalledOnce()
   })
 
-  it('schedules exactly once for a trusted loopback request; repeat is 409', async () => {
-    const r = await bed.dispatch('POST', '/dsh-market/restart', {})
-    expect(r.status).toBe(202)
-    expect(r.json.ok).toBe(true)
-    expect(restartCalls.count).toBe(1)
+  it('accepts exactly once while the Host restart is pending', async () => {
+    bed.dispose()
+    const { hostLifecycle, restart } = configured()
+    bed = createTestbed({ hostLifecycle })
+    expect((await bed.dispatch('POST', '/dsh-market/restart', {})).status).toBe(202)
     expect((await bed.dispatch('POST', '/dsh-market/restart', {})).status).toBe(409)
-    expect(restartCalls.count).toBe(1)
+    expect(restart).toHaveBeenCalledOnce()
   })
 
   it('refuses non-loopback peers, forwarded requests, and cross-origin posts', async () => {
     expect((await bed.dispatch('POST', '/dsh-market/restart', {}, { remoteAddress: '192.168.1.7' })).status).toBe(403)
     expect((await bed.dispatch('POST', '/dsh-market/restart', {}, { forwarded: true })).status).toBe(403)
     expect((await bed.dispatch('POST', '/dsh-market/restart', {}, { crossOrigin: true })).status).toBe(403)
-    expect(restartCalls.count).toBe(0)
   })
 
   it('refuses while a plugin operation is running', async () => {
+    bed.dispose()
+    const { hostLifecycle } = configured()
+    bed = createTestbed({ hostLifecycle })
     fake.npm['dsh-loop'] = { latest: '1.0.0', versions: { '1.0.0': { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] } } }
-    let release!: () => void
-    fake.gate = new Promise<void>((resolvePromise) => { release = resolvePromise })
+    const gate = Promise.withResolvers<void>()
+    fake.gate = gate.promise
     const install = bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/dsh-loop' })
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
+    await vi.waitFor(() => expect(fake.running).toBe(true))
     expect((await bed.dispatch('POST', '/dsh-market/restart', {})).status).toBe(409)
-    release()
+    gate.resolve()
     fake.gate = null
     await install
   })
 
-  it('allowRestart: false disables the endpoint and the status capability flag', async () => {
-    bed.dispose()
-    bed = createTestbed({ allowRestart: false })
-    expect((await bed.dispatch('GET', '/dsh-market/status')).json.restart).toBe(false)
-    expect((await bed.dispatch('POST', '/dsh-market/restart', {})).status).toBe(403)
-    expect(restartCalls.count).toBe(0)
+  it('reports the lifecycle as unavailable when the Host omits it', async () => {
+    expect((await bed.dispatch('GET', '/dsh-market/status')).json).toMatchObject({ restart: false, lifecycle: null })
+    expect((await bed.dispatch('POST', '/dsh-market/restart', {})).status).toBe(503)
   })
 })
 
@@ -2988,41 +2934,6 @@ describe('custom groups (#60)', () => {
   })
 })
 
-describe('self-uninstall — the market removing itself from its settings card', () => {
-  /**
-   * Deliberately a separate route from `/dsh-market/uninstall`, which keeps
-   * refusing the market. A destructive action on the plugin serving the
-   * request should be reachable only from the surface built for it, never as
-   * a stray `{ name: "dshmarket" }` on the ordinary path.
-   */
-  it('is refused without an explicit confirmation', async () => {
-    // Assert the REASON, not just the 400: this route has several ways to
-    // reject, and a status-only assertion passed even with the confirmation
-    // check removed entirely — the request then failed one step later for an
-    // unrelated reason and looked identical from outside.
-    const bare = await bed.dispatch('POST', '/dsh-market/self-uninstall', {})
-    expect(bare.status).toBe(400)
-    expect(String(bare.json.error)).toContain('explicit confirmation')
-    // `confirm: false` is not "close enough" either.
-    const explicitlyNot = await bed.dispatch('POST', '/dsh-market/self-uninstall', { confirm: false })
-    expect(String(explicitlyNot.json.error)).toContain('explicit confirmation')
-  })
-
-  it('is refused from a cross-origin, forwarded or remote client', async () => {
-    // The same door the restart route uses: both end the market's life in
-    // this process, so neither may be driven by anything but the user's own
-    // loopback browser.
-    expect((await bed.dispatch('POST', '/dsh-market/self-uninstall', { confirm: true }, { crossOrigin: true })).status).toBe(403)
-    expect((await bed.dispatch('POST', '/dsh-market/self-uninstall', { confirm: true }, { forwarded: true })).status).toBe(403)
-    expect((await bed.dispatch('POST', '/dsh-market/self-uninstall', { confirm: true }, { remoteAddress: '192.168.1.7' })).status).toBe(403)
-  })
-
-  it('the ordinary uninstall route still refuses the market', async () => {
-    // Adding a way to remove the market must not quietly open the old one.
-    const viaGeneric = await bed.dispatch('POST', '/dsh-market/uninstall', { name: 'dshmarket' })
-    expect(viaGeneric.status).toBe(400)
-  })
-})
 
 describe('download region', () => {
   it('rejects anything but the two regions', async () => {
@@ -3065,72 +2976,6 @@ describe('download region', () => {
   })
 })
 
-describe('release channel', () => {
-  it('rejects anything but the two channels', async () => {
-    expect((await bed.dispatch('POST', '/dsh-market/channel', { channel: 'nightly' })).status).toBe(400)
-    expect((await bed.dispatch('POST', '/dsh-market/channel', {})).status).toBe(400)
-    expect((await bed.dispatch('POST', '/dsh-market/channel', { channel: 'beta' }, { crossOrigin: true })).status).toBe(403)
-  })
-
-  it('round-trips the setting', async () => {
-    // /status reports the ACTIVE channel, which a prerelease build forces to
-    // beta whatever the setting says — so the round-trip is asserted on the
-    // setting itself here, and the derivation is covered by resolveChannel's
-    // own spec. Asserting /status against a literal would tie this test to
-    // whatever version the repo happens to carry today.
-    const set = await bed.dispatch('POST', '/dsh-market/channel', { channel: 'beta' })
-    expect(set.status).toBe(200)
-    expect(set.json.channel).toBe('beta')
-    expect((await bed.dispatch('GET', '/dsh-market/status')).json.channel).toBe('beta')
-
-    const back = await bed.dispatch('POST', '/dsh-market/channel', { channel: 'stable' })
-    expect(back.status).toBe(200)
-    expect(back.json.channel).toBe('stable')
-  })
-
-  it('installs from the channel it offered from, not from latest', async () => {
-    // The offer and the install have to agree. `@latest` was hardcoded, so a
-    // beta subscriber would be told an update existed and then handed the
-    // stable build — the setting would look like it did nothing.
-    fake.npm['dshmarket'] = { latest: '1.0.0', versions: { '1.0.0': { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] } } }
-    await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/dshmarket' })
-    fake.npm['dshmarket'].latest = '9.0.0'
-    fake.npm['dshmarket'].versions['9.0.0'] = { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] }
-    await bed.dispatch('POST', '/dsh-market/channel', { channel: 'beta' })
-    fake.calls = []
-    await bed.dispatch('POST', '/dsh-market/update', { name: 'dshmarket' })
-    const added = fake.calls.find(call => call[0] === 'add')
-    expect(added?.join(' '), 'the update ran with the wrong dist-tag').toContain('dshmarket@beta')
-
-    await bed.dispatch('POST', '/dsh-market/channel', { channel: 'stable' })
-    fake.calls = []
-    await bed.dispatch('POST', '/dsh-market/update', { name: 'dshmarket' })
-    expect(fake.calls.find(call => call[0] === 'add')?.join(' ')).toContain('dshmarket@latest')
-  })
-
-  it('re-checks immediately when the channel changes', async () => {
-    // The listing is cached per profile for a while. Keyed on the profile
-    // alone, switching channels would keep serving the previous verdict for
-    // the rest of the TTL — indistinguishable, to the user, from a setting
-    // that does nothing.
-    fake.npm['dshmarket'] = { latest: '1.0.0', versions: { '1.0.0': { manifest: { dsh: {}, main: 'lib/index.js' }, artifacts: ['lib/index.js'] } } }
-    await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/dshmarket' })
-    const seen: string[] = []
-    const realFetch = globalThis.fetch as typeof fetch
-    vi.stubGlobal('fetch', vi.fn((input: unknown, init?: RequestInit) => {
-      seen.push(String(input))
-      return realFetch(input as string, init)
-    }))
-    // Warm the cache on the stable channel FIRST — that is the state the
-    // bug needs. Without a prior listing there is nothing stale to serve,
-    // and the spec would pass with the channel left out of the cache key.
-    await bed.dispatch('GET', '/dsh-market/updates')
-    await bed.dispatch('POST', '/dsh-market/channel', { channel: 'beta' })
-    seen.length = 0
-    await bed.dispatch('GET', '/dsh-market/updates')
-    expect(seen.some(url => url.endsWith('/beta')), 'the beta dist-tag was never queried').toBe(true)
-  })
-})
 
 describe('catalog: one source, and a failure says so', () => {
   it('reports the reason instead of substituting a bundled copy', async () => {
@@ -3146,93 +2991,5 @@ describe('catalog: one source, and a failure says so', () => {
     expect(failed.status).toBe(502)
     expect(String(failed.json.error)).toContain('ENOTFOUND')
     expect(failed.json.registry, 'a failed catalog fetch must not carry data').toBeUndefined()
-  })
-})
-
-
-describe('the channel choice survives a restart', () => {
-  it('is written down, not just held in memory', async () => {
-    // The route used to mutate the in-memory config only, so the choice
-    // lived exactly as long as the process — and no test noticed, because
-    // every assertion queried the same instance that had just been told.
-    expect(hot.channel).toBeUndefined()
-    expect((await bed.dispatch('POST', '/dsh-market/channel', { channel: 'beta' })).status).toBe(200)
-    expect(hot.channel, 'the choice never reached durable state').toBe('beta')
-  })
-
-  it('is read back by a freshly mounted market', async () => {
-    // 'stable' is the load-bearing direction, and deliberately so: this
-    // build is a prerelease (1.14.0-beta.1), so a market that persisted
-    // NOTHING would still answer 'beta' on the way in — derived from the
-    // running version. Only the way back off the channel can tell a
-    // remembered choice from a re-derived one.
-    expect((await bed.dispatch('POST', '/dsh-market/channel', { channel: 'stable' })).status).toBe(200)
-
-    // A second market over the same profile state: this is what a restart
-    // looks like from the state file's point of view.
-    const restarted = createTestbed({ profile: 'web' })
-    try {
-      expect((await restarted.dispatch('GET', '/dsh-market/status')).json.channel).toBe('stable')
-    } finally { restarted.dispose() }
-  })
-
-  it('leaves the channel derived from the build until the user picks one', async () => {
-    // Absent is not 'stable'. Installing a prerelease by hand should land
-    // on the beta channel with no second step — that is what makes the
-    // setting a memory of a CHOICE rather than a default with extra steps.
-    //
-    // The RULE ("a prerelease build derives beta") is independently and
-    // strongly covered in tests/channels.spec.ts, with literal version
-    // strings on both sides of the branch — that coverage does not depend
-    // on what this checkout happens to be.
-    //
-    // What THIS asserts is narrower than it looks: `resolveChannel(undefined,
-    // marketVersion())` rather than a hardcoded 'beta' — a literal was only
-    // ever true while this checkout happened to be a prerelease, and it
-    // broke on exactly the first stable cut (main tagged 1.14.0). Comparing
-    // against the same functions the route calls is honest about what that
-    // buys: mutation-tested on THIS checkout (a stable, non-prerelease
-    // version) and confirmed NOT to catch the route hardcoding 'stable' or
-    // dropping marketVersion() entirely — both derive 'stable' here too, the
-    // same as a correct implementation. It only regains bite on a prerelease
-    // checkout. What stays checked unconditionally either way: `hot.channel`
-    // really is undefined (nothing was accidentally persisted by an earlier
-    // test), and the route answers with SOME value derived from real
-    // functions rather than throwing or answering undefined.
-    const fresh = createTestbed({ profile: 'web' })
-    try {
-      expect(hot.channel).toBeUndefined()
-      const expected = resolveChannel(undefined, marketVersion())
-      expect((await fresh.dispatch('GET', '/dsh-market/status')).json.channel).toBe(expected)
-    } finally { fresh.dispose() }
-  })
-})
-
-describe('the dev channel is an ordinary choice', () => {
-  it('is offered by the status route alongside the other two', async () => {
-    expect((await bed.dispatch('GET', '/dsh-market/status')).json.channels).toEqual(['stable', 'beta', 'dev'])
-  })
-
-  it('is selectable, persisted and read back like any other', async () => {
-    // It was gated behind a stored developer mode for one version. Removing
-    // the gate must not quietly remove the memory with it.
-    expect((await bed.dispatch('POST', '/dsh-market/channel', { channel: 'dev' })).status).toBe(200)
-    expect(hot.channel).toBe('dev')
-
-    const restarted = createTestbed({ profile: 'web' })
-    try {
-      expect((await restarted.dispatch('GET', '/dsh-market/status')).json.channel).toBe('dev')
-    } finally { restarted.dispose() }
-  })
-
-  it('still refuses a channel that does not exist', async () => {
-    const refused = await bed.dispatch('POST', '/dsh-market/channel', { channel: 'nightly' })
-    expect(refused.status).toBe(400)
-    expect(hot.channel).toBeUndefined()
-  })
-
-  it('still refuses a cross-origin selection', async () => {
-    expect((await bed.dispatch('POST', '/dsh-market/channel', { channel: 'dev' }, { crossOrigin: true })).status).toBe(403)
-    expect(hot.channel).toBeUndefined()
   })
 })

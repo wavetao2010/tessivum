@@ -6,5 +6,8 @@
 /dist/
 
 /web/client-packages/
+/plugins/market/node_modules/
+/plugins/market/client/
+/plugins/market/lib/
 /graphify-out/
 /.tessivum/

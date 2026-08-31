@@ -23,6 +23,7 @@ const REGISTRY = {
     { name: 'whale-skin', owner: 'carol', url: 'https://github.com/carol/whale-skin', category: 'theme', npm: null, stars: 80, added: '2026-08-14', description: { en: 'Whale theme', zh: '鲸鱼主题' }, install: '' },
   ],
 }
+const HOST_LIFECYCLE = { name: 'Tessivum' as const, command: 'tessivum web' as const }
 
 /** Every fetch the component made, for asserting request payloads. */
 let fetchCalls: Array<{ path: string; method: string; body: unknown }> = []
@@ -40,7 +41,7 @@ function stubFetch(overrides: Record<string, unknown> = {}, mountPath = '') {
     const payload =
       route === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
       : route === '/dsh-market/installed' ? { profile: 'web', installed: {}, live: [], disabled: [], groups: {}, groupOrder: [] }
-      : route === '/dsh-market/status' ? { active: false, pnpm: true, boot: 'boot-1', restart: true, installed: {} }
+      : route === '/dsh-market/status' ? { active: false, pnpm: true, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE, installed: {} }
       : route === '/dsh-market/updates' ? { updates: {} }
       : route === '/dsh-market/toggle' ? { ok: true, disabled: [], live: [], activation: {} }
       : route === '/dsh-market/groups' ? { ok: true, groups: {}, groupOrder: [], disabled: [] }
@@ -897,7 +898,7 @@ describe('lost install progress (config page reopened)', () => {
           path === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
           : path === '/dsh-market/installed' ? { profile: 'web', installed: {}, live: [], disabled: [], groups: {}, groupOrder: [] }
           : path === '/dsh-market/status' ? {
-              active: !settled, busy: !settled, pnpm: true, boot: 'boot-1', restart: true,
+              active: !settled, busy: !settled, pnpm: true, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE,
               installed: settled ? { 'dsh-loop': '^1.0.0' } : {},
             }
           : path === '/dsh-market/updates' ? { updates: {} }
@@ -939,7 +940,7 @@ describe('lost update progress (config page reopened)', () => {
           path === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
           : path === '/dsh-market/installed' ? { profile: 'web', installed: { 'dsh-loop': '^1.0.0' }, live: [], disabled: [], groups: {}, groupOrder: [] }
           : path === '/dsh-market/status' ? {
-              active: !settled, busy: !settled, pnpm: true, boot: 'boot-1', restart: true,
+              active: !settled, busy: !settled, pnpm: true, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE,
               installed: { 'dsh-loop': '^1.0.0' },
               phase: settled ? null : 'downloading', currentPackage: settled ? null : 'is-odd@3.0.1', done: settled ? 0 : 3,
             }
@@ -983,7 +984,7 @@ describe('P1-6 structured progress', () => {
         '/dsh-market/status': {
           active: true, phase: 'downloading', done: 3, currentPackage: 'is-odd@3.0.1',
           size: 1000, downloaded: 400, cancelling: true, installed: {},
-          pnpm: true, boot: 'boot-1', restart: true,
+          pnpm: true, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE,
         },
       })
       render(<MarketSection {...props()} />)
@@ -1869,7 +1870,7 @@ describe('status-poll / install-response race (#73)', () => {
           path === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
           : path === '/dsh-market/installed' ? { profile: 'web', installed: {}, live: [] }
           // Poll recovery precondition: host idle AND dsh-loop already installed.
-          : path === '/dsh-market/status' ? { active: false, pnpm: true, boot: 'boot-1', restart: true, installed: { 'dsh-loop': '^1.0.0' } }
+          : path === '/dsh-market/status' ? { active: false, pnpm: true, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE, installed: { 'dsh-loop': '^1.0.0' } }
           : path === '/dsh-market/updates' ? { updates: {} }
           : path === '/dsh-market/install' ? installGate
           : null
@@ -2516,7 +2517,7 @@ describe('lost install response (#100)', () => {
         const payload =
           path === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
           : path === '/dsh-market/installed' ? { profile: 'web', installed: installedNow, live: [] }
-          : path === '/dsh-market/status' ? { active: false, busy: false, pnpm: true, boot: 'boot-1', restart: true, installed: installedNow }
+          : path === '/dsh-market/status' ? { active: false, busy: false, pnpm: true, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE, installed: installedNow }
           : path === '/dsh-market/updates' ? { updates: {} }
           : null
         if (payload === null) return Promise.reject(new Error(`unstubbed fetch: ${String(url)}`))
@@ -2566,7 +2567,7 @@ describe('standing restart notice for host-reported pending plugins', () => {
             // The host says: installed, will activate on restart.
             activation: { 'dsh-loop': { state: 'restart', reasons: ['in the bundle layer'], bundle: true, hot: false } },
           }
-        : path === '/dsh-market/status' ? { active: false, busy: false, pnpm: true, boot, restart: true, installed }
+        : path === '/dsh-market/status' ? { active: false, busy: false, pnpm: true, boot, restart: true, lifecycle: HOST_LIFECYCLE, installed }
         : path === '/dsh-market/updates' ? { updates: {} }
         : null
       if (payload === null) return Promise.reject(new Error(`unstubbed fetch: ${String(url)}`))
@@ -2613,7 +2614,7 @@ describe('standing restart notice for host-reported pending plugins', () => {
  * that hides the button and nothing failed.
  */
 describe('pnpm setup banner', () => {
-  const notReady = { active: false, pnpm: false, boot: 'boot-1', restart: true, installed: {} }
+  const notReady = { active: false, pnpm: false, boot: 'boot-1', restart: true, lifecycle: HOST_LIFECYCLE, installed: {} }
 
   it('offers the one-click fix while setup is still worth trying', async () => {
     stubFetch({ '/dsh-market/status': notReady })

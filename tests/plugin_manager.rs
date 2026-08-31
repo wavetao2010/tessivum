@@ -5,23 +5,19 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::{
-    env,
-    ffi::OsString,
-    sync::LazyLock,
-};
-#[cfg(unix)]
 use parking_lot::{Mutex, MutexGuard};
+#[cfg(unix)]
+use std::{env, ffi::OsString, sync::LazyLock};
 
 use serde_json::json;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use tessivum::plugin_manager::install_first_party_market;
 use tessivum::{
     cli::{parse_cli, resolve_data_root, CliCommand},
     plugin_manager::{enabled_client_plugin_names, load_plugin_entries, plugin_profile_root},
 };
-#[cfg(unix)]
-use tessivum::plugin_manager::install_first_party_market;
 use tessivum_core::RuntimeKind;
 
 #[test]
@@ -379,9 +375,11 @@ fn first_party_market_installs_fresh_at_the_stable_artifact_path_and_is_idempote
 
 #[cfg(unix)]
 #[test]
-fn first_party_market_replaces_the_legacy_bundle_in_place_and_preserves_state_groups_and_disabled() {
+fn first_party_market_replaces_the_legacy_bundle_in_place_and_preserves_state_groups_and_disabled()
+{
     let temp = TempDir::new();
-    let (profile, _, _, state) = legacy_market_profile(&temp, json!(["before", "dshmarket", "after"]));
+    let (profile, _, _, state) =
+        legacy_market_profile(&temp, json!(["before", "dshmarket", "after"]));
     let (tarball, checksum, package) = market_release(&temp, valid_market_patch());
     let _pnpm = FakePnpm::new(&temp, &package, false, &temp.0.join("pnpm.log"));
 
@@ -391,7 +389,10 @@ fn first_party_market_replaces_the_legacy_bundle_in_place_and_preserves_state_gr
         manifest.pointer("/dsh/profile/bundles"),
         Some(&json!(["before", "tessivum-market", "after"]))
     );
-    assert_eq!(manifest.pointer("/dsh/profile/groups/market"), Some(&json!({"disabled": true})));
+    assert_eq!(
+        manifest.pointer("/dsh/profile/groups/market"),
+        Some(&json!({"disabled": true}))
+    );
     assert!(manifest.pointer("/dependencies/dshmarket").is_none());
     assert_eq!(
         fs::read(profile.join(".dsh-market/state.json")).unwrap(),
@@ -461,7 +462,10 @@ fn first_party_market_composition_failure_restores_exact_legacy_source_documents
     assert!(install_first_party_market(&temp.0, &tarball, &checksum).is_err());
     assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
     assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
-    assert_eq!(fs::read(profile.join(".dsh-market/state.json")).unwrap(), state);
+    assert_eq!(
+        fs::read(profile.join(".dsh-market/state.json")).unwrap(),
+        state
+    );
     let restored = read_json_file(&profile.join("package.json"));
     assert_eq!(
         restored.pointer("/dependencies/dshmarket"),
@@ -482,7 +486,10 @@ fn first_party_market_pnpm_failure_rolls_back_the_legacy_profile() {
     assert!(install_first_party_market(&temp.0, &tarball, &checksum).is_err());
     assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
     assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
-    assert_eq!(fs::read(profile.join(".dsh-market/state.json")).unwrap(), state);
+    assert_eq!(
+        fs::read(profile.join(".dsh-market/state.json")).unwrap(),
+        state
+    );
     assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
 }
 
@@ -519,7 +526,10 @@ fn stable_market_artifact(data_dir: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn legacy_market_profile(temp: &TempDir, bundles: serde_json::Value) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
+fn legacy_market_profile(
+    temp: &TempDir,
+    bundles: serde_json::Value,
+) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
     let profile = temp.0.join("plugins");
     fs::create_dir_all(profile.join("node_modules")).unwrap();
     write_json(

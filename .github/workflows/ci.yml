@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 7150b20df296e52403de00f36fdc1dd9bf93edde
+          ref: 4c3d7b7769e43e2eb228ebf43d46bef6119c4574
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
@@ -71,6 +71,13 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run build
+
+      - name: Verify first-party market
+        working-directory: plugins/market
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          bun run test
 
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -119,7 +126,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 7150b20df296e52403de00f36fdc1dd9bf93edde
+          ref: 4c3d7b7769e43e2eb228ebf43d46bef6119c4574
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
@@ -128,9 +135,17 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.7.0
+
       - name: Install pinned DeepSeek build dependencies
         working-directory: .ci/deepseek-harness
         run: npm exec --yes pnpm@11.7.0 -- install --frozen-lockfile
+
+      - name: Install first-party market dependencies
+        working-directory: plugins/market
+        run: bun install --frozen-lockfile
 
       - name: Build Browser shell
         working-directory: web
@@ -141,6 +156,6 @@ jobs:
       - name: Build native Web host
         run: cargo build --bin tessivum
 
-      - name: Run all 69 Browser compatibility scenarios
+      - name: Run Browser compatibility scenarios
         working-directory: web
         run: bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000

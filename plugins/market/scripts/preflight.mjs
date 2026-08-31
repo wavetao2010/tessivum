@@ -30,14 +30,15 @@ if (!client.startsWith(`window.__ModuleLoader__.load({ id: ${JSON.stringify(name
  * about running `npm install` in China makes this visible locally, so the
  * guard belongs where the package is built rather than in anyone's habits.
  */
-const lock = fs.readFileSync('package-lock.json', 'utf8')
+const lockFile = fs.existsSync('package-lock.json') ? 'package-lock.json' : 'bun.lock'
+const lock = fs.readFileSync(lockFile, 'utf8')
 const foreign = [...new Set(
-  [...lock.matchAll(/"resolved": "(https?:\/\/[^/"]+)/g)]
-    .map(match => match[1])
+  [...lock.matchAll(/https?:\/\/[^/'"\s]+/g)]
+    .map(match => match[0])
     .filter(host => host !== 'https://registry.npmjs.org'),
 )]
 if (foreign.length > 0) {
-  failures.push(`package-lock.json resolves to ${foreign.join(', ')} — rewrite to https://registry.npmjs.org or consumers hit EALLOWREMOTE`)
+  failures.push(`${lockFile} resolves to ${foreign.join(', ')} — rewrite to https://registry.npmjs.org or consumers hit EALLOWREMOTE`)
 }
 
 if (failures.length > 0) {

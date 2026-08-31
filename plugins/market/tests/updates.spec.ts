@@ -171,13 +171,13 @@ describe('checkUpdates — github pins', () => {
     // pnpm accepts the shorthand, and it parses as a repo — but without the
     // `github:` prefix the package came from the registry, so asking GitHub
     // for a HEAD commit would compare two unrelated things.
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ version: '1.0.0' }) })))
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '1.0.0' } }) })))
     const result = await checkUpdates('web', true, profileWith('owner/themer', OLD))
     expect(result.themer).toMatchObject({ kind: 'npm' })
   })
 
   it('offers a catalog-matched local package a published upgrade', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ version: '0.17.1' }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ 'dist-tags': { latest: '0.17.1' } }), { status: 200 })))
     const result = await checkUpdates(
       'web', true, profileWith('FILE:/tmp/dsh-better-sidebar-0.16.1.tgz', OLD, '0.16.1'),
       new Map(), new Map([['themer', 'dsh-better-sidebar']]),
@@ -273,7 +273,10 @@ describe('checkUpdates — the channel is part of the cache key', () => {
     const asked: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
       asked.push(String(url))
-      return { ok: true, status: 200, json: async () => ({ version: String(url).endsWith('/beta') ? '2.0.0-beta.1' : '1.5.0' }) }
+      const data = String(url).endsWith('/beta')
+        ? { version: '2.0.0-beta.1' }
+        : { 'dist-tags': { latest: '1.5.0' } }
+      return { ok: true, status: 200, json: async () => data }
     }))
 
     const stable = await checkUpdates('web', false, dir)
@@ -298,7 +301,10 @@ describe('updateAvailable means NEWER, and only that', () => {
     writeFileSync(join(dir, 'node_modules', 'dshmarket', 'package.json'), JSON.stringify({ name: 'dshmarket', version: installedVersion }))
     vi.stubGlobal('fetch', vi.fn((url: unknown) => {
       const tag = String(url).split('/').pop() ?? ''
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: tags[tag] }) })
+      const data = tag === 'beta' || tag === 'dev'
+        ? { version: tags[tag] }
+        : { 'dist-tags': { latest: tags.latest } }
+      return Promise.resolve({ ok: true, status: 200, json: async () => data })
     }))
     return dir
   }

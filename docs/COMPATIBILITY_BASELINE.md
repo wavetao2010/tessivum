@@ -301,7 +301,7 @@ LLM 与 Agent Loop 是独立兼容层，不得以“能生成文本”替代以�
 
 Node 兼容层只服务于显式 `legacy-node` 插件；Rust Host 主路径和原生/WASM 插件不得依赖 Node。
 
-Alpha.16 的 Core 实现基线固定为 `tessivum-core v0.1.6` / `7150b20df296e52403de00f36fdc1dd9bf93edde`。
+Alpha.17 的 Core 实现基线固定为 `tessivum-core v0.1.6` / `4c3d7b7769e43e2eb228ebf43d46bef6119c4574`。
 
 ### 9.1 Transport 与帧
 
@@ -326,7 +326,13 @@ Alpha.16 的 Core 实现基线固定为 `tessivum-core v0.1.6` / `7150b20df296e5
 - 非法帧、Host/Node 任一端崩溃、超时和 forced kill 都必须进入可观察错误结果；不得自动改走 native/WASM runtime 或把失败报告成成功卸载。
 - 当前实现已具备真实 compat-host：vendored Cordis/Loader、function/object/class 插件、Service/inject、事件/waterfall、异步 disposer、generation cleanup 与真实社区 timer 样本均有 Rust↔Bun 往返测试。Node 协议本身不再是 placeholder；整体迁移仍需保留本节回归并通过依赖 Node 的上游 Web 场景。
 
-### 9.4 依赖边界
+### 9.4 Legacy Web 路由命名空间
+
+Alpha.16 的产品 policy 仅允许 `legacy-node` 在三个注册根下使用 `web.route/v1`：`/dsh-market`、`/sidebar` 与 `/dream-skin`。根必须以 path segment 匹配：注册路径要么等于该根，要么紧随一个 `/`；例如 `/dream-skin/api` 合法，`/dream-skin-evil` 不合法。所有其他 Legacy 命名空间和越界前缀都在注册前以结构化 `INVALID_ROUTE_PATH` 拒绝，不会进入 Node handler 或打开泛用途由面。
+
+`dsh-dream-skin@8.30.1` 是已测试的兼容目标。永久 fixture 声明精确 package name/version，提供 `/dream-skin/api` Host 持久化路由和 Browser client；这个精确版本用于兼容证据，不是运行时安装 allowlist，也不得据此拒绝其他 Dream Skin 版本。
+
+### 9.5 依赖边界
 
 - 默认生产部署可完全不安装 Node/Bun；只有配置了 `runtime: legacy-node` 的插件才启动 Bun compat-host 并要求对应 JS package。Rust Host 主路径、native/WASM 插件和已构建的 Browser 静态运行时不依赖它。
 - Browser 上游构建可以在发布流水线使用 Node/Bun，但运行时只消费静态产物，不因此把 Node 引入 Rust Host 主路径。

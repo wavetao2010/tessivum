@@ -17,9 +17,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dsh-market/dsh-market.git"
+    "url": "git+https://github.com/wavetao2010/tessivum.git",
+    "directory": "plugins/market"
   },
-  "homepage": "https://dshmarket.com",
+  "homepage": "https://github.com/wavetao2010/tessivum/tree/main/plugins/market",
   "keywords": [
     "deepseek",
     "harness",
@@ -33,7 +34,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "build": "tsc -p tsconfig.json && npm run build:client",
     "build:client": "tsdown && node scripts/normalize-client-banner.mjs",
-    "check": "npm run typecheck && npm run build && node scripts/restart-smoke.mjs",
+    "check": "npm run typecheck && npm run build && node scripts/preflight.mjs && node scripts/restart-smoke.mjs && node scripts/offline-pack-smoke.mjs",
     "test": "vitest run",
     "test:compat": "vitest run --config vitest.compat.config.ts",
     "prepack": "npm run build && node scripts/preflight.mjs",

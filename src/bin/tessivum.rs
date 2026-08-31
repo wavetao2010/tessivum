@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{self, ExitCode},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -16,6 +16,7 @@ use serde_json::Value;
 use tessivum::{
     agent_mode::AgentModeId,
     boot_theme::inject_boot_theme,
+    bridge::HostLifecycle,
     cli::{
         parse_cli, resolve_data_root, CliCommand, DataRootError, ExitClass, HeadlessCommand,
         PluginAction, PluginCommand, SdkCommand,
@@ -26,15 +27,71 @@ use tessivum::{
     llm::LlmAdapter,
     openai_responses::OpenAiResponsesAdapter,
     plugin_manager::{
-        configure_host_plugins, enabled_client_plugin_names, mutate_plugins, plugin_profile_root,
-        PluginMutation,
+        configure_host_plugins, enabled_client_plugin_names, install_first_party_market,
+        mutate_plugins, plugin_profile_root, PluginMutation,
     },
     settings::Settings,
-    SessionId,
+    SessionId, TessivumError,
 };
+use tokio::sync::Notify;
 
-const PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 static EMBEDDED_WEB_INSTANCE: AtomicU64 = AtomicU64::new(0);
+const WEB_LIFECYCLE_RUNNING: u8 = 0;
+const WEB_LIFECYCLE_RESTART_ACCEPTED: u8 = 1;
+const WEB_LIFECYCLE_SHUTTING_DOWN: u8 = 2;
+
+#[derive(Default)]
+struct WebLifecycle {
+    state: AtomicU8,
+    restart: Notify,
+}
+
+impl WebLifecycle {
+    async fn wait_for_restart(&self) {
+        loop {
+            let notified = self.restart.notified();
+            if self.state.load(Ordering::Acquire) == WEB_LIFECYCLE_RESTART_ACCEPTED {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn begin_shutdown(&self) {
+        self.state
+            .store(WEB_LIFECYCLE_SHUTTING_DOWN, Ordering::Release);
+    }
+}
+
+impl HostLifecycle for WebLifecycle {
+    fn restart(&self) -> Result<(), TessivumError> {
+        match self.state.compare_exchange(
+            WEB_LIFECYCLE_RUNNING,
+            WEB_LIFECYCLE_RESTART_ACCEPTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                self.restart.notify_one();
+                Ok(())
+            }
+            Err(WEB_LIFECYCLE_RESTART_ACCEPTED) => Err(TessivumError::new(
+                "HOST_BUSY",
+                "restart is already pending",
+                "hostLifecycle",
+                Value::Null,
+            )),
+            Err(_) => Err(TessivumError::new(
+                "HOST_SHUTTING_DOWN",
+                "host is shutting down",
+                "hostLifecycle",
+                Value::Null,
+            )),
+        }
+    }
+}
+
 const WEB_FILE_REFERENCE_GUIDANCE: &str = concat!(
     "When you successfully create or modify files, mention the primary outputs in your final response. ",
     "To make those and any other changed-file references clickable in Web, format them as Markdown ",
@@ -137,10 +194,35 @@ async fn shutdown_with_escalation<T>(shutdown: impl Future<Output = T>, exit_cod
     match tokio::time::timeout(PROCESS_SHUTDOWN_TIMEOUT, shutdown).await {
         Ok(result) => result,
         Err(_) => {
-            eprintln!("Tessivum shutdown exceeded 5 seconds; forcing exit");
+            eprintln!(
+                "Tessivum shutdown exceeded {} seconds; forcing exit",
+                PROCESS_SHUTDOWN_TIMEOUT.as_secs()
+            );
             process::exit(exit_code);
         }
     }
+}
+#[cfg(unix)]
+fn relaunch_web_process() -> Result<(), Diagnostic> {
+    use std::os::unix::process::CommandExt;
+
+    let executable =
+        env::current_exe().map_err(|error| Diagnostic::runtime("WEB_RESTART_FAILED", error))?;
+    let error = process::Command::new(executable)
+        .args(env::args_os().skip(1))
+        .exec();
+    Err(Diagnostic::runtime("WEB_RESTART_FAILED", error))
+}
+
+#[cfg(not(unix))]
+fn relaunch_web_process() -> Result<(), Diagnostic> {
+    let executable =
+        env::current_exe().map_err(|error| Diagnostic::runtime("WEB_RESTART_FAILED", error))?;
+    process::Command::new(executable)
+        .args(env::args_os().skip(1))
+        .spawn()
+        .map_err(|error| Diagnostic::runtime("WEB_RESTART_FAILED", error))?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -194,6 +276,52 @@ fn run_plugin_command(command: PluginCommand) -> Result<(), Diagnostic> {
         .map_err(|error| Diagnostic::runtime("PLUGIN_MANAGEMENT_FAILED", error))
 }
 
+fn install_packaged_market(data_dir: &Path) -> Result<(), Diagnostic> {
+    let tarball = env::var_os("TESSIVUM_MARKET_TARBALL").map(PathBuf::from);
+    let checksum_file = env::var_os("TESSIVUM_MARKET_SHA256_FILE").map(PathBuf::from);
+    let (tarball, checksum_file) = match (tarball, checksum_file) {
+        (None, None) => return Ok(()),
+        (Some(tarball), Some(checksum_file)) => (tarball, checksum_file),
+        _ => {
+            return Err(Diagnostic::runtime(
+                "MARKET_ARTIFACT_CONFIG_INVALID",
+                "TESSIVUM_MARKET_TARBALL and TESSIVUM_MARKET_SHA256_FILE must be set together",
+            ))
+        }
+    };
+    let metadata = fs::symlink_metadata(&checksum_file)
+        .map_err(|error| Diagnostic::runtime("MARKET_CHECKSUM_INVALID", error))?;
+    if !metadata.is_file() || metadata.len() > 1024 {
+        return Err(Diagnostic::runtime(
+            "MARKET_CHECKSUM_INVALID",
+            format!(
+                "{} must be a regular checksum file",
+                checksum_file.display()
+            ),
+        ));
+    }
+    let checksum_document = fs::read_to_string(&checksum_file)
+        .map_err(|error| Diagnostic::runtime("MARKET_CHECKSUM_INVALID", error))?;
+    let mut fields = checksum_document.split_whitespace();
+    let expected_sha256 = fields.next();
+    let checksum_name = fields.next();
+    if expected_sha256.is_none()
+        || checksum_name.and_then(|name| Path::new(name).file_name()) != tarball.file_name()
+        || fields.next().is_some()
+    {
+        return Err(Diagnostic::runtime(
+            "MARKET_CHECKSUM_INVALID",
+            format!(
+                "{} is not a checksum for {}",
+                checksum_file.display(),
+                tarball.display()
+            ),
+        ));
+    }
+    install_first_party_market(data_dir, tarball, expected_sha256.unwrap())
+        .map_err(|error| Diagnostic::runtime("MARKET_INSTALL_FAILED", error))
+}
+
 async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic> {
     let (config, task) = config(command).await?;
     let adapter = config
@@ -228,6 +356,7 @@ async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic
 
 async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
+    install_packaged_market(&data_dir)?;
     let cli_patches = load_cli_patches(&command.patches).await?;
     let address = env::var("TESSIVUM_WEB_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
@@ -241,6 +370,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         FrontendStatic::new(PathBuf::from(dist))
             .map_err(|error| Diagnostic::runtime("WEB_FRONTEND_FAILED", error))?;
     }
+    let lifecycle = Arc::new(WebLifecycle::default());
     let runtime = boot_host(
         cwd,
         data_dir.clone(),
@@ -248,6 +378,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         true,
         Some(web_system_prompt(address)),
         cli_patches,
+        Some(Arc::clone(&lifecycle) as Arc<dyn HostLifecycle>),
     )
     .await?;
     let (frontend, _theme_tap, _embedded_assets) = match web_frontend(
@@ -284,21 +415,33 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         }
     };
     eprintln!("Tessivum web listening at http://{}", server.local_addr());
-    let signal = match shutdown_signal().await {
-        Ok(signal) => signal,
-        Err(error) => {
-            let _ = shutdown_with_escalation(
-                async {
-                    let _ = server.shutdown().await;
-                    let _ = runtime.shutdown().await;
-                },
-                ExitClass::Runtime.code(),
-            )
-            .await;
-            return Err(Diagnostic::runtime("SIGNAL_FAILED", error));
-        }
+    enum WebStop {
+        Signal(i32),
+        Restart,
+    }
+    let stop = tokio::select! {
+        signal = shutdown_signal() => match signal {
+            Ok(signal) => WebStop::Signal(signal),
+            Err(error) => {
+                lifecycle.begin_shutdown();
+                let _ = shutdown_with_escalation(
+                    async {
+                        let _ = server.shutdown().await;
+                        let _ = runtime.shutdown().await;
+                    },
+                    ExitClass::Runtime.code(),
+                )
+                .await;
+                return Err(Diagnostic::runtime("SIGNAL_FAILED", error));
+            }
+        },
+        () = lifecycle.wait_for_restart() => WebStop::Restart,
     };
-    let shutdown_exit = if signal == 130 { 130 } else { 0 };
+    lifecycle.begin_shutdown();
+    let shutdown_exit = match stop {
+        WebStop::Signal(130) => 130,
+        WebStop::Signal(_) | WebStop::Restart => 0,
+    };
     let (server_result, host_result) = shutdown_with_escalation(
         async {
             let server_result = server
@@ -316,10 +459,10 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     .await;
     server_result?;
     host_result?;
-    if signal == 130 {
-        Err(Diagnostic::cancelled("interrupted"))
-    } else {
-        Ok(())
+    match stop {
+        WebStop::Signal(130) => Err(Diagnostic::cancelled("interrupted")),
+        WebStop::Signal(_) => Ok(()),
+        WebStop::Restart => relaunch_web_process(),
     }
 }
 
@@ -407,7 +550,7 @@ enum SdkOutcome {
 
 async fn run_sdk(command: SdkCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
-    let runtime = boot_host(cwd, data_dir, None, true, None, Vec::new()).await?;
+    let runtime = boot_host(cwd, data_dir, None, true, None, Vec::new(), None).await?;
     let server = tessivum::sdk::JsonRpcServer::new(Arc::new(runtime.handle()));
     let reader = tokio::io::stdin();
     let writer = tokio::io::stdout();
@@ -451,10 +594,12 @@ async fn boot_host(
     enable_trusted_bash: bool,
     system_prompt: Option<String>,
     cli_patches: Vec<Value>,
+    host_lifecycle: Option<Arc<dyn HostLifecycle>>,
 ) -> Result<HostRuntime, Diagnostic> {
     let mut config = HostConfig::new(cwd, data_dir);
     config.enable_trusted_bash = enable_trusted_bash;
     config.system_prompt = system_prompt;
+    config.host_lifecycle = host_lifecycle;
     for patch in cli_patches {
         config = config.with_cli_patch(patch);
     }
@@ -498,6 +643,13 @@ async fn boot_host(
     }
     configure_host_plugins(&mut config)
         .map_err(|error| Diagnostic::runtime("PLUGIN_PROFILE_FAILED", error))?;
+    if config.host_lifecycle.is_some() {
+        if let Some(host) = &mut config.legacy_host {
+            host.command
+                .env
+                .push(("TESSIVUM_HOST_LIFECYCLE".into(), "1".into()));
+        }
+    }
     HostRuntime::boot(config)
         .await
         .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))
@@ -861,5 +1013,16 @@ mod tests {
             ]
         );
         let _ = fs::remove_dir_all(data);
+    }
+    #[tokio::test]
+    async fn web_restart_is_single_shot_and_rejects_shutdown_requests() {
+        let lifecycle = WebLifecycle::default();
+        lifecycle.restart().expect("first restart is accepted");
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.wait_for_restart())
+            .await
+            .expect("accepted restart wakes the owner");
+        assert_eq!(lifecycle.restart().unwrap_err().code, "HOST_BUSY");
+        lifecycle.begin_shutdown();
+        assert_eq!(lifecycle.restart().unwrap_err().code, "HOST_SHUTTING_DOWN");
     }
 }

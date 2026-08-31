@@ -64,7 +64,7 @@ impl Fixture {
         let binary = root.join("bin/tessivum");
         write(
             &binary,
-            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.17\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\n  --market-tarball) printf '%s\\n' \"$TESSIVUM_MARKET_TARBALL\" ;;\n  --market-sha256-file) printf '%s\\n' \"$TESSIVUM_MARKET_SHA256_FILE\" ;;\nesac\n",
+            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.17\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\n  --market-tarball) printf '%s\\n' \"$TESSIVUM_MARKET_TARBALL\" ;;\n  --market-sha256-file) printf '%s\\n' \"$TESSIVUM_MARKET_SHA256_FILE\" ;;\n  --market-source-file) printf '%s\\n' \"$TESSIVUM_MARKET_SOURCE_FILE\" ;;\nesac\n",
         );
         make_executable(&binary);
 
@@ -91,7 +91,12 @@ impl Fixture {
 
         let market_root = root.join("market");
         let market_tgz = root.join(MARKET_FILENAME);
-        write_market_tgz(&market_root, &market_tgz, MARKET_VERSION, market_provenance());
+        write_market_tgz(
+            &market_root,
+            &market_tgz,
+            MARKET_VERSION,
+            market_provenance(),
+        );
 
         let output = root.join("dist");
         fs::create_dir_all(&output).unwrap();
@@ -393,15 +398,25 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         .stage()
         .join("share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz");
     let market_checksum = PathBuf::from(format!("{}.sha256", market_tgz.display()));
-    assert_eq!(fs::read(&market_tgz).unwrap(), fs::read(&fixture.market_tgz).unwrap());
+    let market_source = PathBuf::from(format!("{}.source.json", market_tgz.display()));
     assert_eq!(
-        fs::read(&market_checksum).unwrap(),
-        fs::read(PathBuf::from(format!("{}.sha256", fixture.market_tgz.display()))).unwrap(),
+        fs::read(&market_tgz).unwrap(),
+        fs::read(&fixture.market_tgz).unwrap()
     );
     assert_eq!(
-        fs::read(fixture.stage().join(
-            "share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz.source.json",
-        ))
+        fs::read(&market_checksum).unwrap(),
+        fs::read(PathBuf::from(format!(
+            "{}.sha256",
+            fixture.market_tgz.display()
+        )))
+        .unwrap(),
+    );
+    assert_eq!(
+        fs::read(
+            fixture
+                .stage()
+                .join("share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz.source.json",)
+        )
         .unwrap(),
         fs::read(repository_root().join("packaging/market-source.json")).unwrap(),
     );
@@ -418,9 +433,13 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
     assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
     assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
     assert!(launcher_text.contains("TESSIVUM_MARKET_TARBALL"));
-    assert!(launcher_text.contains("$root/share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz"));
+    assert!(
+        launcher_text.contains("$root/share/tessivum/plugins/tessivum-market-0.1.0-alpha.17.tgz")
+    );
     assert!(launcher_text.contains("TESSIVUM_MARKET_SHA256_FILE"));
     assert!(launcher_text.contains("tessivum-market-0.1.0-alpha.17.tgz.sha256"));
+    assert!(launcher_text.contains("TESSIVUM_MARKET_SOURCE_FILE"));
+    assert!(launcher_text.contains("tessivum-market-0.1.0-alpha.17.tgz.source.json"));
     assert!(!launcher_text.contains("TESSIVUM_AGENT_PRESET_ROOT"));
     assert!(!launcher_text.contains("agent-presets"));
     for argument in ["--version", "--help"] {
@@ -449,6 +468,7 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
             ("--host-module-root", &host_modules),
             ("--market-tarball", &market_tgz),
             ("--market-sha256-file", &market_checksum),
+            ("--market-source-file", &market_source),
         ] {
             let launcher_env = Command::new(command).arg(argument).output().unwrap();
             assert!(launcher_env.status.success());

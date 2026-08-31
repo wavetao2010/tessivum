@@ -9,14 +9,14 @@
  * factory execution (the loader removes plugin-owned tags on unload).
  *
  * scripts/preflight.mjs asserts the emitted client/client.js starts with the
- * exact `window.__ModuleLoader__.load({ id: "dshmarket"` prefix.
+ * exact `window.__ModuleLoader__.load({ id: "tessivum-market"` prefix.
  */
 import { readFile } from 'node:fs/promises'
 import { basename, dirname, resolve as resolvePath } from 'node:path'
 import { defineConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
-const id = 'dshmarket'
+const id = 'tessivum-market'
 
 /**
  * Externals resolved from the loader module table at runtime. Only the

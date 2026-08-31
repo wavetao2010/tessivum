@@ -2068,11 +2068,6 @@ export function MarketSection(props: MarketSectionProps) {
     }
     requestRestart(10)
   }, [bootId, restarting, t])
-  useEffect(() => {
-    if (!autoRestart || pendingRestart === 0 || !restartEnabled || restarting || hostBusy || busyUrl !== null || updatingName !== null || removingName !== null) return
-    const timer = window.setTimeout(doRestart, 0)
-    return () => window.clearTimeout(timer)
-  }, [autoRestart, busyUrl, doRestart, hostBusy, pendingRestart, removingName, restartEnabled, restarting, updatingName])
 
 
   /** Cancel the running plugin command (#6 by @qichuang321). */
@@ -2760,6 +2755,11 @@ export function MarketSection(props: MarketSectionProps) {
   const hostPendingNames = Object.keys(activations).filter(name => activations[name]?.state === 'restart')
   const showHostPending = hostPendingNames.length > 0 && !restartNoticeDismissed && sessionPendingRestart === 0
   const pendingRestart = sessionPendingRestart > 0 ? sessionPendingRestart : (showHostPending ? hostPendingNames.length : 0)
+  useEffect(() => {
+    if (!autoRestart || pendingRestart === 0 || !restartEnabled || restarting || hostBusy || busyUrl !== null || updatingName !== null || removingName !== null) return
+    const timer = window.setTimeout(doRestart, 0)
+    return () => window.clearTimeout(timer)
+  }, [autoRestart, busyUrl, doRestart, hostBusy, pendingRestart, removingName, restartEnabled, restarting, updatingName])
   const displayedInstalled = pendingBackup === null ? installed : { ...pendingDependencies, ...installed }
   const missingRestoreCount = Object.keys(pendingDependencies).filter(name => !installedFiles.includes(name)).length
   // Self-update lives in the header button and the settings card, not this
@@ -2815,8 +2815,8 @@ export function MarketSection(props: MarketSectionProps) {
               {pluginName(p.name)}
               <IconLinkOutline14 size={12} className={css.repoMark} />
               {p.deprecated === true && <span className={css.depBadge}>{t('deprecatedBadge')}</span>}
-              <span className={css.depBadge}>{catalogBadge(p)}</span>
             </a>
+              <span className={css.depBadge}>{catalogBadge(p)}</span>
             <div className={css.byline}>
               <OwnerAvatar name={p.name} owner={p.owner || ''} />
               <span className={css.owner} title={p.owner}>{p.owner}</span>

@@ -124,6 +124,12 @@ export interface UpdateStatus {
   latest?: string | null
   /** Updating this local package switches it to its matched online release. */
   restoreRequired?: boolean
+  /** Exact npm target chosen by the last update check. */
+  targetVersion?: string | null
+  /** Registry publication time for the exact target. */
+  publishedAt?: string | null
+  /** Registry base URL that supplied the exact target. */
+  registryOrigin?: string
 }
 
 /** Poll payload from /dsh-market/status. */
