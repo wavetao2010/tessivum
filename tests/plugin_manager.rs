@@ -4,11 +4,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::{
+    env,
+    ffi::OsString,
+    sync::LazyLock,
+};
+#[cfg(unix)]
+use parking_lot::{Mutex, MutexGuard};
+
 use serde_json::json;
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
 use tessivum::{
     cli::{parse_cli, resolve_data_root, CliCommand},
     plugin_manager::{enabled_client_plugin_names, load_plugin_entries, plugin_profile_root},
 };
+#[cfg(unix)]
+use tessivum::plugin_manager::install_first_party_market;
 use tessivum_core::RuntimeKind;
 
 #[test]
@@ -334,5 +347,278 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_installs_fresh_at_the_stable_artifact_path_and_is_idempotent() {
+    let temp = TempDir::new();
+    let (tarball, checksum, package) = market_release(&temp, valid_market_patch());
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = FakePnpm::new(&temp, &package, false, &log);
+
+    install_first_party_market(&temp.0, &tarball, &checksum).unwrap();
+    let profile = temp.0.join("plugins");
+    let artifact = stable_market_artifact(&temp.0);
+    let manifest = read_json_file(&profile.join("package.json"));
+    assert_eq!(
+        manifest.pointer("/dependencies/tessivum-market"),
+        Some(&json!(format!("file:{}", artifact.display())))
+    );
+    assert_eq!(
+        manifest.pointer("/dsh/profile/bundles"),
+        Some(&json!(["tessivum-market"]))
+    );
+    assert_eq!(fs::read(&artifact).unwrap(), fs::read(&tarball).unwrap());
+
+    fs::write(&log, "").unwrap();
+    install_first_party_market(&temp.0, &tarball, &checksum).unwrap();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_replaces_the_legacy_bundle_in_place_and_preserves_state_groups_and_disabled() {
+    let temp = TempDir::new();
+    let (profile, _, _, state) = legacy_market_profile(&temp, json!(["before", "dshmarket", "after"]));
+    let (tarball, checksum, package) = market_release(&temp, valid_market_patch());
+    let _pnpm = FakePnpm::new(&temp, &package, false, &temp.0.join("pnpm.log"));
+
+    install_first_party_market(&temp.0, &tarball, &checksum).unwrap();
+    let manifest = read_json_file(&profile.join("package.json"));
+    assert_eq!(
+        manifest.pointer("/dsh/profile/bundles"),
+        Some(&json!(["before", "tessivum-market", "after"]))
+    );
+    assert_eq!(manifest.pointer("/dsh/profile/groups/market"), Some(&json!({"disabled": true})));
+    assert!(manifest.pointer("/dependencies/dshmarket").is_none());
+    assert_eq!(
+        fs::read(profile.join(".dsh-market/state.json")).unwrap(),
+        state
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_respects_an_explicit_empty_bundle_authority() {
+    let temp = TempDir::new();
+    let (profile, _, _, state) = legacy_market_profile(&temp, json!([]));
+    let (tarball, checksum, package) = market_release(&temp, valid_market_patch());
+    let _pnpm = FakePnpm::new(&temp, &package, false, &temp.0.join("pnpm.log"));
+
+    install_first_party_market(&temp.0, &tarball, &checksum).unwrap();
+    let manifest = read_json_file(&profile.join("package.json"));
+    assert_eq!(manifest.pointer("/dsh/profile/bundles"), Some(&json!([])));
+    assert_eq!(
+        fs::read(profile.join(".dsh-market/state.json")).unwrap(),
+        state
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_rejects_an_incorrect_hash_before_profile_mutation() {
+    let temp = TempDir::new();
+    let profile = temp.0.join("plugins");
+    fs::create_dir_all(&profile).unwrap();
+    let manifest = b"{\n  \"dependencies\": {}\n}\n";
+    fs::write(profile.join("package.json"), manifest).unwrap();
+    let (tarball, _, _) = market_release(&temp, valid_market_patch());
+
+    assert!(install_first_party_market(&temp.0, &tarball, "00".repeat(32)).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert!(!stable_market_artifact(&temp.0).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_rejects_duplicate_legacy_identities_without_mutation() {
+    let temp = TempDir::new();
+    let profile = temp.0.join("plugins");
+    fs::create_dir_all(&profile).unwrap();
+    let manifest = json!({
+        "dependencies": {"dshmarket": "file:/old-one.tgz", "dsh-market": "file:/old-two.tgz"},
+        "dsh": {"profile": {"bundles": []}}
+    });
+    write_json(&profile.join("package.json"), manifest);
+    let original = fs::read(profile.join("package.json")).unwrap();
+    let (tarball, checksum, _) = market_release(&temp, valid_market_patch());
+
+    assert!(install_first_party_market(&temp.0, &tarball, &checksum).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_composition_failure_restores_exact_legacy_source_documents_and_state() {
+    let temp = TempDir::new();
+    let (profile, manifest, lock, state) = legacy_market_profile(&temp, json!(["dshmarket"]));
+    let (tarball, checksum, package) = market_release(&temp, "not: [valid\n");
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = FakePnpm::new(&temp, &package, false, &log);
+
+    assert!(install_first_party_market(&temp.0, &tarball, &checksum).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert_eq!(fs::read(profile.join(".dsh-market/state.json")).unwrap(), state);
+    let restored = read_json_file(&profile.join("package.json"));
+    assert_eq!(
+        restored.pointer("/dependencies/dshmarket"),
+        Some(&json!("file:/previous/dshmarket-1.29.2.tgz"))
+    );
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn first_party_market_pnpm_failure_rolls_back_the_legacy_profile() {
+    let temp = TempDir::new();
+    let (profile, manifest, lock, state) = legacy_market_profile(&temp, json!(["dshmarket"]));
+    let (tarball, checksum, package) = market_release(&temp, valid_market_patch());
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = FakePnpm::new(&temp, &package, true, &log);
+
+    assert!(install_first_party_market(&temp.0, &tarball, &checksum).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert_eq!(fs::read(profile.join(".dsh-market/state.json")).unwrap(), state);
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+}
+
+#[cfg(unix)]
+fn valid_market_patch() -> &'static str {
+    "- insert:\n    - id: tessivum-market\n      name: tessivum-market\n"
+}
+
+#[cfg(unix)]
+fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
+    let tarball = temp.0.join("release.tgz");
+    let bytes = b"tessivum market release";
+    fs::write(&tarball, bytes).unwrap();
+    let package = temp.0.join("market-package");
+    fs::create_dir_all(package.join("lib")).unwrap();
+    write_json(
+        &package.join("package.json"),
+        json!({
+            "name": "tessivum-market",
+            "version": "0.1.0-alpha.17",
+            "type": "module",
+            "main": "./lib/index.js",
+            "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
+        }),
+    );
+    fs::write(package.join("lib/index.js"), "export default () => {}\n").unwrap();
+    fs::write(package.join("cordis.patch.yml"), patch).unwrap();
+    (tarball, format!("{:x}", Sha256::digest(bytes)), package)
+}
+
+#[cfg(unix)]
+fn stable_market_artifact(data_dir: &Path) -> PathBuf {
+    data_dir.join("artifacts/market/0.1.0-alpha.17/tessivum-market-0.1.0-alpha.17.tgz")
+}
+
+#[cfg(unix)]
+fn legacy_market_profile(temp: &TempDir, bundles: serde_json::Value) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let profile = temp.0.join("plugins");
+    fs::create_dir_all(profile.join("node_modules")).unwrap();
+    write_json(
+        &profile.join("package.json"),
+        json!({
+            "name": "profile",
+            "dependencies": {
+                "before": "1.0.0",
+                "dshmarket": "file:/previous/dshmarket-1.29.2.tgz",
+                "after": "1.0.0"
+            },
+            "dsh": {"profile": {"bundles": bundles, "groups": {"market": {"disabled": true}}}}
+        }),
+    );
+    write_bundle(&profile, "before", false, "[]\n");
+    write_bundle(
+        &profile,
+        "dshmarket",
+        false,
+        "- insert:\n    - id: old-market\n      name: dshmarket\n",
+    );
+    write_bundle(&profile, "after", false, "[]\n");
+    let lock = b"lockfileVersion: '9.0'\n".to_vec();
+    fs::write(profile.join("pnpm-lock.yaml"), &lock).unwrap();
+    let state = br#"{"disabled":["dshmarket"],"groups":{"dshmarket":"market"}}"#.to_vec();
+    fs::create_dir_all(profile.join(".dsh-market")).unwrap();
+    fs::write(profile.join(".dsh-market/state.json"), &state).unwrap();
+    let manifest = fs::read(profile.join("package.json")).unwrap();
+    (profile, manifest, lock, state)
+}
+
+#[cfg(unix)]
+fn read_json_file(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+struct FakePnpm {
+    _gate: MutexGuard<'static, ()>,
+    path: Option<OsString>,
+    market: Option<OsString>,
+    fail_add: Option<OsString>,
+    log: Option<OsString>,
+}
+
+#[cfg(unix)]
+impl FakePnpm {
+    fn new(temp: &TempDir, market: &Path, fail_add: bool, log: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        static GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        let gate = GATE.lock();
+        let bin = temp.0.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let pnpm = bin.join("pnpm");
+        fs::write(
+            &pnpm,
+            "#!/bin/sh\nif [ -n \"$FAKE_PNPM_LOG\" ]; then echo \"$1\" >> \"$FAKE_PNPM_LOG\"; fi\ncase \"$1\" in\n  add)\n    mkdir -p \"$PWD/node_modules\"\n    rm -rf \"$PWD/node_modules/tessivum-market\"\n    cp -R \"$FAKE_PNPM_MARKET\" \"$PWD/node_modules/tessivum-market\"\n    [ \"$FAKE_PNPM_FAIL_ADD\" = 1 ] && exit 23\n    ;;\n  remove) rm -rf \"$PWD/node_modules/$2\" ;;\n  install) rm -rf \"$PWD/node_modules/tessivum-market\" ;;\nesac\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&pnpm, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = env::var_os("PATH");
+        let mut replacement = OsString::from(bin);
+        if let Some(previous) = &path {
+            replacement.push(":");
+            replacement.push(previous);
+        }
+        let market_previous = env::var_os("FAKE_PNPM_MARKET");
+        let fail_add_previous = env::var_os("FAKE_PNPM_FAIL_ADD");
+        let log_previous = env::var_os("FAKE_PNPM_LOG");
+        env::set_var("PATH", replacement);
+        env::set_var("FAKE_PNPM_MARKET", market);
+        env::set_var("FAKE_PNPM_FAIL_ADD", if fail_add { "1" } else { "0" });
+        env::set_var("FAKE_PNPM_LOG", log);
+        Self {
+            _gate: gate,
+            path,
+            market: market_previous,
+            fail_add: fail_add_previous,
+            log: log_previous,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakePnpm {
+    fn drop(&mut self) {
+        restore_environment("PATH", self.path.take());
+        restore_environment("FAKE_PNPM_MARKET", self.market.take());
+        restore_environment("FAKE_PNPM_FAIL_ADD", self.fail_add.take());
+        restore_environment("FAKE_PNPM_LOG", self.log.take());
+    }
+}
+
+#[cfg(unix)]
+fn restore_environment(name: &str, value: Option<OsString>) {
+    if let Some(value) = value {
+        env::set_var(name, value);
+    } else {
+        env::remove_var(name);
     }
 }

@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{self, ErrorKind, Write},
+    io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::Arc,
@@ -30,6 +30,10 @@ use crate::{
 const MAX_PROFILE_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_PROFILE_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BUNDLE_PATCH_BYTES: u64 = 1024 * 1024;
+const FIRST_PARTY_MARKET_NAME: &str = "tessivum-market";
+const FIRST_PARTY_MARKET_VERSION: &str = "0.1.0-alpha.17";
+const FIRST_PARTY_MARKET_TARBALL: &str = "tessivum-market-0.1.0-alpha.17.tgz";
+const MAX_FIRST_PARTY_MARKET_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PluginManagerError {
@@ -481,8 +485,79 @@ pub fn mutate_plugins(
             format!("pnpm completed but Profile activation record was not committed: {error}"),
             &profile,
             &mutation,
+
         )
     })
+}
+/// Installs the release-owned market tarball into the profile without retaining a
+/// reference to the release directory.
+pub fn install_first_party_market(
+    data_dir: impl AsRef<Path>,
+    tarball: impl AsRef<Path>,
+    expected_sha256: impl AsRef<str>,
+) -> Result<(), PluginManagerError> {
+    let data_dir = data_dir.as_ref();
+    let artifact = copy_first_party_market_artifact(data_dir, tarball.as_ref(), expected_sha256.as_ref())?;
+    let profile = plugin_profile_root(data_dir);
+    fs::create_dir_all(&profile).map_err(|error| io_error(&profile, error))?;
+    let _lock = ProfileLock::acquire(&profile)?;
+    let snapshot = FirstPartyMarketSnapshot::capture(&profile)?;
+    let mut pnpm_started = false;
+    let mut legacy_market = None;
+    let mut previous_bundles = None;
+
+    let mut install = || -> Result<(), PluginManagerError> {
+        ensure_profile(&profile)?;
+        let document = read_profile_document(&profile)?;
+        let migration = FirstPartyMarketMigration::discover(&profile, &document)?;
+        legacy_market = migration.legacy.clone();
+        previous_bundles = Some(migration.bundles.clone());
+        if first_party_market_is_current(&profile, &document, &artifact, &migration)? {
+            return Ok(());
+        }
+
+        run_first_party_market_pnpm(
+            &profile,
+            FirstPartyMarketPnpm::Add(&artifact),
+            Some(&mut pnpm_started),
+        )?;
+        write_first_party_market_manifest(&profile, &artifact, &migration, false)?;
+        validate_first_party_market_installation(&profile)?;
+
+        if let Some(legacy) = &migration.legacy {
+            run_first_party_market_pnpm(
+                &profile,
+                FirstPartyMarketPnpm::Remove(&legacy.name),
+                Some(&mut pnpm_started),
+            )?;
+        }
+        write_first_party_market_manifest(&profile, &artifact, &migration, true)?;
+        validate_first_party_market_installation(&profile)
+    };
+
+    let result = install();
+    drop(install);
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => match rollback_first_party_market(
+            &profile,
+            &snapshot,
+            pnpm_started,
+            legacy_market.as_ref(),
+            previous_bundles.as_deref(),
+        ) {
+            Ok(()) => Err(PluginManagerError::Mutation {
+                reason: format!("first-party market installation failed and the profile was restored: {error}"),
+                partial_state: first_party_market_partial_state(&profile),
+            }),
+            Err(recovery) => Err(PluginManagerError::Mutation {
+                reason: format!(
+                    "first-party market installation failed: {error}; recovery could not be proven: {recovery}"
+                ),
+                partial_state: first_party_market_partial_state(&profile),
+            }),
+        },
+    }
 }
 
 impl ProfileLock {
@@ -743,6 +818,145 @@ struct ProfileSnapshot {
     dependencies: BTreeSet<String>,
     bundles: Vec<String>,
 }
+#[derive(Clone)]
+struct ProfileFileSnapshot {
+    bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct FirstPartyMarketSnapshot {
+    manifest: ProfileFileSnapshot,
+    lock: ProfileFileSnapshot,
+    state: ProfileFileSnapshot,
+}
+
+#[derive(Clone)]
+struct FirstPartyMarketDependency {
+    name: String,
+    source: String,
+}
+
+struct FirstPartyMarketMigration {
+    legacy: Option<FirstPartyMarketDependency>,
+    bundles: Vec<String>,
+    explicit_bundles: bool,
+}
+
+enum FirstPartyMarketPnpm<'a> {
+    Add(&'a Path),
+    Remove(&'a str),
+    Install,
+}
+
+impl FirstPartyMarketSnapshot {
+    fn capture(profile: &Path) -> Result<Self, PluginManagerError> {
+        Ok(Self {
+            manifest: capture_profile_file(&profile.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?,
+            lock: capture_profile_file(&profile.join("pnpm-lock.yaml"), MAX_PROFILE_LOCK_BYTES)?,
+            state: capture_profile_file(
+                &profile.join(".dsh-market").join("state.json"),
+                MAX_PROFILE_MANIFEST_BYTES,
+            )?,
+        })
+    }
+
+    fn restore(&self, profile: &Path) -> Result<(), PluginManagerError> {
+        restore_profile_file(&profile.join("package.json"), &self.manifest)?;
+        restore_profile_file(&profile.join("pnpm-lock.yaml"), &self.lock)?;
+        restore_profile_file(
+            &profile.join(".dsh-market").join("state.json"),
+            &self.state,
+        )
+    }
+}
+
+impl FirstPartyMarketMigration {
+    fn discover(profile: &Path, document: &ProfileDocument) -> Result<Self, PluginManagerError> {
+        let dependencies = document
+            .manifest
+            .get("dependencies")
+            .and_then(Value::as_object)
+            .ok_or_else(|| PluginManagerError::Invalid("plugin profile dependencies must be an object".into()))?;
+        let legacy = ["dshmarket", "dsh-market"]
+            .into_iter()
+            .filter_map(|name| dependencies.get(name).map(|source| (name, source)))
+            .map(|(name, source)| {
+                source.as_str().map_or_else(
+                    || {
+                        Err(PluginManagerError::Invalid(format!(
+                            "legacy market dependency {name:?} must have a string source"
+                        )))
+                    },
+                    |source| {
+                        Ok(FirstPartyMarketDependency {
+                            name: name.into(),
+                            source: source.into(),
+                        })
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if legacy.len() > 1 {
+            return Err(PluginManagerError::Invalid(
+                "plugin profile contains both dshmarket and dsh-market".into(),
+            ));
+        }
+        let legacy = legacy.into_iter().next();
+        let explicit_bundles = document.bundles.is_some();
+        let bundles = match &document.bundles {
+            Some(bundles) => bundles.clone(),
+            None => derive_profile_bundles(profile, &document.dependencies)?
+                .into_iter()
+                .map(|bundle| bundle.name)
+                .collect(),
+        };
+        let legacy_bundles: BTreeSet<_> = bundles
+            .iter()
+            .filter(|name| matches!(name.as_str(), "dshmarket" | "dsh-market"))
+            .collect();
+        if legacy_bundles.len() > 1 {
+            return Err(PluginManagerError::Invalid(
+                "plugin profile contains both dshmarket and dsh-market bundles".into(),
+            ));
+        }
+        if let Some(bundle) = legacy_bundles.into_iter().next() {
+            if legacy.as_ref().map(|legacy| legacy.name.as_str()) != Some(bundle.as_str()) {
+                return Err(PluginManagerError::Invalid(format!(
+                    "legacy market bundle {bundle:?} does not match its dependency"
+                )));
+            }
+        }
+        let migration = Self {
+            legacy,
+            bundles,
+            explicit_bundles,
+        };
+        migration.market_bundles()?;
+        Ok(migration)
+    }
+
+    fn market_bundles(&self) -> Result<Vec<String>, PluginManagerError> {
+        let mut bundles = self.bundles.clone();
+        if let Some(legacy) = &self.legacy {
+            for bundle in &mut bundles {
+                if bundle == &legacy.name {
+                    *bundle = FIRST_PARTY_MARKET_NAME.into();
+                }
+            }
+        }
+        if !self.explicit_bundles && !bundles.iter().any(|bundle| bundle == FIRST_PARTY_MARKET_NAME) {
+            bundles.push(FIRST_PARTY_MARKET_NAME.into());
+        }
+        let mut seen = BTreeSet::new();
+        if bundles.iter().any(|bundle| !seen.insert(bundle)) {
+            return Err(PluginManagerError::Invalid(
+                "first-party market migration would duplicate a bundle".into(),
+            ));
+        }
+        Ok(bundles)
+    }
+}
+
 
 #[derive(Clone, Copy)]
 enum ReconciliationMode {
@@ -1045,6 +1259,395 @@ fn write_profile_manifest(path: &Path, manifest: &Value) -> Result<(), PluginMan
     }
     result
 }
+fn copy_first_party_market_artifact(
+    data_dir: &Path,
+    tarball: &Path,
+    expected_sha256: &str,
+) -> Result<PathBuf, PluginManagerError> {
+    let metadata = fs::symlink_metadata(tarball).map_err(|error| io_error(tarball, error))?;
+    if !metadata.is_file()
+        || metadata.len() > MAX_FIRST_PARTY_MARKET_TARBALL_BYTES
+        || tarball.extension().and_then(|extension| extension.to_str()) != Some("tgz")
+    {
+        return Err(PluginManagerError::Invalid(format!(
+            "{} must be a regular .tgz no larger than {MAX_FIRST_PARTY_MARKET_TARBALL_BYTES} bytes",
+            tarball.display()
+        )));
+    }
+    let expected = decode_sha256(expected_sha256)?;
+    let directory = data_dir
+        .join("artifacts")
+        .join("market")
+        .join(FIRST_PARTY_MARKET_VERSION);
+    fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
+    let artifact = directory.join(FIRST_PARTY_MARKET_TARBALL);
+    let temporary = directory.join(format!(
+        ".{FIRST_PARTY_MARKET_TARBALL}-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut input = fs::File::open(tarball).map_err(|error| io_error(tarball, error))?;
+        let opened = input.metadata().map_err(|error| io_error(tarball, error))?;
+        if !opened.is_file() || opened.len() > MAX_FIRST_PARTY_MARKET_TARBALL_BYTES {
+            return Err(PluginManagerError::Invalid(format!(
+                "{} must be a regular .tgz no larger than {MAX_FIRST_PARTY_MARKET_TARBALL_BYTES} bytes",
+                tarball.display()
+            )));
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| io_error(&temporary, error))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut copied = 0_u64;
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|error| io_error(tarball, error))?;
+            if read == 0 {
+                break;
+            }
+            copied = copied.checked_add(read as u64).ok_or_else(|| {
+                PluginManagerError::Invalid(format!("{} is too large", tarball.display()))
+            })?;
+            if copied > MAX_FIRST_PARTY_MARKET_TARBALL_BYTES {
+                return Err(PluginManagerError::Invalid(format!(
+                    "{} is too large",
+                    tarball.display()
+                )));
+            }
+            hasher.update(&buffer[..read]);
+            output
+                .write_all(&buffer[..read])
+                .map_err(|error| io_error(&temporary, error))?;
+        }
+        let actual: [u8; 32] = hasher.finalize().into();
+        if actual != expected {
+            return Err(PluginManagerError::Invalid(format!(
+                "{} does not match the supplied SHA-256",
+                tarball.display()
+            )));
+        }
+        output.sync_all().map_err(|error| io_error(&temporary, error))?;
+        drop(output);
+        fs::rename(&temporary, &artifact).map_err(|error| io_error(&artifact, error))?;
+        #[cfg(unix)]
+        fs::File::open(&directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| io_error(&directory, error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map(|()| artifact)
+}
+
+fn decode_sha256(value: &str) -> Result<[u8; 32], PluginManagerError> {
+    let value = value.trim();
+    if value.len() != 64 {
+        return Err(PluginManagerError::Invalid(
+            "first-party market SHA-256 must be 64 hexadecimal characters".into(),
+        ));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, bytes) in value.as_bytes().chunks_exact(2).enumerate() {
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let Some(high) = digit(bytes[0]) else {
+            return Err(PluginManagerError::Invalid(
+                "first-party market SHA-256 must be hexadecimal".into(),
+            ));
+        };
+        let Some(low) = digit(bytes[1]) else {
+            return Err(PluginManagerError::Invalid(
+                "first-party market SHA-256 must be hexadecimal".into(),
+            ));
+        };
+        digest[index] = high << 4 | low;
+    }
+    Ok(digest)
+}
+
+fn first_party_market_file_spec(path: &Path) -> Result<String, PluginManagerError> {
+    let path = path.to_str().ok_or_else(|| {
+        PluginManagerError::Invalid("first-party market artifact path must be UTF-8".into())
+    })?;
+    Ok(format!("file:{path}"))
+}
+
+fn write_first_party_market_manifest(
+    profile: &Path,
+    artifact: &Path,
+    migration: &FirstPartyMarketMigration,
+    remove_legacy: bool,
+) -> Result<(), PluginManagerError> {
+    let mut document = read_profile_document(profile)?;
+    {
+        let root = document.manifest.as_object_mut().ok_or_else(|| {
+            PluginManagerError::Invalid("plugin profile manifest must be an object".into())
+        })?;
+        let dependencies = root
+            .get_mut("dependencies")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| PluginManagerError::Invalid("plugin profile dependencies must be an object".into()))?;
+        dependencies.insert(
+            FIRST_PARTY_MARKET_NAME.into(),
+            Value::String(first_party_market_file_spec(artifact)?),
+        );
+        if remove_legacy {
+            if let Some(legacy) = &migration.legacy {
+                dependencies.remove(&legacy.name);
+            }
+        }
+    }
+    set_profile_bundles(&mut document.manifest, migration.market_bundles()?)?;
+    write_profile_manifest(&profile.join("package.json"), &document.manifest)
+}
+
+fn first_party_market_is_current(
+    profile: &Path,
+    document: &ProfileDocument,
+    artifact: &Path,
+    migration: &FirstPartyMarketMigration,
+) -> Result<bool, PluginManagerError> {
+    if migration.legacy.is_some() || document.bundles.as_ref() != Some(&migration.market_bundles()?) {
+        return Ok(false);
+    }
+    let expected_source = first_party_market_file_spec(artifact)?;
+    let source = document
+        .manifest
+        .pointer(&format!("/dependencies/{FIRST_PARTY_MARKET_NAME}"))
+        .and_then(Value::as_str);
+    if source != Some(expected_source.as_str()) {
+        return Ok(false);
+    }
+    Ok(validate_first_party_market_installation(profile).is_ok())
+}
+
+fn validate_first_party_market_installation(profile: &Path) -> Result<(), PluginManagerError> {
+    validate_market_package_entry(profile, FIRST_PARTY_MARKET_NAME)?;
+    let state = load_profile(profile, false)?;
+    build_bundle_entries(&state).map(|_| ())
+}
+
+fn validate_market_package_entry(profile: &Path, package: &str) -> Result<(), PluginManagerError> {
+    let root = installed_package_root(profile, package)?;
+    let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+    if manifest.get("name").and_then(Value::as_str) != Some(package) {
+        return Err(PluginManagerError::Invalid(format!(
+            "{package} package manifest does not declare its package name"
+        )));
+    }
+    if package == FIRST_PARTY_MARKET_NAME
+        && manifest.get("version").and_then(Value::as_str) != Some(FIRST_PARTY_MARKET_VERSION)
+    {
+        return Err(PluginManagerError::Invalid(format!(
+            "{package} package manifest does not declare version {FIRST_PARTY_MARKET_VERSION}"
+        )));
+    }
+    let patch = bundle_patch(&manifest, package)?.ok_or_else(|| {
+        PluginManagerError::Invalid(format!("{package} does not declare dsh.bundle.patch"))
+    })?;
+    safe_join(&root, patch)?;
+    package_entry(profile, package, None, &PluginRouter::new()).map(|_| ())
+}
+
+fn run_first_party_market_pnpm(
+    profile: &Path,
+    operation: FirstPartyMarketPnpm<'_>,
+    pnpm_started: Option<&mut bool>,
+) -> Result<(), PluginManagerError> {
+    let scripts_allowed = profile_allows_builds(profile)
+        .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
+    let mut command = Command::new("pnpm");
+    command
+        .current_dir(profile)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    match operation {
+        FirstPartyMarketPnpm::Add(artifact) => {
+            command
+                .arg("add")
+                .arg("--save-exact")
+                .arg(first_party_market_file_spec(artifact)?);
+        }
+        FirstPartyMarketPnpm::Remove(package) => {
+            command.arg("remove").arg(package);
+        }
+        FirstPartyMarketPnpm::Install => {
+            command.arg("install");
+        }
+    }
+    if !scripts_allowed {
+        command.arg("--ignore-scripts");
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| PluginManagerError::Mutation {
+            reason: format!("could not run pnpm: {error}"),
+            partial_state: first_party_market_partial_state(profile),
+        })?;
+    if let Some(pnpm_started) = pnpm_started {
+        *pnpm_started = true;
+    }
+    let status = child.wait().map_err(|error| PluginManagerError::Mutation {
+        reason: format!("could not wait for pnpm: {error}"),
+        partial_state: first_party_market_partial_state(profile),
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(PluginManagerError::Mutation {
+        reason: status.code().map_or_else(
+            || "pnpm terminated without an exit code".into(),
+            |code| format!("pnpm exited with code {code}"),
+        ),
+        partial_state: first_party_market_partial_state(profile),
+    })
+}
+
+fn rollback_first_party_market(
+    profile: &Path,
+    snapshot: &FirstPartyMarketSnapshot,
+    pnpm_started: bool,
+    legacy: Option<&FirstPartyMarketDependency>,
+    previous_bundles: Option<&[String]>,
+) -> Result<(), PluginManagerError> {
+    snapshot.restore(profile)?;
+    if pnpm_started {
+        if snapshot.manifest.bytes.is_some() {
+            run_first_party_market_pnpm(profile, FirstPartyMarketPnpm::Install, None)?;
+        } else {
+            remove_first_party_market_package(profile)?;
+        }
+    }
+    snapshot.restore(profile)?;
+    if snapshot.manifest.bytes.is_some() {
+        if let Some(previous_bundles) = previous_bundles {
+            validate_profile_bundle_sequence(profile, previous_bundles)?;
+        } else {
+            let state = load_profile(profile, false)?;
+            build_bundle_entries(&state)?;
+        }
+    }
+    if let Some(legacy) = legacy {
+        let source = read_profile_document(profile)?
+            .manifest
+            .pointer(&format!("/dependencies/{}", legacy.name))
+            .and_then(Value::as_str);
+        if source != Some(legacy.source.as_str()) {
+            return Err(PluginManagerError::Invalid(format!(
+                "legacy market dependency {:?} was not restored to its exact source",
+                legacy.name
+            )));
+        }
+        validate_market_package_entry(profile, &legacy.name)?;
+    }
+    Ok(())
+}
+fn validate_profile_bundle_sequence(
+    profile: &Path,
+    names: &[String],
+) -> Result<(), PluginManagerError> {
+    let document = read_profile_document(profile)?;
+    let dependencies = document.dependencies.iter().cloned().collect();
+    let bundles = resolve_profile_bundles(profile, &dependencies, names)?;
+    validate_bundle_sequence(profile, &bundles)
+}
+
+fn remove_first_party_market_package(profile: &Path) -> Result<(), PluginManagerError> {
+    let package = package_root(profile, FIRST_PARTY_MARKET_NAME)?;
+    match fs::symlink_metadata(&package) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            fs::remove_file(&package).map_err(|error| io_error(&package, error))
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(&package).map_err(|error| io_error(&package, error))
+        }
+        Ok(_) => Err(PluginManagerError::Invalid(format!(
+            "{} is not a removable package entry",
+            package.display()
+        ))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(&package, error)),
+    }
+}
+
+
+fn first_party_market_partial_state(profile: &Path) -> String {
+    let (manifest, lock) = profile_document_state(profile);
+    format!(
+        "package.json={manifest}; pnpm-lock.yaml={lock}; first-party market entry={}",
+        mutation_target_entry_state(profile, &PluginMutation::Add(FIRST_PARTY_MARKET_NAME.into()))
+    )
+}
+
+fn capture_profile_file(path: &Path, maximum: u64) -> Result<ProfileFileSnapshot, PluginManagerError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(ProfileFileSnapshot {
+            bytes: Some(read_bounded(path, maximum)?),
+        }),
+        Ok(_) => Err(PluginManagerError::Invalid(format!(
+            "{} must be a regular file",
+            path.display()
+        ))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(ProfileFileSnapshot { bytes: None }),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn restore_profile_file(path: &Path, snapshot: &ProfileFileSnapshot) -> Result<(), PluginManagerError> {
+    let Some(bytes) = &snapshot.bytes else {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(path, error)),
+        };
+    };
+    let parent = path.parent().ok_or_else(|| {
+        PluginManagerError::Invalid(format!("{} has no parent", path.display()))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+    let temporary = parent.join(format!(
+        ".restore-{}-{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| io_error(&temporary, error))?;
+        file.write_all(bytes)
+            .map_err(|error| io_error(&temporary, error))?;
+        file.sync_all().map_err(|error| io_error(&temporary, error))?;
+        if let Some(permissions) = permissions {
+            fs::set_permissions(&temporary, permissions).map_err(|error| io_error(&temporary, error))?;
+        }
+        drop(file);
+        fs::rename(&temporary, path).map_err(|error| io_error(path, error))?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| io_error(parent, error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 
 fn reconcile_profile(
     profile: &Path,
