@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.18 - 2026-08-31
+
+### Fixed
+
+- Packaged Web startup uses pnpm 11's supported config form when removing a legacy market package, so the first-party market migration no longer rolls back after installation.
+
 ## 0.1.0-alpha.17 - 2026-08-31
 
 ### Added

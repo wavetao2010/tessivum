@@ -1501,22 +1501,29 @@ fn run_first_party_market_pnpm(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    match operation {
+    let is_remove = match operation {
         FirstPartyMarketPnpm::Add(artifact) => {
             command
                 .arg("add")
                 .arg("--save-exact")
                 .arg(first_party_market_file_spec(artifact)?);
+            false
         }
         FirstPartyMarketPnpm::Remove(package) => {
             command.arg("remove").arg(package);
+            true
         }
         FirstPartyMarketPnpm::Install => {
             command.arg("install");
+            false
         }
-    }
+    };
     if !scripts_allowed {
-        command.arg("--ignore-scripts");
+        command.arg(if is_remove {
+            "--config.ignore-scripts=true"
+        } else {
+            "--ignore-scripts"
+        });
     }
     let mut child = command
         .spawn()

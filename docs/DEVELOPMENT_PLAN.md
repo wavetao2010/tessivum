@@ -595,7 +595,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.17`，固定 `tessivum-core v0.1.6` / `4c3d7b7769e43e2eb228ebf43d46bef6119c4574`。本版本交付从固定 `dshmarket@1.38.1` MIT 源码派生的 `tessivum-market`，包含来源与许可证、checksum release artifact、旧市场事务迁移、精确 registry 版本更新、Host-owned 重启，以及 Native Rust Host + Bun client + Chromium 的安装/分类/主题/快照恢复场景。Standard/PTC/Minimal/Composition 继续由 Rust Native Mode Registry 解析并按 Session 固化；`mode.toml` 是唯一模式文件，Native/WASM/Legacy Node/Browser 四类插件平面继续保留。冻结 RPC、69 个上游 Chromium 场景加 1 个产品 Market 场景和社区插件回归继续分别以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)、[`WEB_E2E_PORT_CHECKLIST.md`](WEB_E2E_PORT_CHECKLIST.md) 与 [`PLUGIN_COMPATIBILITY.md`](PLUGIN_COMPATIBILITY.md) 为门槛；这些已实现切片不代表 Agent/LLM 迁移完成。
+当前实现基线为 `v0.1.0-alpha.18`，固定 `tessivum-core v0.1.6` / `4c3d7b7769e43e2eb228ebf43d46bef6119c4574`。本版本交付从固定 `dshmarket@1.38.1` MIT 源码派生的 `tessivum-market`，包含来源与许可证、checksum release artifact、旧市场事务迁移、精确 registry 版本更新、Host-owned 重启，以及 Native Rust Host + Bun client + Chromium 的安装/分类/主题/快照恢复场景。Standard/PTC/Minimal/Composition 继续由 Rust Native Mode Registry 解析并按 Session 固化；`mode.toml` 是唯一模式文件，Native/WASM/Legacy Node/Browser 四类插件平面继续保留。冻结 RPC、69 个上游 Chromium 场景加 1 个产品 Market 场景和社区插件回归继续分别以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)、[`WEB_E2E_PORT_CHECKLIST.md`](WEB_E2E_PORT_CHECKLIST.md) 与 [`PLUGIN_COMPATIBILITY.md`](PLUGIN_COMPATIBILITY.md) 为门槛；这些已实现切片不代表 Agent/LLM 迁移完成。
 
 ## 14.1 Alpha.9 发布记录
 

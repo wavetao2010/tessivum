@@ -509,7 +509,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
         &package.join("package.json"),
         json!({
             "name": "tessivum-market",
-            "version": "0.1.0-alpha.17",
+            "version": "0.1.0-alpha.18",
             "type": "module",
             "main": "./lib/index.js",
             "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
@@ -522,7 +522,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
 
 #[cfg(unix)]
 fn stable_market_artifact(data_dir: &Path) -> PathBuf {
-    data_dir.join("artifacts/market/0.1.0-alpha.17/tessivum-market-0.1.0-alpha.17.tgz")
+    data_dir.join("artifacts/market/0.1.0-alpha.18/tessivum-market-0.1.0-alpha.18.tgz")
 }
 
 #[cfg(unix)]
@@ -585,9 +585,10 @@ impl FakePnpm {
         let bin = temp.0.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let pnpm = bin.join("pnpm");
+        // pnpm 11 rejects the add/install-only --ignore-scripts flag on remove.
         fs::write(
             &pnpm,
-            "#!/bin/sh\nif [ -n \"$FAKE_PNPM_LOG\" ]; then echo \"$1\" >> \"$FAKE_PNPM_LOG\"; fi\ncase \"$1\" in\n  add)\n    mkdir -p \"$PWD/node_modules\"\n    rm -rf \"$PWD/node_modules/tessivum-market\"\n    cp -R \"$FAKE_PNPM_MARKET\" \"$PWD/node_modules/tessivum-market\"\n    [ \"$FAKE_PNPM_FAIL_ADD\" = 1 ] && exit 23\n    ;;\n  remove) rm -rf \"$PWD/node_modules/$2\" ;;\n  install) rm -rf \"$PWD/node_modules/tessivum-market\" ;;\nesac\nexit 0\n",
+            "#!/bin/sh\nif [ -n \"$FAKE_PNPM_LOG\" ]; then echo \"$1\" >> \"$FAKE_PNPM_LOG\"; fi\ncase \"$1\" in\n  add)\n    mkdir -p \"$PWD/node_modules\"\n    rm -rf \"$PWD/node_modules/tessivum-market\"\n    cp -R \"$FAKE_PNPM_MARKET\" \"$PWD/node_modules/tessivum-market\"\n    [ \"$FAKE_PNPM_FAIL_ADD\" = 1 ] && exit 23\n    ;;\n  remove) case \" $* \" in *\" --ignore-scripts \"*) exit 24;; esac; rm -rf \"$PWD/node_modules/$2\" ;;\n  install) rm -rf \"$PWD/node_modules/tessivum-market\" ;;\nesac\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&pnpm, fs::Permissions::from_mode(0o755)).unwrap();
