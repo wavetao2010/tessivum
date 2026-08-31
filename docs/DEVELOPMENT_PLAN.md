@@ -1,8 +1,8 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover 与 Phase 6 DSH Profile 兼容实现已完成；Alpha.15 公开发行验证进行中
-> 计划校准日期：2026-08-28
-> Tessivum 实现基线：`v0.1.0-alpha.15`
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容与 Alpha.16 社区插件兼容发布已完成
+> 计划校准日期：2026-08-31
+> Tessivum 实现基线：`v0.1.0-alpha.16`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容与 Web 模型配置面
 
