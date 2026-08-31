@@ -2505,13 +2505,19 @@ fn validate_web_response(response: &WebRouteResponse) -> BridgeResult<()> {
 }
 fn validate_product_path(path: &str) -> BridgeResult<()> {
     if path.len() > MAX_WEB_PATH_BYTES
-        || !["/dsh-market", "/sidebar"]
+        || !["/dsh-market", "/sidebar", "/dream-skin"]
             .iter()
-            .any(|root| path == *root || path.starts_with(&format!("{root}/")))
+            .any(|&root| {
+                path == root
+                    || path
+                        .strip_prefix(root)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
         || path.contains('\0')
         || path.contains('%')
         || path.contains('?')
         || path.contains('#')
+        || path.contains('\\')
         || path.split('/').any(|segment| matches!(segment, "." | ".."))
     {
         return Err(remote(
@@ -3195,6 +3201,25 @@ mod alpha11_tests {
         match error {
             BridgeError::Remote(error) => error.code,
             error => panic!("expected remote failure: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn dream_skin_route_is_allowlisted_without_opening_arbitrary_namespaces() {
+        validate_product_path("/dream-skin/api").expect("plugin namespace is accepted");
+        for path in [
+            "/",
+            "/api",
+            "/api/plugin",
+            "/unknown",
+            "/dream-skin-evil",
+            "dream-skin/api",
+            "/dream%2Dskin",
+        ] {
+            assert_eq!(
+                remote_code(validate_product_path(path).expect_err("unsafe route rejects")),
+                "INVALID_ROUTE_PATH"
+            );
         }
     }
 

@@ -205,6 +205,7 @@ tessivum plugin remove @scope/package
 # Frozen compatibility targets
 tessivum plugin add dshmarket@1.29.2
 tessivum plugin add dsh-better-sidebar@0.16.1
+tessivum plugin add dsh-dream-skin@8.30.1
 tessivum web
 
 `tessivum` and `tsv` are the same launcher and resolve the same data root. After a CLI mutation—or whenever dshmarket reports “重启后生效”—restart the Web process. dshmarket reads the current Profile plus settled Loader/Fiber inventory; Tessivum does not expose a global `dsh` shim or maintain a second Node-side Loader state.

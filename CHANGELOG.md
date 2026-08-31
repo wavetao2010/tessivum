@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Frozen compatibility coverage for `dsh-dream-skin@8.30.1`, including its Host persistence route and Browser client bundle.
+
+### Changed
+
+- Legacy web routes are restricted to the supported `/dsh-market`, `/sidebar`, and `/dream-skin` namespaces.
+- Tessivum pins the `tessivum-core v0.1.6` route-policy revision at `7150b20df296e52403de00f36fdc1dd9bf93edde`.
+
 ## 0.1.0-alpha.15 - 2026-08-28
 
 ### Added

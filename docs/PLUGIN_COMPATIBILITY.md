@@ -441,6 +441,7 @@ Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 
 - `dshmarket@1.29.2`：Profile mutation、HTTP prefix route、Browser client bundle 与重启激活；
 - `dsh-better-sidebar@0.16.1`：Host/Browser 双半插件、HTTP prefix route、WebSocket upgrade、native-backed settings 写入及重启恢复。
+- `dsh-dream-skin@8.30.1`：Host/Browser 双半插件、`/dream-skin/api` 有界状态持久化路由与浏览器主题 bundle；
 
 ### 14.2 WASM 样本
 
@@ -483,7 +484,7 @@ Legacy 插件不因为经过 Bridge 自动获得 WASM 的安全声明。
 - Node 崩溃或插件卸载后无残留；
 - 新 WASM 插件 ABI 已冻结；per-plugin manifest permissions 接线前，Host service call 默认拒绝，不能宣称权限生态已完成；
 - 浏览器插件继续工作，且 `dsh.client` boot graph 不依赖 Agent Mode 文件；
-- 社区插件只有通过固定版本矩阵、受限 Host route、Profile 安装和真实 Browser E2E 后才属于兼容范围；当前范围是 `dshmarket@1.29.2` 与 `dsh-better-sidebar@0.16.1`；
+- 社区插件只有通过固定版本矩阵、受限 Host route、Profile 安装和真实 Browser E2E 后才属于兼容范围；当前范围是 `dshmarket@1.29.2`、`dsh-better-sidebar@0.16.1` 与 `dsh-dream-skin@8.30.1`；
 - 删除 `agent.cordis.yml` Runtime Parser 后，Native/WASM/Legacy Node/Browser 四条插件路径仍有独立回归证据；
 - 不支持的插件获得具体、可行动的诊断；
 - 文档明确区分 Mode 文件、Node 源码兼容与 WASM 沙箱，不做误导性兼容或安全承诺。

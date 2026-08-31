@@ -377,7 +377,7 @@ v1 不提供：
 - Node 自行 listen；
 - 绕过 Host/Origin 或 body limit。
 
-Tessivum 产品 policy 只允许 dshmarket generation 注册 `/dsh-market` 及其子路径。Core transport 负责 framed callback、取消和 generation cleanup；产品仓库负责 Axum 路由、前缀 allowlist、HTTP DTO 与 authority。
+Tessivum 产品 policy 只允许固定兼容样本注册其自有前缀：`/dsh-market`、`/sidebar` 与 `/dream-skin`。Core transport 负责 framed callback、取消和 generation cleanup；产品仓库负责 Axum 路由、前缀 allowlist、HTTP DTO 与 authority。
 
 ### 9.3 Host-owned Profile 与包管理服务
 
