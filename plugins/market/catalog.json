@@ -1,0 +1,27 @@
+{
+  "updated": "2026-08-31T00:00:00.000Z",
+  "count": 1,
+  "categories": {
+    "market": {
+      "en": "Markets",
+      "zh": "市场"
+    }
+  },
+  "plugins": [
+    {
+      "name": "tessivum-market",
+      "owner": "Tessivum",
+      "url": "https://github.com/tessivum/tessivum",
+      "category": "market",
+      "description": {
+        "en": "Tessivum's first-party DSH-compatible community plugin market.",
+        "zh": "Tessivum 的第一方 DSH 社区插件市场。"
+      },
+      "npm": "tessivum-market",
+      "install": "",
+      "added": "2026-08-31",
+      "catalogSource": "tessivum",
+      "tessivumCompatibility": "official"
+    }
+  ]
+}
