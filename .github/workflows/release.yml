@@ -299,7 +299,7 @@ jobs:
           PATH="$ptc_path" bun --version
           ptc_log="$PWD/smoke-ptc-web.log"
           PATH="$ptc_path" TESSIVUM_WEB_ADDR=127.0.0.1:38079 \
-            "$launcher" --data-dir "$PWD/smoke-ptc-state" web >"$ptc_log" 2>&1 &
+            "$archive_root/libexec/tessivum" --data-dir "$PWD/smoke-ptc-state" web >"$ptc_log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           wait_for_web 38079 "$ptc_log"
