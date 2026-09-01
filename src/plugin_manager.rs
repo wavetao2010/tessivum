@@ -1,12 +1,11 @@
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -15,6 +14,7 @@ use tokio::{
 };
 
 use serde::{Deserialize, Serialize};
+use regex::Regex;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tessivum_core::{CancellationToken, Entry, EntryId, EntryOptions, EntryTree, RuntimeKind};
@@ -30,6 +30,14 @@ use crate::{
 const MAX_PROFILE_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_PROFILE_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BUNDLE_PATCH_BYTES: u64 = 1024 * 1024;
+const DSH_COMPATIBILITY_BASELINE: &str = "0.1.0-rc.5";
+const PLUGIN_DSH_ENGINE_UNSUPPORTED: &str = "PLUGIN_DSH_ENGINE_UNSUPPORTED";
+const PLUGIN_PACKAGE_ENTRY_INVALID: &str = "PLUGIN_PACKAGE_ENTRY_INVALID";
+const PLUGIN_BUNDLE_PATCH_INVALID: &str = "PLUGIN_BUNDLE_PATCH_INVALID";
+const PLUGIN_RUNTIME_DEPENDENCY_MISSING: &str = "PLUGIN_RUNTIME_DEPENDENCY_MISSING";
+const PLUGIN_CLIENT_ENTRY_INVALID: &str = "PLUGIN_CLIENT_ENTRY_INVALID";
+const PLUGIN_INJECT_UNAVAILABLE: &str = "PLUGIN_INJECT_UNAVAILABLE";
+const PLUGIN_MUTATION_ROLLBACK_FAILED: &str = "PLUGIN_MUTATION_ROLLBACK_FAILED";
 const FIRST_PARTY_MARKET_NAME: &str = "tessivum-market";
 const FIRST_PARTY_MARKET_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIRST_PARTY_MARKET_TARBALL: &str =
@@ -82,14 +90,33 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         cancellation: CancellationToken,
         sink: crate::bridge::PnpmOutputSink,
     ) -> Result<crate::bridge::PnpmRunResult, BridgeError> {
+        if let Some(mutation) = pnpm_request_mutation(&request.args) {
+            reject_known_unsupported_mutation(&mutation)
+                .map_err(|error| BridgeError::Process(error.to_string()))?;
+        }
         let profile = self.profile.clone();
-        let (_lock, snapshot) = tokio::task::spawn_blocking({
+        let request_args = request.args.clone();
+        let (_lock, transaction, snapshot, args) = tokio::task::spawn_blocking({
             let profile = profile.clone();
             move || {
                 let lock = ProfileLock::acquire(&profile)?;
-                ensure_profile(&profile)?;
-                let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
-                Ok::<_, PluginManagerError>((lock, snapshot))
+                let transaction = ProfileMutationSnapshot::capture(&profile)?;
+                let prepared = (|| {
+                    ensure_profile(&profile)?;
+                    let args = route_pnpm_args(&request_args, &profile)
+                        .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
+                    let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
+                    Ok::<_, PluginManagerError>((snapshot, args))
+                })();
+                match prepared {
+                    Ok((snapshot, args)) => Ok((lock, transaction, snapshot, args)),
+                    Err(error) => match rollback_generic_mutation(&profile, &transaction, false) {
+                        Ok(()) => Err(error),
+                        Err(recovery) => Err(PluginManagerError::Invalid(format!(
+                            "{PLUGIN_MUTATION_ROLLBACK_FAILED}: {error}; recovery proof failed: {recovery}"
+                        ))),
+                    },
+                }
             }
         })
         .await
@@ -100,19 +127,33 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
             }
             error => BridgeError::Process(error.to_string()),
         })?;
-        let args = route_pnpm_args(&request.args, &profile)?;
         let reconciliation = reconciliation_mode(&args);
         let mut command = TokioCommand::new("pnpm");
         command
             .current_dir(&profile)
-            .args(args)
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        set_process_group(&mut command)?;
-        let mut child = command
-            .spawn()
-            .map_err(|error| BridgeError::Process(format!("could not run pnpm: {error}")))?;
+        if let Err(error) = set_process_group(&mut command) {
+            return Err(
+                restore_pnpm_boundary_failure(&profile, &transaction, false, error).await,
+            );
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Err(
+                    restore_pnpm_boundary_failure(
+                        &profile,
+                        &transaction,
+                        false,
+                        BridgeError::Process(format!("could not run pnpm: {error}")),
+                    )
+                    .await,
+                );
+            }
+        };
         let (sender, mut receiver) = mpsc::channel(8);
         let stdout = child.stdout.take().expect("piped stdout exists");
         let stderr = child.stderr.take().expect("piped stderr exists");
@@ -144,30 +185,47 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         if failure.is_some() {
             stop_process_group(&mut child).await;
         }
-        let status = child
-            .wait()
-            .await
-            .map_err(|error| BridgeError::Process(format!("could not wait for pnpm: {error}")))?;
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(
+                    restore_pnpm_boundary_failure(
+                        &profile,
+                        &transaction,
+                        true,
+                        BridgeError::Process(format!("could not wait for pnpm: {error}")),
+                    )
+                    .await,
+                );
+            }
+        };
         for task in [stdout_task, stderr_task] {
-            task.await
-                .map_err(|error| {
-                    BridgeError::Process(format!("pnpm output worker failed: {error}"))
-                })?
-                .map_err(|error| {
-                    BridgeError::Process(format!("could not read pnpm output: {error}"))
-                })?;
+            let output = task
+                .await
+                .map_err(|error| BridgeError::Process(format!("pnpm output worker failed: {error}")))
+                .and_then(|result| {
+                    result.map_err(|error| {
+                        BridgeError::Process(format!("could not read pnpm output: {error}"))
+                    })
+                });
+            if let Err(error) = output {
+                return Err(
+                    restore_pnpm_boundary_failure(&profile, &transaction, true, error).await,
+                );
+            }
         }
-        tokio::task::spawn_blocking({
+        let cleanup = tokio::task::spawn_blocking({
             let profile = profile.clone();
             move || remove_legacy_package_lock(&profile)
         })
         .await
-        .map_err(|error| {
-            BridgeError::Process(format!("package-lock cleanup worker failed: {error}"))
-        })?
-        .map_err(|error| BridgeError::Process(error.to_string()))?;
+        .map_err(|error| BridgeError::Process(format!("package-lock cleanup worker failed: {error}")))
+        .and_then(|result| result.map_err(|error| BridgeError::Process(error.to_string())));
+        if let Err(error) = cleanup {
+            return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
+        }
         if let Some(error) = failure {
-            return Err(error);
+            return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
         }
         if !status.success() {
             let diagnostic = format!(
@@ -181,20 +239,40 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
                 crate::bridge::PnpmOutputStream::Stderr,
                 diagnostic.as_bytes(),
             );
-        } else {
-            tokio::task::spawn_blocking({
+            if let Err(error) = tokio::task::spawn_blocking({
                 let profile = profile.clone();
-                move || reconcile_profile(&profile, &snapshot, reconciliation)
+                let transaction = transaction.clone();
+                move || rollback_generic_mutation(&profile, &transaction, true)
             })
             .await
-            .map_err(|error| {
-                BridgeError::Process(format!("profile reconciliation worker failed: {error}"))
-            })?
-            .map_err(|error| {
-                BridgeError::Process(format!(
-                    "pnpm completed but Profile activation record was not committed: {error}"
-                ))
-            })?;
+            .map_err(|error| BridgeError::Process(format!("rollback worker failed: {error}")))
+            .and_then(|result| result.map_err(|error| BridgeError::Process(error.to_string())))
+            {
+                return Err(BridgeError::Process(format!(
+                    "{PLUGIN_MUTATION_ROLLBACK_FAILED}: pnpm exited unsuccessfully; recovery proof failed: {error}"
+                )));
+            }
+        } else {
+            let validated = tokio::task::spawn_blocking({
+                let profile = profile.clone();
+                let args = args.clone();
+                move || {
+                    validate_pnpm_candidate(&profile, &args)?;
+                    reconcile_profile(&profile, &snapshot, reconciliation)
+                }
+            })
+            .await
+            .map_err(|error| BridgeError::Process(format!("profile reconciliation worker failed: {error}")))
+            .and_then(|result| {
+                result.map_err(|error| {
+                    BridgeError::Process(format!(
+                        "pnpm completed but Profile activation record was not committed: {error}"
+                    ))
+                })
+            });
+            if let Err(error) = validated {
+                return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
+            }
         }
         Ok(crate::bridge::PnpmRunResult {
             exit_code: status.code(),
@@ -204,6 +282,53 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         })
     }
 }
+async fn restore_pnpm_boundary_failure(
+    profile: &Path,
+    snapshot: &ProfileMutationSnapshot,
+    pnpm_started: bool,
+    error: BridgeError,
+) -> BridgeError {
+    let profile = profile.to_path_buf();
+    let snapshot = snapshot.clone();
+    match tokio::task::spawn_blocking(move || {
+        rollback_generic_mutation(&profile, &snapshot, pnpm_started)
+    })
+    .await
+    {
+        Ok(Ok(())) => error,
+        Ok(Err(recovery)) => BridgeError::Process(format!(
+            "{PLUGIN_MUTATION_ROLLBACK_FAILED}: {error}; recovery proof failed: {recovery}"
+        )),
+        Err(recovery) => BridgeError::Process(format!(
+            "{PLUGIN_MUTATION_ROLLBACK_FAILED}: {error}; rollback worker failed: {recovery}"
+        )),
+    }
+}
+
+fn pnpm_request_mutation(args: &[String]) -> Option<PluginMutation> {
+    let command = args
+        .iter()
+        .find(|argument| matches!(argument.as_str(), "add" | "remove"))?;
+    let target = args.iter().find(|argument| {
+        !matches!(argument.as_str(), "add" | "remove" | "install")
+            && !MARKET_PNPM_FLAGS.contains(&argument.as_str())
+    })?;
+    Some(if command == "add" {
+        PluginMutation::Add(target.clone())
+    } else {
+        PluginMutation::Remove(target.clone())
+    })
+}
+
+fn validate_pnpm_candidate(profile: &Path, args: &[String]) -> Result<(), PluginManagerError> {
+    match pnpm_request_mutation(args) {
+        Some(PluginMutation::Add(specifier)) => {
+            validate_mutation_candidate(profile, &PluginMutation::Add(specifier))
+        }
+        _ => Ok(()),
+    }
+}
+
 
 async fn pump_pnpm_output<R: AsyncRead + Unpin>(
     mut reader: R,
@@ -450,44 +575,35 @@ pub fn mutate_plugins(
     data_dir: impl AsRef<Path>,
     mutation: PluginMutation,
 ) -> Result<(), PluginManagerError> {
+    reject_known_unsupported_mutation(&mutation)?;
     let profile = plugin_profile_root(data_dir);
     fs::create_dir_all(&profile).map_err(|error| io_error(&profile, error))?;
     let _lock = ProfileLock::acquire(&profile)?;
-    ensure_profile(&profile)?;
-    let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
-    let cwd = env::current_dir().map_err(|error| io_error(".", error))?;
-    let arguments = pnpm_arguments(&mutation);
-    let argument: Cow<'_, str> = match &mutation {
-        PluginMutation::Add(specifier) => Cow::Owned(anchor_path_spec(specifier, &cwd)?),
-        PluginMutation::Remove(package) => Cow::Borrowed(package),
-    };
-    let status = Command::new("pnpm")
-        .current_dir(&profile)
-        .args(arguments)
-        .arg(argument.as_ref())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|error| {
-            mutation_error(format!("could not run pnpm: {error}"), &profile, &mutation)
-        })?;
-    if !status.success() {
-        let reason = status.code().map_or_else(
-            || "pnpm terminated without an exit code".into(),
-            |code| format!("pnpm exited with code {code}"),
-        );
-        return Err(mutation_error(reason, &profile, &mutation));
-    }
-    remove_legacy_package_lock(&profile)
-        .map_err(|error| mutation_error(error.to_string(), &profile, &mutation))?;
-    reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation).map_err(|error| {
-        mutation_error(
-            format!("pnpm completed but Profile activation record was not committed: {error}"),
+    let transaction = ProfileMutationSnapshot::capture(&profile)?;
+    let mut pnpm_started = false;
+    let result = (|| {
+        ensure_profile(&profile)?;
+        let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
+        let cwd = env::current_dir().map_err(|error| io_error(".", error))?;
+        let argument = match &mutation {
+            PluginMutation::Add(specifier) => anchor_path_spec(specifier, &cwd)?,
+            PluginMutation::Remove(package) => package.clone(),
+        };
+        run_generic_mutation_pnpm(&profile, pnpm_arguments(&mutation), &argument, &mut pnpm_started)?;
+        remove_legacy_package_lock(&profile)?;
+        validate_mutation_candidate(&profile, &mutation)?;
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation)
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(restore_generic_mutation_failure(
             &profile,
             &mutation,
-        )
-    })
+            &transaction,
+            pnpm_started,
+            error,
+        )),
+    }
 }
 /// Installs the release-owned market tarball into the profile without retaining a
 /// reference to the release directory.
@@ -829,6 +945,12 @@ struct ProfileFileSnapshot {
 }
 
 #[derive(Clone)]
+struct ProfileMutationSnapshot {
+    manifest: ProfileFileSnapshot,
+    lock: ProfileFileSnapshot,
+}
+
+#[derive(Clone)]
 struct FirstPartyMarketSnapshot {
     manifest: ProfileFileSnapshot,
     lock: ProfileFileSnapshot,
@@ -984,6 +1106,191 @@ impl ProfileSnapshot {
                 .map(|bundle| bundle.name.clone())
                 .collect(),
         }
+    }
+}
+
+impl ProfileMutationSnapshot {
+    fn capture(profile: &Path) -> Result<Self, PluginManagerError> {
+        Ok(Self {
+            manifest: capture_profile_file(
+                &profile.join("package.json"),
+                MAX_PROFILE_MANIFEST_BYTES,
+            )?,
+            lock: capture_profile_file(&profile.join("pnpm-lock.yaml"), MAX_PROFILE_LOCK_BYTES)?,
+        })
+    }
+
+    fn restore(&self, profile: &Path) -> Result<(), PluginManagerError> {
+        restore_profile_file(&profile.join("package.json"), &self.manifest)?;
+        restore_profile_file(&profile.join("pnpm-lock.yaml"), &self.lock)
+    }
+
+    fn verify(&self, profile: &Path) -> Result<(), PluginManagerError> {
+        verify_profile_file(
+            &profile.join("package.json"),
+            &self.manifest,
+            MAX_PROFILE_MANIFEST_BYTES,
+        )?;
+        verify_profile_file(
+            &profile.join("pnpm-lock.yaml"),
+            &self.lock,
+            MAX_PROFILE_LOCK_BYTES,
+        )
+    }
+}
+
+fn reject_known_unsupported_mutation(mutation: &PluginMutation) -> Result<(), PluginManagerError> {
+    if matches!(mutation, PluginMutation::Add(specifier) if specifier == "@linxin666/dsh-remote-web-ui@0.3.6") {
+        return Err(compatibility_error(
+            PLUGIN_DSH_ENGINE_UNSUPPORTED,
+            "@linxin666/dsh-remote-web-ui@0.3.6 requires DSH >=0.1.1-rc.1; this host is fixed at 0.1.0-rc.5",
+        ));
+    }
+    Ok(())
+}
+
+fn run_generic_mutation_pnpm(
+    profile: &Path,
+    arguments: &[&str],
+    argument: &str,
+    pnpm_started: &mut bool,
+) -> Result<(), PluginManagerError> {
+    let mut child = Command::new("pnpm")
+        .current_dir(profile)
+        .args(arguments)
+        .arg(argument)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| PluginManagerError::Invalid(format!("could not run pnpm: {error}")))?;
+    *pnpm_started = true;
+    let status = child
+        .wait()
+        .map_err(|error| PluginManagerError::Invalid(format!("could not wait for pnpm: {error}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(PluginManagerError::Invalid(status.code().map_or_else(
+        || "pnpm terminated without an exit code".into(),
+        |code| format!("pnpm exited with code {code}"),
+    )))
+}
+
+fn restore_generic_mutation_failure(
+    profile: &Path,
+    mutation: &PluginMutation,
+    snapshot: &ProfileMutationSnapshot,
+    pnpm_started: bool,
+    error: PluginManagerError,
+) -> PluginManagerError {
+    match rollback_generic_mutation(profile, snapshot, pnpm_started) {
+        Ok(()) => mutation_error(format!("{error}; profile restored"), profile, mutation),
+        Err(recovery) => mutation_error(
+            format!(
+                "{PLUGIN_MUTATION_ROLLBACK_FAILED}: {error}; recovery proof failed: {recovery}"
+            ),
+            profile,
+            mutation,
+        ),
+    }
+}
+
+fn rollback_generic_mutation(
+    profile: &Path,
+    snapshot: &ProfileMutationSnapshot,
+    pnpm_started: bool,
+) -> Result<(), PluginManagerError> {
+    snapshot.restore(profile)?;
+    if pnpm_started {
+        restore_profile_node_modules(profile, snapshot)?;
+    }
+    snapshot.restore(profile)?;
+    snapshot.verify(profile)?;
+    if snapshot.manifest.bytes.is_some() {
+        let document = read_profile_document(profile)?;
+        for package in &document.dependencies {
+            let root = installed_package_root(profile, package)?;
+            let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+            if manifest.get("name").and_then(Value::as_str) != Some(package.as_str()) {
+                return Err(PluginManagerError::Invalid(format!(
+                    "restored package {package:?} does not declare its exact package name"
+                )));
+            }
+        }
+        let state = load_profile(profile, false)?;
+        build_bundle_entries(&state)?;
+    }
+    Ok(())
+}
+
+fn restore_profile_node_modules(
+    profile: &Path,
+    snapshot: &ProfileMutationSnapshot,
+) -> Result<(), PluginManagerError> {
+    if snapshot.manifest.bytes.is_none() {
+        let modules = profile.join("node_modules");
+        return match fs::symlink_metadata(&modules) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&modules).map_err(|error| io_error(&modules, error))
+            }
+            Ok(_) => fs::remove_file(&modules).map_err(|error| io_error(&modules, error)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(&modules, error)),
+        };
+    }
+    let scripts_allowed = profile_allows_builds(profile)
+        .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
+    let mut command = Command::new("pnpm");
+    command
+        .current_dir(profile)
+        .arg("install")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if !scripts_allowed {
+        command.arg("--ignore-scripts");
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| PluginManagerError::Invalid(format!("could not run pnpm restoration: {error}")))?;
+    let deadline = Instant::now() + PNPM_OPERATION_TIMEOUT;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| PluginManagerError::Invalid(format!("could not wait for pnpm restoration: {error}")))?
+        {
+            return status.success().then_some(()).ok_or_else(|| {
+                PluginManagerError::Invalid(status.code().map_or_else(
+                    || "pnpm restoration terminated without an exit code".into(),
+                    |code| format!("pnpm restoration exited with code {code}"),
+                ))
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PluginManagerError::Invalid(
+                "pnpm restoration timed out".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn verify_profile_file(
+    path: &Path,
+    snapshot: &ProfileFileSnapshot,
+    maximum: u64,
+) -> Result<(), PluginManagerError> {
+    let current = capture_profile_file(path, maximum)?;
+    if current.bytes == snapshot.bytes {
+        Ok(())
+    } else {
+        Err(PluginManagerError::Invalid(format!(
+            "{} was not restored byte-for-byte",
+            path.display()
+        )))
     }
 }
 
@@ -1972,6 +2279,455 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, PluginManagerError>
         ));
     }
     Ok(canonical)
+}
+
+fn validate_mutation_candidate(
+    profile: &Path,
+    mutation: &PluginMutation,
+) -> Result<(), PluginManagerError> {
+    let PluginMutation::Add(specifier) = mutation else {
+        return Ok(());
+    };
+    let package = add_package_name(specifier).filter(|name| !name.is_empty()).ok_or_else(|| {
+        compatibility_error(
+            PLUGIN_PACKAGE_ENTRY_INVALID,
+            "the added package name could not be resolved",
+        )
+    })?;
+    validate_candidate_package(profile, package)
+}
+
+fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), PluginManagerError> {
+    let root = installed_package_root(profile, package).map_err(|error| {
+        compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
+    })?;
+    let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES).map_err(
+        |error| compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}")),
+    )?;
+    if manifest.get("name").and_then(Value::as_str) != Some(package) {
+        return Err(compatibility_error(
+            PLUGIN_PACKAGE_ENTRY_INVALID,
+            format!("{package} package manifest does not declare its exact package name"),
+        ));
+    }
+    validate_dsh_engine(&manifest, package)?;
+    let entry = package_export_entry(&manifest, ".")
+        .or_else(|| manifest.get("main").and_then(Value::as_str))
+        .or_else(|| manifest.get("module").and_then(Value::as_str))
+        .ok_or_else(|| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                format!("{package} has no main or root export"),
+            )
+        })?;
+    let entry = resolve_package_entry(&root, entry, package, PLUGIN_PACKAGE_ENTRY_INVALID)?;
+    let mut runtime_entries = vec![entry];
+    let dsh = dsh_declaration(&manifest, package).map_err(|error| {
+        compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
+    })?;
+    if let Some(dsh) = dsh {
+        if dsh.contains_key("client") {
+            let client = dsh.get("client").and_then(Value::as_object).ok_or_else(|| {
+                compatibility_error(
+                    PLUGIN_CLIENT_ENTRY_INVALID,
+                    format!("{package} dsh.client must be an object"),
+                )
+            })?;
+            if client.get("platform").and_then(Value::as_str) != Some("web") {
+                return Err(compatibility_error(
+                    PLUGIN_CLIENT_ENTRY_INVALID,
+                    format!("{package} dsh.client.platform must be web"),
+                ));
+            }
+            let client_entry = package_export_entry(&manifest, "./client").ok_or_else(|| {
+                compatibility_error(
+                    PLUGIN_CLIENT_ENTRY_INVALID,
+                    format!("{package} does not export ./client"),
+                )
+            })?;
+            runtime_entries.push(resolve_package_entry(
+                &root,
+                client_entry,
+                package,
+                PLUGIN_CLIENT_ENTRY_INVALID,
+            )?);
+        }
+    }
+    validate_runtime_imports(&manifest, &runtime_entries, package)?;
+    let report = PluginRouter::new()
+        .inspect(&root, Some(PluginRuntime::LegacyNode))
+        .map_err(|error| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                format!("{package}: {error}"),
+            )
+        })?;
+    validate_declared_inject(&report.inject, package)?;
+    validate_bundle_candidate(profile, &root, &manifest, package)
+}
+
+fn validate_dsh_engine(manifest: &Value, package: &str) -> Result<(), PluginManagerError> {
+    let Some(dsh) = dsh_declaration(manifest, package).map_err(|error| {
+        compatibility_error(PLUGIN_DSH_ENGINE_UNSUPPORTED, format!("{package}: {error}"))
+    })? else {
+        return Ok(());
+    };
+    let Some(engines) = dsh.get("engines") else {
+        return Ok(());
+    };
+    let engine = engines
+        .as_object()
+        .and_then(|engines| engines.get("dsh"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            compatibility_error(
+                PLUGIN_DSH_ENGINE_UNSUPPORTED,
+                format!("{package} dsh.engines.dsh must be a semver range"),
+            )
+        })?;
+    if dsh_engine_supports_baseline(engine) {
+        return Ok(());
+    }
+    Err(compatibility_error(
+        PLUGIN_DSH_ENGINE_UNSUPPORTED,
+        format!(
+            "{package} requires DSH {engine}; this host is fixed at {DSH_COMPATIBILITY_BASELINE}"
+        ),
+    ))
+}
+
+fn validate_bundle_candidate(
+    profile: &Path,
+    root: &Path,
+    manifest: &Value,
+    package: &str,
+) -> Result<(), PluginManagerError> {
+    let Some(patch) = bundle_patch(manifest, package).map_err(|error| {
+        compatibility_error(PLUGIN_BUNDLE_PATCH_INVALID, format!("{package}: {error}"))
+    })? else {
+        return Ok(());
+    };
+    let patch_path = safe_join(root, patch).map_err(|error| {
+        compatibility_error(PLUGIN_BUNDLE_PATCH_INVALID, format!("{package}: {error}"))
+    })?;
+    let patch_source = String::from_utf8(
+        read_bounded(&patch_path, MAX_BUNDLE_PATCH_BYTES).map_err(|error| {
+            compatibility_error(PLUGIN_BUNDLE_PATCH_INVALID, format!("{package}: {error}"))
+        })?,
+    )
+    .map_err(|error| {
+        compatibility_error(
+            PLUGIN_BUNDLE_PATCH_INVALID,
+            format!("{} is not UTF-8: {error}", patch_path.display()),
+        )
+    })?;
+    let patch_source = resolve_bundle_expressions(&patch_source, &BTreeMap::new(), &patch_path)
+        .map_err(|error| {
+            compatibility_error(PLUGIN_BUNDLE_PATCH_INVALID, format!("{package}: {error}"))
+        })?;
+    serde_yaml::from_str::<Vec<Value>>(&patch_source).map_err(|error| {
+        compatibility_error(
+            PLUGIN_BUNDLE_PATCH_INVALID,
+            format!("{} is invalid YAML: {error}", patch_path.display()),
+        )
+    })?;
+    let mut entries = BTreeMap::new();
+    let mut order = Vec::new();
+    apply_bundle(
+        profile,
+        root,
+        patch,
+        &PluginRouter::new(),
+        &mut entries,
+        &mut order,
+    )
+    .map_err(|error| {
+        compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
+    })?;
+    for entry in entries.values() {
+        validate_declared_inject(&entry.options.inject, entry.options.name.as_deref().unwrap_or(package))?;
+    }
+    Ok(())
+}
+
+fn resolve_package_entry(
+    root: &Path,
+    entry: &str,
+    package: &str,
+    code: &str,
+) -> Result<PathBuf, PluginManagerError> {
+    let path = safe_join(root, entry)
+        .map_err(|error| compatibility_error(code, format!("{package}: {error}")))?;
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(compatibility_error(
+            code,
+            format!("{package} entry {entry:?} is not a regular file"),
+        ))
+    }
+}
+
+fn package_export_entry<'a>(manifest: &'a Value, key: &str) -> Option<&'a str> {
+    manifest
+        .get("exports")
+        .and_then(|exports| match key {
+            "." => export_entry(exports),
+            key => exports.as_object()?.get(key).and_then(export_entry),
+        })
+}
+
+fn export_entry(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(value) => Some(value),
+        Value::Object(values) => values
+            .get("import")
+            .and_then(export_entry)
+            .or_else(|| values.get("require").and_then(export_entry))
+            .or_else(|| values.get("default").and_then(export_entry)),
+        _ => None,
+    }
+}
+
+fn validate_runtime_imports(
+    manifest: &Value,
+    entries: &[PathBuf],
+    package: &str,
+) -> Result<(), PluginManagerError> {
+    let expression = Regex::new(
+        r#"(?m)(?:\b(?:import|export)\s+(?:[^'\"]*?\s+from\s+)?|\brequire\s*\()\s*['\"]([^'\"]+)['\"]"#,
+    )
+    .expect("valid runtime import expression");
+    let mut imports = BTreeSet::new();
+    for entry in entries {
+        let bytes = read_bounded(entry, MAX_BUNDLE_PATCH_BYTES).map_err(|error| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                format!("{}: {error}", entry.display()),
+            )
+        })?;
+        let source = String::from_utf8(bytes).map_err(|error| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                format!("{} is not UTF-8: {error}", entry.display()),
+            )
+        })?;
+        imports.extend(
+            expression
+                .captures_iter(&source)
+                .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_owned())),
+        );
+    }
+    let declared = ["dependencies", "peerDependencies"]
+        .into_iter()
+        .filter_map(|field| manifest.get(field).and_then(Value::as_object))
+        .flat_map(|dependencies| dependencies.keys().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    for import in imports {
+        let Some(dependency) = runtime_dependency_name(&import) else {
+            continue;
+        };
+        if dependency == package
+            || declared.contains(dependency)
+            || HOST_MODULE_ALIASES.contains(&dependency)
+        {
+            continue;
+        }
+        return Err(compatibility_error(
+            PLUGIN_RUNTIME_DEPENDENCY_MISSING,
+            format!("{package} imports {import:?} without a runtime dependency, peer, or Host alias"),
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_dependency_name(specifier: &str) -> Option<&str> {
+    if specifier.starts_with('.') || specifier.starts_with('/') || specifier.starts_with("node:") {
+        return None;
+    }
+    let package = if let Some(scoped) = specifier.strip_prefix('@') {
+        let slash = scoped.find('/')? + 1;
+        let rest = &specifier[slash..];
+        let end = rest.find('/').map_or(specifier.len(), |index| slash + index);
+        &specifier[..end]
+    } else {
+        specifier.split('/').next().unwrap_or_default()
+    };
+    (!package.is_empty() && !NODE_BUILTIN_MODULES.contains(&package)).then_some(package)
+}
+
+const HOST_MODULE_ALIASES: &[&str] = &[
+    "cordis",
+    "cosmokit",
+    "@deepseek-ai/cordis",
+    "@deepseek-ai/cosmokit",
+    "@deepseek-ai/cordis-plugin-loader",
+    "@cordisjs/plugin-loader",
+    "@deepseek-ai/dsh-settings",
+    "@deepseek-ai/schemastery",
+    "@deepseek-ai/dsh-tools",
+    "@deepseek-ai/dsh-llm",
+    "@deepseek-ai/dsh-subagent",
+];
+
+const NODE_BUILTIN_MODULES: &[&str] = &[
+    "assert", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram",
+    "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2", "https", "module",
+    "net", "os", "path", "perf_hooks", "process", "punycode", "querystring", "readline", "repl",
+    "stream", "string_decoder", "sys", "timers", "tls", "trace_events", "tty", "url", "util", "v8",
+    "vm", "wasi", "worker_threads", "zlib",
+];
+
+fn validate_declared_inject(services: &[String], package: &str) -> Result<(), PluginManagerError> {
+    for service in services {
+        let service = service.split('@').next().unwrap_or(service);
+        if AVAILABLE_LEGACY_SERVICES.contains(&service) {
+            continue;
+        }
+        return Err(compatibility_error(
+            PLUGIN_INJECT_UNAVAILABLE,
+            format!("{package} requires unavailable Legacy Context service {service:?}"),
+        ));
+    }
+    Ok(())
+}
+
+const AVAILABLE_LEGACY_SERVICES: &[&str] = &[
+    "agents",
+    "commands",
+    "desktopPnpm",
+    "desktopProfiles",
+    "hostEvents",
+    "hostLifecycle",
+    "loader",
+    "models",
+    "settings",
+    "webListener",
+    "webRuntime",
+    "webServer",
+    "workspaces",
+];
+
+fn compatibility_error(code: &str, message: impl std::fmt::Display) -> PluginManagerError {
+    PluginManagerError::Invalid(format!("{code}: {message}"))
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct DshVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Option<String>,
+}
+
+fn dsh_engine_supports_baseline(range: &str) -> bool {
+    let Some(baseline) = parse_dsh_version(DSH_COMPATIBILITY_BASELINE) else {
+        return false;
+    };
+    range.split("||").any(|alternative| {
+        let terms = alternative
+            .split(|character: char| character.is_ascii_whitespace() || character == ',')
+            .filter(|term| !term.is_empty());
+        let mut saw_term = false;
+        for term in terms {
+            saw_term = true;
+            if !dsh_comparator_matches(&baseline, term) {
+                return false;
+            }
+        }
+        saw_term
+    })
+}
+
+fn dsh_comparator_matches(baseline: &DshVersion, term: &str) -> bool {
+    let (operator, version) = [">=", "<=", ">", "<", "=", "^", "~"]
+        .into_iter()
+        .find_map(|operator| term.strip_prefix(operator).map(|version| (operator, version)))
+        .unwrap_or(("=", term));
+    let Some(version) = parse_dsh_version(version) else {
+        return false;
+    };
+    let comparison = compare_dsh_versions(baseline, &version);
+    match operator {
+        ">=" => comparison.is_ge(),
+        "<=" => comparison.is_le(),
+        ">" => comparison.is_gt(),
+        "<" => comparison.is_lt(),
+        "=" => comparison.is_eq(),
+        "^" => comparison.is_ge() && compare_dsh_versions(baseline, &dsh_caret_upper(&version)).is_lt(),
+        "~" => comparison.is_ge() && compare_dsh_versions(baseline, &dsh_tilde_upper(&version)).is_lt(),
+        _ => false,
+    }
+}
+
+fn parse_dsh_version(value: &str) -> Option<DshVersion> {
+    let (release, prerelease) = value.split_once('-').map_or((value, None), |(release, prerelease)| {
+        (release, (!prerelease.is_empty()).then_some(prerelease.to_owned()))
+    });
+    let mut parts = release.split('.').map(str::parse::<u64>);
+    Some(DshVersion {
+        major: parts.next()??,
+        minor: parts.next()??,
+        patch: parts.next()??,
+        prerelease,
+    })
+    .filter(|_| parts.next().is_none())
+}
+
+fn compare_dsh_versions(left: &DshVersion, right: &DshVersion) -> std::cmp::Ordering {
+    for (left, right) in [
+        (left.major, right.major),
+        (left.minor, right.minor),
+        (left.patch, right.patch),
+    ] {
+        let comparison = left.cmp(&right);
+        if !comparison.is_eq() {
+            return comparison;
+        }
+    }
+    match (&left.prerelease, &right.prerelease) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(left), Some(right)) => compare_prerelease(left, right),
+    }
+}
+
+fn compare_prerelease(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left = left.split('.');
+    let mut right = right.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left), Some(right)) => {
+                let comparison = match (left.parse::<u64>(), right.parse::<u64>()) {
+                    (Ok(left), Ok(right)) => left.cmp(&right),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => left.cmp(right),
+                };
+                if !comparison.is_eq() {
+                    return comparison;
+                }
+            }
+        }
+    }
+}
+
+fn dsh_caret_upper(version: &DshVersion) -> DshVersion {
+    if version.major > 0 {
+        DshVersion { major: version.major + 1, minor: 0, patch: 0, prerelease: None }
+    } else if version.minor > 0 {
+        DshVersion { major: 0, minor: version.minor + 1, patch: 0, prerelease: None }
+    } else {
+        DshVersion { major: 0, minor: 0, patch: version.patch + 1, prerelease: None }
+    }
+}
+
+fn dsh_tilde_upper(version: &DshVersion) -> DshVersion {
+    DshVersion { major: version.major, minor: version.minor + 1, patch: 0, prerelease: None }
 }
 
 fn read_json(path: &Path, maximum: u64) -> Result<Value, PluginManagerError> {

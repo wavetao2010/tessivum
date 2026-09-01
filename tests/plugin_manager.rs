@@ -16,9 +16,15 @@ use sha2::{Digest, Sha256};
 use tessivum::plugin_manager::install_first_party_market;
 use tessivum::{
     cli::{parse_cli, resolve_data_root, CliCommand},
-    plugin_manager::{enabled_client_plugin_names, load_plugin_entries, plugin_profile_root},
+    plugin_manager::{
+        enabled_client_plugin_names, load_plugin_entries, mutate_plugins, plugin_profile_root,
+        PluginMutation,
+    },
 };
 use tessivum_core::RuntimeKind;
+
+#[cfg(unix)]
+static PNPM_ENV_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[test]
 fn plugin_profile_loads_enabled_bundle_insertions_without_plain_dependencies() {
@@ -494,6 +500,323 @@ fn first_party_market_pnpm_failure_rolls_back_the_legacy_profile() {
 }
 
 #[cfg(unix)]
+#[test]
+fn unsupported_remote_engine_is_rejected_before_any_profile_mutation() {
+    let temp = TempDir::new();
+    let (profile, manifest, lock) = generic_profile(&temp);
+    let package = generic_package(
+        &temp,
+        json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
+        "export default () => {}\n",
+        None,
+    );
+    let next = temp.0.join("next.json");
+    write_json(&next, json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}));
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &temp, &package, "candidate", &next, None, false, false, false, &log,
+    );
+
+    let error = mutate_plugins(
+        &temp.0,
+        PluginMutation::Add("@linxin666/dsh-remote-web-ui@0.3.6".into()),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("PLUGIN_DSH_ENGINE_UNSUPPORTED"));
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert_eq!(fs::read_to_string(&log).unwrap_or_default(), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_preflight_reports_entry_patch_client_dependency_and_inject_failures() {
+    let cases = [
+        (
+            "entry",
+            json!({"name": "candidate", "version": "1.0.0"}),
+            "",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_PACKAGE_ENTRY_INVALID",
+        ),
+        (
+            "unsafe-entry",
+            json!({"name": "candidate", "version": "1.0.0", "main": "../outside.js"}),
+            "",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_PACKAGE_ENTRY_INVALID",
+        ),
+        (
+            "patch",
+            json!({
+                "name": "candidate",
+                "version": "1.0.0",
+                "main": "./lib/index.js",
+                "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
+            }),
+            "export default () => {}\n",
+            Some("not: [valid\n"),
+            json!({
+                "dependencies": {"old": "1.0.0", "candidate": "1.0.0"},
+                "dsh": {"profile": {"bundles": ["candidate"]}}
+            }),
+            "PLUGIN_BUNDLE_PATCH_INVALID",
+        ),
+        (
+            "missing-patch",
+            json!({
+                "name": "candidate",
+                "version": "1.0.0",
+                "main": "./lib/index.js",
+                "dsh": {"bundle": {"patch": "./missing.yml"}}
+            }),
+            "export default () => {}\n",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_BUNDLE_PATCH_INVALID",
+        ),
+        (
+            "client",
+            json!({
+                "name": "candidate",
+                "version": "1.0.0",
+                "main": "./lib/index.js",
+                "dsh": {"client": {"platform": "web"}}
+            }),
+            "export default () => {}\n",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_CLIENT_ENTRY_INVALID",
+        ),
+        (
+            "client-platform",
+            json!({
+                "name": "candidate",
+                "version": "1.0.0",
+                "main": "./lib/index.js",
+                "dsh": {"client": {"platform": "desktop"}}
+            }),
+            "export default () => {}\n",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_CLIENT_ENTRY_INVALID",
+        ),
+        (
+            "dependency",
+            json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
+            "import 'missing-runtime-package'\nexport default () => {}\n",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_RUNTIME_DEPENDENCY_MISSING",
+        ),
+        (
+            "inject",
+            json!({
+                "name": "candidate",
+                "version": "1.0.0",
+                "main": "./lib/index.js",
+                "inject": ["unavailableService"]
+            }),
+            "export default () => {}\n",
+            None,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+            "PLUGIN_INJECT_UNAVAILABLE",
+        ),
+    ];
+    for (label, manifest, source, patch, next, code) in cases {
+        let temp = TempDir::new();
+        let (profile, original_manifest, original_lock) = generic_profile(&temp);
+        let package = generic_package(&temp, manifest, source, patch);
+        let next_manifest = temp.0.join(format!("{label}-package.json"));
+        write_json(&next_manifest, next);
+        let log = temp.0.join("pnpm.log");
+        let _pnpm = GenericPnpm::new(
+            &temp,
+            &package,
+            "candidate",
+            &next_manifest,
+            None,
+            false,
+            false,
+            false,
+            &log,
+        );
+
+        let error = mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into()))
+            .unwrap_err();
+        assert!(error.to_string().contains(code), "{label}: {error}");
+        assert_eq!(fs::read(profile.join("package.json")).unwrap(), original_manifest);
+        assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), original_lock);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_add_remove_and_reconcile_restore_profile_documents_and_modules() {
+    let add = TempDir::new();
+    let (profile, manifest, lock) = generic_profile(&add);
+    let package = generic_package(
+        &add,
+        json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
+        "export default () => {}\n",
+        None,
+    );
+    let next = add.0.join("next.json");
+    write_json(&next, json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}));
+    let log = add.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &add, &package, "candidate", &next, None, true, false, false, &log,
+    );
+    assert!(mutate_plugins(&add.0, PluginMutation::Add("candidate@1.0.0".into())).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert!(!profile.join("node_modules/candidate").exists());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+    drop(_pnpm);
+
+    let remove = TempDir::new();
+    let (profile, manifest, lock) = generic_profile(&remove);
+    let old = profile.join("node_modules/old");
+    let next = remove.0.join("next.json");
+    write_json(&next, json!({"dependencies": {}}));
+    let log = remove.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &remove, &old, "old", &next, Some(&old), false, true, false, &log,
+    );
+    assert!(mutate_plugins(&remove.0, PluginMutation::Remove("old".into())).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert!(profile.join("node_modules/old/lib/index.js").is_file());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "remove\ninstall\n");
+    drop(_pnpm);
+
+    let reconcile = TempDir::new();
+    let (profile, manifest, lock) = generic_profile(&reconcile);
+    let package = generic_package(
+        &reconcile,
+        json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
+        "export default () => {}\n",
+        None,
+    );
+    let next = reconcile.0.join("next.json");
+    write_json(
+        &next,
+        json!({
+            "dependencies": {"old": "1.0.0", "candidate": "1.0.0"},
+            "dsh": {"profile": {"bundles": ["missing"]}}
+        }),
+    );
+    let log = reconcile.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &reconcile, &package, "candidate", &next, None, false, false, false, &log,
+    );
+    assert!(mutate_plugins(&reconcile.0, PluginMutation::Add("candidate@1.0.0".into())).is_err());
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert!(!profile.join("node_modules/candidate").exists());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_generic_add_update_and_remove_keep_profile_semantics() {
+    let temp = TempDir::new();
+    let (profile, _, _) = generic_profile(&temp);
+    let package = generic_package(
+        &temp,
+        json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
+        "export default () => {}\n",
+        None,
+    );
+    let added = temp.0.join("added.json");
+    write_json(
+        &added,
+        json!({
+            "dependencies": {"old": "1.0.0", "candidate": "1.0.0"},
+            "dsh": {"profile": {"bundles": []}}
+        }),
+    );
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &temp, &package, "candidate", &added, None, false, false, false, &log,
+    );
+    mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap();
+    assert_eq!(
+        read_json_file(&profile.join("package.json")).pointer("/dependencies/candidate"),
+        Some(&json!("1.0.0"))
+    );
+    drop(_pnpm);
+    let updated_package = generic_package(
+        &temp,
+        json!({"name": "candidate", "version": "1.0.1", "main": "./lib/index.js"}),
+        "export default () => {}\n",
+        None,
+    );
+
+    let updated = temp.0.join("updated.json");
+    write_json(
+        &updated,
+        json!({
+            "dependencies": {"old": "1.0.0", "candidate": "1.0.1"},
+            "dsh": {"profile": {"bundles": []}}
+        }),
+    );
+    let _pnpm = GenericPnpm::new(
+        &temp, &updated_package, "candidate", &updated, None, false, false, false, &log,
+    );
+    mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.1".into())).unwrap();
+    assert_eq!(
+        read_json_file(&profile.join("package.json")).pointer("/dependencies/candidate"),
+        Some(&json!("1.0.1"))
+    );
+    drop(_pnpm);
+
+    let removed = temp.0.join("removed.json");
+    write_json(
+        &removed,
+        json!({
+            "dependencies": {"old": "1.0.0"},
+            "dsh": {"profile": {"bundles": []}}
+        }),
+    );
+    let _pnpm = GenericPnpm::new(
+        &temp, &package, "candidate", &removed, None, false, false, false, &log,
+    );
+    mutate_plugins(&temp.0, PluginMutation::Remove("candidate".into())).unwrap();
+    assert!(read_json_file(&profile.join("package.json"))
+        .pointer("/dependencies/candidate")
+        .is_none());
+    assert!(!profile.join("node_modules/candidate").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_failure_is_reported_loudly() {
+    let temp = TempDir::new();
+    let (profile, manifest, lock) = generic_profile(&temp);
+    let package = generic_package(&temp, json!({"name": "candidate", "version": "1.0.0"}), "", None);
+    let next = temp.0.join("next.json");
+    write_json(&next, json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}));
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &temp, &package, "candidate", &next, None, false, false, true, &log,
+    );
+
+    let error = mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into()))
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("PLUGIN_MUTATION_ROLLBACK_FAILED"));
+    assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+}
+
+#[cfg(unix)]
 fn valid_market_patch() -> &'static str {
     "- insert:\n    - id: tessivum-market\n      name: tessivum-market\n"
 }
@@ -567,6 +890,130 @@ fn read_json_file(path: &Path) -> serde_json::Value {
 }
 
 #[cfg(unix)]
+fn generic_profile(temp: &TempDir) -> (PathBuf, Vec<u8>, Vec<u8>) {
+    let profile = temp.0.join("plugins");
+    fs::create_dir_all(profile.join("node_modules")).unwrap();
+    let manifest = br#"{"preserved":{"value":42},"dependencies":{"old":"1.0.0"}}"#.to_vec();
+    let lock = b"lockfileVersion: '9.0'\n".to_vec();
+    fs::write(profile.join("package.json"), &manifest).unwrap();
+    fs::write(profile.join("pnpm-lock.yaml"), &lock).unwrap();
+    write_package(&profile, "old", json!({}));
+    (profile, manifest, lock)
+}
+
+#[cfg(unix)]
+fn generic_package(
+    temp: &TempDir,
+    manifest: serde_json::Value,
+    source: &str,
+    patch: Option<&str>,
+) -> PathBuf {
+    let package = temp.0.join(format!("package-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(package.join("lib")).unwrap();
+    write_json(&package.join("package.json"), manifest);
+    if !source.is_empty() {
+        fs::write(package.join("lib/index.js"), source).unwrap();
+    }
+    if let Some(patch) = patch {
+        fs::write(package.join("cordis.patch.yml"), patch).unwrap();
+    }
+    package
+}
+
+#[cfg(unix)]
+struct GenericPnpm {
+    _gate: MutexGuard<'static, ()>,
+    environment: Vec<(&'static str, Option<OsString>)>,
+}
+
+#[cfg(unix)]
+impl GenericPnpm {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        temp: &TempDir,
+        package: &Path,
+        package_name: &str,
+        next_manifest: &Path,
+        restore_package: Option<&Path>,
+        fail_add: bool,
+        fail_remove: bool,
+        fail_restore: bool,
+        log: &Path,
+    ) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let gate = PNPM_ENV_GATE.lock();
+        let bin = temp.0.join("generic-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let pnpm = bin.join("pnpm");
+        fs::write(
+            &pnpm,
+            "#!/bin/sh\nif [ -n \"$FAKE_PNPM_LOG\" ]; then echo \"$1\" >> \"$FAKE_PNPM_LOG\"; fi\ncase \"$1\" in\n  add)\n    mkdir -p \"$PWD/node_modules\"\n    rm -rf \"$PWD/node_modules/$FAKE_PNPM_PACKAGE_NAME\"\n    cp -R \"$FAKE_PNPM_PACKAGE\" \"$PWD/node_modules/$FAKE_PNPM_PACKAGE_NAME\"\n    cp \"$FAKE_PNPM_NEXT_MANIFEST\" \"$PWD/package.json\"\n    printf \"lockfileVersion: '9.0'\\npackages: {}\\n\" > \"$PWD/pnpm-lock.yaml\"\n    [ \"$FAKE_PNPM_FAIL_ADD\" = 1 ] && exit 23\n    ;;\n  remove)\n    rm -rf \"$PWD/node_modules/$FAKE_PNPM_PACKAGE_NAME\"\n    cp \"$FAKE_PNPM_NEXT_MANIFEST\" \"$PWD/package.json\"\n    printf \"lockfileVersion: '9.0'\\npackages: {}\\n\" > \"$PWD/pnpm-lock.yaml\"\n    [ \"$FAKE_PNPM_FAIL_REMOVE\" = 1 ] && exit 24\n    ;;\n  install)\n    [ \"$FAKE_PNPM_FAIL_RESTORE\" = 1 ] && exit 25\n    rm -rf \"$PWD/node_modules/$FAKE_PNPM_PACKAGE_NAME\"\n    if [ -n \"$FAKE_PNPM_RESTORE_PACKAGE\" ]; then cp -R \"$FAKE_PNPM_RESTORE_PACKAGE\" \"$PWD/node_modules/$FAKE_PNPM_PACKAGE_NAME\"; fi\n    ;;\nesac\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&pnpm, fs::Permissions::from_mode(0o755)).unwrap();
+        let restore = restore_package.map(|package| {
+            let copy = temp.0.join("restore-package");
+            fs::remove_dir_all(&copy).ok();
+            fs::create_dir_all(copy.join("lib")).unwrap();
+            fs::copy(package.join("package.json"), copy.join("package.json")).unwrap();
+            fs::copy(package.join("lib/index.js"), copy.join("lib/index.js")).unwrap();
+            copy
+        });
+        let path = env::var_os("PATH");
+        let mut replacement = OsString::from(bin);
+        if let Some(previous) = &path {
+            replacement.push(":");
+            replacement.push(previous);
+        }
+        let names = [
+            "PATH",
+            "FAKE_PNPM_PACKAGE",
+            "FAKE_PNPM_PACKAGE_NAME",
+            "FAKE_PNPM_NEXT_MANIFEST",
+            "FAKE_PNPM_RESTORE_PACKAGE",
+            "FAKE_PNPM_FAIL_ADD",
+            "FAKE_PNPM_FAIL_REMOVE",
+            "FAKE_PNPM_FAIL_RESTORE",
+            "FAKE_PNPM_LOG",
+        ];
+        let environment = names
+            .into_iter()
+            .map(|name| (name, env::var_os(name)))
+            .collect();
+        env::set_var("PATH", replacement);
+        env::set_var("FAKE_PNPM_PACKAGE", package);
+        env::set_var("FAKE_PNPM_PACKAGE_NAME", package_name);
+        env::set_var("FAKE_PNPM_NEXT_MANIFEST", next_manifest);
+        if let Some(restore) = restore {
+            env::set_var("FAKE_PNPM_RESTORE_PACKAGE", restore);
+        } else {
+            env::remove_var("FAKE_PNPM_RESTORE_PACKAGE");
+        }
+        env::set_var("FAKE_PNPM_FAIL_ADD", if fail_add { "1" } else { "0" });
+        env::set_var("FAKE_PNPM_FAIL_REMOVE", if fail_remove { "1" } else { "0" });
+        env::set_var(
+            "FAKE_PNPM_FAIL_RESTORE",
+            if fail_restore { "1" } else { "0" },
+        );
+        env::set_var("FAKE_PNPM_LOG", log);
+        Self {
+            _gate: gate,
+            environment,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GenericPnpm {
+    fn drop(&mut self) {
+        for (name, value) in self.environment.drain(..) {
+            restore_environment(name, value);
+        }
+    }
+}
+
+#[cfg(unix)]
 struct FakePnpm {
     _gate: MutexGuard<'static, ()>,
     path: Option<OsString>,
@@ -580,8 +1027,7 @@ impl FakePnpm {
     fn new(temp: &TempDir, market: &Path, fail_add: bool, log: &Path) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
-        static GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-        let gate = GATE.lock();
+        let gate = PNPM_ENV_GATE.lock();
         let bin = temp.0.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let pnpm = bin.join("pnpm");
