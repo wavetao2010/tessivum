@@ -511,10 +511,21 @@ fn unsupported_remote_engine_is_rejected_before_any_profile_mutation() {
         None,
     );
     let next = temp.0.join("next.json");
-    write_json(&next, json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}));
+    write_json(
+        &next,
+        json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+    );
     let log = temp.0.join("pnpm.log");
     let _pnpm = GenericPnpm::new(
-        &temp, &package, "candidate", &next, None, false, false, false, &log,
+        &temp,
+        &package,
+        "candidate",
+        &next,
+        None,
+        false,
+        false,
+        false,
+        &log,
     );
 
     let error = mutate_plugins(
@@ -568,11 +579,7 @@ fn candidate_dsh_engine_preflight_accepts_baseline_and_rejects_invalid_ranges_be
         &log,
     );
 
-    mutate_plugins(
-        &accepted.0,
-        PluginMutation::Add("candidate@1.0.0".into()),
-    )
-    .unwrap();
+    mutate_plugins(&accepted.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap();
     assert_eq!(
         read_json_file(&profile.join("package.json")).pointer("/dependencies/candidate"),
         Some(&json!("1.0.0"))
@@ -588,6 +595,9 @@ fn candidate_dsh_engine_preflight_accepts_baseline_and_rejects_invalid_ranges_be
             "candidate",
             json!({"dsh": {"engines": {"dsh": engine}}}),
         );
+        let candidate = profile.join("node_modules/candidate");
+        let candidate_manifest = fs::read(candidate.join("package.json")).unwrap();
+        let candidate_entry = fs::read(candidate.join("lib/index.js")).unwrap();
         let package = generic_package(
             &temp,
             json!({
@@ -625,6 +635,14 @@ fn candidate_dsh_engine_preflight_accepts_baseline_and_rejects_invalid_ranges_be
         );
         assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
         assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+        assert_eq!(
+            fs::read(candidate.join("package.json")).unwrap(),
+            candidate_manifest
+        );
+        assert_eq!(
+            fs::read(candidate.join("lib/index.js")).unwrap(),
+            candidate_entry
+        );
         assert_eq!(fs::read_to_string(&log).unwrap_or_default(), "");
     }
 }
@@ -717,10 +735,9 @@ fn candidate_preflight_reports_entry_patch_client_dependency_and_inject_failures
             json!({
                 "name": "candidate",
                 "version": "1.0.0",
-                "main": "./lib/index.js",
-                "inject": ["unavailableService"]
+                "main": "./lib/index.js"
             }),
-            "export default () => {}\n",
+            "export const inject = [\"unavailableService\"]\nexport default () => {}\n",
             None,
             json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
             "PLUGIN_INJECT_UNAVAILABLE",
@@ -729,6 +746,9 @@ fn candidate_preflight_reports_entry_patch_client_dependency_and_inject_failures
     for (label, manifest, source, patch, next, code) in cases {
         let temp = TempDir::new();
         let (profile, original_manifest, original_lock) = generic_profile(&temp);
+        let old = profile.join("node_modules/old");
+        let old_manifest = fs::read(old.join("package.json")).unwrap();
+        let old_entry = fs::read(old.join("lib/index.js")).unwrap();
         let package = generic_package(&temp, manifest, source, patch);
         let next_manifest = temp.0.join(format!("{label}-package.json"));
         write_json(&next_manifest, next);
@@ -745,11 +765,20 @@ fn candidate_preflight_reports_entry_patch_client_dependency_and_inject_failures
             &log,
         );
 
-        let error = mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into()))
-            .unwrap_err();
+        let error =
+            mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap_err();
         assert!(error.to_string().contains(code), "{label}: {error}");
-        assert_eq!(fs::read(profile.join("package.json")).unwrap(), original_manifest);
-        assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), original_lock);
+        assert_eq!(
+            fs::read(profile.join("package.json")).unwrap(),
+            original_manifest
+        );
+        assert_eq!(
+            fs::read(profile.join("pnpm-lock.yaml")).unwrap(),
+            original_lock
+        );
+        assert_eq!(fs::read(old.join("package.json")).unwrap(), old_manifest);
+        assert_eq!(fs::read(old.join("lib/index.js")).unwrap(), old_entry);
+        assert!(!profile.join("node_modules/candidate").exists());
         assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
     }
 }
@@ -758,7 +787,25 @@ fn candidate_preflight_reports_entry_patch_client_dependency_and_inject_failures
 #[test]
 fn failed_add_remove_and_reconcile_restore_profile_documents_and_modules() {
     let add = TempDir::new();
-    let (profile, manifest, lock) = generic_profile(&add);
+    let (profile, _, lock) = generic_profile(&add);
+    write_json(
+        &profile.join("package.json"),
+        json!({
+            "preserved": {"value": 42},
+            "dependencies": {"old": "1.0.0"},
+            "dsh": {"profile": {"bundles": ["old"]}}
+        }),
+    );
+    write_bundle(
+        &profile,
+        "old",
+        false,
+        "- insert:\n    - id: old\n      name: old\n",
+    );
+    let manifest = fs::read(profile.join("package.json")).unwrap();
+    let old = profile.join("node_modules/old");
+    let old_manifest = fs::read(old.join("package.json")).unwrap();
+    let old_entry = fs::read(old.join("lib/index.js")).unwrap();
     let package = generic_package(
         &add,
         json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
@@ -766,58 +813,131 @@ fn failed_add_remove_and_reconcile_restore_profile_documents_and_modules() {
         None,
     );
     let next = add.0.join("next.json");
-    write_json(&next, json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}));
+    write_json(
+        &next,
+        json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+    );
     let log = add.0.join("pnpm.log");
     let _pnpm = GenericPnpm::new(
-        &add, &package, "candidate", &next, None, true, false, false, &log,
+        &add,
+        &package,
+        "candidate",
+        &next,
+        None,
+        true,
+        false,
+        false,
+        &log,
     );
-    assert!(mutate_plugins(&add.0, PluginMutation::Add("candidate@1.0.0".into())).is_err());
+    let error = mutate_plugins(&add.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap_err();
+    assert!(error.to_string().contains("pnpm exited with code 23"));
     assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
     assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
     assert!(!profile.join("node_modules/candidate").exists());
+    assert_eq!(fs::read(old.join("package.json")).unwrap(), old_manifest);
+    assert_eq!(fs::read(old.join("lib/index.js")).unwrap(), old_entry);
     assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
+    let entries = load_plugin_entries(&profile)
+        .expect("restored profile remains loadable")
+        .expect("restored profile retains active entries");
+    let old_entry = entries
+        .entries()
+        .into_iter()
+        .find(|entry| entry.options.id.as_str() == "old")
+        .expect("restored profile retains old entry");
+    assert_eq!(old_entry.options.name.as_deref(), Some("old"));
+    assert_eq!(old_entry.options.runtime, RuntimeKind::LegacyNode);
     drop(_pnpm);
 
     let remove = TempDir::new();
     let (profile, manifest, lock) = generic_profile(&remove);
     let old = profile.join("node_modules/old");
+    let old_manifest = fs::read(old.join("package.json")).unwrap();
+    let old_entry = fs::read(old.join("lib/index.js")).unwrap();
     let next = remove.0.join("next.json");
     write_json(&next, json!({"dependencies": {}}));
     let log = remove.0.join("pnpm.log");
     let _pnpm = GenericPnpm::new(
-        &remove, &old, "old", &next, Some(&old), false, true, false, &log,
+        &remove,
+        &old,
+        "old",
+        &next,
+        Some(&old),
+        false,
+        true,
+        false,
+        &log,
     );
-    assert!(mutate_plugins(&remove.0, PluginMutation::Remove("old".into())).is_err());
+    let error = mutate_plugins(&remove.0, PluginMutation::Remove("old".into())).unwrap_err();
+    assert!(error.to_string().contains("pnpm exited with code 24"));
     assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
     assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
-    assert!(profile.join("node_modules/old/lib/index.js").is_file());
+    assert_eq!(fs::read(old.join("package.json")).unwrap(), old_manifest);
+    assert_eq!(fs::read(old.join("lib/index.js")).unwrap(), old_entry);
     assert_eq!(fs::read_to_string(&log).unwrap(), "remove\ninstall\n");
     drop(_pnpm);
 
     let reconcile = TempDir::new();
     let (profile, manifest, lock) = generic_profile(&reconcile);
+    let old = profile.join("node_modules/old");
+    write_package(
+        &profile,
+        "old",
+        json!({"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}}),
+    );
+    fs::write(
+        old.join("cordis.patch.yml"),
+        "- insert:\n    - id: existing\n      name: old\n",
+    )
+    .unwrap();
+    let old_manifest = fs::read(old.join("package.json")).unwrap();
+    let old_entry = fs::read(old.join("lib/index.js")).unwrap();
+    let old_patch = fs::read(old.join("cordis.patch.yml")).unwrap();
     let package = generic_package(
         &reconcile,
-        json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
+        json!({
+            "name": "candidate",
+            "version": "1.0.0",
+            "main": "./lib/index.js",
+            "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
+        }),
         "export default () => {}\n",
-        None,
+        Some("- id: existing\n  disabled: \"not-a-boolean\"\n"),
     );
     let next = reconcile.0.join("next.json");
     write_json(
         &next,
         json!({
             "dependencies": {"old": "1.0.0", "candidate": "1.0.0"},
-            "dsh": {"profile": {"bundles": ["missing"]}}
+            "dsh": {"profile": {"bundles": ["old"]}}
         }),
     );
     let log = reconcile.0.join("pnpm.log");
     let _pnpm = GenericPnpm::new(
-        &reconcile, &package, "candidate", &next, None, false, false, false, &log,
+        &reconcile,
+        &package,
+        "candidate",
+        &next,
+        None,
+        false,
+        false,
+        false,
+        &log,
     );
-    assert!(mutate_plugins(&reconcile.0, PluginMutation::Add("candidate@1.0.0".into())).is_err());
+    let error =
+        mutate_plugins(&reconcile.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("bundle disabled must be a boolean"),
+        "{error}"
+    );
     assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
     assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
     assert!(!profile.join("node_modules/candidate").exists());
+    assert_eq!(fs::read(old.join("package.json")).unwrap(), old_manifest);
+    assert_eq!(fs::read(old.join("lib/index.js")).unwrap(), old_entry);
+    assert_eq!(fs::read(old.join("cordis.patch.yml")).unwrap(), old_patch);
     assert_eq!(fs::read_to_string(&log).unwrap(), "add\ninstall\n");
 }
 
@@ -842,7 +962,15 @@ fn successful_generic_add_update_and_remove_keep_profile_semantics() {
     );
     let log = temp.0.join("pnpm.log");
     let _pnpm = GenericPnpm::new(
-        &temp, &package, "candidate", &added, None, false, false, false, &log,
+        &temp,
+        &package,
+        "candidate",
+        &added,
+        None,
+        false,
+        false,
+        false,
+        &log,
     );
     mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap();
     assert_eq!(
@@ -866,7 +994,15 @@ fn successful_generic_add_update_and_remove_keep_profile_semantics() {
         }),
     );
     let _pnpm = GenericPnpm::new(
-        &temp, &updated_package, "candidate", &updated, None, false, false, false, &log,
+        &temp,
+        &updated_package,
+        "candidate",
+        &updated,
+        None,
+        false,
+        false,
+        false,
+        &log,
     );
     mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.1".into())).unwrap();
     assert_eq!(
@@ -884,7 +1020,15 @@ fn successful_generic_add_update_and_remove_keep_profile_semantics() {
         }),
     );
     let _pnpm = GenericPnpm::new(
-        &temp, &package, "candidate", &removed, None, false, false, false, &log,
+        &temp,
+        &package,
+        "candidate",
+        &removed,
+        None,
+        false,
+        false,
+        false,
+        &log,
     );
     mutate_plugins(&temp.0, PluginMutation::Remove("candidate".into())).unwrap();
     assert!(read_json_file(&profile.join("package.json"))
@@ -898,16 +1042,31 @@ fn successful_generic_add_update_and_remove_keep_profile_semantics() {
 fn rollback_failure_is_reported_loudly() {
     let temp = TempDir::new();
     let (profile, manifest, lock) = generic_profile(&temp);
-    let package = generic_package(&temp, json!({"name": "candidate", "version": "1.0.0"}), "", None);
+    let package = generic_package(
+        &temp,
+        json!({"name": "candidate", "version": "1.0.0"}),
+        "",
+        None,
+    );
     let next = temp.0.join("next.json");
-    write_json(&next, json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}));
+    write_json(
+        &next,
+        json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+    );
     let log = temp.0.join("pnpm.log");
     let _pnpm = GenericPnpm::new(
-        &temp, &package, "candidate", &next, None, false, false, true, &log,
+        &temp,
+        &package,
+        "candidate",
+        &next,
+        None,
+        false,
+        false,
+        true,
+        &log,
     );
 
-    let error = mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into()))
-        .unwrap_err();
+    let error = mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap_err();
     assert!(error
         .to_string()
         .contains("PLUGIN_MUTATION_ROLLBACK_FAILED"));
@@ -932,7 +1091,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
         &package.join("package.json"),
         json!({
             "name": "tessivum-market",
-            "version": "0.1.0-alpha.18",
+            "version": "0.1.0-alpha.19",
             "type": "module",
             "main": "./lib/index.js",
             "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
@@ -945,7 +1104,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
 
 #[cfg(unix)]
 fn stable_market_artifact(data_dir: &Path) -> PathBuf {
-    data_dir.join("artifacts/market/0.1.0-alpha.18/tessivum-market-0.1.0-alpha.18.tgz")
+    data_dir.join("artifacts/market/0.1.0-alpha.19/tessivum-market-0.1.0-alpha.19.tgz")
 }
 
 #[cfg(unix)]

@@ -234,13 +234,17 @@ async fn wasm_runner_loads_deep_interop_package_and_bridges_legacy_node() {
             .unwrap()["state"],
         "ACTIVE"
     );
+    let canonical_call = fs::read_to_string(core_source().join("node/compat-host/src/protocol.ts"))
+        .unwrap()
+        .contains("parseServiceCall");
+    let service_call = if canonical_call {
+        json!({"service": "legacy.function", "method": "inspect", "params": ["bridge-ok"]})
+    } else {
+        json!({"service": "legacy.function", "method": "inspect", "args": ["bridge-ok"]})
+    };
     assert_eq!(
         client
-            .request(
-                FrameKind::ServiceCall,
-                json!({"name": "legacy.function", "method": "inspect", "args": ["bridge-ok"]}),
-                Duration::from_secs(2),
-            )
+            .request(FrameKind::ServiceCall, service_call, Duration::from_secs(2),)
             .unwrap(),
         json!({"prefix": "node", "value": "bridge-ok", "file": "index.ts", "readable": true})
     );

@@ -14,6 +14,7 @@
       - img
       - text: Agent 模式
   - button "打开配置文件"
+  - button "远程访问"
   - button "关闭":
     - img
     - text: 关闭

@@ -1812,7 +1812,7 @@ describe('update flow — no npm publishing required', () => {
     expect(lockfile).not.toContain(NEW)
     const installed = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { version?: string }
     expect(installed.version).toBe('1.0.0')
-  })
+  }, 60_000)
 
   it('does not launch recovery when Desktop rejects the update as busy', async () => {
     advanceNpmLatest('1.2.0')

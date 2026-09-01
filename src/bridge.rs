@@ -9,17 +9,17 @@ use std::{
     path::{Component, Path},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Weak,
+        Arc, OnceLock, Weak,
     },
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use futures_util::stream;
-use parking_lot::{Condvar, Mutex, MutexGuard};
+use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tessivum_core::CancellationToken;
+use tessivum_core::{CancellationToken, ContextHandle};
 use tessivum_extism::{Capability, CapabilityHandler, CapabilityRequest, PluginError, WasmResult};
 use tessivum_node_bridge::{
     BridgeClient, BridgeError, BridgeHandler, BridgeResult, Frame, FrameKind, RemoteError,
@@ -32,20 +32,33 @@ use tokio::{
 
 use crate::{
     agent::{AgentAuthority, AgentOptions, AgentRegistry, AgentStatus, InboxTarget},
-    agent_mode::AgentModeId,
+    agent_mode::{AgentModeId, AgentModeTrust},
+    approval::{ApprovalId, ApprovalOutcome},
+    attachments::AttachmentId,
     credentials::{CredentialRef, Credentials},
+    goal::{GoalError, GoalRef},
+    host::{HostApi, HostNotification, SessionQueueAction, SessionUpdateQueueParams},
     llm::{LlmAdapter, LlmProviderRegistration, LlmRuntime, LlmStream},
     plugins::ServiceMethodPermission,
-    protocol::{GenerateRequest, Message, SessionEvent, SessionId, StreamChunk, ToolCallId},
+    protocol::{
+        ContentBlock, GenerateRequest, Message, MessageId, SessionEvent, SessionId,
+        SessionPromptParams, StreamChunk, ToolCallId,
+    },
+    question::AskUserQuestionAnswer,
+    remote_access::{RemoteAccess, RemoteAccessError},
     session::SessionStore,
-    settings::Settings,
+    settings::{Settings, SettingsPathOp},
+    skills::{FilesystemSkillProvider, SkillProvider},
     subagent::{
-        SubagentActivation, SubagentMode, SubagentParent, SubagentService, SubagentStartRequest,
+        SubagentActivation, SubagentDeleteRequest, SubagentHistoryRequest,
+        SubagentInterruptRequest, SubagentMode, SubagentParent, SubagentPromptRequest,
+        SubagentService, SubagentStartRequest,
     },
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     tools::{
         ToolDefinition, ToolHandler, ToolOutput, ToolRegistration, ToolRunContext, ToolRuntime,
     },
+    workspace::WorkspaceId,
     TessivumError,
 };
 
@@ -60,6 +73,20 @@ pub const TIMERS_SERVICE: &str = "timers@1";
 pub const SETTINGS_SERVICE: &str = "settings@1";
 pub const CREDENTIALS_SERVICE: &str = "credentials@1";
 pub const HOST_LIFECYCLE_SERVICE: &str = "hostLifecycle@1";
+pub const WORKSPACES_SERVICE: &str = "workspaces@1";
+pub const AGENT_MODES_SERVICE: &str = "agentModes@1";
+pub const GOALS_SERVICE: &str = "goals@1";
+pub const SKILLS_SERVICE: &str = "skills@1";
+pub const AGENT_PRESETS_SERVICE: &str = "agentPresets@1";
+pub const SUBAGENTS_SERVICE: &str = "subagents@1";
+pub const MODELS_SERVICE: &str = "models@1";
+pub const COMMANDS_SERVICE: &str = "commands@1";
+pub const HOST_EVENTS_SERVICE: &str = "hostEvents@1";
+pub const HOST_SERVICE: &str = "host@1";
+pub const WEB_LISTENER_SERVICE: &str = "webListener@1";
+pub const REMOTE_ACCESS_SERVICE: &str = "remoteAccess@1";
+const MAX_HOST_EVENT_SUBSCRIPTIONS: usize = 16;
+const MAX_DIRECTORY_ENTRIES: usize = 1_000;
 const MAX_WEB_ROUTES: usize = 256;
 const MAX_WEB_HEADERS: usize = 64;
 const MAX_WEB_HEADER_BYTES: usize = 16 * 1024;
@@ -572,6 +599,68 @@ impl DomainLogger for NoopLogger {
     fn log(&self, _: LogLevel, _: &str, _: &Value) {}
 }
 
+/// Late-bound product Host facade shared with the legacy compatibility bridge.
+/// The host installs itself after boot; callers never receive the facade object.
+#[derive(Clone, Default)]
+pub struct DomainHost {
+    inner: Arc<OnceLock<Arc<dyn HostApi>>>,
+}
+
+impl DomainHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bind(&self, host: Arc<dyn HostApi>) -> BridgeResult<()> {
+        self.inner
+            .set(host)
+            .map_err(|_| remote("HOST_ALREADY_BOUND", "product host is already bound"))
+    }
+
+    fn get(&self) -> BridgeResult<Arc<dyn HostApi>> {
+        self.inner
+            .get()
+            .cloned()
+            .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "product host is not bound"))
+    }
+}
+
+/// Read-only listener metadata exposed to Legacy plugins.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebListenerSnapshot {
+    pub host: String,
+    pub port: u16,
+    pub loopback: bool,
+    pub advertised_origins: Vec<String>,
+    pub remote_access_enabled: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct WebListenerRegistry {
+    inner: Arc<RwLock<Option<WebListenerSnapshot>>>,
+}
+
+impl WebListenerRegistry {
+    pub fn new(snapshot: WebListenerSnapshot) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(snapshot))),
+        }
+    }
+
+    pub fn publish(&self, snapshot: WebListenerSnapshot) {
+        *self.inner.write() = Some(snapshot);
+    }
+
+    pub fn clear(&self) {
+        *self.inner.write() = None;
+    }
+
+    pub fn describe(&self) -> Option<WebListenerSnapshot> {
+        self.inner.read().clone()
+    }
+}
+
 /// Product services attached to one bridge. Optional services are unavailable rather than inferred.
 #[derive(Clone)]
 pub struct BridgeServices {
@@ -589,6 +678,9 @@ pub struct BridgeServices {
     permitted_events: Arc<BTreeSet<String>>,
     pnpm: Option<Arc<dyn PnpmBoundary>>,
     host_lifecycle: Option<Arc<dyn HostLifecycle>>,
+    host: Option<DomainHost>,
+    web_listener: Option<WebListenerRegistry>,
+    remote_access: Option<RemoteAccess>,
 }
 
 impl BridgeServices {
@@ -615,6 +707,9 @@ impl BridgeServices {
             permitted_events: Arc::new(BTreeSet::new()),
             pnpm: None,
             host_lifecycle: None,
+            host: None,
+            web_listener: None,
+            remote_access: None,
         }
     }
 
@@ -665,6 +760,21 @@ impl BridgeServices {
         self.host_lifecycle = Some(lifecycle);
         self
     }
+
+    pub fn with_domain_host(mut self, host: DomainHost) -> Self {
+        self.host = Some(host);
+        self
+    }
+
+    pub fn with_web_listener(mut self, listener: WebListenerRegistry) -> Self {
+        self.web_listener = Some(listener);
+        self
+    }
+
+    pub fn with_remote_access(mut self, remote_access: RemoteAccess) -> Self {
+        self.remote_access = Some(remote_access);
+        self
+    }
 }
 
 /// Shared Node/WASM product-domain bridge.
@@ -706,6 +816,9 @@ struct GenerationState {
     web_routes_supported: bool,
     web_upgrades_supported: bool,
     operations: BTreeMap<u64, PnpmOperation>,
+    service_calls: BTreeMap<u64, CancellationToken>,
+    pending_cancellations: BTreeSet<u64>,
+    host_event_subscriptions: BTreeMap<String, JoinHandle<()>>,
 }
 
 impl Drop for BridgeInner {
@@ -835,6 +948,52 @@ impl Drop for PnpmOperationGuard {
         }
     }
 }
+struct ServiceCallGuard {
+    inner: Weak<BridgeInner>,
+    generation: u64,
+    request_id: u64,
+    cancellation: CancellationToken,
+    armed: bool,
+}
+
+impl ServiceCallGuard {
+    fn new(
+        inner: Weak<BridgeInner>,
+        generation: u64,
+        request_id: u64,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            inner,
+            generation,
+            request_id,
+            cancellation,
+            armed: true,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.remove();
+        self.armed = false;
+    }
+
+    fn remove(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            if let Some(state) = lock(&inner.generations).get_mut(&self.generation) {
+                state.service_calls.remove(&self.request_id);
+            }
+        }
+    }
+}
+
+impl Drop for ServiceCallGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+            self.remove();
+        }
+    }
+}
 
 impl DomainBridge {
     /// Creates a bridge with conservative bounded defaults and no WASM policies.
@@ -925,6 +1084,9 @@ impl DomainBridge {
                 web_routes_supported,
                 web_upgrades_supported,
                 operations: BTreeMap::new(),
+                service_calls: BTreeMap::new(),
+                host_event_subscriptions: BTreeMap::new(),
+                pending_cancellations: BTreeSet::new(),
             },
         );
         Ok(())
@@ -1185,6 +1347,9 @@ impl DomainBridge {
                     cancellation: cancellation.clone(),
                 },
             );
+            if state.pending_cancellations.remove(&request_id) {
+                cancellation.cancel();
+            }
             (cancellation, output)
         };
         let mut operation = PnpmOperationGuard::new(
@@ -1200,19 +1365,49 @@ impl DomainBridge {
         serde_json::to_value(result).map_err(serialize_error)
     }
 
-    fn cancel_pnpm_request(&self, generation: u64, request_id: u64) -> BridgeResult<bool> {
-        let mut states = lock(&self.inner.generations);
-        let state = states
-            .get_mut(&generation)
-            .ok_or_else(|| stale_generation(generation))?;
-        let Some(operation) = state.operations.remove(&request_id) else {
-            return Ok(false);
+    fn cancel_request(&self, generation: u64, request_id: u64) -> BridgeResult<bool> {
+        let pending = {
+            let mut states = lock(&self.inner.generations);
+            let active_elsewhere = states.iter().any(|(candidate, state)| {
+                *candidate != generation
+                    && (state.operations.contains_key(&request_id)
+                        || state.service_calls.contains_key(&request_id))
+            });
+            let state = states
+                .get_mut(&generation)
+                .ok_or_else(|| stale_generation(generation))?;
+            let mut cancelled = false;
+            if let Some(operation) = state.operations.remove(&request_id) {
+                if !operation.cancellation.is_cancelled() {
+                    operation.cancellation.cancel();
+                    cancelled = true;
+                }
+            }
+            if let Some(call) = state.service_calls.remove(&request_id) {
+                if !call.is_cancelled() {
+                    call.cancel();
+                    cancelled = true;
+                }
+            }
+            if cancelled || active_elsewhere {
+                return Ok(cancelled);
+            }
+            state.pending_cancellations.insert(request_id)
         };
-        if operation.cancellation.is_cancelled() {
-            return Ok(false);
+        if pending {
+            let inner = Arc::downgrade(&self.inner);
+            let timeout = self.inner.limits.request_timeout;
+            self.inner.handle.spawn(async move {
+                tokio::time::sleep(timeout).await;
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
+                if let Some(state) = lock(&inner.generations).get_mut(&generation) {
+                    state.pending_cancellations.remove(&request_id);
+                };
+            });
         }
-        operation.cancellation.cancel();
-        Ok(true)
+        Ok(false)
     }
     /// Cancels every callback and timer and disposes all generation-owned registrations.
     pub fn cleanup_generation(&self, generation: u64) {
@@ -1325,15 +1520,839 @@ impl DomainBridge {
             }
             LOGGER_SERVICE => self.logger(&request.method, request.params),
             TIMERS_SERVICE => self.timers(generation, &request.method, request.params),
-            SETTINGS_SERVICE => self.settings(&request.method, request.params).await,
+            SETTINGS_SERVICE => {
+                self.settings(generation, &request.method, request.params)
+                    .await
+            }
             CREDENTIALS_SERVICE => self.credentials(&request.method, request.params).await,
             HOST_LIFECYCLE_SERVICE => {
                 self.host_lifecycle(generation, &request.method, request.params)
+            }
+            SUBAGENTS_SERVICE => {
+                self.subagents(generation, &request.method, request.params)
+                    .await
+            }
+            WORKSPACES_SERVICE => {
+                self.workspaces(generation, &request.method, request.params)
+                    .await
+            }
+            AGENT_MODES_SERVICE => {
+                self.agent_modes(generation, &request.method, request.params)
+                    .await
+            }
+            GOALS_SERVICE => {
+                self.goals(generation, &request.method, request.params)
+                    .await
+            }
+            SKILLS_SERVICE => {
+                self.skills(generation, &request.method, request.params)
+                    .await
+            }
+            AGENT_PRESETS_SERVICE => {
+                self.agent_presets(generation, &request.method, request.params)
+                    .await
+            }
+            MODELS_SERVICE => {
+                self.models(generation, &request.method, request.params)
+                    .await
+            }
+            COMMANDS_SERVICE => {
+                self.commands(generation, &request.method, request.params)
+                    .await
+            }
+            HOST_EVENTS_SERVICE => {
+                self.host_events(generation, &request.method, request.params)
+                    .await
+            }
+            HOST_SERVICE => self.host(generation, &request.method, request.params).await,
+            WEB_LISTENER_SERVICE => self.web_listener(generation, &request.method, request.params),
+            REMOTE_ACCESS_SERVICE => {
+                self.remote_access(generation, &request.method, request.params)
+                    .await
             }
             _ => Err(remote(
                 "UNKNOWN_SERVICE",
                 "service is not exposed by DomainBridge",
             )),
+        }
+    }
+
+    async fn workspaces(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        let registry = host
+            .workspace_registry()
+            .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "workspace registry is unavailable"))?;
+        match method {
+            "list" => {
+                let _: EmptyRequest = decode(params)?;
+                let snapshot = registry.snapshot();
+                Ok(json!({
+                    "items": snapshot.items,
+                    "archivedSessionIds": snapshot.archived_session_ids,
+                }))
+            }
+            "create" => {
+                let request: WorkspaceCreate = decode(params)?;
+                let result = registry
+                    .create(request.path, None)
+                    .map_err(workspace_error)?;
+                Ok(json!({"workspace": result.workspace, "created": result.created}))
+            }
+            "connect" => {
+                let request: WorkspaceReference = decode(params)?;
+                let workspace = registry
+                    .list()
+                    .into_iter()
+                    .find(|workspace| workspace.workspace_id == request.workspace_id)
+                    .ok_or_else(|| remote("WORKSPACE_NOT_FOUND", "workspace was not found"))?;
+                let session_id = match workspace.session_ids.first() {
+                    Some(session_id) => session_id.clone(),
+                    None => {
+                        host.create_session_in(SessionId::random(), request.workspace_id)
+                            .await
+                            .map_err(tessivum_error)?
+                            .session_id
+                    }
+                };
+                Ok(json!({"sessionId": session_id}))
+            }
+            "rename" => {
+                let request: WorkspaceRename = decode(params)?;
+                let workspace = registry
+                    .rename(request.workspace_id, request.title, None)
+                    .map_err(workspace_error)?;
+                Ok(json!({"workspace": workspace}))
+            }
+            "remove" | "delete" => {
+                let request: WorkspaceReference = decode(params)?;
+                let deleted = host
+                    .delete_workspace(request.workspace_id)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"deleted": deleted}))
+            }
+            "insertBefore" | "reorder" => {
+                let request: WorkspaceInsertBefore = decode(params)?;
+                let workspace_ids = registry
+                    .insert_before(
+                        request.workspace_id,
+                        request.before_workspace_id.as_deref(),
+                        None,
+                    )
+                    .map_err(workspace_error)?;
+                Ok(json!({"workspaceIds": workspace_ids}))
+            }
+            "insertSessionBefore" => {
+                let request: WorkspaceInsertSessionBefore = decode(params)?;
+                registry
+                    .insert_session_before(
+                        request.workspace_id.clone(),
+                        request.session_id,
+                        request.before_session_id.as_deref(),
+                        None,
+                    )
+                    .map_err(workspace_error)?;
+                let workspace = registry
+                    .list()
+                    .into_iter()
+                    .find(|workspace| workspace.workspace_id == request.workspace_id)
+                    .ok_or_else(|| remote("WORKSPACE_NOT_FOUND", "workspace was not found"))?;
+                Ok(json!({"workspace": workspace}))
+            }
+            "archiveSession" | "archive" => {
+                let request: WorkspaceArchiveSession = decode(params)?;
+                registry
+                    .archive_session(request.session_id, None)
+                    .map_err(workspace_error)?;
+                Ok(json!({
+                    "archivedSessionIds": registry.snapshot().archived_session_ids,
+                }))
+            }
+            _ => unknown_method(WORKSPACES_SERVICE, method),
+        }
+    }
+
+    async fn subagents(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        match method {
+            "list" => {
+                let request: SubagentCatalogRequest = decode(params)?;
+                serde_json::to_value(
+                    host.subagent_list(request.parent_session_id)
+                        .await
+                        .map_err(tessivum_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "history" => serde_json::to_value(
+                host.subagent_history(decode::<SubagentHistoryRequest>(params)?)
+                    .await
+                    .map_err(tessivum_error)?,
+            )
+            .map_err(serialize_error),
+            "prompt" => serde_json::to_value(
+                host.subagent_prompt(decode::<SubagentPromptRequest>(params)?)
+                    .await
+                    .map_err(tessivum_error)?,
+            )
+            .map_err(serialize_error),
+            "interrupt" => serde_json::to_value(
+                host.subagent_interrupt(decode::<SubagentInterruptRequest>(params)?)
+                    .await
+                    .map_err(tessivum_error)?,
+            )
+            .map_err(serialize_error),
+            "delete" => serde_json::to_value(
+                host.subagent_delete(decode::<SubagentDeleteRequest>(params)?)
+                    .await
+                    .map_err(tessivum_error)?,
+            )
+            .map_err(serialize_error),
+            _ => unknown_method(SUBAGENTS_SERVICE, method),
+        }
+    }
+    async fn agent_modes(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        match method {
+            "list" => {
+                let _: EmptyRequest = decode(params)?;
+                let items = host.agent_mode_list().await.map_err(tessivum_error)?;
+                let (authorable, can_open_path) = host.agent_mode_capabilities();
+                Ok(json!({
+                    "items": items,
+                    "authorable": authorable,
+                    "canOpenPath": can_open_path,
+                }))
+            }
+            "get" | "read" => {
+                let request: AgentModeGet = decode(params)?;
+                let document = host
+                    .agent_mode_read(request.agent_mode)
+                    .await
+                    .map_err(tessivum_error)?;
+                serde_json::to_value(document).map_err(serialize_error)
+            }
+            "set" | "select" => {
+                let request: AgentModeSet = decode(params)?;
+                let agent_mode = host
+                    .agent_mode_select(request.session_id, request.agent_mode)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"agentMode": agent_mode}))
+            }
+            _ => unknown_method(AGENT_MODES_SERVICE, method),
+        }
+    }
+
+    async fn goals(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        match method {
+            "create" => {
+                let request: GoalCreate = decode(params)?;
+                let goals = self
+                    .host_api(generation)?
+                    .goal_service(request.session_id)
+                    .await
+                    .map_err(tessivum_error)?;
+                let snapshot = goals
+                    .create(
+                        request.objective,
+                        request.max_goal_rounds,
+                        goals.cancellation(),
+                    )
+                    .await
+                    .map_err(goal_error)?;
+                goals.drive().await.map_err(goal_error)?;
+                Ok(json!({"ref": snapshot.reference}))
+            }
+            "edit" => {
+                let request: GoalEdit = decode(params)?;
+                let goals = self
+                    .host_api(generation)?
+                    .goal_service(request.session_id)
+                    .await
+                    .map_err(tessivum_error)?;
+                let snapshot = goals
+                    .edit(
+                        request.reference,
+                        request.objective,
+                        request.max_goal_rounds,
+                        goals.cancellation(),
+                    )
+                    .await
+                    .map_err(goal_error)?;
+                Ok(json!({"ref": snapshot.reference}))
+            }
+            "pause" | "resume" | "complete" | "clear" => {
+                let request: GoalMutation = decode(params)?;
+                let goals = self
+                    .host_api(generation)?
+                    .goal_service(request.session_id)
+                    .await
+                    .map_err(tessivum_error)?;
+                let cancellation = goals.cancellation();
+                match method {
+                    "pause" => {
+                        let snapshot = goals
+                            .pause(request.reference, cancellation)
+                            .await
+                            .map_err(goal_error)?;
+                        Ok(json!({"ref": snapshot.reference}))
+                    }
+                    "resume" => {
+                        let snapshot = goals
+                            .resume(request.reference, cancellation)
+                            .await
+                            .map_err(goal_error)?;
+                        goals.drive().await.map_err(goal_error)?;
+                        Ok(json!({"ref": snapshot.reference}))
+                    }
+                    "complete" => {
+                        let snapshot = goals
+                            .complete(request.reference, cancellation)
+                            .await
+                            .map_err(goal_error)?;
+                        Ok(json!({"ref": snapshot.reference}))
+                    }
+                    "clear" => {
+                        goals
+                            .clear(request.reference, cancellation)
+                            .await
+                            .map_err(goal_error)?;
+                        Ok(json!({"cleared": true}))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unknown_method(GOALS_SERVICE, method),
+        }
+    }
+
+    async fn skills(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        if method != "list" {
+            return unknown_method(SKILLS_SERVICE, method);
+        }
+        let request: SessionReference = decode(params)?;
+        let host = self.host_api(generation)?;
+        let session = host
+            .list_sessions()
+            .await
+            .map_err(tessivum_error)?
+            .into_iter()
+            .find(|session| session.session_id == request.session_id)
+            .ok_or_else(|| remote("SESSION_NOT_FOUND", "session was not found"))?;
+        if !host
+            .agent_mode_skills_enabled(session.agent_mode.map(AgentModeId::into_string))
+            .await
+            .map_err(tessivum_error)?
+        {
+            return Ok(json!({"skills": []}));
+        }
+        let Some(cwd) = session.cwd else {
+            return Ok(json!({"skills": []}));
+        };
+        let root = std::path::PathBuf::from(cwd).join(".agents/skills");
+        if !root.is_dir() {
+            return Ok(json!({"skills": []}));
+        }
+        let provider = FilesystemSkillProvider::from_root(root)
+            .map_err(|error| remote(error.code.clone(), error.message.clone()))?;
+        let skills = provider
+            .list(ContextHandle::root().scope().cancellation())
+            .await
+            .map_err(|error| remote(error.code.clone(), error.message.clone()))?
+            .into_iter()
+            .filter(|skill| skill.invocation.user_invocable)
+            .map(|skill| {
+                let mut value = json!({
+                    "name": skill.name,
+                    "description": skill.description,
+                    "modelInvocable": skill.invocation.model_invocable,
+                });
+                if let Some(when_to_use) = skill.when_to_use {
+                    value["whenToUse"] = Value::String(when_to_use);
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"skills": skills}))
+    }
+
+    async fn agent_presets(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        match method {
+            "list" => {
+                let _: EmptyRequest = decode(params)?;
+                let presets = host.agent_mode_list().await.map_err(tessivum_error)?;
+                let (authorable, has_document) = host.agent_mode_capabilities();
+                Ok(json!({
+                    "presets": presets,
+                    "authorable": authorable,
+                    "hasDocument": has_document,
+                }))
+            }
+            "read" => {
+                let request: AgentPresetReference = decode(params)?;
+                let document = host
+                    .agent_mode_read(request.agent_preset)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({
+                    "agentPreset": document.id,
+                    "trust": if document.trust == AgentModeTrust::User { "user" } else { "system" },
+                    "content": document.content,
+                    "name": document.name,
+                    "description": document.description,
+                }))
+            }
+            "select" => {
+                let request: AgentPresetSelect = decode(params)?;
+                let agent_preset = host
+                    .agent_mode_select(request.session_id, request.agent_preset)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"agentPreset": agent_preset}))
+            }
+            "copy" => {
+                let request: AgentPresetCopy = decode(params)?;
+                let agent_preset = host
+                    .agent_mode_copy(request.from, request.agent_preset, request.name)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"agentPreset": agent_preset}))
+            }
+            "openDocument" => {
+                let request: AgentPresetReference = decode(params)?;
+                serde_json::to_value(
+                    host.agent_mode_open_document(request.agent_preset)
+                        .await
+                        .map_err(tessivum_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "remove" => {
+                let request: AgentPresetReference = decode(params)?;
+                host.agent_mode_remove(request.agent_preset)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({}))
+            }
+            _ => unknown_method(AGENT_PRESETS_SERVICE, method),
+        }
+    }
+
+    async fn models(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        match method {
+            "list" | "providers" => {
+                let _: EmptyRequest = decode(params)?;
+                let providers = host
+                    .provider_directory()
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "provider": entry.route.id,
+                            "displayName": entry.route.display_name,
+                            "settingsNs": entry.namespace,
+                            "settingsPath": entry.settings_path,
+                            "active": entry.active,
+                            "declared": entry.declared,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({"providers": providers}))
+            }
+            "catalog" | "models" => {
+                let _: EmptyRequest = decode(params)?;
+                let mut groups = Vec::new();
+                let mut failures = Vec::new();
+                for entry in host.provider_directory() {
+                    for group in host.model_groups(&entry.route.id) {
+                        if let Some(failure) = group.failure {
+                            failures.push(json!({
+                                "id": group.provider,
+                                "name": group.display_name,
+                                "message": failure.message,
+                            }));
+                            continue;
+                        }
+                        let models = group
+                            .models
+                            .into_iter()
+                            .map(|model| {
+                                json!({
+                                    "id": model.id,
+                                    "name": model.name.unwrap_or_else(|| model.id.clone()),
+                                    "description": model.description,
+                                    "reasoning": model.reasoning,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        groups.push(json!({
+                            "id": group.provider,
+                            "name": group.display_name,
+                            "models": models,
+                        }));
+                    }
+                }
+                Ok(json!({"groups": groups, "failures": failures}))
+            }
+            "groups" => {
+                let request: ModelsProvider = decode(params)?;
+                Ok(json!({"groups": host.model_groups(&request.provider)}))
+            }
+            "read" | "session" => {
+                let request: SessionReference = decode(params)?;
+                serde_json::to_value(
+                    host.session_models(request.session_id)
+                        .await
+                        .map_err(tessivum_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "select" => {
+                let request: ModelsSelect = decode(params)?;
+                serde_json::to_value(
+                    host.select_model(
+                        request.session_id,
+                        request.provider,
+                        request.model,
+                        request.reasoning_effort,
+                    )
+                    .await
+                    .map_err(tessivum_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "providerModels" => {
+                let request: ModelsProviderConfig = decode(params)?;
+                serde_json::to_value(
+                    host.provider_models(request.provider, request.config)
+                        .await
+                        .map_err(tessivum_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "discoverModels" => {
+                let request: ModelsDiscover = decode(params)?;
+                crate::api::compat_discover_models(
+                    host.as_ref(),
+                    crate::api::CompatDiscoverModels {
+                        settings_ns: request.settings_ns,
+                        provider: request.provider,
+                        base_url: request.base_url,
+                        api: request.api,
+                        api_key: request.api_key,
+                    },
+                )
+                .await
+                .map_err(|error| remote(error.code, error.message))
+            }
+            _ => unknown_method(MODELS_SERVICE, method),
+        }
+    }
+
+    async fn commands(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        match method {
+            "list" => {
+                let request: CommandsList = decode(params)?;
+                let items = host
+                    .command_list(request.session_id)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"items": items}))
+            }
+            "search" => {
+                let request: CommandsSearch = decode(params)?;
+                let query = request.query.trim().to_lowercase();
+                let items = host
+                    .command_list(request.session_id)
+                    .await
+                    .map_err(tessivum_error)?
+                    .into_iter()
+                    .filter(|item| {
+                        query.is_empty()
+                            || item.name.to_lowercase().contains(&query)
+                            || item.description.to_lowercase().contains(&query)
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({"items": items}))
+            }
+            "execute" => {
+                let request: CommandsExecute = decode(params)?;
+                let execution = host
+                    .command_execute(request.session_id, request.line)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"execution": execution}))
+            }
+            _ => unknown_method(COMMANDS_SERVICE, method),
+        }
+    }
+
+    async fn host_events(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let generation = require_node_generation(generation)?;
+        let host = self.host_api(Some(generation))?;
+        match method {
+            "subscribe" => {
+                let request: HostEventsSubscribe = decode(params)?;
+                validate_registration(&request.registration_id, &request.callback_id)?;
+                let stream = HostEventStream::parse(&request.stream)?;
+                let cancellation = {
+                    let states = lock(&self.inner.generations);
+                    let state = states
+                        .get(&generation)
+                        .ok_or_else(|| stale_generation(generation))?;
+                    if state.host_event_subscriptions.len() >= MAX_HOST_EVENT_SUBSCRIPTIONS {
+                        return Err(remote(
+                            "CONCURRENCY_LIMIT",
+                            "host event subscription limit is reached",
+                        ));
+                    }
+                    if state
+                        .host_event_subscriptions
+                        .contains_key(&request.registration_id)
+                    {
+                        return Err(remote(
+                            "DUPLICATE_REGISTRATION",
+                            "registrationId is already active",
+                        ));
+                    }
+                    state.cancellation.clone()
+                };
+                let mut receiver = host.subscribe();
+                let callback_id = request.callback_id;
+                let inner = Arc::clone(&self.inner);
+                let task = self.inner.handle.spawn(async move {
+                    let mut replayed_interactions = BTreeSet::new();
+                    if stream == HostEventStream::Mux {
+                        let sessions = match host.list_sessions().await {
+                            Ok(sessions) => sessions,
+                            Err(_) => return,
+                        };
+                        for session in sessions {
+                            let last_seq = last_event_seq(session.event_count);
+                            if callback_to_node(
+                                Arc::clone(&inner),
+                                generation,
+                                callback_id.clone(),
+                                json!({
+                                    "stream": "mux",
+                                    "event": {
+                                        "type": "session/subscribed",
+                                        "sessionId": session.session_id,
+                                        "lastSeq": last_seq,
+                                    },
+                                }),
+                                cancellation.clone(),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        if let Some(registry) = host.approval_registry() {
+                            for requested in registry.snapshots() {
+                                if !replayed_interactions.insert(requested.rpc_id.clone()) {
+                                    continue;
+                                }
+                                let Ok(event) = host_notification_value(
+                                    HostNotification::ApprovalRequested(requested),
+                                ) else {
+                                    return;
+                                };
+                                if callback_to_node(
+                                    Arc::clone(&inner),
+                                    generation,
+                                    callback_id.clone(),
+                                    json!({"stream": "mux", "event": event}),
+                                    cancellation.clone(),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        if let Some(registry) = host.question_registry() {
+                            for requested in registry.snapshots() {
+                                if !replayed_interactions.insert(requested.rpc_id.clone()) {
+                                    continue;
+                                }
+                                let Ok(event) = host_notification_value(
+                                    HostNotification::QuestionRequested(requested),
+                                ) else {
+                                    return;
+                                };
+                                if callback_to_node(
+                                    Arc::clone(&inner),
+                                    generation,
+                                    callback_id.clone(),
+                                    json!({"stream": "mux", "event": event}),
+                                    cancellation.clone(),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    loop {
+                        let notification = tokio::select! {
+                            _ = cancellation.cancelled() => break,
+                            notification = receiver.recv() => match notification {
+                                Ok(notification) => notification,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                                    let _ = callback_to_node(
+                                        Arc::clone(&inner),
+                                        generation,
+                                        callback_id.clone(),
+                                        json!({
+                                            "stream": stream.as_str(),
+                                            "event": {
+                                                "type": "stream/error",
+                                                "error": {
+                                                    "code": "internal",
+                                                    "message": format!("host event stream lagged by {dropped} frames"),
+                                                    "details": {},
+                                                },
+                                            },
+                                        }),
+                                        cancellation.clone(),
+                                    ).await;
+                                    break;
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            },
+                        };
+                        if !stream.accepts(&notification) {
+                            continue;
+                        }
+                        if stream == HostEventStream::Mux {
+                            let rpc_id = match &notification {
+                                HostNotification::ApprovalRequested(value) => Some(&value.rpc_id),
+                                HostNotification::QuestionRequested(value) => Some(&value.rpc_id),
+                                _ => None,
+                            };
+                            if rpc_id.is_some_and(|rpc_id| {
+                                !replayed_interactions.insert(rpc_id.clone())
+                            }) {
+                                continue;
+                            }
+                        }
+                        let Ok(event) = host_notification_value(notification) else {
+                            break;
+                        };
+                        if callback_to_node(
+                            Arc::clone(&inner),
+                            generation,
+                            callback_id.clone(),
+                            json!({"stream": stream.as_str(), "event": event}),
+                            cancellation.clone(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                let mut states = lock(&self.inner.generations);
+                let Some(state) = states.get_mut(&generation) else {
+                    task.abort();
+                    return Err(stale_generation(generation));
+                };
+                state
+                    .host_event_subscriptions
+                    .insert(request.registration_id.clone(), task);
+                Ok(json!({"registrationId": request.registration_id}))
+            }
+            "unsubscribe" => {
+                let request: RegistrationDispose = decode(params)?;
+                let task = lock(&self.inner.generations)
+                    .get_mut(&generation)
+                    .ok_or_else(|| stale_generation(generation))?
+                    .host_event_subscriptions
+                    .remove(&request.registration_id);
+                let removed = task.is_some();
+                if let Some(task) = task {
+                    task.abort();
+                }
+                Ok(json!({"removed": removed}))
+            }
+            "respondApproval" => {
+                let request: HostApprovalResponse = decode(params)?;
+                let registry = host.approval_registry().ok_or_else(|| {
+                    remote("SERVICE_UNAVAILABLE", "approval registry is unavailable")
+                })?;
+                let receipt = registry.respond(
+                    &request.rpc_id,
+                    &request.session_id,
+                    &request.approval_id,
+                    request.outcome,
+                );
+                serde_json::to_value(receipt).map_err(serialize_error)
+            }
+            "respondQuestion" => {
+                let request: HostQuestionResponse = decode(params)?;
+                let registry = host.question_registry().ok_or_else(|| {
+                    remote("SERVICE_UNAVAILABLE", "question registry is unavailable")
+                })?;
+                let receipt =
+                    registry.respond_answer(&request.rpc_id, &request.session_id, request.answer);
+                serde_json::to_value(receipt).map_err(serialize_error)
+            }
+            _ => unknown_method(HOST_EVENTS_SERVICE, method),
         }
     }
 
@@ -1367,6 +2386,118 @@ impl DomainBridge {
                 Ok(json!({"accepted": true}))
             }
             _ => unknown_method(HOST_LIFECYCLE_SERVICE, method),
+        }
+    }
+    fn web_listener(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        require_node_generation(generation)?;
+        if method != "describe" {
+            return unknown_method(WEB_LISTENER_SERVICE, method);
+        }
+        let _: EmptyRequest = decode(params)?;
+        let listener = self
+            .inner
+            .services
+            .web_listener
+            .as_ref()
+            .and_then(WebListenerRegistry::describe)
+            .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "web listener is not active"))?;
+        serde_json::to_value(listener).map_err(serialize_error)
+    }
+    async fn remote_access(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        require_node_generation(generation)?;
+        let access = self.inner.services.remote_access.as_ref().ok_or_else(|| {
+            remote(
+                "SERVICE_UNAVAILABLE",
+                "remote access service is unavailable",
+            )
+        })?;
+        match method {
+            "describe" => {
+                let _: EmptyRequest = decode(params)?;
+                serde_json::to_value(access.describe(None).await).map_err(serialize_error)
+            }
+            "issuePairing" => {
+                let _: EmptyRequest = decode(params)?;
+                serde_json::to_value(access.issue_pairing().await.map_err(remote_access_error)?)
+                    .map_err(serialize_error)
+            }
+            "revoke" => {
+                let request: RemoteDeviceRef = decode(params)?;
+                let device_id = uuid::Uuid::parse_str(&request.device_id)
+                    .map_err(|_| invalid("deviceId must be a UUID"))?;
+                serde_json::to_value(
+                    access
+                        .revoke(device_id)
+                        .await
+                        .map_err(remote_access_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "revokeAll" => {
+                let _: EmptyRequest = decode(params)?;
+                Ok(json!({"revoked": access.revoke_all().await.map_err(remote_access_error)?}))
+            }
+            _ => unknown_method(REMOTE_ACCESS_SERVICE, method),
+        }
+    }
+
+    async fn host(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
+        let host = self.host_api(generation)?;
+        match method {
+            "describe" => {
+                let _: EmptyRequest = decode(params)?;
+                let descriptor = host.descriptor();
+                let attached_sessions = host
+                    .list_sessions()
+                    .await
+                    .map_err(tessivum_error)?
+                    .into_iter()
+                    .filter(|session| session.running)
+                    .count();
+                Ok(json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "cwd": descriptor.cwd,
+                    "provider": descriptor.provider,
+                    "model": descriptor.model,
+                    "attachedSessions": attached_sessions,
+                    "canOpenPath": host.can_open_path(),
+                }))
+            }
+            "pickDirectory" => {
+                let _: EmptyRequest = decode(params)?;
+                let path = host.pick_directory().await.map_err(tessivum_error)?;
+                Ok(json!({"path": path}))
+            }
+            "listDirectory" => {
+                let request: HostListDirectory = decode(params)?;
+                list_directory(request.path)
+            }
+            "createDirectory" => {
+                let request: HostCreateDirectory = decode(params)?;
+                create_directory(request.path, request.name)
+            }
+            "openPath" => {
+                let request: HostOpenPath = decode(params)?;
+                nonblank("path", &request.path)?;
+                host.open_path(request.path).await.map_err(tessivum_error)?;
+                Ok(json!({"opened": true}))
+            }
+            _ => unknown_method(HOST_SERVICE, method),
         }
     }
 
@@ -1591,6 +2722,254 @@ impl DomainBridge {
                     "header": header,
                     "events": events,
                 }}))
+            }
+            "list" => {
+                let _: SessionList = decode(params)?;
+                let host = self.host_api(generation)?;
+                let mut items = Vec::new();
+                for session in host.list_sessions().await.map_err(tessivum_error)? {
+                    let projections = projection_block(
+                        host.session_projections(session.session_id.clone())
+                            .await
+                            .map_err(tessivum_error)?,
+                    );
+                    let mut item = json!({
+                        "sessionId": session.session_id,
+                        "updatedAt": session.updated_at,
+                        "running": session.running,
+                        "blank": session.blank,
+                    });
+                    for (key, value) in [
+                        ("cwd", session.cwd.map(Value::String)),
+                        (
+                            "parentSessionId",
+                            session.parent_session.map(|value| json!(value)),
+                        ),
+                        ("origin", session.origin.map(|value| json!(value))),
+                        ("agentPreset", session.agent_mode.map(|value| json!(value))),
+                        ("projections", projections),
+                    ] {
+                        if let Some(value) = value {
+                            item[key] = value;
+                        }
+                    }
+                    items.push(item);
+                }
+                Ok(json!({"items": items}))
+            }
+            "create" => {
+                let request: SessionCreate = decode(params)?;
+                let host = self.host_api(generation)?;
+                if request.workspace_id.is_some() && request.cwd.is_some() {
+                    return Err(remote(
+                        "INVALID_SCHEMA",
+                        "workspaceId and cwd are mutually exclusive",
+                    ));
+                }
+                let requested_id = request.session_id.unwrap_or_else(SessionId::random);
+                let workspace_id = match (request.workspace_id, request.cwd) {
+                    (Some(workspace_id), None) => Some(workspace_id),
+                    (None, Some(cwd)) => Some(
+                        host.workspace_registry()
+                            .ok_or_else(|| {
+                                remote("SERVICE_UNAVAILABLE", "workspace registry is unavailable")
+                            })?
+                            .create(cwd, None)
+                            .map_err(workspace_error)?
+                            .workspace
+                            .workspace_id,
+                    ),
+                    (None, None) => host.default_workspace_id(),
+                    (Some(_), Some(_)) => unreachable!(),
+                };
+                let session = match workspace_id {
+                    Some(workspace_id) => host
+                        .create_session_in(requested_id, workspace_id)
+                        .await
+                        .map_err(tessivum_error)?,
+                    None => host
+                        .create_session(requested_id)
+                        .await
+                        .map_err(tessivum_error)?,
+                };
+                let session_id = session.session_id;
+                let agent_mode = match request.agent_mode {
+                    Some(mode) => Some(
+                        host.agent_mode_select(session_id.clone(), mode)
+                            .await
+                            .map_err(tessivum_error)?,
+                    ),
+                    None => None,
+                };
+                let mut value = json!({"sessionId": session_id});
+                if let Some(agent_mode) = agent_mode {
+                    value["agentPreset"] = Value::String(agent_mode);
+                }
+                Ok(value)
+            }
+            "history" => {
+                let request: SessionHistory = decode(params)?;
+                let max_messages = request.max_messages.unwrap_or(20);
+                if max_messages == 0 || max_messages > 1_000 {
+                    return Err(remote(
+                        "INVALID_SCHEMA",
+                        "maxMessages must be between 1 and 1000",
+                    ));
+                }
+                let host = self.host_api(generation)?;
+                let mut events = host
+                    .events(request.session_id.clone(), 0)
+                    .await
+                    .map_err(tessivum_error)?;
+                if let Some(before_seq) = request.before_seq {
+                    events.retain(|event| event.seq < before_seq);
+                }
+                let (events, has_more) = paginate_session_history(events, max_messages);
+                let projections = if request.before_seq.is_none() {
+                    projection_block(
+                        host.session_projections(request.session_id.clone())
+                            .await
+                            .map_err(tessivum_error)?,
+                    )
+                } else {
+                    None
+                };
+                let mut value = json!({
+                    "events": events.into_iter().map(|event| json!({"event": event})).collect::<Vec<_>>(),
+                    "hasMore": has_more,
+                });
+                if let Some(projections) = projections {
+                    value["projections"] = projections;
+                }
+                Ok(value)
+            }
+            "search" => {
+                let request: SessionSearch = decode(params)?;
+                nonblank("query", &request.query)?;
+                let result = self
+                    .host_api(generation)?
+                    .search_sessions(request.query)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({
+                    "items": result.items.into_iter().map(|item| json!({
+                        "sessionId": item.session_id,
+                        "snippet": item.snippet,
+                    })).collect::<Vec<_>>(),
+                    "hasMore": result.has_more,
+                }))
+            }
+            "fork" => {
+                let request: SessionFork = decode(params)?;
+                let session_id = self
+                    .host_api(generation)?
+                    .fork_session(request.session_id, request.at_seq)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"sessionId": session_id}))
+            }
+            "prompt" => {
+                let request: SessionPrompt = decode(params)?;
+                let params = SessionPromptParams {
+                    session_id: request.session_id,
+                    content_blocks: session_prompt_blocks(request.content)?,
+                    client_time_zone: request.client_time_zone,
+                };
+                let host = self.host_api(generation)?;
+                match request.mode {
+                    SessionPromptMode::Queue => host.prompt(params).await,
+                    SessionPromptMode::Steer => host.steer(params).await,
+                }
+                .map_err(tessivum_error)?;
+                Ok(json!({"accepted": true}))
+            }
+            "attachment" => {
+                let request: SessionAttachment = decode(params)?;
+                let attachment = self
+                    .host_api(generation)?
+                    .read_attachment(request.session_id, request.attachment_id)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({
+                    "attachment": attachment.reference.safe_metadata(),
+                    "data": base64_encode(&attachment.data),
+                }))
+            }
+            "updateQueue" => {
+                let request: SessionUpdateQueue = decode(params)?;
+                let action = match request.action {
+                    SessionQueueActionWire::Edit { content } => {
+                        SessionQueueAction::Edit { content }
+                    }
+                    SessionQueueActionWire::Remove {} => SessionQueueAction::Remove,
+                    SessionQueueActionWire::Steer {} => SessionQueueAction::Steer,
+                };
+                let result = self
+                    .host_api(generation)?
+                    .update_queue(SessionUpdateQueueParams {
+                        session_id: request.session_id,
+                        item_id: request.item_id,
+                        action,
+                    })
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"accepted": result.accepted}))
+            }
+            "cancel" => {
+                let request: SessionReference = decode(params)?;
+                self.host_api(generation)?
+                    .cancel(request.session_id, crate::agent::AgentCancelCause::User)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"accepted": true}))
+            }
+            "sendMessage" => {
+                let request: SessionSendMessage = decode(params)?;
+                self.inner
+                    .services
+                    .agents
+                    .send(
+                        &request.session_id,
+                        request.message,
+                        request.target,
+                        request.wakeup,
+                    )
+                    .await
+                    .map_err(agent_error)?;
+                Ok(json!({"sent": true}))
+            }
+            "models" => {
+                let request: SessionReference = decode(params)?;
+                serde_json::to_value(
+                    self.host_api(generation)?
+                        .session_models(request.session_id)
+                        .await
+                        .map_err(tessivum_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "selectModel" => {
+                let request: ModelsSelect = decode(params)?;
+                let selected = self
+                    .host_api(generation)?
+                    .select_model(
+                        request.session_id,
+                        request.provider,
+                        request.model,
+                        request.reasoning_effort,
+                    )
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"selected": selected}))
+            }
+            "rename" => {
+                let request: SessionRename = decode(params)?;
+                let result = self
+                    .host_api(generation)?
+                    .rename_session(request.session_id, request.title)
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"title": result.title, "seq": result.seq}))
             }
             _ => unknown_method(SESSIONS_SERVICE, method),
         }
@@ -1924,11 +3303,27 @@ impl DomainBridge {
             _ => unknown_method(TIMERS_SERVICE, method),
         }
     }
-    async fn settings(&self, method: &str, params: Value) -> BridgeResult<Value> {
+    async fn settings(
+        &self,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+    ) -> BridgeResult<Value> {
         if !matches!(
             method,
-            "get" | "describe" | "loadDocument" | "persistUnregistered"
+            "get"
+                | "describe"
+                | "list"
+                | "openDocument"
+                | "loadDocument"
+                | "persistUnregistered"
+                | "update"
+                | "replace"
+                | "mutate"
         ) {
+            return unknown_method(SETTINGS_SERVICE, method);
+        }
+        if generation.is_none() && !matches!(method, "get" | "describe" | "list") {
             return unknown_method(SETTINGS_SERVICE, method);
         }
         let settings = self
@@ -1938,6 +3333,72 @@ impl DomainBridge {
             .as_ref()
             .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "settings is not configured"))?;
         match method {
+            "list" => {
+                let _: EmptyRequest = decode(params)?;
+                let namespaces = settings
+                    .describe_all()
+                    .map_err(settings_error)?
+                    .into_iter()
+                    .map(settings_descriptor_value)
+                    .collect::<Vec<_>>();
+                Ok(json!({
+                    "writable": settings.writable(),
+                    "hasDocument": settings.document_path().is_some(),
+                    "namespaces": namespaces,
+                }))
+            }
+            "openDocument" => {
+                let _: EmptyRequest = decode(params)?;
+                self.host_api(generation)?
+                    .open_settings_document()
+                    .await
+                    .map_err(tessivum_error)?;
+                Ok(json!({"opened": true}))
+            }
+            "update" => {
+                let request: SettingsUpdate = decode(params)?;
+                settings
+                    .update(&request.namespace, request.patch, request.expected_revision)
+                    .await
+                    .map_err(settings_error)?;
+                Ok(settings_descriptor_value(
+                    settings
+                        .describe(&request.namespace)
+                        .map_err(settings_error)?,
+                ))
+            }
+            "replace" => {
+                let request: SettingsReplace = decode(params)?;
+                settings
+                    .replace(
+                        &request.namespace,
+                        request.section,
+                        request.expected_revision,
+                    )
+                    .await
+                    .map_err(settings_error)?;
+                Ok(settings_descriptor_value(
+                    settings
+                        .describe(&request.namespace)
+                        .map_err(settings_error)?,
+                ))
+            }
+            "mutate" => {
+                let request: SettingsMutate = decode(params)?;
+                settings
+                    .mutate(
+                        &request.namespace,
+                        request.ops.into_iter().map(Into::into).collect(),
+                        request.expected_revision,
+                    )
+                    .await
+                    .map_err(settings_error)?;
+                Ok(settings_descriptor_value(
+                    settings
+                        .describe(&request.namespace)
+                        .map_err(settings_error)?,
+                ))
+            }
             "get" | "describe" => {
                 let request: SettingsRead = decode(params)?;
                 match method {
@@ -1977,24 +3438,74 @@ impl DomainBridge {
     }
 
     async fn credentials(&self, method: &str, params: Value) -> BridgeResult<Value> {
-        if method != "describe" {
-            return unknown_method(CREDENTIALS_SERVICE, method);
-        }
         let credentials = self
             .inner
             .services
             .credentials
             .as_ref()
             .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "credentials is not configured"))?;
-        let request: CredentialDescribe = decode(params)?;
-        let reference = CredentialRef::new(request.reference).map_err(credential_error)?;
-        serde_json::to_value(
-            credentials
-                .describe(&reference)
-                .await
-                .map_err(credential_error)?,
-        )
-        .map_err(serialize_error)
+        match method {
+            "describe" => {
+                let request: CredentialDescribe = decode(params)?;
+                let reference = CredentialRef::new(request.reference).map_err(credential_error)?;
+                serde_json::to_value(
+                    credentials
+                        .describe(&reference)
+                        .await
+                        .map_err(credential_error)?,
+                )
+                .map_err(serialize_error)
+            }
+            "describeMany" => {
+                let request: CredentialDescribeMany = decode(params)?;
+                let mut response = serde_json::Map::new();
+                for raw in request.references {
+                    let reference = CredentialRef::new(raw.clone()).map_err(credential_error)?;
+                    let descriptor = credentials
+                        .describe(&reference)
+                        .await
+                        .map_err(credential_error)?;
+                    response.insert(
+                        raw,
+                        json!({
+                            "configured": descriptor.configured,
+                            "source": descriptor.source,
+                            "writable": descriptor.writable,
+                        }),
+                    );
+                }
+                Ok(json!({"credentials": response}))
+            }
+            "set" => {
+                let request: CredentialSet = decode(params)?;
+                let reference = CredentialRef::new(request.reference).map_err(credential_error)?;
+                credentials
+                    .set(reference, request.value)
+                    .await
+                    .map_err(credential_error)?;
+                Ok(json!({}))
+            }
+            "unset" => {
+                let request: CredentialUnset = decode(params)?;
+                let reference = CredentialRef::new(request.reference).map_err(credential_error)?;
+                credentials
+                    .unset(&reference)
+                    .await
+                    .map_err(credential_error)?;
+                Ok(json!({}))
+            }
+            _ => unknown_method(CREDENTIALS_SERVICE, method),
+        }
+    }
+
+    fn host_api(&self, generation: Option<u64>) -> BridgeResult<Arc<dyn HostApi>> {
+        require_node_generation(generation)?;
+        self.inner
+            .services
+            .host
+            .as_ref()
+            .ok_or_else(|| remote("SERVICE_UNAVAILABLE", "product host facade is unavailable"))?
+            .get()
     }
 
     fn require_owner(&self, requested: &SessionId) -> BridgeResult<()> {
@@ -2144,17 +3655,53 @@ impl DomainBridge {
         bounded_json(&frame.payload, self.inner.limits.max_json_bytes)?;
         match frame.kind {
             FrameKind::ServiceCall | FrameKind::ServiceProvide => {
+                let generation = frame.connection_generation;
+                let request_id = frame
+                    .request_id
+                    .ok_or_else(|| invalid("service request requires a request id"))?;
                 let request: DomainRequest = decode(frame.payload)?;
                 self.validate_request(&request, self.inner.limits.max_json_bytes)?;
-                self.ensure_generation(frame.connection_generation)?;
+                self.ensure_generation(generation)?;
                 if frame.kind == FrameKind::ServiceProvide && request.method != "register" {
                     return Err(remote(
                         "INVALID_PROVIDE",
                         "service.provide only admits typed registrations",
                     ));
                 }
-                self.dispatch_async(Some(frame.connection_generation), request)
-                    .await
+                let cancellation = fresh_cancellation();
+                let was_cancelled = {
+                    let mut states = lock(&self.inner.generations);
+                    let state = states
+                        .get_mut(&generation)
+                        .ok_or_else(|| stale_generation(generation))?;
+                    if state
+                        .service_calls
+                        .insert(request_id, cancellation.clone())
+                        .is_some()
+                    {
+                        return Err(remote(
+                            "DUPLICATE_REQUEST",
+                            "service request id is already active",
+                        ));
+                    }
+                    state.pending_cancellations.remove(&request_id)
+                };
+                if was_cancelled {
+                    cancellation.cancel();
+                }
+                let mut call = ServiceCallGuard::new(
+                    Arc::downgrade(&self.inner),
+                    generation,
+                    request_id,
+                    cancellation.clone(),
+                );
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => Err(remote("CANCELLED", "service request was cancelled")),
+                    result = self.dispatch_async(Some(generation), request) => result,
+                };
+                call.finish();
+                result
             }
             FrameKind::ServiceRemove | FrameKind::RegistrationDispose => {
                 self.ensure_generation(frame.connection_generation)?;
@@ -2203,7 +3750,7 @@ impl DomainBridge {
                     .request_id
                     .ok_or_else(|| invalid("cancel requires a request id"))?;
                 Ok(json!({
-                    "cancelled": self.cancel_pnpm_request(frame.connection_generation, request_id)?
+                    "cancelled": self.cancel_request(frame.connection_generation, request_id)?
                 }))
             }
             _ => Err(remote(
@@ -2422,6 +3969,9 @@ fn cleanup_state(inner: &BridgeInner, mut state: GenerationState) -> Vec<Subagen
     for (_, operation) in std::mem::take(&mut state.operations) {
         operation.cancellation.cancel();
     }
+    for (_, call) in std::mem::take(&mut state.service_calls) {
+        call.cancel();
+    }
     for (_, key) in std::mem::take(&mut state.routes) {
         inner.web_routes.lock().entries.remove(&key);
     }
@@ -2432,6 +3982,9 @@ fn cleanup_state(inner: &BridgeInner, mut state: GenerationState) -> Vec<Subagen
         if let Some(task) = timer.task {
             task.abort();
         }
+    }
+    for (_, task) in std::mem::take(&mut state.host_event_subscriptions) {
+        task.abort();
     }
     std::mem::take(&mut state.registrations)
         .into_values()
@@ -2825,6 +4378,150 @@ fn nonblank(field: &str, value: &str) -> BridgeResult<()> {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HostEventStream {
+    Host,
+    Mux,
+}
+
+impl HostEventStream {
+    fn parse(value: &str) -> BridgeResult<Self> {
+        match value {
+            "host" => Ok(Self::Host),
+            "mux" => Ok(Self::Mux),
+            _ => Err(remote("INVALID_SCHEMA", "stream must be host or mux")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Mux => "mux",
+        }
+    }
+
+    fn accepts(self, notification: &HostNotification) -> bool {
+        matches!(
+            (self, notification),
+            (
+                Self::Mux,
+                HostNotification::SessionEvent(_)
+                    | HostNotification::SessionProjection(_)
+                    | HostNotification::SessionQueue(_)
+                    | HostNotification::SessionJobs(_)
+                    | HostNotification::ApprovalRequested(_)
+                    | HostNotification::ApprovalResolved(_)
+                    | HostNotification::QuestionRequested(_)
+                    | HostNotification::QuestionResolved(_)
+            ) | (
+                Self::Host,
+                HostNotification::SessionStatus(_)
+                    | HostNotification::RemoteEvent(_)
+                    | HostNotification::SubagentStarted(_)
+                    | HostNotification::SettingsChanged(_)
+                    | HostNotification::CredentialsChanged(_)
+                    | HostNotification::ModelsChanged
+                    | HostNotification::AdaptersUpdated
+            )
+        )
+    }
+}
+
+fn host_notification_value(notification: HostNotification) -> BridgeResult<Value> {
+    match notification {
+        HostNotification::SessionEvent(value) => tagged_value("session/event", value),
+        HostNotification::SessionProjection(value) => tagged_value("session/projection", value),
+        HostNotification::SessionStatus(value) => Ok(json!({
+            "type": "host/session-status",
+            "sessionId": value.session_id,
+            "running": value.status == crate::protocol::SessionStatus::Running,
+        })),
+        HostNotification::SessionQueue(value) => tagged_value("session/queue", value),
+        HostNotification::SessionJobs(value) => tagged_value("session/jobs", value),
+        HostNotification::RemoteEvent(value) => tagged_value("host/remote-event", value),
+        HostNotification::SubagentStarted(value) => Ok(json!({
+            "type": "host/session-added",
+            "sessionId": value.child_session_id,
+            "blank": false,
+            "parentSessionId": value.parent_session_id,
+            "origin": "subagent",
+        })),
+        HostNotification::SubagentFinished(_) => {
+            Err(invalid("subagent completion has no HostFrame projection"))
+        }
+        HostNotification::ApprovalRequested(value) => tagged_value("approval/requested", value),
+        HostNotification::ApprovalResolved(value) => tagged_value("approval/resolved", value),
+        HostNotification::QuestionRequested(value) => tagged_value("question/requested", value),
+        HostNotification::QuestionResolved(value) => tagged_value("question/resolved", value),
+        HostNotification::SettingsChanged(value) => Ok(json!({
+            "type": "host/remote-event",
+            "event": "settings/document-updated",
+            "args": [value.namespace, value.revision],
+        })),
+        HostNotification::CredentialsChanged(value) => Ok(json!({
+            "type": "host/remote-event",
+            "event": "credentials/updated",
+            "args": [value.reference],
+        })),
+        HostNotification::ModelsChanged | HostNotification::AdaptersUpdated => Ok(json!({
+            "type": "host/remote-event",
+            "event": "llm/adapters-updated",
+            "args": [],
+        })),
+    }
+}
+
+fn tagged_value(kind: &str, value: impl Serialize) -> BridgeResult<Value> {
+    let mut value = serde_json::to_value(value).map_err(serialize_error)?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| invalid("host notification payload must be an object"))?
+        .insert("type".into(), Value::String(kind.into()));
+    Ok(value)
+}
+
+fn paginate_session_history(
+    mut events: Vec<SessionEvent>,
+    max_messages: usize,
+) -> (Vec<SessionEvent>, bool) {
+    let mut messages = 0;
+    let mut cut = 0;
+
+    for (index, event) in events.iter().enumerate().rev() {
+        if matches!(
+            event.event_type.as_str(),
+            "user/message" | "assistant/message"
+        ) {
+            messages += 1;
+        }
+        if event.event_type == "turn/start" && messages >= max_messages {
+            cut = index;
+            break;
+        }
+    }
+    events.drain(..cut);
+    (events, cut > 0)
+}
+fn last_event_seq(event_count: u64) -> i64 {
+    i64::try_from(event_count)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(1)
+}
+fn projection_block(projections: Vec<crate::host::HostSessionProjection>) -> Option<Value> {
+    if projections.is_empty() {
+        return None;
+    }
+    let mut as_of_seq = -1_i64;
+    let mut values = serde_json::Map::new();
+    for projection in projections {
+        if let Some(seq) = projection.seq {
+            as_of_seq = as_of_seq.max(i64::try_from(seq).unwrap_or(i64::MAX));
+        }
+        values.insert(projection.key, projection.value);
+    }
+    Some(json!({"asOfSeq": as_of_seq, "values": values}))
+}
+
 fn stale_generation(generation: u64) -> BridgeError {
     remote(
         "STALE_GENERATION",
@@ -2838,6 +4535,169 @@ fn unknown_method(service: &str, method: &str) -> BridgeResult<Value> {
         format!("{method} is not allowed for {service}"),
     ))
 }
+fn list_directory(requested: Option<String>) -> BridgeResult<Value> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| remote("DIRECTORY_UNREADABLE", "home directory is unavailable"))?;
+    let home = std::fs::canonicalize(home)
+        .map_err(|_| remote("DIRECTORY_UNREADABLE", "home directory is unavailable"))?;
+    let path = std::fs::canonicalize(requested.unwrap_or_else(|| home.to_string_lossy().into()))
+        .map_err(|_| remote("DIRECTORY_UNREADABLE", "directory does not exist"))?;
+    if !path.is_dir() {
+        return Err(remote("DIRECTORY_UNREADABLE", "path is not a directory"));
+    }
+    let mut entries = std::fs::read_dir(&path)
+        .map_err(|_| remote("DIRECTORY_UNREADABLE", "directory is not readable"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            Some(json!({
+                "hidden": name.starts_with('.'),
+                "name": name,
+                "path": entry.path().to_string_lossy(),
+            }))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    let truncated = entries.len() > MAX_DIRECTORY_ENTRIES;
+    entries.truncate(MAX_DIRECTORY_ENTRIES);
+    let mut crumbs = path
+        .ancestors()
+        .map(|ancestor| {
+            let name = ancestor
+                .file_name()
+                .unwrap_or(ancestor.as_os_str())
+                .to_string_lossy();
+            json!({"hidden": false, "name": name, "path": ancestor.to_string_lossy()})
+        })
+        .collect::<Vec<_>>();
+    crumbs.reverse();
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "home": home.to_string_lossy(),
+        "crumbs": crumbs,
+        "entries": entries,
+        "truncated": truncated,
+    }))
+}
+
+fn create_directory(parent: String, name: String) -> BridgeResult<Value> {
+    let name = name.trim();
+    if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
+        return Err(remote(
+            "INVALID_SCHEMA",
+            "directory name must be one non-blank path segment",
+        ));
+    }
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|_| remote("DIRECTORY_CREATE_FAILED", "parent directory does not exist"))?;
+    if !parent.is_dir() {
+        return Err(remote(
+            "DIRECTORY_CREATE_FAILED",
+            "parent path is not a directory",
+        ));
+    }
+    let path = parent.join(name);
+    std::fs::create_dir(&path)
+        .map_err(|_| remote("DIRECTORY_CREATE_FAILED", "directory could not be created"))?;
+    let path = std::fs::canonicalize(path).map_err(|_| {
+        remote(
+            "DIRECTORY_CREATE_FAILED",
+            "created directory is unavailable",
+        )
+    })?;
+    Ok(json!({"path": path.to_string_lossy()}))
+}
+fn session_prompt_blocks(content: Vec<SessionPromptContent>) -> BridgeResult<Vec<ContentBlock>> {
+    if content.is_empty() {
+        return Err(invalid("content must not be empty"));
+    }
+    content
+        .into_iter()
+        .map(|content| match content {
+            SessionPromptContent::Text { text } => Ok(ContentBlock::Text { text }),
+            SessionPromptContent::Image {
+                media_type,
+                data,
+                name,
+                attachment,
+            } => match (attachment, media_type, data) {
+                (Some(attachment), None, None) if name.is_none() => {
+                    Ok(ContentBlock::Image { attachment })
+                }
+                (None, Some(media_type), Some(data)) => {
+                    let mut attachment = serde_json::Map::from_iter([
+                        ("mediaType".into(), Value::String(media_type)),
+                        ("data".into(), Value::String(data)),
+                    ]);
+                    if let Some(name) = name {
+                        attachment.insert("name".into(), Value::String(name));
+                    }
+                    Ok(ContentBlock::Image {
+                        attachment: Value::Object(attachment),
+                    })
+                }
+                _ => Err(invalid(
+                    "image must be exactly inline mediaType/data or canonical attachment",
+                )),
+            },
+        })
+        .collect()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        output.push(TABLE[(first >> 2) as usize] as char);
+        let second = chunk.get(1).copied().unwrap_or(0);
+        output.push(TABLE[((first & 0x03) << 4 | second >> 4) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(
+                TABLE[((second & 0x0f) << 2 | chunk.get(2).copied().unwrap_or(0) >> 6) as usize]
+                    as char,
+            );
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(chunk[2] & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
+fn settings_descriptor_value(descriptor: crate::settings::SettingsDescriptor) -> Value {
+    let secrets = descriptor
+        .secret_paths
+        .iter()
+        .cloned()
+        .zip(descriptor.secret_set.iter().copied())
+        .map(|(path, set)| json!({"path": path, "set": set}))
+        .collect::<Vec<_>>();
+    let mut value = json!({
+        "ns": descriptor.namespace,
+        "revision": descriptor.revision,
+        "schema": descriptor.schema,
+        "value": descriptor.resolved,
+        "applies": descriptor.applies,
+        "secrets": secrets,
+    });
+    if !descriptor
+        .base
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        value["base"] = descriptor.base;
+    }
+    if descriptor.user_present {
+        value["user"] = descriptor.user;
+    }
+    value
+}
 
 fn invalid(message: impl Into<String>) -> BridgeError {
     BridgeError::InvalidFrame(message.into())
@@ -2847,8 +4707,16 @@ fn remote(code: impl Into<String>, message: impl Into<String>) -> BridgeError {
     BridgeError::Remote(RemoteError::new(code, message))
 }
 
+fn remote_access_error(error: RemoteAccessError) -> BridgeError {
+    remote(error.code(), error.to_string())
+}
+
 fn tessivum_error(error: TessivumError) -> BridgeError {
     BridgeError::Remote(RemoteError::new(error.code, error.message).with_details(error.details))
+}
+
+fn goal_error(error: GoalError) -> BridgeError {
+    remote(error.code(), error.to_string())
 }
 
 fn bridge_to_tessivum(error: BridgeError) -> TessivumError {
@@ -2927,6 +4795,10 @@ fn settings_error(error: crate::settings::SettingsError) -> BridgeError {
     remote(error.code(), error.to_string())
 }
 
+fn workspace_error(error: crate::workspace::WorkspaceError) -> BridgeError {
+    remote(error.code(), error.to_string())
+}
+
 fn credential_error(error: crate::credentials::CredentialError) -> BridgeError {
     remote(error.code(), error.to_string())
 }
@@ -2941,6 +4813,335 @@ fn policy_error(code: impl Into<String>, message: impl Into<String>) -> PluginEr
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyRequest {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostListDirectory {
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostCreateDirectory {
+    path: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostOpenPath {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionList {
+    #[serde(default, rename = "cursor")]
+    _cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionCreate {
+    workspace_id: Option<WorkspaceId>,
+    cwd: Option<String>,
+    session_id: Option<SessionId>,
+    #[serde(alias = "agentPreset")]
+    agent_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionHistory {
+    session_id: SessionId,
+    before_seq: Option<u64>,
+    max_messages: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionSearch {
+    query: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionPrompt {
+    session_id: SessionId,
+    mode: SessionPromptMode,
+    content: Vec<SessionPromptContent>,
+    client_time_zone: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SessionPromptMode {
+    Queue,
+    Steer,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum SessionPromptContent {
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: Option<String>,
+        data: Option<String>,
+        name: Option<String>,
+        attachment: Option<Value>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionFork {
+    session_id: SessionId,
+    at_seq: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionAttachment {
+    session_id: SessionId,
+    attachment_id: AttachmentId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionUpdateQueue {
+    session_id: SessionId,
+    item_id: MessageId,
+    action: SessionQueueActionWire,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum SessionQueueActionWire {
+    Edit { content: Vec<ContentBlock> },
+    Remove {},
+    Steer {},
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubagentCatalogRequest {
+    parent_session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionReference {
+    session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionRename {
+    session_id: SessionId,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionSendMessage {
+    session_id: SessionId,
+    message: Message,
+    target: InboxTarget,
+    #[serde(default)]
+    wakeup: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceCreate {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceReference {
+    workspace_id: WorkspaceId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceRename {
+    workspace_id: WorkspaceId,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceInsertBefore {
+    workspace_id: WorkspaceId,
+    before_workspace_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceInsertSessionBefore {
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    before_session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceArchiveSession {
+    session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentModeGet {
+    agent_mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentModeSet {
+    session_id: SessionId,
+    agent_mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoalCreate {
+    session_id: SessionId,
+    objective: String,
+    max_goal_rounds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoalEdit {
+    session_id: SessionId,
+    #[serde(rename = "ref")]
+    reference: GoalRef,
+    objective: Option<String>,
+    max_goal_rounds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoalMutation {
+    session_id: SessionId,
+    #[serde(rename = "ref")]
+    reference: GoalRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPresetReference {
+    agent_preset: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPresetSelect {
+    session_id: SessionId,
+    agent_preset: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPresetCopy {
+    from: String,
+    agent_preset: String,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelsProvider {
+    provider: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelsProviderConfig {
+    provider: String,
+    #[serde(default)]
+    config: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelsDiscover {
+    settings_ns: String,
+    provider: Option<String>,
+    #[serde(rename = "baseURL")]
+    base_url: Option<String>,
+    api: Option<String>,
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelsSelect {
+    session_id: SessionId,
+    provider: String,
+    model: String,
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommandsList {
+    session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommandsSearch {
+    session_id: SessionId,
+    #[serde(default)]
+    query: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommandsExecute {
+    session_id: SessionId,
+    line: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostEventsSubscribe {
+    registration_id: String,
+    callback_id: String,
+    stream: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostApprovalResponse {
+    rpc_id: String,
+    session_id: SessionId,
+    approval_id: ApprovalId,
+    outcome: ApprovalOutcome,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostQuestionResponse {
+    rpc_id: String,
+    session_id: SessionId,
+    answer: AskUserQuestionAnswer,
 }
 
 #[derive(Deserialize)]
@@ -3111,6 +5312,49 @@ struct SettingsRead {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsUpdate {
+    #[serde(alias = "ns")]
+    namespace: String,
+    patch: Value,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsReplace {
+    #[serde(alias = "ns")]
+    namespace: String,
+    section: Value,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+enum SettingsPathOpWire {
+    Set { path: Vec<String>, value: Value },
+    Unset { path: Vec<String> },
+}
+
+impl From<SettingsPathOpWire> for SettingsPathOp {
+    fn from(operation: SettingsPathOpWire) -> Self {
+        match operation {
+            SettingsPathOpWire::Set { path, value } => Self::Set { path, value },
+            SettingsPathOpWire::Unset { path } => Self::Unset { path },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsMutate {
+    #[serde(alias = "ns")]
+    namespace: String,
+    ops: Vec<SettingsPathOpWire>,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SettingsPersist {
     namespace: String,
     value: Value,
@@ -3119,7 +5363,36 @@ struct SettingsPersist {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CredentialDescribe {
+    #[serde(rename = "ref", alias = "reference")]
     reference: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialDescribeMany {
+    #[serde(rename = "refs")]
+    references: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialSet {
+    #[serde(rename = "ref", alias = "reference")]
+    reference: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialUnset {
+    #[serde(rename = "ref", alias = "reference")]
+    reference: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteDeviceRef {
+    device_id: String,
 }
 
 #[derive(Deserialize)]
@@ -3156,6 +5429,36 @@ mod alpha11_tests {
             agents,
         ))
         .expect("bridge constructs")
+    }
+
+    #[test]
+    fn browser_prompt_content_and_attachment_encoding_match_wire() {
+        assert_eq!(
+            session_prompt_blocks(vec![
+                SessionPromptContent::Text {
+                    text: "hello".into()
+                },
+                SessionPromptContent::Image {
+                    media_type: Some("image/png".into()),
+                    data: Some("AQI=".into()),
+                    name: None,
+                    attachment: None,
+                },
+            ])
+            .unwrap(),
+            vec![
+                ContentBlock::Text {
+                    text: "hello".into()
+                },
+                ContentBlock::Image {
+                    attachment: json!({"mediaType": "image/png", "data": "AQI="}),
+                },
+            ],
+        );
+        assert_eq!(base64_encode(&[]), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
     }
 
     fn client(generation: u64) -> BridgeClient {
@@ -3560,7 +5863,7 @@ mod alpha11_tests {
         };
         started.notified().await;
         assert!(!bridge
-            .cancel_pnpm_request(2, 9)
+            .cancel_request(2, 9)
             .expect("foreign generation observes"));
         assert_eq!(
             BridgeHandler::handle(&*bridge, Frame::cancel(1, 9))
@@ -3655,5 +5958,177 @@ mod alpha11_tests {
             .is_err());
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn web_listener_snapshot_is_read_only_and_retires() {
+        let listener = WebListenerRegistry::new(WebListenerSnapshot {
+            host: "127.0.0.1".into(),
+            port: 3080,
+            loopback: true,
+            advertised_origins: vec!["http://127.0.0.1:3080".into()],
+            remote_access_enabled: false,
+        });
+        let tools = ToolRuntime::new();
+        let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+        let agents = AgentRegistry::new(sessions.clone());
+        let configured = DomainBridge::new(
+            BridgeServices::new(
+                tools,
+                SystemPrompt::new(),
+                LlmRuntime::new(),
+                sessions,
+                agents,
+            )
+            .with_web_listener(listener.clone()),
+        )
+        .expect("bridge constructs");
+        attach(&configured, 1);
+        let frame = || {
+            Frame::request(
+                1,
+                7,
+                FrameKind::ServiceCall,
+                json!({"service": WEB_LISTENER_SERVICE, "method": "describe", "params": {}}),
+            )
+        };
+        assert_eq!(
+            BridgeHandler::handle(&configured, frame()).expect("listener describes"),
+            json!({
+                "host": "127.0.0.1",
+                "port": 3080,
+                "loopback": true,
+                "advertisedOrigins": ["http://127.0.0.1:3080"],
+                "remoteAccessEnabled": false,
+            })
+        );
+        listener.clear();
+        assert_eq!(
+            remote_code(
+                BridgeHandler::handle(&configured, frame())
+                    .expect_err("retired listener is unavailable")
+            ),
+            "SERVICE_UNAVAILABLE"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_access_contract_is_redacted_and_generation_scoped() {
+        let path = std::env::temp_dir().join(format!(
+            "tessivum-remote-bridge-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let access = RemoteAccess::open(
+            &path,
+            crate::remote_access::RemoteAccessConfig {
+                enabled: true,
+                trusted_tunnel: true,
+                ..crate::remote_access::RemoteAccessConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let tools = ToolRuntime::new();
+        let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+        let agents = AgentRegistry::new(sessions.clone());
+        let configured = DomainBridge::new(
+            BridgeServices::new(
+                tools,
+                SystemPrompt::new(),
+                LlmRuntime::new(),
+                sessions,
+                agents,
+            )
+            .with_remote_access(access.clone()),
+        )
+        .unwrap();
+        attach(&configured, 1);
+        let call = |request_id, method: &str, params| {
+            BridgeHandler::handle(
+                &configured,
+                Frame::request(
+                    1,
+                    request_id,
+                    FrameKind::ServiceCall,
+                    json!({"service": REMOTE_ACCESS_SERVICE, "method": method, "params": params}),
+                ),
+            )
+        };
+
+        let issued = call(1, "issuePairing", json!({})).unwrap();
+        let token = issued["token"].as_str().unwrap();
+        let session = access.exchange_pairing(token, "Bridge QA").await.unwrap();
+        let description = call(2, "describe", json!({})).unwrap();
+        assert_eq!(description["enabled"], true);
+        assert_eq!(description["devices"][0]["name"], "Bridge QA");
+        assert!(!description.to_string().contains(token));
+        assert!(!description.to_string().contains(&session.session_secret));
+
+        let revoked = call(3, "revoke", json!({"deviceId": session.device.device_id})).unwrap();
+        assert_eq!(revoked["status"], "revoked");
+        assert_eq!(
+            call(4, "revokeAll", json!({})).unwrap(),
+            json!({"revoked": 0})
+        );
+        assert_eq!(
+            remote_code(call(5, "exchangePairing", json!({})).unwrap_err()),
+            "UNKNOWN_METHOD"
+        );
+        drop(configured);
+        drop(access);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn compatibility_baselines_preserve_empty_sequence_sentinel() {
+        assert_eq!(last_event_seq(0), -1);
+        assert_eq!(last_event_seq(4), 3);
+        let block = projection_block(vec![crate::host::HostSessionProjection {
+            key: "title".into(),
+            value: json!("Blank"),
+            seq: None,
+        }])
+        .unwrap();
+        assert_eq!(block["asOfSeq"], -1);
+    }
+
+    #[test]
+    fn compatibility_host_events_use_contract_frames() {
+        assert_eq!(
+            host_notification_value(HostNotification::ModelsChanged).unwrap(),
+            json!({
+                "type": "host/remote-event",
+                "event": "llm/adapters-updated",
+                "args": [],
+            }),
+        );
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_frame_cancels_active_service_call() {
+        let bridge = bridge();
+        attach(&bridge, 1);
+        let cancellation = fresh_cancellation();
+        lock(&bridge.inner.generations)
+            .get_mut(&1)
+            .unwrap()
+            .service_calls
+            .insert(7, cancellation.clone());
+
+        assert_eq!(
+            BridgeHandler::handle(&bridge, Frame::cancel(1, 7)).unwrap(),
+            json!({"cancelled": true}),
+        );
+        assert!(cancellation.is_cancelled());
+
+        assert_eq!(
+            BridgeHandler::handle(&bridge, Frame::cancel(1, 8)).unwrap(),
+            json!({"cancelled": false}),
+        );
+        assert_eq!(
+            remote_code(
+                BridgeHandler::handle(&bridge, lifecycle_frame(1, 8, json!({})))
+                    .expect_err("pre-registration cancellation wins"),
+            ),
+            "CANCELLED",
+        );
     }
 }

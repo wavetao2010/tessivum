@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+## 0.1.0-alpha.19 - 2026-09-01
+
+### Added
+
+- Rust-owned Remote Access with one-time pairing, persistent device sessions, local device administration, exact `remoteAccess@1` Browser/Legacy APIs, and the built-in `/remote` QR pairing surface.
+- An immutable Remote Access entry in loopback Web settings; paired devices reuse the existing Tessivum Web shell instead of a second Session/Workspace implementation.
+- Editable connected-provider cards plus custom OpenAI-compatible provider creation, draft endpoint/key model discovery, capacity editing, and persisted model selection in Web settings.
+
+### Security
+
+- The HTTP, SSE, and WebSocket boundary now requires exact trusted Host and Origin, same-origin Fetch metadata, an explicit trusted-TLS tunnel posture, and a live Rust device session for every protected remote request.
+- Remote Access remains disabled by default, the Rust listener remains loopback-only, pairing and administrative mutations remain local-only, raw secrets are never persisted or returned in state, and revocation promptly closes active SSE and WebSocket streams.
+- Anonymous remote access is limited to a bounded public-posture read, the built-in pairing flow, and fixed Browser assets; Legacy Node Web routes remain loopback-only.
+
+### Changed
+
+- Remote browsers may read redacted settings and credential state needed by the existing Web shell, while settings, credentials, workspace, plugin-host activation, filesystem, and Host shutdown mutations remain loopback-only.
+- Tessivum pins `tessivum-core v0.1.6` revision `bafb893f182d64b7b464b6cf827676f7ac368168` for correlated Legacy cancellation and Browser `AbortSignal` propagation.
+- Accepted Agent work remains in the local Host across browser reloads, disconnects, remote session expiry, and device revocation; only explicit Stop/cancel terminates the run.
+
+### Fixed
+
+- Profile reconciliation prunes stale bundle names after package removal before validating the remaining bundle graph.
+- Native/WASM settings access rejects Node-only mutation methods at the read-only DomainBridge boundary.
+- The deep package-interoperability fixture uses the canonical `service.call.params` envelope.
+
 ## 0.1.0-alpha.18 - 2026-08-31
 
 ### Fixed

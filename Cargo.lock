@@ -1958,6 +1958,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2823,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "tessivum"
-version = "0.1.0-alpha.18"
+version = "0.1.0-alpha.19"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2838,6 +2844,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "parking_lot",
+ "qrcode",
  "regex",
  "reqwest",
  "rusqlite",
@@ -2862,7 +2869,7 @@ dependencies = [
 [[package]]
 name = "tessivum-core"
 version = "0.1.6"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=4c3d7b7769e43e2eb228ebf43d46bef6119c4574#4c3d7b7769e43e2eb228ebf43d46bef6119c4574"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=bafb893f182d64b7b464b6cf827676f7ac368168#bafb893f182d64b7b464b6cf827676f7ac368168"
 dependencies = [
  "serde",
  "serde_json",
@@ -2873,7 +2880,7 @@ dependencies = [
 [[package]]
 name = "tessivum-extism"
 version = "0.1.6"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=4c3d7b7769e43e2eb228ebf43d46bef6119c4574#4c3d7b7769e43e2eb228ebf43d46bef6119c4574"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=bafb893f182d64b7b464b6cf827676f7ac368168#bafb893f182d64b7b464b6cf827676f7ac368168"
 dependencies = [
  "extism",
  "libc",
@@ -2885,7 +2892,7 @@ dependencies = [
 [[package]]
 name = "tessivum-node-bridge"
 version = "0.1.6"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=4c3d7b7769e43e2eb228ebf43d46bef6119c4574#4c3d7b7769e43e2eb228ebf43d46bef6119c4574"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=bafb893f182d64b7b464b6cf827676f7ac368168#bafb893f182d64b7b464b6cf827676f7ac368168"
 dependencies = [
  "serde",
  "serde_json",

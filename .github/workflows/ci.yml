@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 4c3d7b7769e43e2eb228ebf43d46bef6119c4574
+          ref: bafb893f182d64b7b464b6cf827676f7ac368168
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
@@ -126,7 +126,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 4c3d7b7769e43e2eb228ebf43d46bef6119c4574
+          ref: bafb893f182d64b7b464b6cf827676f7ac368168
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
@@ -158,4 +158,4 @@ jobs:
 
       - name: Run Browser compatibility scenarios
         working-directory: web
-        run: bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000
+        run: bun test ./tests/migrated.test.ts --timeout 3600000

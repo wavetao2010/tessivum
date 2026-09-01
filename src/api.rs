@@ -22,14 +22,14 @@ use axum::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
         Path, Request, State,
     },
-    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse, Response,
+        Html, IntoResponse, Response,
     },
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use bytes::Bytes;
 use crc32fast::hash as crc32;
@@ -37,6 +37,7 @@ use futures_util::{
     stream::{FuturesUnordered, StreamExt},
     SinkExt,
 };
+use qrcode::{render::svg, QrCode};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use tessivum_node_bridge::BridgeError;
@@ -73,6 +74,7 @@ use crate::{
         SessionId, SessionOrigin, SessionPromptParams, MAX_SAFE_INTEGER,
     },
     question::AskUserQuestionAnswer,
+    remote_access::{RemoteAccess, RemoteAccessError, RemoteDeviceContext},
     session::SessionRawArtifact,
     session_query::SESSION_SEARCH_QUERY_MAX_CHARS,
     settings::{SettingsDescriptor, SettingsError, SettingsPathOp, LLM_PI_AI_NAMESPACE},
@@ -163,16 +165,38 @@ impl ApiServer {
         trusted_authorities: Vec<String>,
         web_routes: Option<DomainBridge>,
     ) -> io::Result<Self> {
+        Self::bind_with_remote_access(host, config, trusted_authorities, web_routes, None).await
+    }
+
+    /// Binds a loopback listener whose exact trusted authorities require Rust-owned device auth.
+    pub async fn bind_with_remote_access(
+        host: Arc<dyn HostApi>,
+        config: ApiServerConfig,
+        trusted_authorities: Vec<String>,
+        web_routes: Option<DomainBridge>,
+        remote_access: Option<RemoteAccess>,
+    ) -> io::Result<Self> {
         if !config.bind_addr.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "API listeners require a loopback bind address",
             ));
         }
+        if remote_access.as_ref().is_some_and(RemoteAccess::enabled)
+            && trusted_authorities.is_empty()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "enabled remote access requires at least one trusted Web authority",
+            ));
+        }
         let listener = TcpListener::bind(config.bind_addr).await?;
         let address = listener.local_addr()?;
         let authority_guard = AuthorityGuard::new(address, trusted_authorities)?;
         let (socket_shutdown, _) = broadcast::channel(1);
+        if let Some(remote_access) = &remote_access {
+            remote_access.attach_disconnects(socket_shutdown.clone());
+        }
         let (listener_shutdown, listener_stopped) = oneshot::channel();
         let app = router_with_shutdown(
             host,
@@ -180,6 +204,7 @@ impl ApiServer {
             socket_shutdown.clone(),
             Some(authority_guard),
             web_routes,
+            remote_access,
         );
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -233,7 +258,7 @@ impl Drop for ApiServer {
 /// giving static routes any host privileges; network listeners add authority pinning.
 pub fn router(host: Arc<dyn HostApi>, frontend: Option<FrontendStatic>) -> Router {
     let (socket_shutdown, _) = broadcast::channel(1);
-    router_with_shutdown(host, frontend, socket_shutdown, None, None)
+    router_with_shutdown(host, frontend, socket_shutdown, None, None, None)
 }
 
 fn router_with_shutdown(
@@ -242,20 +267,28 @@ fn router_with_shutdown(
     socket_shutdown: broadcast::Sender<()>,
     authority_guard: Option<AuthorityGuard>,
     web_routes: Option<DomainBridge>,
+    remote_access: Option<RemoteAccess>,
 ) -> Router {
+    let advertised_origins = authority_guard
+        .as_ref()
+        .map(AuthorityGuard::advertised_origins)
+        .unwrap_or_default();
     let compat = Arc::new(CompatibilityState::new(host.descriptor()));
     let state = ApiState {
         host,
         socket_shutdown,
         frontend,
-        web_routes,
+        web_routes: web_routes.clone(),
         compat,
+        remote_access: remote_access.clone(),
+        advertised_origins: Arc::from(advertised_origins),
         workspace_mutation: Arc::new(AsyncMutex::new(())),
     };
     let router = Router::new()
         // Static routes are registered before the catch-all unary route.
         .route("/events/{session}", get(sse_events))
         .route("/ws", get(websocket_upgrade))
+        .route("/remote", get(remote_access_page))
         .route("/api/events.mux", get(compat_events_mux))
         .route(
             "/api/attachments",
@@ -289,6 +322,10 @@ fn router_with_shutdown(
             post(compat_message_feedback),
         )
         .route(
+            "/api/remoteAccess/{method}",
+            post(remote_access_api).fallback(method_not_allowed),
+        )
+        .route(
             "/api/{method}",
             post(compat_unary).fallback(method_not_allowed),
         )
@@ -300,7 +337,13 @@ fn router_with_shutdown(
         .with_state(state);
     if let Some(authority_guard) = authority_guard.map(Arc::new) {
         router.layer(middleware::from_fn(move |request, next| {
-            require_bound_authority(Arc::clone(&authority_guard), request, next)
+            require_bound_authority(
+                Arc::clone(&authority_guard),
+                remote_access.clone(),
+                web_routes.clone(),
+                request,
+                next,
+            )
         }))
     } else {
         router
@@ -334,6 +377,8 @@ struct ApiState {
     web_routes: Option<DomainBridge>,
     compat: Arc<CompatibilityState>,
     workspace_mutation: Arc<AsyncMutex<()>>,
+    remote_access: Option<RemoteAccess>,
+    advertised_origins: Arc<[String]>,
 }
 
 struct ExactAuthority {
@@ -353,12 +398,12 @@ impl ExactAuthority {
     }
 
     fn trusted(authority: &str) -> io::Result<Self> {
-        let serialized = format!("http://{authority}/");
+        let serialized = format!("https://{authority}/");
         let parsed = Url::parse(&serialized).map_err(|_| invalid_trusted_authority(authority))?;
         if authority.is_empty()
+            || authority.len() > 255
             || authority.trim() != authority
             || parsed.as_str() != serialized
-            || parsed.port().is_none()
             || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.path() != "/"
@@ -374,15 +419,28 @@ impl ExactAuthority {
                 .map_err(|_| invalid_trusted_authority(authority))?,
         })
     }
-
-    fn matches(&self, host: &HeaderValue, origin: Option<&HeaderValue>) -> bool {
-        host == self.host && origin.is_none_or(|origin| origin == self.origin)
-    }
 }
 
 struct AuthorityGuard {
     bound: ExactAuthority,
     trusted: Vec<ExactAuthority>,
+}
+
+#[derive(Clone)]
+enum RequestAuthority {
+    Local,
+    RemotePublic,
+    Remote(RemoteDeviceContext),
+}
+
+enum AuthorityKind {
+    Local,
+    Remote,
+}
+
+enum AuthorityFailure {
+    Host,
+    Origin,
 }
 
 impl AuthorityGuard {
@@ -396,30 +454,143 @@ impl AuthorityGuard {
         })
     }
 
-    fn allows(&self, headers: &HeaderMap, path: &str) -> bool {
-        let mut hosts = headers.get_all(header::HOST).iter();
-        let (Some(host), None) = (hosts.next(), hosts.next()) else {
-            return false;
-        };
-        let mut origins = headers.get_all(header::ORIGIN).iter();
-        let origin = match (origins.next(), origins.next()) {
-            (None, None) => None,
-            (Some(origin), None) => Some(origin),
-            _ => return false,
-        };
-        self.bound.matches(host, origin)
-            || (!loopback_only_path(path)
-                && self
-                    .trusted
-                    .iter()
-                    .any(|authority| authority.matches(host, origin)))
+    fn advertised_origins(&self) -> Vec<String> {
+        self.trusted
+            .iter()
+            .map(|authority| {
+                authority
+                    .origin
+                    .to_str()
+                    .expect("trusted origins are validated HTTP headers")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn classify(
+        &self,
+        headers: &HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> Result<AuthorityKind, AuthorityFailure> {
+        let host = one_header(headers, header::HOST).ok_or(AuthorityFailure::Host)?;
+        let origin = optional_one_header(headers, header::ORIGIN)?;
+        if host == self.bound.host {
+            return if origin.is_none_or(|origin| origin == self.bound.origin) {
+                Ok(AuthorityKind::Local)
+            } else {
+                Err(AuthorityFailure::Origin)
+            };
+        }
+        let trusted = self
+            .trusted
+            .iter()
+            .find(|authority| host == authority.host)
+            .ok_or(AuthorityFailure::Host)?;
+        let public = public_remote_path(method, path);
+        let originless_same_origin_get = origin.is_none()
+            && (*method == Method::GET || *method == Method::HEAD)
+            && one_header(headers, header::HeaderName::from_static("sec-fetch-site"))
+                .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"same-origin"));
+        if origin.is_some_and(|origin| origin != trusted.origin)
+            || (!public && origin.is_none() && !originless_same_origin_get)
+            || !valid_fetch_site(headers)
+        {
+            return Err(AuthorityFailure::Origin);
+        }
+        Ok(AuthorityKind::Remote)
+    }
+}
+
+fn one_header(headers: &HeaderMap, name: header::HeaderName) -> Option<&HeaderValue> {
+    let mut values = headers.get_all(name).iter();
+    match (values.next(), values.next()) {
+        (Some(value), None) => Some(value),
+        _ => None,
+    }
+}
+
+fn optional_one_header(
+    headers: &HeaderMap,
+    name: header::HeaderName,
+) -> Result<Option<&HeaderValue>, AuthorityFailure> {
+    let mut values = headers.get_all(name).iter();
+    match (values.next(), values.next()) {
+        (None, None) => Ok(None),
+        (Some(value), None) => Ok(Some(value)),
+        _ => Err(AuthorityFailure::Origin),
+    }
+}
+
+fn valid_fetch_site(headers: &HeaderMap) -> bool {
+    one_header(headers, header::HeaderName::from_static("sec-fetch-site")).is_none_or(|value| {
+        value.as_bytes().eq_ignore_ascii_case(b"same-origin")
+            || value.as_bytes().eq_ignore_ascii_case(b"none")
+    })
+}
+
+fn public_remote_path(method: &Method, path: &str) -> bool {
+    let plugin_asset = path
+        .strip_prefix("/plugins/")
+        .and_then(|path| path.rsplit_once('/'))
+        .is_some_and(|(package, name)| {
+            !package.is_empty() && matches!(name, "client.js" | "client.js.map")
+        });
+    (*method == Method::GET || *method == Method::HEAD)
+        && (matches!(
+            path,
+            "/" | "/index.html"
+                | "/remote"
+                | "/theme-bootstrap.js"
+                | "/favicon.svg"
+                | "/manifest.webmanifest"
+        ) || path.starts_with("/assets/")
+            || plugin_asset)
+}
+
+fn forwarded_https(headers: &HeaderMap) -> bool {
+    one_header(
+        headers,
+        header::HeaderName::from_static("x-forwarded-proto"),
+    )
+    .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"https"))
+}
+
+fn remote_session_secret(headers: &HeaderMap) -> Option<String> {
+    let bearer = one_header(headers, header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, secret)| {
+            scheme.eq_ignore_ascii_case("bearer")
+                && !secret.is_empty()
+                && !secret.chars().any(char::is_whitespace)
+        })
+        .map(|(_, secret)| secret.to_owned());
+    let cookie = one_header(headers, header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let mut matches = value.split(';').filter_map(|field| {
+                field
+                    .trim()
+                    .strip_prefix("__Host-tessivum-remote=")
+                    .filter(|value| !value.is_empty())
+            });
+            match (matches.next(), matches.next()) {
+                (Some(value), None) => Some(value.to_owned()),
+                _ => None,
+            }
+        });
+    match (bearer, cookie) {
+        (Some(left), Some(right)) if left == right => Some(left),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        _ => None,
     }
 }
 
 fn invalid_trusted_authority(authority: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("trusted Web authority must be an exact canonical host:port: {authority:?}"),
+        format!("trusted Web authority must be an exact canonical authority: {authority:?}"),
     )
 }
 
@@ -444,8 +615,14 @@ fn loopback_only_path(path: &str) -> bool {
             | "host/pickDirectory"
             | "host.openPath"
             | "host/openPath"
-            | "settings.describe"
-            | "settings/describe"
+            | "host.listDirectory"
+            | "host/listDirectory"
+            | "host.createDirectory"
+            | "host/createDirectory"
+            | "host.shutdown"
+            | "host/shutdown"
+            | "dynamicCordisRunner/runHostHalf"
+            | "dynamicCordisRunner.runHostHalf"
             | "settings.openDocument"
             | "settings/openDocument"
             | "settings.update"
@@ -454,34 +631,157 @@ fn loopback_only_path(path: &str) -> bool {
             | "settings/replace"
             | "settings.mutate"
             | "settings/mutate"
-            | "credentials.describe"
-            | "credentials/describe"
             | "credentials.set"
             | "credentials/set"
             | "credentials.unset"
             | "credentials/unset"
+            | "workspace.create"
+            | "workspace/create"
+            | "workspace.rename"
+            | "workspace/rename"
+            | "workspace.delete"
+            | "workspace/delete"
+            | "workspace.insertBefore"
+            | "workspace/insertBefore"
+            | "workspace.insertSessionBefore"
+            | "workspace/insertSessionBefore"
+            | "workspace.archiveSession"
+            | "workspace/archiveSession"
             | "llm.discoverModels"
             | "llm/discoverModels"
     )
 }
 
+fn legacy_web_route(routes: Option<&DomainBridge>, path: &str) -> bool {
+    routes.is_some_and(|routes| {
+        routes.has_web_route(path) || routes.select_web_upgrade(path).is_some()
+    })
+}
+
+fn remote_product_path(path: &str) -> bool {
+    path == "/ws"
+        || path == "/plugins/events"
+        || path.starts_with("/events/")
+        || path.starts_with("/api/")
+}
+
 async fn require_bound_authority(
     authority: Arc<AuthorityGuard>,
-    request: Request,
+    remote_access: Option<RemoteAccess>,
+    web_routes: Option<DomainBridge>,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    if !authority.allows(request.headers(), request.uri().path()) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+    let classified = authority.classify(request.headers(), request.method(), request.uri().path());
+    let request_authority = match classified {
+        Ok(AuthorityKind::Local) => RequestAuthority::Local,
+        Err(AuthorityFailure::Host) => {
+            return response_error(
+                None,
+                remote_api_error("REMOTE_HOST_DENIED", "request Host is not trusted"),
+            )
+        }
+        Err(AuthorityFailure::Origin) => {
+            return response_error(
+                None,
+                remote_api_error("REMOTE_ORIGIN_DENIED", "request Origin is not trusted"),
+            )
+        }
+        Ok(AuthorityKind::Remote) => {
+            let Some(access) = remote_access.as_ref() else {
+                return response_error(None, remote_access_api_error(RemoteAccessError::Disabled));
+            };
+            if !access.enabled() {
+                return response_error(None, remote_access_api_error(RemoteAccessError::Disabled));
+            }
+            if !access.trusted_tunnel() || !forwarded_https(request.headers()) {
+                return response_error(
+                    None,
+                    remote_access_api_error(RemoteAccessError::TlsRequired),
+                );
+            }
+            if (public_remote_path(request.method(), request.uri().path())
+                && !legacy_web_route(web_routes.as_ref(), request.uri().path()))
+                || (*request.method() == Method::POST
+                    && matches!(
+                        request.uri().path(),
+                        "/api/remoteAccess/describe" | "/api/remoteAccess/exchangePairing"
+                    )
+                    && remote_session_secret(request.headers()).is_none())
+            {
+                RequestAuthority::RemotePublic
+            } else {
+                let Some(secret) = remote_session_secret(request.headers()) else {
+                    return response_error(
+                        None,
+                        remote_access_api_error(RemoteAccessError::AuthRequired),
+                    );
+                };
+                let device = match access.authenticate(&secret).await {
+                    Ok(device) => device,
+                    Err(error) => return response_error(None, remote_access_api_error(error)),
+                };
+                if loopback_only_path(request.uri().path())
+                    || !remote_product_path(request.uri().path())
+                    || legacy_web_route(web_routes.as_ref(), request.uri().path())
+                {
+                    return response_error(
+                        None,
+                        remote_api_error("REMOTE_HOST_DENIED", "this Host route is loopback-only"),
+                    );
+                }
+                RequestAuthority::Remote(device)
+            }
+        }
+    };
+    let recheck_device = match (&request_authority, request.uri().path()) {
+        (RequestAuthority::Remote(_), "/api/remoteAccess/revokeSelf") => None,
+        (RequestAuthority::Remote(device), _) => Some(device.device_id),
+        (RequestAuthority::Local | RequestAuthority::RemotePublic, _) => None,
+    };
+    request.extensions_mut().insert(request_authority);
     let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'"),
-    );
+    if let (Some(access), Some(device_id)) = (remote_access.as_ref(), recheck_device) {
+        if let Err(error) = access.check_device(device_id).await {
+            return response_error(None, remote_access_api_error(error));
+        }
+    }
     response
         .headers_mut()
-        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static("frame-ancestors 'none'"));
     response
+        .headers_mut()
+        .entry(header::X_FRAME_OPTIONS)
+        .or_insert(HeaderValue::from_static("DENY"));
+    response
+}
+
+fn remote_api_error(code: &str, message: &str) -> ApiError {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn remote_access_api_error(error: RemoteAccessError) -> ApiError {
+    let status = match error {
+        RemoteAccessError::AuthRequired
+        | RemoteAccessError::SessionExpired
+        | RemoteAccessError::SessionRevoked => StatusCode::UNAUTHORIZED,
+        RemoteAccessError::Persistence(_) | RemoteAccessError::Corrupt(_) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        RemoteAccessError::DeviceNotFound => StatusCode::NOT_FOUND,
+        RemoteAccessError::Invalid(_) => StatusCode::BAD_REQUEST,
+        RemoteAccessError::Disabled | RemoteAccessError::TlsRequired => StatusCode::FORBIDDEN,
+    };
+    ApiError {
+        status,
+        code: error.code().into(),
+        message: error.to_string(),
+    }
 }
 
 const MAX_COMPAT_FRAME_QUEUE: usize = 32;
@@ -609,6 +909,7 @@ fn is_websocket_upgrade(request: &Request) -> bool {
 async fn proxy_websocket_upgrade(
     mut request: Request,
     route: crate::bridge::WebUpgradeRoute,
+    mut shutdown: broadcast::Receiver<()>,
 ) -> Response {
     let browser_upgrade = hyper::upgrade::on(&mut request);
     let stream = match TcpStream::connect((Ipv4Addr::LOCALHOST, route.port)).await {
@@ -643,7 +944,10 @@ async fn proxy_websocket_upgrade(
         };
         let mut browser = TokioIo::new(browser);
         let mut backend = TokioIo::new(backend);
-        let _ = copy_bidirectional(&mut browser, &mut backend).await;
+        tokio::select! {
+            _ = shutdown.recv() => {}
+            _ = copy_bidirectional(&mut browser, &mut backend) => {}
+        }
     });
     Response::from_parts(parts, Body::empty())
 }
@@ -660,7 +964,8 @@ async fn frontend_fallback(State(state): State<ApiState>, request: Request) -> R
             .as_ref()
             .and_then(|routes| routes.select_web_upgrade(&path))
         {
-            return proxy_websocket_upgrade(request, route).await;
+            return proxy_websocket_upgrade(request, route, state.socket_shutdown.subscribe())
+                .await;
         }
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -832,10 +1137,10 @@ impl ApiError {
 }
 
 #[derive(Clone)]
-struct CompatError {
-    code: String,
-    message: String,
-    details: Value,
+pub(crate) struct CompatError {
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) details: Value,
 }
 
 impl CompatError {
@@ -1303,13 +1608,13 @@ struct CompatSessionSelectModel {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompatDiscoverModels {
-    settings_ns: String,
-    provider: Option<String>,
+pub(crate) struct CompatDiscoverModels {
+    pub(crate) settings_ns: String,
+    pub(crate) provider: Option<String>,
     #[serde(rename = "baseURL")]
-    base_url: Option<String>,
-    api: Option<String>,
-    api_key: Option<String>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) api: Option<String>,
+    pub(crate) api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2108,6 +2413,7 @@ fn compat_receipt(receipt: RpcReceipt) -> Response {
 }
 
 async fn plugin_events(State(state): State<ApiState>) -> Response {
+    let mut shutdown = state.socket_shutdown.subscribe();
     let events = stream! {
         if let Some(frontend) = state.frontend {
             if let Some(mut updates) = frontend.subscribe_hmr() {
@@ -2121,6 +2427,7 @@ async fn plugin_events(State(state): State<ApiState>) -> Response {
                 poll.tick().await;
                 loop {
                     tokio::select! {
+                        _ = shutdown.recv() => break,
                         _ = poll.tick() => {
                             let frontend = frontend.clone();
                             let _ = tokio::task::spawn_blocking(move || frontend.rebuild()).await;
@@ -2150,10 +2457,10 @@ async fn plugin_events(State(state): State<ApiState>) -> Response {
                     }
                 }
             } else {
-                futures_util::future::pending::<()>().await;
+                let _ = shutdown.recv().await;
             }
         } else {
-            futures_util::future::pending::<()>().await;
+            let _ = shutdown.recv().await;
         }
     };
     Sse::new(events)
@@ -2812,7 +3119,9 @@ async fn compat_dispatch(
             }))
         }
         "llm.models" => compat_llm_models(state, compat_decode(payload)?).await,
-        "llm.discoverModels" => compat_discover_models(state, compat_decode(payload)?).await,
+        "llm.discoverModels" => {
+            compat_discover_models(state.host.as_ref(), compat_decode(payload)?).await
+        }
         "llm.providerModels" => {
             let args: CompatProviderModels = compat_decode(payload)?;
             compat_require_nonblank("provider", &args.provider)?;
@@ -5039,8 +5348,8 @@ fn discovery_value(value: Option<u64>) -> Option<Value> {
         .map(Value::from)
 }
 
-async fn compat_discover_models(
-    state: &ApiState,
+pub(crate) async fn compat_discover_models(
+    host: &dyn HostApi,
     args: CompatDiscoverModels,
 ) -> Result<Value, CompatError> {
     if args.settings_ns != LLM_PI_AI_NAMESPACE {
@@ -5059,9 +5368,7 @@ async fn compat_discover_models(
     }
 
     let entry = args.provider.as_deref().and_then(|provider| {
-        state
-            .host
-            .provider_directory()
+        host.provider_directory()
             .into_iter()
             .find(|entry| entry.route.id == provider)
     });
@@ -5086,7 +5393,7 @@ async fn compat_discover_models(
         }
         Some(api_key)
     } else if !base_override || route_matches {
-        if let (Some(entry), Some(credentials)) = (entry.as_ref(), state.host.credentials()) {
+        if let (Some(entry), Some(credentials)) = (entry.as_ref(), host.credentials()) {
             if entry.route.credential_ref.is_empty() {
                 None
             } else {
@@ -6133,6 +6440,279 @@ fn response(status: StatusCode, body: ResponseEnvelope) -> Response {
     (status, Json(body)).into_response()
 }
 
+async fn remote_access_page() -> Response {
+    let mut response = Html(include_str!("remote_access_page.html")).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        ),
+    );
+    response
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemotePairExchange {
+    token: String,
+    device_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteDeviceMutation {
+    device_id: uuid::Uuid,
+}
+
+async fn remote_access_api(
+    State(state): State<ApiState>,
+    Path(method): Path<String>,
+    request: Request,
+) -> Response {
+    let authority = request
+        .extensions()
+        .get::<RequestAuthority>()
+        .cloned()
+        .unwrap_or(RequestAuthority::Local);
+    let Some(access) = state.remote_access.as_ref() else {
+        return response_error(None, remote_access_api_error(RemoteAccessError::Disabled));
+    };
+    if !is_json(request.headers()) {
+        return response_error(
+            None,
+            ApiError::bad_request("Content-Type must be application/json"),
+        );
+    }
+    if content_length_exceeds(request.headers(), MAX_FRAME_BYTES) {
+        return response_error(None, ApiError::too_large());
+    }
+    let body = match to_bytes(request.into_body(), MAX_FRAME_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return response_error(None, ApiError::too_large()),
+    };
+    let envelope: RequestEnvelope = match serde_json::from_slice(&body) {
+        Ok(envelope) => envelope,
+        Err(error) => return response_error(None, ApiError::bad_request(error.to_string())),
+    };
+    if let Err(error) = validate_request_id(&envelope.request_id) {
+        return response_error(None, error);
+    }
+    let request_id = envelope.request_id;
+    let output = match method.as_str() {
+        "describe" => {
+            let _: EmptyArgs = match serde_json::from_value(envelope.args) {
+                Ok(value) => value,
+                Err(error) => {
+                    return response_error(
+                        Some(request_id),
+                        ApiError::bad_request(error.to_string()),
+                    )
+                }
+            };
+            let (authority_name, only) = match &authority {
+                RequestAuthority::Remote(device) => ("device", Some(device.device_id)),
+                RequestAuthority::Local => ("local", None),
+                RequestAuthority::RemotePublic => {
+                    return response_ok(
+                        request_id,
+                        json!({"enabled": access.enabled(), "authority": "public"}),
+                    )
+                }
+            };
+            serde_json::to_value(access.describe(only).await)
+                .map_err(|error| ApiError::unavailable(error.to_string()))
+                .and_then(|mut value| {
+                    let object = value
+                        .as_object_mut()
+                        .ok_or_else(|| ApiError::unavailable("remote state is not an object"))?;
+                    if authority_name == "device" {
+                        let device = object
+                            .remove("devices")
+                            .and_then(|value| value.as_array()?.first().cloned())
+                            .unwrap_or(Value::Null);
+                        object.insert("device".into(), device);
+                    }
+                    object.insert(
+                        "advertisedOrigins".into(),
+                        json!(state.advertised_origins.as_ref()),
+                    );
+                    object.insert("authority".into(), json!(authority_name));
+                    Ok(value)
+                })
+        }
+        "issuePairing" => {
+            if !matches!(authority, RequestAuthority::Local) {
+                Err(remote_api_error(
+                    "REMOTE_HOST_DENIED",
+                    "pairing tokens can only be issued from the local Host",
+                ))
+            } else {
+                if let Err(error) = serde_json::from_value::<EmptyArgs>(envelope.args) {
+                    return response_error(
+                        Some(request_id),
+                        ApiError::bad_request(error.to_string()),
+                    );
+                }
+                access
+                    .issue_pairing()
+                    .await
+                    .map_err(remote_access_api_error)
+                    .and_then(|issued| {
+                        let origin = state.advertised_origins.first().ok_or_else(|| {
+                            ApiError::unavailable("remote access has no advertised origin")
+                        })?;
+                        let pairing_url = format!("{origin}/remote#pair={}", issued.token);
+                        let qr_document = QrCode::new(pairing_url.as_bytes())
+                            .map_err(|error| ApiError::unavailable(error.to_string()))?
+                            .render::<svg::Color>()
+                            .min_dimensions(256, 256)
+                            .build();
+                        let qr_svg = qr_document
+                            .find("<svg")
+                            .map(|start| qr_document[start..].to_owned())
+                            .ok_or_else(|| {
+                                ApiError::unavailable("QR renderer returned invalid SVG")
+                            })?;
+                        Ok(json!({
+                            "token": issued.token,
+                            "expiresAt": issued.expires_at,
+                            "pairingUrl": pairing_url,
+                            "qrSvg": qr_svg,
+                        }))
+                    })
+            }
+        }
+        "exchangePairing" => {
+            if !matches!(
+                authority,
+                RequestAuthority::Local | RequestAuthority::RemotePublic
+            ) {
+                Err(remote_api_error(
+                    "REMOTE_HOST_DENIED",
+                    "an authenticated device cannot exchange another pairing token",
+                ))
+            } else {
+                let args: RemotePairExchange = match serde_json::from_value(envelope.args) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        return response_error(
+                            Some(request_id),
+                            ApiError::bad_request(error.to_string()),
+                        )
+                    }
+                };
+                match access
+                    .exchange_pairing(&args.token, &args.device_name)
+                    .await
+                {
+                    Ok(issued) => {
+                        let max_age =
+                            issued.device.expires_at.saturating_sub(compat_updated_at()) / 1_000;
+                        let cookie = format!(
+                            "__Host-tessivum-remote={}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={max_age}",
+                            issued.session_secret
+                        );
+                        let mut response =
+                            response_ok(request_id, json!({"device": issued.device}));
+                        let cookie = match HeaderValue::try_from(cookie) {
+                            Ok(cookie) => cookie,
+                            Err(_) => {
+                                return response_error(
+                                    None,
+                                    ApiError::unavailable("remote session cookie is invalid"),
+                                )
+                            }
+                        };
+                        response.headers_mut().insert(header::SET_COOKIE, cookie);
+                        return response;
+                    }
+                    Err(error) => Err(remote_access_api_error(error)),
+                }
+            }
+        }
+        "revoke" => {
+            if !matches!(authority, RequestAuthority::Local) {
+                Err(remote_api_error(
+                    "REMOTE_HOST_DENIED",
+                    "devices can only be revoked from the local Host",
+                ))
+            } else {
+                let args: RemoteDeviceMutation = match serde_json::from_value(envelope.args) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        return response_error(
+                            Some(request_id),
+                            ApiError::bad_request(error.to_string()),
+                        )
+                    }
+                };
+                access
+                    .revoke(args.device_id)
+                    .await
+                    .map_err(remote_access_api_error)
+                    .and_then(|device| {
+                        serde_json::to_value(device)
+                            .map_err(|error| ApiError::unavailable(error.to_string()))
+                    })
+            }
+        }
+        "revokeSelf" => {
+            let RequestAuthority::Remote(device) = authority else {
+                return response_error(
+                    Some(request_id),
+                    remote_api_error(
+                        "REMOTE_HOST_DENIED",
+                        "revokeSelf requires a remote device session",
+                    ),
+                );
+            };
+            match access.revoke(device.device_id).await {
+                Ok(device) => {
+                    let mut response = response_ok(request_id, json!({"device": device}));
+                    response.headers_mut().insert(
+                        header::SET_COOKIE,
+                        HeaderValue::from_static("__Host-tessivum-remote=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"),
+                    );
+                    return response;
+                }
+                Err(error) => Err(remote_access_api_error(error)),
+            }
+        }
+        "revokeAll" => {
+            if !matches!(authority, RequestAuthority::Local) {
+                Err(remote_api_error(
+                    "REMOTE_HOST_DENIED",
+                    "devices can only be revoked from the local Host",
+                ))
+            } else {
+                if let Err(error) = serde_json::from_value::<EmptyArgs>(envelope.args) {
+                    return response_error(
+                        Some(request_id),
+                        ApiError::bad_request(error.to_string()),
+                    );
+                }
+                access
+                    .revoke_all()
+                    .await
+                    .map(|revoked| json!({"revoked": revoked}))
+                    .map_err(remote_access_api_error)
+            }
+        }
+        _ => Err(ApiError::not_found()),
+    };
+    match output {
+        Ok(output) => response_ok(request_id, output),
+        Err(error) => response_error(Some(request_id), error),
+    }
+}
+
 async fn method_not_allowed() -> Response {
     response_error(
         None,
@@ -6683,17 +7263,24 @@ fn sse_error_event(event: &str, error: ApiError) -> Event {
     )
 }
 
-async fn websocket_upgrade(State(state): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
+async fn websocket_upgrade(
+    State(state): State<ApiState>,
+    Extension(authority): Extension<RequestAuthority>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let remote_device = match authority {
+        RequestAuthority::Remote(device) => Some(device.device_id),
+        RequestAuthority::Local | RequestAuthority::RemotePublic => None,
+    };
     upgrade
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| websocket(socket, state))
+        .on_upgrade(move |socket| websocket(socket, state, remote_device))
 }
 
-type HostCall =
-    Pin<Box<dyn Future<Output = (String, Result<Value, ApiError>, Option<SessionId>)> + Send>>;
+type HostCall = Pin<Box<dyn Future<Output = (String, Result<Value, ApiError>)> + Send>>;
 
-async fn websocket(socket: WebSocket, state: ApiState) {
+async fn websocket(socket: WebSocket, state: ApiState, remote_device: Option<Uuid>) {
     let (mut writer, mut reader) = socket.split();
     let (outgoing, mut queued) = mpsc::channel::<WsMessage>(MAX_SOCKET_QUEUE);
     let writer_task = tokio::spawn(async move {
@@ -6706,11 +7293,18 @@ async fn websocket(socket: WebSocket, state: ApiState) {
     let mut notifications = state.host.subscribe();
     let mut shutdown = state.socket_shutdown.subscribe();
     let mut calls = FuturesUnordered::<HostCall>::new();
-    let mut cancel_on_disconnect = BTreeMap::<SessionId, usize>::new();
+    let mut device_checks = tokio::time::interval(Duration::from_millis(250));
+    device_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = shutdown.recv() => break,
+            _ = device_checks.tick(), if remote_device.is_some() => {
+                let Some(access) = state.remote_access.as_ref() else { break };
+                if access.check_device(remote_device.expect("guarded remote device")).await.is_err() {
+                    break;
+                }
+            }
             frame = reader.next() => match frame {
                 Some(Ok(WsMessage::Text(text))) => {
                     if text.len() > MAX_FRAME_BYTES {
@@ -6728,6 +7322,22 @@ async fn websocket(socket: WebSocket, state: ApiState) {
                         if !queue_ws_error(&outgoing, None, error) { break; }
                         continue;
                     }
+                    if remote_device.is_some()
+                        && envelope.namespace == "host"
+                        && envelope.method == "shutdown"
+                    {
+                        if !queue_ws_error(
+                            &outgoing,
+                            Some(envelope.request_id),
+                            remote_api_error(
+                                "REMOTE_HOST_DENIED",
+                                "this Host method is loopback-only",
+                            ),
+                        ) {
+                            break;
+                        }
+                        continue;
+                    }
                     if calls.len() == MAX_SOCKET_QUEUE {
                         if !queue_ws_error(&outgoing, Some(envelope.request_id), ApiError {
                             status: StatusCode::TOO_MANY_REQUESTS,
@@ -6736,15 +7346,11 @@ async fn websocket(socket: WebSocket, state: ApiState) {
                         }) { break; }
                         continue;
                     }
-                    let cancellation = prompt_session(&envelope.namespace, &envelope.method, &envelope.args);
-                    if let Some(session) = &cancellation {
-                        *cancel_on_disconnect.entry(session.clone()).or_default() += 1;
-                    }
                     let host = state.host.clone();
                     calls.push(Box::pin(async move {
                         let request_id = envelope.request_id;
                         let output = dispatch(host, &envelope.namespace, &envelope.method, envelope.args).await;
-                        (request_id, output, cancellation)
+                        (request_id, output)
                     }));
                 }
                 Some(Ok(WsMessage::Binary(_))) => {
@@ -6778,15 +7384,7 @@ async fn websocket(socket: WebSocket, state: ApiState) {
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             completed = calls.next(), if !calls.is_empty() => {
-                if let Some((request_id, result, cancellation)) = completed {
-                    if let Some(session) = cancellation {
-                        if let Some(count) = cancel_on_disconnect.get_mut(&session) {
-                            *count -= 1;
-                            if *count == 0 {
-                                cancel_on_disconnect.remove(&session);
-                            }
-                        }
-                    }
+                if let Some((request_id, result)) = completed {
                     let envelope = match result {
                         Ok(output) => ResponseEnvelope { request_id: Some(request_id), ok: true, output: Some(output), error: None },
                         Err(error) => ResponseEnvelope {
@@ -6800,33 +7398,10 @@ async fn websocket(socket: WebSocket, state: ApiState) {
         }
     }
 
-    // Prompt is durable admission; cancellation only affects the active agent
-    // and is intentionally not retried, so it cannot duplicate durable facts.
-    for (session, _) in cancel_on_disconnect {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(1),
-            state.host.cancel(session, AgentCancelCause::User),
-        )
-        .await;
-    }
+    // Disconnect drops request waiters, never Host-owned Agent work. Cancellation is explicit.
     drop(outgoing);
     writer_task.abort();
     let _ = writer_task.await;
-}
-
-fn prompt_session(namespace: &str, method: &str, args: &Value) -> Option<SessionId> {
-    if (namespace, method) != ("session", "prompt") {
-        return None;
-    }
-    let args = serde_json::from_value::<PromptArgs>(args.clone()).ok()?;
-    let params = SessionPromptParams {
-        session_id: args.session_id,
-        content_blocks: args.content_blocks,
-        client_time_zone: args.client_time_zone,
-    };
-    require_session(&params.session_id).ok()?;
-    params.validate().ok()?;
-    Some(params.session_id)
 }
 
 fn ws_notification(notification: &HostNotification) -> Result<WsMessage, ApiError> {
@@ -7006,6 +7581,98 @@ mod tests {
         let mut with_null = base;
         with_null["ifVersion"] = Value::Null;
         assert!(serde_json::from_value::<CompatMessageFeedbackPut>(with_null).is_ok());
+    }
+
+    #[test]
+    fn remote_authority_requires_exact_https_origin_and_unambiguous_session() {
+        let guard = AuthorityGuard::new(
+            "127.0.0.1:3000".parse().unwrap(),
+            vec!["app.example.test".into()],
+        )
+        .unwrap();
+        assert!(
+            AuthorityGuard::new("127.0.0.1:3000".parse().unwrap(), vec!["a".repeat(256)],).is_err()
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.example.test"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://app.example.test"),
+        );
+        headers.insert(
+            header::HeaderName::from_static("sec-fetch-site"),
+            HeaderValue::from_static("same-origin"),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-forwarded-proto"),
+            HeaderValue::from_static("https"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer tvs_one"),
+        );
+        assert!(matches!(
+            guard.classify(&headers, &Method::POST, "/api/session/list"),
+            Ok(AuthorityKind::Remote)
+        ));
+        assert!(forwarded_https(&headers));
+        assert_eq!(remote_session_secret(&headers).as_deref(), Some("tvs_one"));
+        assert_eq!(guard.advertised_origins(), vec!["https://app.example.test"]);
+        assert!(public_remote_path(&Method::GET, "/remote"));
+        assert!(public_remote_path(&Method::GET, "/assets/client.js"));
+        assert!(!public_remote_path(&Method::GET, "/ws"));
+        assert!(public_remote_path(
+            &Method::GET,
+            "/plugins/@deepseek-ai/dsh-client/client.js"
+        ));
+        assert!(!public_remote_path(&Method::GET, "/plugins/events"));
+        assert!(!public_remote_path(&Method::GET, "/dsh-market/market"));
+        assert!(!public_remote_path(&Method::POST, "/assets/client.js"));
+        assert!(remote_product_path("/api/session/list"));
+        assert!(remote_product_path("/events/session"));
+        assert!(remote_product_path("/plugins/events"));
+        assert!(!remote_product_path("/dsh-market/api/v1/capabilities"));
+        headers.remove(header::ORIGIN);
+        assert!(matches!(
+            guard.classify(&headers, &Method::GET, "/plugins/events"),
+            Ok(AuthorityKind::Remote)
+        ));
+        assert!(matches!(
+            guard.classify(&headers, &Method::POST, "/api/session/list"),
+            Err(AuthorityFailure::Origin)
+        ));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://app.example.test"),
+        );
+
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("__Host-tessivum-remote=tvs_other"),
+        );
+        assert!(!loopback_only_path("/api/settings.describe"));
+        assert!(!loopback_only_path("/api/credentials.describe"));
+        assert!(loopback_only_path("/api/settings.update"));
+        assert!(loopback_only_path("/api/credentials.set"));
+        assert!(loopback_only_path("/api/host/shutdown"));
+        assert!(!loopback_only_path("/api/dynamicCordisRunner/inventory"));
+        assert!(loopback_only_path("/api/dynamicCordisRunner/runHostHalf"));
+        assert_eq!(remote_session_secret(&headers), None);
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(matches!(
+            guard.classify(&headers, &Method::POST, "/api/session/list"),
+            Err(AuthorityFailure::Origin)
+        ));
+
+        let mut local = HeaderMap::new();
+        local.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
+        assert!(matches!(
+            guard.classify(&local, &Method::POST, "/api/session/list"),
+            Ok(AuthorityKind::Local)
+        ));
     }
 
     #[test]

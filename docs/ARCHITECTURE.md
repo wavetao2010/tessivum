@@ -466,7 +466,7 @@ Browser Cordis
 
 Browser 兼容构建直接使用上游 `apps/web/src/main.ts` 的薄入口、`@deepseek-ai/dsh-client-web` 源码和当前 profile 中所有 `dsh.client` 双面包；`web/` 只保存构建适配与有界品牌 Overlay，不维护自有 bootloader、模块系统或 UI fork。Host 从 Loader entries 动态生成 package-name graph，提供同源 bundle 路由和内容 hash 校验；精确 wire 与完成门槛见 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)，品牌 Overlay 边界见 [`PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md`](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)。
 
-浏览器不直接访问 Rust Context。API 只允许 loopback 监听，WebSocket 校验同源 `Origin`；所有权限和持久事实由 Host 判定。重连通过 `HostApi::list_sessions`、workspace baseline 和 durable SessionEvent 恢复，不把浏览器本地状态当作事实源。
+浏览器不直接访问 Rust Context；所有权限和持久事实由 Host 判定。Rust HTTP listener 始终只绑定 loopback。默认请求继续按该 socket 的 exact `Host`/`Origin` 判为 local；显式 Remote Access 只接受配置中的 exact HTTPS authority，并要求受信 tunnel 提供 `X-Forwarded-Proto: https`。公开 GET/HEAD 仅覆盖固定 Web assets 与内置 `/remote` 配对页；未携带设备凭据的 `remoteAccess.describe` 只返回 `enabled/public` posture，`exchangePairing` 是唯一匿名 mutation；其余 API、SSE 与 WebSocket 在领域 handler 前要求同源 Fetch metadata 和有效设备 session。远端可读取现有 Web shell 必需的脱敏 Settings/Credentials 状态，但所有 Legacy Node Web routes，以及 Settings、Credentials、Workspace、文件系统、Host 插件激活与 shutdown mutation 保持 loopback-only。配对 token 单次、短 TTL、只存 hash；设备 secret 只进入 `Secure`/`HttpOnly`/`SameSite=Strict` cookie，持久化只保留 hash 与脱敏 metadata。撤销广播会立即结束在途 SSE/WebSocket，后续请求重新鉴权；已接受的 Agent work 属于 Host durable admission，不因浏览器断开、session 过期或设备撤销而静默取消，必须通过显式 Stop/cancel 终止。重连通过 `HostApi::list_sessions`、workspace baseline 和 durable SessionEvent 恢复，不把浏览器本地状态当作事实源。
 
 ## 14. 并发、取消与背压
 

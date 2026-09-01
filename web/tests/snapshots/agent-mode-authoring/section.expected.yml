@@ -14,6 +14,7 @@
       - img
       - text: Agent 模式
   - button "打开配置文件"
+  - button "远程访问"
   - button "关闭":
     - img
     - text: 关闭
@@ -22,43 +23,43 @@
   - heading "内置" [level=3]
   - list:
     - listitem:
-      - 'button "当前使用: Standard" [disabled] [pressed]':
-        - text: Standard 内置 当前使用 The full native Tessivum tool catalog.
+      - 'button "当前使用: 标准模式" [disabled] [pressed]':
+        - text: 标准模式 内置 当前使用 提供完整的 Tessivum 原生工具集。
         - code: standard
-      - 'button "查看: Standard"':
+      - 'button "查看: 标准模式"':
         - img
         - text: 查看
-      - 'button "复制: Standard"':
+      - 'button "复制: 标准模式"':
         - img
         - text: 复制
     - listitem:
-      - 'button "设为默认: PTC"':
-        - text: PTC 内置 A programmatic tool-calling mode backed by Bun.
+      - 'button "设为默认: PTC 模式"':
+        - text: PTC 模式 内置 由 Bun 驱动的程序化工具调用方式。
         - code: ptc
-      - 'button "查看: PTC"':
+      - 'button "查看: PTC 模式"':
         - img
         - text: 查看
-      - 'button "复制: PTC"':
+      - 'button "复制: PTC 模式"':
         - img
         - text: 复制
     - listitem:
-      - 'button "设为默认: Minimal"':
-        - text: Minimal 内置 A focused persistent-shell editing mode.
+      - 'button "设为默认: 极简模式"':
+        - text: 极简模式 内置 专注于持久 Shell 编辑的精简模式。
         - code: minimal
-      - 'button "查看: Minimal"':
+      - 'button "查看: 极简模式"':
         - img
         - text: 查看
-      - 'button "复制: Minimal"':
+      - 'button "复制: 极简模式"':
         - img
         - text: 复制
     - listitem:
-      - 'button "设为默认: Composition"':
-        - text: Composition 内置 A native entry composition-builder mode.
+      - 'button "设为默认: 组装模式"':
+        - text: 组装模式 内置 用于构建 Native、WASM 或 Legacy 条目组合的原生模式。
         - code: composition
-      - 'button "查看: Composition"':
+      - 'button "查看: 组装模式"':
         - img
         - text: 查看
-      - 'button "复制: Composition"':
+      - 'button "复制: 组装模式"':
         - img
         - text: 复制
   - heading "自定义" [level=3]

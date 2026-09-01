@@ -2,7 +2,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use serde_json::json;
@@ -23,6 +23,7 @@ use tessivum::{
 };
 use tessivum_core::{ContextHandle, LoaderRuntime, PackageResolver};
 use tessivum_node_bridge::{ClientConfig, FrameKind, HostCommand};
+use uuid::Uuid;
 
 const TIMER_PACKAGE_HASH: &str = "ecb8ac09dfd326400c1b9893415cbc92077ce8409b0cb8cdcd45dc3ac9f1b0bc";
 const TIMER_INDEX_HASH: &str = "cbf60311b58210f6f2c6ee1bbd438039806f5ee6b268a46906a949ad926cca81";
@@ -143,14 +144,8 @@ struct TemporaryTimerPackage {
 
 impl TemporaryTimerPackage {
     fn new(vendor: &Path) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "tessivum-community-timer-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time is after the epoch")
-                .as_nanos(),
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tessivum-community-timer-{}", Uuid::new_v4(),));
         let timer = root.join("timer");
         fs::create_dir_all(timer.join("lib")).expect("temporary timer package directory exists");
         fs::copy(

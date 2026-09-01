@@ -9,14 +9,14 @@ use std::{
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+#[cfg(unix)]
+use tessivum::plugin_manager::{mutate_plugins, PluginMutation};
 use tessivum::{
     api::{ApiServer, ApiServerConfig},
     frontend::FrontendStatic,
     host::{HostApi, HostConfig, HostRuntime},
     plugin_manager::configure_host_plugins,
 };
-#[cfg(unix)]
-use tessivum::plugin_manager::{mutate_plugins, PluginMutation};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -538,7 +538,10 @@ async fn failed_plugin_add_keeps_the_last_good_profile_bootable_by_web() {
         "state/plugins/node_modules/old-plugin/package.json",
         r#"{"name":"old-plugin","exports":{"./client":"./dist/client.js"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
     );
-    fixture.write("state/plugins/node_modules/old-plugin/cordis.patch.yml", "[]\n");
+    fixture.write(
+        "state/plugins/node_modules/old-plugin/cordis.patch.yml",
+        "[]\n",
+    );
     fixture.write(
         "state/plugins/node_modules/old-plugin/dist/client.js",
         "export const oldPlugin = true;",
@@ -590,8 +593,7 @@ case "$1" in
 esac
 "#,
     );
-    fs::set_permissions(&pnpm, fs::Permissions::from_mode(0o755))
-        .expect("fake pnpm is executable");
+    fs::set_permissions(&pnpm, fs::Permissions::from_mode(0o755)).expect("fake pnpm is executable");
 
     let previous_path = std::env::var_os("PATH");
     let mut path = fake_bin.into_os_string();

@@ -72,7 +72,6 @@ struct FakeHost {
     shutdown: AtomicBool,
     delay_prompt: AtomicBool,
     prompt_started: Notify,
-    cancel_seen: Notify,
     queue_updates: Mutex<Vec<SessionUpdateQueueParams>>,
     queue_error: Mutex<Option<TessivumError>>,
     provider_enable_available: AtomicBool,
@@ -99,7 +98,6 @@ impl FakeHost {
             shutdown: AtomicBool::new(false),
             delay_prompt: AtomicBool::new(false),
             prompt_started: Notify::new(),
-            cancel_seen: Notify::new(),
             queue_updates: Mutex::new(Vec::new()),
             subagent_history_params: ParkingMutex::new(Vec::new()),
             subagent_prompt_params: ParkingMutex::new(Vec::new()),
@@ -184,7 +182,6 @@ impl HostApi for FakeHost {
         _cause: AgentCancelCause,
     ) -> Result<bool, TessivumError> {
         self.cancels.fetch_add(1, Ordering::SeqCst);
-        self.cancel_seen.notify_one();
         Ok(true)
     }
 
@@ -3356,7 +3353,7 @@ async fn sse_replays_then_delivers_live_events_and_reconnects_from_last_id() {
 }
 
 #[tokio::test]
-async fn websocket_streams_notifications_cancels_inflight_prompt_and_exits_on_shutdown() {
+async fn websocket_streams_notifications_preserves_inflight_prompt_and_exits_on_shutdown() {
     let (mut server, host, _base) = start().await;
     let mut socket = RawWebSocket::connect(server.local_addr()).await;
     let first_started = host.prompt_started.notified();
@@ -3383,25 +3380,26 @@ async fn websocket_streams_notifications_cancels_inflight_prompt_and_exits_on_sh
     assert_eq!(notification["type"], "notification");
 
     host.delay_prompt.store(true, Ordering::SeqCst);
-    let mut cancelling = RawWebSocket::connect(server.local_addr()).await;
+    let mut disconnecting = RawWebSocket::connect(server.local_addr()).await;
     let started = host.prompt_started.notified();
-    cancelling
+    disconnecting
         .send_json(json!({
-            "requestId": "ws-cancel",
+            "requestId": "ws-background",
             "namespace": "session",
             "method": "prompt",
-            "args": {"sessionId": "cancel-session", "contentBlocks": [{"type": "text", "text": "cancel"}]}
+            "args": {"sessionId": "background-session", "contentBlocks": [{"type": "text", "text": "continue"}]}
         }))
         .await;
     timeout(Duration::from_secs(1), started)
         .await
         .expect("prompt starts");
-    let cancelled = host.cancel_seen.notified();
-    drop(cancelling);
-    timeout(Duration::from_secs(1), cancelled)
-        .await
-        .expect("disconnect cancels in-flight prompt");
-    assert_eq!(host.cancels.load(Ordering::SeqCst), 1);
+    drop(disconnecting);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        host.cancels.load(Ordering::SeqCst),
+        0,
+        "disconnect must not cancel accepted Agent work"
+    );
 
     server
         .shutdown()

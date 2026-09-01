@@ -64,6 +64,7 @@ run_installer() {
     os=$4
     arch=$5
 
+    HOME="$prefix/home" \
     PATH="$fake_bin:$PATH" \
     TESSIVUM_INSTALLER_TEST=1 \
     TESSIVUM_TEST_UNAME_S="$os" \
@@ -77,6 +78,7 @@ run_installer() {
 
 run_uninstaller() {
     prefix=$1
+    HOME="$prefix/home" \
     INSTALL_ROOT="$prefix/lib/tessivum" \
     BIN_DIR="$prefix/bin" \
     sh "$installer" --uninstall
@@ -193,13 +195,16 @@ fi
 assert_no_partial "$prefix/lib/tessivum"
 
 prefix="$work/upgrade"
-old_version=1.0.0-old
-new_version=1.0.0-new
+old_version=0.1.0-alpha.18
+new_version=0.1.0-alpha.19
 blocked_version=1.0.0-blocked
 old_fixture=$(fixture_archive "$old_version" "$target" old)
 new_fixture=$(fixture_archive "$new_version" "$target" new)
 blocked_fixture=$(fixture_archive "$blocked_version" "$target" blocked)
 run_installer "$old_fixture" "$old_version" "$prefix" Linux x86_64
+data_root="$prefix/home/.tessivum"
+mkdir -p "$data_root"
+printf '%s\n' alpha18-durable-state > "$data_root/state.marker"
 assert_link "$prefix/bin/tessivum" "$prefix/lib/tessivum/$old_version/bin/tessivum"
 assert_link "$prefix/bin/tsv" "$prefix/lib/tessivum/$old_version/bin/tessivum"
 old_target=$(readlink "$prefix/bin/tessivum")
@@ -214,6 +219,7 @@ assert_link "$prefix/bin/tessivum" "$prefix/lib/tessivum/$old_version/bin/tessiv
 [ "$(cat "$prefix/bin/tsv")" = external ] || fail "alias collision changed third-party path"
 assert_absent "$prefix/lib/tessivum/$blocked_version"
 assert_no_partial "$prefix/lib/tessivum"
+[ "$(cat "$data_root/state.marker")" = alpha18-durable-state ] || fail "blocked upgrade changed Alpha18 durable state"
 
 rm "$prefix/bin/tsv"
 run_installer "$new_fixture" "$new_version" "$prefix" Linux x86_64
@@ -222,6 +228,7 @@ assert_link "$prefix/bin/tsv" "$prefix/lib/tessivum/$new_version/bin/tessivum"
 [ "$("$prefix/bin/tessivum")" = new ] || fail "upgrade did not switch executable"
 [ "$("$prefix/bin/tsv")" = new ] || fail "upgrade did not switch alias executable"
 [ "$old_target" != "$(readlink "$prefix/bin/tessivum")" ] || fail "upgrade did not replace symlink"
+[ "$(cat "$data_root/state.marker")" = alpha18-durable-state ] || fail "Alpha19 upgrade changed Alpha18 durable state"
 
 failed_version=1.0.0-failed
 failed_fixture=$(fixture_archive "$failed_version" "$target" failed)
@@ -234,11 +241,13 @@ assert_link "$prefix/bin/tsv" "$prefix/lib/tessivum/$new_version/bin/tessivum"
 [ "$("$prefix/bin/tessivum")" = new ] || fail "failed upgrade replaced executable"
 assert_absent "$prefix/lib/tessivum/$failed_version"
 assert_no_partial "$prefix/lib/tessivum"
+[ "$(cat "$data_root/state.marker")" = alpha18-durable-state ] || fail "failed upgrade changed Alpha18 durable state"
 
 run_uninstaller "$prefix"
 assert_absent "$prefix/bin/tessivum"
 assert_absent "$prefix/bin/tsv"
 assert_absent "$prefix/lib/tessivum"
+[ "$(cat "$data_root/state.marker")" = alpha18-durable-state ] || fail "uninstall removed durable user data"
 run_uninstaller "$prefix"
 
 prefix="$work/uninstall-external"

@@ -9,7 +9,12 @@ const SNAPSHOTS = join(import.meta.dir, 'snapshots/agent-mode-authoring')
 
 let harness: RustWebHarness
 let modeRoot: string
-
+const BUILT_IN_MODES = [
+  ['标准模式', '提供完整的 Tessivum 原生工具集。'],
+  ['PTC 模式', '由 Bun 驱动的程序化工具调用方式。'],
+  ['极简模式', '专注于持久 Shell 编辑的精简模式。'],
+  ['组装模式', '用于构建 Native、WASM 或 Legacy 条目组合的原生模式。'],
+] as const
 
 function normalize(snapshot: string): string {
   return snapshot
@@ -27,6 +32,15 @@ function normalize(snapshot: string): string {
 async function expectGolden(locator: Locator, name: string): Promise<void> {
   expect(normalize(await locator.ariaSnapshot())).toBe((await Bun.file(join(SNAPSHOTS, name)).text()).trim())
 }
+async function expectLocalizedModeMenu(anchor: Locator): Promise<void> {
+  const menu = harness.page.getByRole('menu')
+  await menu.waitFor()
+  for (const [name, description] of BUILT_IN_MODES) {
+    expect(await menu.getByRole('menuitem', { name: `${name} ${description}`, exact: true }).count()).toBe(1)
+  }
+  await anchor.click()
+  await menu.waitFor({ state: 'detached' })
+}
 
 beforeAll(async () => {
   harness = await RustWebHarness.launch({ name: 'agent-mode-authoring', locale: 'zh-CN' })
@@ -35,27 +49,34 @@ beforeAll(async () => {
 
 afterAll(async () => { await harness?.close() })
 
-test('Agent Mode authoring copies, edits, copies again, and deletes Host-owned mode.toml', async () => {
+test('Agent Mode UI localizes built-ins and manages Host-owned mode.toml', async () => {
+  const seatMode = harness.page.getByRole('button', { name: '标准模式', exact: true })
+  await seatMode.click()
+  await expectLocalizedModeMenu(seatMode)
+
   await harness.page.getByRole('button', { name: '设置', exact: true }).click()
   const settings = harness.page.getByRole('dialog', { name: '设置' })
+  const defaultMode = settings.getByRole('button', { name: '标准模式', exact: true })
+  await defaultMode.click()
+  await expectLocalizedModeMenu(defaultMode)
   await settings.getByRole('button', { name: 'Agent 模式' }).click()
-  await settings.getByText('Standard').first().waitFor({ timeout: 10_000 })
+  await settings.getByText('标准模式').first().waitFor({ timeout: 10_000 })
   await expectGolden(settings, 'section.expected.yml')
 
-  await settings.getByRole('button', { name: '查看: Standard' }).click()
-  const viewer = harness.page.getByRole('dialog', { name: '查看 mode.toml · Standard' })
+  await settings.getByRole('button', { name: '查看: 标准模式' }).click()
+  const viewer = harness.page.getByRole('dialog', { name: '查看 mode.toml · 标准模式' })
   await viewer.waitFor()
   expect(await viewer.locator('pre').textContent()).toContain('id = "standard"')
   expect(await viewer.getByRole('textbox').count()).toBe(0)
   await viewer.getByRole('button', { name: '关闭' }).last().click()
 
-  for (const name of ['Standard', 'PTC', 'Minimal', 'Composition']) {
+  for (const name of ['标准模式', 'PTC 模式', '极简模式', '组装模式']) {
     expect(await settings.getByRole('button', { name: `编辑: ${name}` }).count()).toBe(0)
     expect(await settings.getByRole('button', { name: `删除: ${name}` }).count()).toBe(0)
   }
 
-  await settings.getByRole('button', { name: '复制: Minimal' }).click()
-  const copy = harness.page.getByRole('dialog', { name: '复制 Agent 模式 · 复制自 Minimal' })
+  await settings.getByRole('button', { name: '复制: 极简模式' }).click()
+  const copy = harness.page.getByRole('dialog', { name: '复制 Agent 模式 · 复制自 极简模式' })
   await expectGolden(copy, 'copy-dialog.expected.yml')
   await copy.getByPlaceholder('my-mode').fill('my-mode')
   await copy.getByPlaceholder('选择器中显示的名字，缺省用标识符').fill('我的模式')

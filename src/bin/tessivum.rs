@@ -16,7 +16,7 @@ use serde_json::Value;
 use tessivum::{
     agent_mode::AgentModeId,
     boot_theme::inject_boot_theme,
-    bridge::HostLifecycle,
+    bridge::{HostLifecycle, WebListenerRegistry, WebListenerSnapshot},
     cli::{
         parse_cli, resolve_data_root, CliCommand, DataRootError, ExitClass, HeadlessCommand,
         PluginAction, PluginCommand, SdkCommand,
@@ -30,12 +30,16 @@ use tessivum::{
         configure_host_plugins, enabled_client_plugin_names, install_first_party_market,
         mutate_plugins, plugin_profile_root, PluginMutation,
     },
+    remote_access::{RemoteAccess, RemoteAccessConfig},
     settings::Settings,
     SessionId, TessivumError,
 };
 use tokio::sync::Notify;
 
 const PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_REMOTE_SESSION_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+const MIN_REMOTE_SESSION_TTL_SECONDS: u64 = 5 * 60;
+const MAX_REMOTE_SESSION_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 static EMBEDDED_WEB_INSTANCE: AtomicU64 = AtomicU64::new(0);
 const WEB_LIFECYCLE_RUNNING: u8 = 0;
 const WEB_LIFECYCLE_RESTART_ACCEPTED: u8 = 1;
@@ -364,23 +368,84 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         .map_err(|error| Diagnostic::usage(format!("invalid TESSIVUM_WEB_ADDR: {error}")))?;
     env::set_var("DSH_WEB_URL", format!("http://{address}"));
     let trusted_authorities = environment("TESSIVUM_WEB_TRUSTED_AUTHORITIES")?
-        .map(|authorities| authorities.split(',').map(str::to_owned).collect())
+        .map(|authorities| {
+            authorities
+                .split(',')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
+    let remote_enabled = environment_flag("TESSIVUM_REMOTE_ACCESS")?;
+    let trusted_tunnel = environment_flag("TESSIVUM_REMOTE_TRUSTED_TUNNEL")?;
+    let session_ttl_seconds = environment("TESSIVUM_REMOTE_SESSION_TTL_SECONDS")?
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| {
+                    (MIN_REMOTE_SESSION_TTL_SECONDS..=MAX_REMOTE_SESSION_TTL_SECONDS)
+                        .contains(value)
+                })
+                .ok_or_else(|| {
+                    Diagnostic::usage(format!(
+                        "TESSIVUM_REMOTE_SESSION_TTL_SECONDS must be an integer from {MIN_REMOTE_SESSION_TTL_SECONDS} to {MAX_REMOTE_SESSION_TTL_SECONDS}"
+                    ))
+                })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_REMOTE_SESSION_TTL_SECONDS);
+    if !remote_enabled && (!trusted_authorities.is_empty() || trusted_tunnel) {
+        return Err(Diagnostic::usage(
+            "trusted Web authorities and tunnel posture require TESSIVUM_REMOTE_ACCESS=1",
+        ));
+    }
+    if remote_enabled && trusted_authorities.is_empty() {
+        return Err(Diagnostic::usage(
+            "TESSIVUM_REMOTE_ACCESS=1 requires TESSIVUM_WEB_TRUSTED_AUTHORITIES",
+        ));
+    }
+    if remote_enabled && !address.ip().is_loopback() {
+        return Err(Diagnostic::usage(
+            "Remote Access requires a loopback TESSIVUM_WEB_ADDR behind the trusted TLS tunnel",
+        ));
+    }
+    let remote_access = RemoteAccess::open(
+        data_dir.join("remote-access.json"),
+        RemoteAccessConfig {
+            enabled: remote_enabled,
+            trusted_tunnel,
+            session_ttl: Duration::from_secs(session_ttl_seconds),
+            ..RemoteAccessConfig::default()
+        },
+    )
+    .await
+    .map_err(|error| Diagnostic::runtime(error.code(), error))?;
+    let advertised_origins = std::iter::once(format!("http://{address}"))
+        .chain(
+            trusted_authorities
+                .iter()
+                .map(|authority| format!("https://{authority}")),
+        )
+        .collect::<Vec<_>>();
+    let listener = WebListenerRegistry::new(WebListenerSnapshot {
+        host: address.ip().to_string(),
+        port: address.port(),
+        loopback: address.ip().is_loopback(),
+        advertised_origins: advertised_origins.clone(),
+        remote_access_enabled: remote_enabled,
+    });
     if let Some(dist) = env::var_os("TESSIVUM_WEB_DIST") {
         FrontendStatic::new(PathBuf::from(dist))
             .map_err(|error| Diagnostic::runtime("WEB_FRONTEND_FAILED", error))?;
     }
     let lifecycle = Arc::new(WebLifecycle::default());
-    let runtime = boot_host(
-        cwd,
-        data_dir.clone(),
-        web_replay().await?,
-        true,
-        Some(web_system_prompt(address)),
-        cli_patches,
-        Some(Arc::clone(&lifecycle) as Arc<dyn HostLifecycle>),
-    )
-    .await?;
+    let mut host_config = HostConfig::new(cwd, data_dir.clone());
+    host_config.enable_trusted_bash = true;
+    host_config.system_prompt = Some(web_system_prompt(address));
+    host_config.host_lifecycle = Some(Arc::clone(&lifecycle) as Arc<dyn HostLifecycle>);
+    host_config.web_listener = Some(listener.clone());
+    host_config.remote_access = Some(remote_access.clone());
+    let runtime = boot_host(host_config, web_replay().await?, cli_patches).await?;
     let (frontend, _theme_tap, _embedded_assets) = match web_frontend(
         runtime
             .handle()
@@ -397,7 +462,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     let host_handle = runtime.handle();
     let web_routes = host_handle.web_route_registry();
     let host: Arc<dyn HostApi> = Arc::new(host_handle);
-    let mut server = match tessivum::api::ApiServer::bind_with_web_routes(
+    let mut server = match tessivum::api::ApiServer::bind_with_remote_access(
         host,
         tessivum::api::ApiServerConfig {
             bind_addr: address,
@@ -405,6 +470,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         },
         trusted_authorities,
         web_routes,
+        Some(remote_access),
     )
     .await
     {
@@ -414,6 +480,14 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             return Err(Diagnostic::runtime("WEB_BIND_FAILED", error));
         }
     };
+    let bound = server.local_addr();
+    listener.publish(WebListenerSnapshot {
+        host: bound.ip().to_string(),
+        port: bound.port(),
+        loopback: bound.ip().is_loopback(),
+        advertised_origins,
+        remote_access_enabled: remote_enabled,
+    });
     eprintln!("Tessivum web listening at http://{}", server.local_addr());
     enum WebStop {
         Signal(i32),
@@ -438,6 +512,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         () = lifecycle.wait_for_restart() => WebStop::Restart,
     };
     lifecycle.begin_shutdown();
+    listener.clear();
     let shutdown_exit = match stop {
         WebStop::Signal(130) => 130,
         WebStop::Signal(_) | WebStop::Restart => 0,
@@ -550,7 +625,9 @@ enum SdkOutcome {
 
 async fn run_sdk(command: SdkCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
-    let runtime = boot_host(cwd, data_dir, None, true, None, Vec::new(), None).await?;
+    let mut host_config = HostConfig::new(cwd, data_dir);
+    host_config.enable_trusted_bash = true;
+    let runtime = boot_host(host_config, None, Vec::new()).await?;
     let server = tessivum::sdk::JsonRpcServer::new(Arc::new(runtime.handle()));
     let reader = tokio::io::stdin();
     let writer = tokio::io::stdout();
@@ -588,18 +665,10 @@ async fn run_sdk(command: SdkCommand) -> Result<(), Diagnostic> {
 }
 
 async fn boot_host(
-    cwd: PathBuf,
-    data_dir: PathBuf,
+    mut config: HostConfig,
     recorded_replay: Option<WebReplay>,
-    enable_trusted_bash: bool,
-    system_prompt: Option<String>,
     cli_patches: Vec<Value>,
-    host_lifecycle: Option<Arc<dyn HostLifecycle>>,
 ) -> Result<HostRuntime, Diagnostic> {
-    let mut config = HostConfig::new(cwd, data_dir);
-    config.enable_trusted_bash = enable_trusted_bash;
-    config.system_prompt = system_prompt;
-    config.host_lifecycle = host_lifecycle;
     for patch in cli_patches {
         config = config.with_cli_patch(patch);
     }
@@ -648,6 +717,17 @@ async fn boot_host(
             host.command
                 .env
                 .push(("TESSIVUM_HOST_LIFECYCLE".into(), "1".into()));
+        }
+    }
+    if let (Some(host), Some(listener)) = (&mut config.legacy_host, &config.web_listener) {
+        if let Some(snapshot) = listener.describe() {
+            host.command
+                .env
+                .push(("TESSIVUM_WEB_LISTENER_HOST".into(), snapshot.host.into()));
+            host.command.env.push((
+                "TESSIVUM_WEB_LISTENER_PORT".into(),
+                snapshot.port.to_string().into(),
+            ));
         }
     }
     HostRuntime::boot(config)
@@ -708,6 +788,14 @@ fn environment(name: &str) -> Result<Option<String>, Diagnostic> {
         Err(env::VarError::NotUnicode(_)) => {
             Err(Diagnostic::usage(format!("{name} must be valid Unicode")))
         }
+    }
+}
+
+fn environment_flag(name: &str) -> Result<bool, Diagnostic> {
+    match environment(name)?.as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(Diagnostic::usage(format!("{name} must be 0 or 1"))),
     }
 }
 struct WebReplay {

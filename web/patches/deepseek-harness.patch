@@ -2304,10 +2304,10 @@ index f3274796..00322995 100644
 +  }, AgentModeSection))
  }
 diff --git a/packages/client/ui-agent-preset/src/client/locales.ts b/packages/client/ui-agent-preset/src/client/locales.ts
-index 54acc298..3587dceb 100644
+index 54acc298..1de16275 100644
 --- a/packages/client/ui-agent-preset/src/client/locales.ts
 +++ b/packages/client/ui-agent-preset/src/client/locales.ts
-@@ -1,56 +1,39 @@
+@@ -1,56 +1,49 @@
 -/** Locale bundles for the agent-preset settings row, hero chip, header label, and management section. */
 +/** Locale bundles for the Agent Mode settings row, hero chip, header label, and management section. */
  
@@ -2323,6 +2323,8 @@ index 54acc298..3587dceb 100644
 +export type AgentModeSettingsKey =
 +  | 'title' | 'description' | 'loading' | 'error' | 'userOrigin' | 'seatHint' | 'headerHint'
 +  | 'nav' | 'sectionIntro' | 'builtIn' | 'setDefault'
++  | 'modeStandardName' | 'modeStandardDescription' | 'modePtcName' | 'modePtcDescription'
++  | 'modeMinimalName' | 'modeMinimalDescription' | 'modeCompositionName' | 'modeCompositionDescription'
 +  | 'view' | 'viewTitle' | 'viewLoading' | 'viewError' | 'copy' | 'copyUnavailable' | 'delete' | 'modeId' | 'modeIdPlaceholder' | 'copyOf'
    | 'displayName' | 'displayNamePlaceholder'
    | 'inUse' | 'noDescription' | 'builtInGroup' | 'customGroup'
@@ -2359,6 +2361,14 @@ index 54acc298..3587dceb 100644
 +  headerHint: 'The Agent mode this session runs, fixed when it started',
 +  nav: 'Agent modes',
 +  sectionIntro: 'An Agent mode defines one session\'s prompt, tools, and capabilities. Copy an existing mode to create an editable mode.toml.',
++  modeStandardName: 'Standard',
++  modeStandardDescription: 'The full native Tessivum tool catalog.',
++  modePtcName: 'PTC',
++  modePtcDescription: 'A programmatic tool-calling mode backed by Bun.',
++  modeMinimalName: 'Minimal',
++  modeMinimalDescription: 'A focused persistent-shell editing mode.',
++  modeCompositionName: 'Composition',
++  modeCompositionDescription: 'A native entry composition-builder mode.',
    builtIn: 'Built-in',
    setDefault: 'Set as default',
    view: 'View',
@@ -2389,7 +2399,7 @@ index 54acc298..3587dceb 100644
    displayName: 'Name',
    displayNamePlaceholder: 'Shown in the picker; defaults to the identifier',
    inUse: 'In use',
-@@ -58,59 +41,49 @@ export const en: Record<AgentPresetSettingsKey, string> = {
+@@ -58,59 +51,57 @@ export const en: Record<AgentPresetSettingsKey, string> = {
    customGroup: 'Custom',
    noDescription: 'No description.',
    brokenBadge: 'Failed to load',
@@ -2451,6 +2461,14 @@ index 54acc298..3587dceb 100644
 +  headerHint: '本会话运行的 Agent 模式，开始时即固定',
 +  nav: 'Agent 模式',
 +  sectionIntro: 'Agent 模式定义一个会话的提示词、工具与能力。复制既有模式，即可创建可编辑的 mode.toml。',
++  modeStandardName: '标准模式',
++  modeStandardDescription: '提供完整的 Tessivum 原生工具集。',
++  modePtcName: 'PTC 模式',
++  modePtcDescription: '由 Bun 驱动的程序化工具调用方式。',
++  modeMinimalName: '极简模式',
++  modeMinimalDescription: '专注于持久 Shell 编辑的精简模式。',
++  modeCompositionName: '组装模式',
++  modeCompositionDescription: '用于构建 Native、WASM 或 Legacy 条目组合的原生模式。',
    builtIn: '内置',
    setDefault: '设为默认',
    view: '查看',
@@ -2477,7 +2495,7 @@ index 54acc298..3587dceb 100644
    displayName: '名称',
    displayNamePlaceholder: '选择器中显示的名字，缺省用标识符',
    inUse: '当前使用',
-@@ -118,75 +91,37 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
+@@ -118,75 +109,55 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
    customGroup: '自定义',
    noDescription: '暂无描述。',
    brokenBadge: '加载失败',
@@ -2523,6 +2541,7 @@ index 54acc298..3587dceb 100644
 -  /** Whether the deployment ships the preset or the user owns it. */
 -  readonly trust: 'system' | 'user'
 -  /** Unlocalized name published by the preset. */
++  readonly origin?: 'builtin' | 'user'
    readonly name?: string
 -  /** Unlocalized description published by the preset. */
    readonly description?: string
@@ -2539,15 +2558,23 @@ index 54acc298..3587dceb 100644
 -interface PresetLocaleKeys {
 -  readonly name: AgentPresetSettingsKey
 -  readonly description: AgentPresetSettingsKey
--}
--
++interface ModeLocaleKeys {
++  readonly name: AgentModeSettingsKey
++  readonly description: AgentModeSettingsKey
+ }
+ 
 -const BUILT_IN_PRESET_KEYS: Readonly<Partial<Record<string, PresetLocaleKeys>>> = {
 -  standard: { name: 'presetStandardName', description: 'presetStandardDescription' },
 -  code: { name: 'presetCodeName', description: 'presetCodeDescription' },
 -  minimal: { name: 'presetMinimalName', description: 'presetMinimalDescription' },
 -  cordis: { name: 'presetCordisName', description: 'presetCordisDescription' },
--}
--
++const BUILT_IN_MODE_KEYS: Readonly<Partial<Record<string, ModeLocaleKeys>>> = {
++  standard: { name: 'modeStandardName', description: 'modeStandardDescription' },
++  ptc: { name: 'modePtcName', description: 'modePtcDescription' },
++  minimal: { name: 'modeMinimalName', description: 'modeMinimalDescription' },
++  composition: { name: 'modeCompositionName', description: 'modeCompositionDescription' },
+ }
+ 
 -/**
 - * Resolve preset display copy without making user-authored metadata translatable.
 - * @param preset - roster row whose copy is being rendered.
@@ -2559,8 +2586,12 @@ index 54acc298..3587dceb 100644
 -  t: (key: AgentPresetSettingsKey) => string,
 -): PresetDisplayText {
 -  const keys = preset.trust === 'system' ? BUILT_IN_PRESET_KEYS[preset.id] : undefined
--  if (keys !== undefined) return { name: t(keys.name), description: t(keys.description) }
-+export function modeDisplayText(mode: ModeDisplaySource): { name: string; description?: string } {
++export function modeDisplayText(
++  mode: ModeDisplaySource,
++  t: (key: AgentModeSettingsKey) => string,
++): { name: string; description?: string } {
++  const keys = mode.origin === 'builtin' ? BUILT_IN_MODE_KEYS[mode.id] : undefined
+   if (keys !== undefined) return { name: t(keys.name), description: t(keys.description) }
    return {
 -    name: preset.name ?? preset.id,
 -    ...preset.description === undefined ? {} : { description: preset.description },
@@ -4125,10 +4156,10 @@ index 7ff47416..00000000
 -  })
 -})
 diff --git a/packages/client/ui-agent-preset/tests/components.client.spec.tsx b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
-index 0c29175a..7cb0f061 100644
+index 0c29175a..8f7d5c65 100644
 --- a/packages/client/ui-agent-preset/tests/components.client.spec.tsx
 +++ b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
-@@ -1,405 +1,62 @@
+@@ -1,405 +1,63 @@
  // @vitest-environment jsdom
 -/**
 - * The three conversation-adjacent surfaces: the General-settings row naming the
@@ -4338,6 +4369,7 @@ index 0c29175a..7cb0f061 100644
  
 -    expect(container.firstChild).toBeNull()
 +    fireEvent.click(screen.getByRole('button', { name: 'Standard' }))
++    expect(screen.getByText(en.modePtcDescription)).toBeTruthy()
 +    fireEvent.click(screen.getByText('PTC'))
 +    expect(select).toHaveBeenCalledWith('ptc')
 +    expect(screen.queryByText('Code mode')).toBeNull()
@@ -4614,20 +4646,21 @@ index 768a6487..7bf70b73 100644
    })
  })
 diff --git a/packages/client/ui-agent-preset/tests/locales.client.spec.ts b/packages/client/ui-agent-preset/tests/locales.client.spec.ts
-index 02623e7d..a3ef6be3 100644
+index 02623e7d..3926aaa7 100644
 --- a/packages/client/ui-agent-preset/tests/locales.client.spec.ts
 +++ b/packages/client/ui-agent-preset/tests/locales.client.spec.ts
-@@ -1,33 +1,22 @@
+@@ -1,33 +1,25 @@
 -/** Web-localized copy for the four shipped presets and file copy for every other row. */
 -
  import { describe, expect, it } from 'vitest'
 -import { en, presetDisplayText, zh } from '../src/client/locales.ts'
--
--const translate = (bundle: typeof en) => (key: keyof typeof en): string => bundle[key]
 +import { en, modeDisplayText, zh } from '../src/client/locales.ts'
  
+-const translate = (bundle: typeof en) => (key: keyof typeof en): string => bundle[key]
+ 
 -describe('preset display copy', () => {
--  it.each([
++describe('Agent Mode display copy', () => {
+   it.each([
 -    ['standard', 'presetStandardName', 'presetStandardDescription'],
 -    ['code', 'presetCodeName', 'presetCodeDescription'],
 -    ['minimal', 'presetMinimalName', 'presetMinimalDescription'],
@@ -4636,19 +4669,17 @@ index 02623e7d..a3ef6be3 100644
 -    const preset = { id, trust: 'system' as const, name: 'file name', description: 'file description' }
 -
 -    expect(presetDisplayText(preset, translate(en)))
--      .toEqual({ name: en[nameKey], description: en[descriptionKey] })
++    ['standard', 'modeStandardName', 'modeStandardDescription'],
++    ['ptc', 'modePtcName', 'modePtcDescription'],
++    ['minimal', 'modeMinimalName', 'modeMinimalDescription'],
++    ['composition', 'modeCompositionName', 'modeCompositionDescription'],
++  ] as const)('localizes the built-in %s mode in English and Chinese', (id, nameKey, descriptionKey) => {
++    const mode = { id, origin: 'builtin' as const, name: 'Host name', description: 'Host description' }
++    expect(modeDisplayText(mode, key => en[key]))
+       .toEqual({ name: en[nameKey], description: en[descriptionKey] })
 -    expect(presetDisplayText(preset, translate(zh)))
--      .toEqual({ name: zh[nameKey], description: zh[descriptionKey] })
-+describe('Agent Mode display copy', () => {
-+  it('uses Host-provided names and descriptions for every built-in', () => {
-+    for (const mode of [
-+      { id: 'standard', name: 'Standard', description: 'The full native Tessivum tool catalog.' },
-+      { id: 'ptc', name: 'PTC', description: 'A programmatic tool-calling mode backed by Bun.' },
-+      { id: 'minimal', name: 'Minimal', description: 'A focused persistent-shell editing mode.' },
-+      { id: 'composition', name: 'Composition', description: 'A native entry composition-builder mode.' },
-+    ]) {
-+      expect(modeDisplayText(mode)).toEqual({ name: mode.name, description: mode.description })
-+    }
++    expect(modeDisplayText(mode, key => zh[key]))
+       .toEqual({ name: zh[nameKey], description: zh[descriptionKey] })
    })
  
 -  it('keeps file metadata for user and unknown system presets', () => {
@@ -4660,11 +4691,11 @@ index 02623e7d..a3ef6be3 100644
 -      .toEqual(fileCopy)
 -    expect(presetDisplayText({ id: 'bare', trust: 'user' }, translate(en)))
 -      .toEqual({ name: 'bare' })
-+  it('falls back only when Host metadata is absent', () => {
-+    expect(modeDisplayText({ id: 'mine' })).toEqual({ name: 'mine' })
-+    expect(en.sectionIntro).toContain('mode.toml')
-+    expect(zh.sectionIntro).toContain('mode.toml')
-+    expect(en.sectionIntro).not.toContain('YAML')
++  it('keeps custom and unknown built-in metadata unchanged', () => {
++    const copy = { name: '团队模式', description: '团队自己的模式。' }
++    expect(modeDisplayText({ id: 'standard', origin: 'user', ...copy }, key => zh[key])).toEqual(copy)
++    expect(modeDisplayText({ id: 'other', origin: 'builtin', ...copy }, key => zh[key])).toEqual(copy)
++    expect(modeDisplayText({ id: 'mine' }, key => en[key])).toEqual({ name: 'mine' })
    })
  })
 diff --git a/packages/client/ui-agent-preset/tests/section-store.client.spec.ts b/packages/client/ui-agent-preset/tests/section-store.client.spec.ts
@@ -6787,6 +6818,63 @@ index 469c5aaf..34bd596b 100644
 +    expect(currentWordmark.container.querySelector('linearGradient, filter, text, image')).toBeNull()
    })
  })
+diff --git a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
+index c4bb82e1..d3008a1b 100644
+--- a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
++++ b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
+@@ -3,6 +3,8 @@
+   min-width: 0;
+   align-items: center;
+   gap: 8px;
++  flex-wrap: wrap;
++  justify-content: flex-end;
+ }
+ 
+ .error {
+diff --git a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
+index bfe8a813..b5364170 100644
+--- a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
++++ b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
+@@ -1,4 +1,4 @@
+-/** Optional settings-header action for opening a file-backed Host document. */
++/** Loopback-only settings actions for the Host document and Remote Access. */
+ 
+ import { useEffect } from 'react'
+ import type { ReactNode } from 'react'
+@@ -32,18 +32,24 @@ export function SettingsDocumentAction({ controller, useSnapshot, t }: SettingsD
+     void controller.load()
+   }, [controller])
+ 
+-  if (state.status !== 'ready') return null
+ 
+   return (
+     <div className={css.action}>
+-      {state.error === null ? null : <span className={css.error} role="alert">{t('openDocument.error')}</span>}
+-      <Button
+-        variant="outline"
+-        size="sm"
+-        disabled={state.opening}
+-        onClick={() => { void controller.open() }}
+-      >
+-        {t('openDocument')}
++      {state.status === 'ready' && state.error !== null
++        ? <span className={css.error} role="alert">{t('openDocument.error')}</span>
++        : null}
++      {state.status === 'ready'
++        ? <Button
++            variant="outline"
++            size="sm"
++            disabled={state.opening}
++            onClick={() => { void controller.open() }}
++          >
++            {t('openDocument')}
++          </Button>
++        : null}
++      <Button variant="outline" size="sm" onClick={() => { window.location.assign('/remote') }}>
++        {t('remoteAccess')}
+       </Button>
+     </div>
+   )
 diff --git a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
 index 76274750..25bb2564 100644
 --- a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
@@ -6809,6 +6897,47 @@ index 76274750..25bb2564 100644
    if (id === 'plugins') return <IconPersonalizationOutline16 className={css.navIcon} size={16} />
    return <IconSettingsOutline16 className={css.navIcon} size={16} />
  }
+diff --git a/packages/client/ui-settings-general/src/client/locales.ts b/packages/client/ui-settings-general/src/client/locales.ts
+index a5578553..636e6bf3 100644
+--- a/packages/client/ui-settings-general/src/client/locales.ts
++++ b/packages/client/ui-settings-general/src/client/locales.ts
+@@ -7,6 +7,7 @@ export const zh = {
+   'close': '关闭',
+   'openDocument': '打开配置文件',
+   'openDocument.error': '无法打开配置文件',
++  'remoteAccess': '远程访问',
+   'general.nav': '通用设置',
+ } satisfies Record<string, string>
+ 
+@@ -20,5 +21,6 @@ export const en = {
+   'close': 'Close',
+   'openDocument': 'Open configuration file',
+   'openDocument.error': 'Could not open configuration file',
++  'remoteAccess': 'Remote access',
+   'general.nav': 'General',
+ } satisfies Record<SettingsKey, string>
+diff --git a/packages/client/ui-settings-general/tests/components.client.spec.tsx b/packages/client/ui-settings-general/tests/components.client.spec.tsx
+index 874bd446..64646905 100644
+--- a/packages/client/ui-settings-general/tests/components.client.spec.tsx
++++ b/packages/client/ui-settings-general/tests/components.client.spec.tsx
+@@ -59,6 +59,17 @@ describe('GeneralSection', () => {
+ })
+ 
+ describe('SettingsDocumentAction', () => {
++  it('always links loopback users to the Rust-owned Remote Access page', () => {
++    const controller = new SettingsDocumentStore({
++      settings: {
++        describe: vi.fn(() => new Promise(() => {})),
++        openDocument: vi.fn(),
++      },
++    } as never)
++    render(<SettingsDocumentAction {...kit} controller={controller} useSnapshot={bindSnapshotSelector(controller.store)} t={t} />)
++    expect(screen.getByRole('button', { name: 'Remote access' })).toBeTruthy()
++  })
++
+   it('appears only for a file-backed provider and requests its Host-owned document', async () => {
+     const openDocument = vi.fn(() => Promise.resolve({
+       rpcId: 'document-open' as never,
 diff --git a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
 index c9ec5939..55d021de 100644
 --- a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
@@ -7280,1494 +7409,3 @@ index 37b2e9ff..66c4c010 100644
          version: '0.0.1',
        },
        capabilities: {
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
-new file mode 100644
-index 00000000..6d2cdd81
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
-@@ -0,0 +1,23 @@
-+/* Session-header agent-preset label: static chrome, never a control. */
-+
-+.label {
-+  display: inline-flex;
-+  align-items: center;
-+  gap: 4px;
-+  max-width: 180px;
-+  padding: 0 2px 0 0;
-+  height: 22px;
-+  border-radius: 6px;
-+  background: var(--dsw-alias-fill-tsp-secondary);
-+  font-size: 12px;
-+  line-height: 22px;
-+  color: var(--dsw-alias-label-secondary);
-+  white-space: nowrap;
-+  overflow: hidden;
-+  text-overflow: ellipsis;
-+}
-+
-+.icon {
-+  flex: none;
-+  opacity: 0.7;
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx b/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx
-new file mode 100644
-index 00000000..d984fc85
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx
-@@ -0,0 +1,41 @@
-+/** Read-only Native Agent Mode label in a running session header. */
-+import { useEffect } from 'react'
-+import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
-+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-+import { IconAgentPresetOutline16 as IconAgentModeOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-+import type { AgentModeSettingsState } from './settings-store.ts'
-+import { modeDisplayText } from './locales.ts'
-+import { modeIdFromSession } from './mode-wire.ts'
-+import css from './AgentModeLabel.module.css'
-+
-+export interface AgentModeLabelInjected {
-+  hooks: { agentModes: SnapshotStore<AgentModeSettingsState> }
-+  load: () => Promise<void>
-+}
-+
-+export type AgentModeLabelProps =
-+  PropsRuntime<'conversation.session.header.actions'>
-+  & PropsLocale<'settings.agentMode'>
-+  & InjectFace<AgentModeLabelInjected>
-+
-+export function AgentModeLabel({
-+  sessionId, useSessions, useAgentModes, load, t,
-+}: AgentModeLabelProps) {
-+  const modeId = useSessions(state => modeIdFromSession(state.byId[sessionId]))
-+  const options = useAgentModes(state => state.options)
-+
-+  useEffect(() => {
-+    if (modeId !== undefined) void load()
-+  }, [modeId, load])
-+
-+  if (modeId === undefined) return null
-+  const option = options.find(entry => entry.id === modeId)
-+  const text = option === undefined ? undefined : modeDisplayText(option)
-+  return (
-+    <span className={css.label} title={text?.description ?? t('headerHint')}>
-+      <IconAgentModeOutline16 size={14} className={css.icon} />
-+      {text?.name ?? modeId}
-+    </span>
-+  )
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
-new file mode 100644
-index 00000000..d0f71343
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
-@@ -0,0 +1,60 @@
-+/* Agent-preset row: title/description plus the preset selector pill. */
-+
-+.row {
-+  display: flex;
-+  align-items: center;
-+  gap: 8px;
-+  padding: 16px 0;
-+  border-bottom: 1px solid var(--dsw-alias-border-l2);
-+}
-+
-+.rowText {
-+  flex: 1;
-+  min-width: 0;
-+  display: flex;
-+  flex-direction: column;
-+  gap: 4px;
-+  padding-right: 48px;
-+}
-+
-+.title {
-+  font-size: 14px;
-+  font-weight: 400;
-+  line-height: 22px;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.desc {
-+  font-size: 12px;
-+  font-weight: 400;
-+  line-height: 18px;
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+.selector {
-+  display: inline-flex;
-+  align-items: center;
-+  gap: 12px;
-+  height: 36px;
-+  padding: 0 14px;
-+  border: none;
-+  border-radius: 18px;
-+  background: var(--dsw-alias-bg-module-platform);
-+  font: inherit;
-+  font-size: 14px;
-+  line-height: 22px;
-+  color: var(--dsw-alias-label-primary);
-+  cursor: pointer;
-+}
-+
-+.selector:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover);
-+}
-+
-+.selector:disabled {
-+  cursor: default;
-+}
-+
-+.chevron {
-+  flex: none;
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx b/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx
-new file mode 100644
-index 00000000..24460f80
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx
-@@ -0,0 +1,65 @@
-+/** General-settings row choosing the default Native Agent Mode. */
-+import { useEffect, useState } from 'react'
-+import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
-+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-+import type { AgentModeSettingsState } from './settings-store.ts'
-+import { modeDisplayText, type AgentModeSettingsKey } from './locales.ts'
-+import { ModeMenu } from './ModeMenu.tsx'
-+import css from './AgentModeRow.module.css'
-+
-+export interface AgentModeRowInjected {
-+  hooks: { agentMode: SnapshotStore<AgentModeSettingsState> }
-+  load: () => Promise<void>
-+  select: (id: string) => Promise<void>
-+}
-+
-+export type AgentModeRowProps =
-+  PropsRuntime<'settings.general.item'>
-+  & PropsLocale<'settings.agentMode'>
-+  & InjectFace<AgentModeRowInjected>
-+
-+export function AgentModeRow({ load, select, useAgentMode, t }: AgentModeRowProps) {
-+  const state = useAgentMode(snapshot => snapshot)
-+  const [open, setOpen] = useState(false)
-+
-+  useEffect(() => { void load() }, [load])
-+  useEffect(() => {
-+    if (state.writable && state.status !== 'unavailable') return
-+    setOpen(false)
-+  }, [state.status, state.writable])
-+
-+  if (state.status === 'unavailable') return null
-+  const busy = state.status === 'loading' || state.status === 'saving'
-+  const chosen = state.options.find(option => option.id === state.currentValue)
-+  const chosenText = chosen === undefined ? undefined : modeDisplayText(chosen)
-+  const label = state.currentValue === '' ? t('loading') : (chosenText?.name ?? state.currentValue)
-+
-+  return (
-+    <div className={css.row}>
-+      <div className={css.rowText}>
-+        <div className={css.title}>{t('title')}</div>
-+        <div className={css.desc} role={state.error === null ? undefined : 'alert'}>
-+          {state.error ?? t('description')}
-+        </div>
-+      </div>
-+      <ModeMenu
-+        options={state.options}
-+        selectedId={state.currentValue}
-+        label={label}
-+        t={t as (key: AgentModeSettingsKey) => string}
-+        buttonClassName={css.selector}
-+        chevronClassName={css.chevron}
-+        disabled={busy || !state.writable || state.options.length === 0}
-+        open={open}
-+        onOpenChange={setOpen}
-+        onSelect={(id) => { void select(id) }}
-+      />
-+    </div>
-+  )
-+}
-+
-+declare module '@deepseek-ai/dsh-client-ui-slots' {
-+  interface LocaleNamespaceMap {
-+    'settings.agentMode': AgentModeSettingsKey
-+  }
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
-new file mode 100644
-index 00000000..55fe22e8
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
-@@ -0,0 +1,119 @@
-+/* Agent-preset chip on the new-session screen, beside the workspace picker.
-+   Geometry mirrors HeroShell's .workspace so the two read as one row. */
-+
-+.seat {
-+  display: inline-flex;
-+  align-items: center;
-+  gap: 4px;
-+  max-width: min(100%, 240px);
-+  min-height: 28px;
-+  padding: 0 8px;
-+  border: none;
-+  border-radius: 16px;
-+  background: transparent;
-+  color: var(--dsw-alias-label-primary);
-+  font-size: 13px;
-+  line-height: 20px;
-+  font-weight: 500;
-+  white-space: nowrap;
-+  overflow: hidden;
-+  text-overflow: ellipsis;
-+  cursor: pointer;
-+}
-+
-+.seat:not(:disabled):hover,
-+.seat[aria-expanded='true'] {
-+  background: var(--dsw-alias-interactive-bg-hover);
-+}
-+
-+.seat:disabled {
-+  cursor: default;
-+  color: var(--dsw-alias-label-quaternary);
-+}
-+
-+.seatIcon {
-+  flex: none;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+/* Introduce cue: the icon eases in on an overshoot-free expo curve (duration
-+   matches INTRO_TEXT_DELAY_MS, so the characters start the moment it lands),
-+   then the name's characters fade up on a stagger (delays set inline per
-+   character). All chars occupy their width from the start, so nothing
-+   reflows mid-run. */
-+.introIcon {
-+  animation: seat-icon-in 0.15s cubic-bezier(0.16, 1, 0.3, 1) both;
-+}
-+
-+@keyframes seat-icon-in {
-+  from {
-+    opacity: 0;
-+    transform: scale(0.5);
-+  }
-+
-+  to {
-+    opacity: 1;
-+    transform: scale(1);
-+  }
-+}
-+
-+/* Wraps the staggered characters into one flex item, so the chip's gap
-+   applies around the name as a whole rather than between characters. */
-+.introText {
-+  display: inline-block;
-+  white-space: pre;
-+}
-+
-+.introChar {
-+  display: inline-block;
-+  white-space: pre;
-+  opacity: 0;
-+  animation: seat-char-in 0.4s ease-out forwards;
-+}
-+
-+@keyframes seat-char-in {
-+  from {
-+    opacity: 0;
-+    transform: translateY(4px);
-+  }
-+
-+  to {
-+    opacity: 1;
-+    transform: none;
-+  }
-+}
-+
-+@media (prefers-reduced-motion: reduce) {
-+  .introIcon,
-+  .introChar {
-+    animation: none;
-+    opacity: 1;
-+  }
-+}
-+
-+.chevron {
-+  flex: none;
-+  color: var(--dsw-alias-label-caption);
-+}
-+
-+/* Menu rows carry the name over its description: the id alone never said what
-+   a preset does, which is why the metadata exists. */
-+.item {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 2px;
-+  max-width: 280px;
-+}
-+
-+.itemName {
-+  font-size: 13px;
-+  line-height: 20px;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.itemDesc {
-+  font-size: 12px;
-+  line-height: 16px;
-+  color: var(--dsw-alias-label-caption);
-+  white-space: normal;
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx b/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx
-new file mode 100644
-index 00000000..07c6cb32
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx
-@@ -0,0 +1,76 @@
-+/** Native Agent Mode picker on the new-session screen. */
-+import { useEffect, useState } from 'react'
-+import {
-+  IconAgentPresetOutline16 as IconAgentModeOutline16,
-+  IconChevronDownOutline14,
-+  Menu,
-+} from '@deepseek-ai/dsh-client-ui-primitives'
-+import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
-+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-+import type { AgentModeSeatState } from './seat-store.ts'
-+import { modeDisplayText } from './locales.ts'
-+import css from './AgentModeSeat.module.css'
-+
-+export interface AgentModeSeatInjected {
-+  hooks: { agentModeSeat: SnapshotStore<AgentModeSeatState> }
-+  load: () => Promise<void>
-+  select: (id: string) => Promise<void>
-+}
-+
-+export type AgentModeSeatProps =
-+  PropsRuntime<'conversation.hero.agentMode'>
-+  & PropsLocale<'settings.agentMode'>
-+  & InjectFace<AgentModeSeatInjected>
-+
-+export function AgentModeSeat({ load, select, useAgentModeSeat, t }: AgentModeSeatProps) {
-+  const state = useAgentModeSeat(snapshot => snapshot)
-+  const [open, setOpen] = useState(false)
-+  useEffect(() => { void load() }, [load])
-+
-+  const chosen = state.options.find(option => option.id === state.current)
-+  const chosenText = chosen === undefined ? undefined : modeDisplayText(chosen)
-+  const label = chosenText?.name ?? state.current
-+  if (state.options.length === 0 || state.current === '') return null
-+
-+  return (
-+    <Menu
-+      open={open}
-+      onClose={() => { setOpen(false) }}
-+      items={state.options.map((option) => {
-+        const text = modeDisplayText(option)
-+        return {
-+          id: option.id,
-+          label: (
-+            <span className={css.item}>
-+              <span className={css.itemName}>{text.name}</span>
-+              <span className={css.itemDesc}>{text.description ?? t('noDescription')}</span>
-+            </span>
-+          ),
-+        }
-+      })}
-+      selectedId={state.current}
-+      onSelect={(id) => {
-+        setOpen(false)
-+        void select(id)
-+      }}
-+      align="start"
-+      portal
-+      anchor={(
-+        <button
-+          type="button"
-+          className={css.seat}
-+          aria-haspopup="menu"
-+          aria-expanded={open}
-+          title={state.error ?? t('seatHint')}
-+          disabled={state.busy}
-+          onClick={() => { setOpen(value => !value) }}
-+        >
-+          <IconAgentModeOutline16 className={css.seatIcon} />
-+          {label}
-+          <IconChevronDownOutline14 className={css.chevron} />
-+        </button>
-+      )}
-+    />
-+  )
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-new file mode 100644
-index 00000000..a9e1a684
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-@@ -0,0 +1,409 @@
-+.section {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 12px;
-+  max-width: 720px;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.title {
-+  margin: 0;
-+  font-size: 18px;
-+  font-weight: 600;
-+}
-+
-+.intro {
-+  margin: 0;
-+  font-size: 13px;
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+/* Cards, not rows: a mode is a thing you pick, and the description is the
-+   part that tells them apart — a row would bury it beside the actions. */
-+.group {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 10px;
-+}
-+
-+/* Group-to-group breathing room: the section's 12px gap plus 20px reads the
-+   two rosters as separate blocks (32px total). */
-+.group + .group {
-+  margin-top: 20px;
-+}
-+
-+.groupHead {
-+  margin: 0;
-+  font-size: 12px;
-+  font-weight: 600;
-+  letter-spacing: .06em;
-+  text-transform: uppercase;
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+.cards {
-+  list-style: none;
-+  margin: 0;
-+  padding: 0;
-+  display: grid;
-+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
-+  /* Every row the same height, so a short description does not make its card
-+     shorter than the one beside it. */
-+  grid-auto-rows: 1fr;
-+  gap: 12px;
-+}
-+
-+.card {
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 12px;
-+  display: flex;
-+  flex-direction: column;
-+  background: var(--dsw-alias-bg-layer-3);
-+  transition: border-color .16s, background .16s;
-+}
-+
-+
-+.card:hover:not(.cardActive) {
-+  border-color: var(--dsw-alias-label-dimmed);
-+}
-+
-+/* The default mode reads as selected, not merely badged. */
-+.cardActive {
-+  background: var(--dsw-alias-bg-layer-2);
-+  border-color: var(--dsw-alias-label-primary);
-+}
-+
-+/* A broken mode reads as damaged before anything else: the card cannot be
-+   picked, so its border carries the warning the disabled body cannot. */
-+.cardBroken {
-+  border-color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.cardBroken:hover {
-+  border-color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.brokenBadge {
-+  border-radius: 999px;
-+  padding: 1px 8px;
-+  font-size: 11px;
-+  line-height: 17px;
-+  white-space: nowrap;
-+  font-weight: 500;
-+  background: var(--dsw-alias-state-error-primary);
-+  color: var(--dsw-alias-bg-layer-3);
-+}
-+
-+/* The discovery-reported reason, verbatim: it names the file and the fix. */
-+.cardBrokenReason {
-+  font-size: 12px;
-+  line-height: 1.5;
-+  color: var(--dsw-alias-state-error-primary);
-+  overflow-wrap: anywhere;
-+}
-+
-+/* The card body is the control that picks the mode. */
-+.cardMain {
-+  flex: 1;
-+  appearance: none;
-+  border: 0;
-+  background: none;
-+  font: inherit;
-+  color: inherit;
-+  text-align: left;
-+  cursor: pointer;
-+  display: flex;
-+  flex-direction: column;
-+  gap: 8px;
-+  padding: 14px 16px 12px;
-+  border-radius: 12px 12px 0 0;
-+}
-+
-+.cardMain:disabled {
-+  cursor: default;
-+}
-+
-+.cardMain:focus-visible {
-+  outline: 2px solid var(--dsw-alias-brand-primary);
-+  outline-offset: -2px;
-+}
-+
-+.cardHead {
-+  display: flex;
-+  align-items: center;
-+  gap: 8px;
-+}
-+
-+.cardName {
-+  font-size: 15px;
-+  font-weight: 600;
-+  line-height: 1.4;
-+}
-+
-+.badge,
-+.inUse {
-+  border-radius: 999px;
-+  padding: 1px 8px;
-+  font-size: 11px;
-+  line-height: 17px;
-+  white-space: nowrap;
-+  font-weight: 500;
-+}
-+
-+.badge {
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+.inUse {
-+  margin-left: auto;
-+  background: var(--dsw-alias-label-primary);
-+  color: var(--dsw-alias-bg-layer-3);
-+}
-+
-+/* Bounded to four lines. A mode publishes its own description, so one long
-+   one would otherwise stretch every card in its grid row (`.cards` sizes rows
-+   1fr). Clamping is CSS alone: the whole text stays in the DOM for assistive
-+   tech, and the card offers it on hover when it is actually cut off. The
-+   description does not grow to fill the card — `-webkit-line-clamp` on a
-+   flex-stretched box leaves the clamp height and the box height disagreeing,
-+   so `.cardId` takes the free space with an auto margin instead. */
-+.cardDesc {
-+  font-size: 13px;
-+  line-height: 1.55;
-+  color: var(--dsw-alias-label-secondary);
-+  min-height: 42px;
-+  display: -webkit-box;
-+  -webkit-box-orient: vertical;
-+  -webkit-line-clamp: 4;
-+  overflow: hidden;
-+  /* A user-authored description may carry an unbreakable path or URL. */
-+  overflow-wrap: anywhere;
-+}
-+
-+.cardId {
-+  margin-top: auto;
-+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-+  font-size: 11px;
-+  color: var(--dsw-alias-label-dimmed);
-+}
-+
-+.cardFoot {
-+  display: flex;
-+  justify-content: flex-end;
-+  gap: 2px;
-+  padding: 6px 10px;
-+  border-top: 1px solid var(--dsw-alias-border-l2);
-+}
-+
-+/* Icon-only actions: the label rides `title` so the row stays quiet until
-+   someone reaches for it. */
-+.iconButton {
-+  position: relative;
-+  appearance: none;
-+  border: 0;
-+  border-radius: 7px;
-+  padding: 6px;
-+  background: none;
-+  color: var(--dsw-alias-label-tertiary);
-+  cursor: pointer;
-+  display: inline-flex;
-+  align-items: center;
-+}
-+
-+.iconButton:disabled {
-+  opacity: 0.4;
-+  cursor: default;
-+}
-+
-+.iconButton:hover:not(:disabled) {
-+  background: var(--dsw-alias-bg-layer-1);
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.iconButton:focus-visible {
-+  outline: 2px solid var(--dsw-alias-brand-primary);
-+  outline-offset: -1px;
-+}
-+
-+.iconButton::after {
-+  content: attr(data-tip);
-+  position: absolute;
-+  bottom: calc(100% + 6px);
-+  left: 50%;
-+  transform: translateX(-50%);
-+  padding: 3px 8px;
-+  border-radius: 6px;
-+  background: var(--dsw-alias-label-primary);
-+  color: var(--dsw-alias-bg-layer-3);
-+  font-size: 11px;
-+  line-height: 17px;
-+  white-space: nowrap;
-+  opacity: 0;
-+  pointer-events: none;
-+  transition: opacity .12s;
-+}
-+
-+.iconButton:hover::after,
-+.iconButton:focus-visible::after {
-+  opacity: 1;
-+}
-+
-+.iconDanger:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover-danger);
-+  color: var(--dsw-alias-state-error-primary);
-+}
-+
-+/* Where the host has no desktop opener, the row answers with the directory
-+   itself — text to copy, not a control that would spawn into nothing. */
-+.revealedPath {
-+  margin: 0;
-+  padding: 6px 16px 10px;
-+  font-size: 11px;
-+  color: var(--dsw-alias-label-tertiary);
-+  display: flex;
-+  gap: 6px;
-+  align-items: baseline;
-+}
-+
-+.revealedPath code {
-+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-+  color: var(--dsw-alias-label-secondary);
-+  user-select: all;
-+  overflow-wrap: anywhere;
-+}
-+
-+.revealedPathLabel {
-+  white-space: nowrap;
-+}
-+
-+.secondaryButton {
-+  border: none;
-+  border-radius: 7px;
-+  padding: 5px 8px;
-+  background: none;
-+  color: var(--dsw-alias-label-secondary);
-+  font: inherit;
-+  font-size: 12.5px;
-+  cursor: pointer;
-+}
-+
-+
-+.secondaryButton:hover:not(:disabled) {
-+  background: var(--dsw-alias-bg-layer-1);
-+}
-+
-+.secondaryButton:disabled {
-+  opacity: 0.5;
-+  cursor: default;
-+}
-+
-+.field {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 6px;
-+}
-+
-+.fieldLabel {
-+  font-size: 12px;
-+  font-weight: 500;
-+  color: var(--dsw-alias-label-secondary);
-+}
-+
-+.input {
-+  box-sizing: border-box;
-+  padding: 9px 12px;
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 10px;
-+  font: inherit;
-+  font-size: 13px;
-+  background: var(--dsw-alias-bg-layer-1);
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.input:focus {
-+  outline: none;
-+  border-color: var(--dsw-alias-brand-primary);
-+}
-+
-+.input::placeholder {
-+  color: var(--dsw-alias-label-dimmed);
-+}
-+
-+.dialog {
-+  width: min(560px, 100%);
-+}
-+
-+.dialogFields {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 12px;
-+}
-+
-+/* A shipped composition can be long; the dialog scrolls it rather than grow. */
-+.viewerCode {
-+  margin: 0;
-+  padding: 12px;
-+  max-height: min(52vh, 480px);
-+  overflow: auto;
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 10px;
-+  background: var(--dsw-alias-bg-layer-2);
-+  color: var(--dsw-alias-label-secondary);
-+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-+  font-size: 12.5px;
-+  line-height: 1.5;
-+  white-space: pre;
-+  tab-size: 2;
-+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
-+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
-+}
-+
-+.error {
-+  margin: 0;
-+  font-size: 12px;
-+  color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.deleteDialog {
-+  width: min(480px, 100%);
-+}
-+
-+.deleteConfirm:not(:disabled) {
-+  border-color: var(--dsw-alias-state-error-primary);
-+  color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.deleteConfirm:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover-danger);
-+}
-+
-+/* The conversational authoring entry, after the card grid in the spot the
-+   create button vacated. Dashed like the Models page's add affordances: it
-+   reads as a place a mode will appear, not a command. */
-+.creatorButton {
-+  box-sizing: border-box;
-+  align-self: stretch;
-+  display: flex;
-+  align-items: center;
-+  justify-content: center;
-+  gap: 6px;
-+  height: 44px;
-+  border: 1px dashed var(--dsw-alias-border-l3);
-+  border-radius: 12px;
-+  font: inherit;
-+  font-size: 14px;
-+  line-height: 22px;
-+  background: transparent;
-+  color: var(--dsw-alias-label-primary);
-+  cursor: pointer;
-+}
-+
-+.creatorButton:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover);
-+}
-+
-+.creatorButton:disabled {
-+  opacity: 0.4;
-+  cursor: default;
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx b/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx
-new file mode 100644
-index 00000000..f4569c7f
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx
-@@ -0,0 +1,302 @@
-+/** Agent Mode settings section backed by Host-owned mode.toml files. */
-+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-+import type { ReactNode } from 'react'
-+import {
-+  Button, IconBrowseOutline16, IconCopyOutline16, IconFolderOpenOutline16, IconTrashOutline16, Modal, Tooltip,
-+} from '@deepseek-ai/dsh-client-ui-primitives'
-+import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
-+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-+import { draftBlocker, type AgentModeSectionState } from './section-store.ts'
-+import { modeDisplayText, type AgentModeSettingsKey } from './locales.ts'
-+import css from './AgentModeSection.module.css'
-+
-+export interface AgentModeSectionInjected {
-+  hooks: { agentModeSection: SnapshotStore<AgentModeSectionState> }
-+  load: () => Promise<void>
-+  viewMode: (modeId: string) => Promise<void>
-+  closeViewer: () => void
-+  beginCopy: (from: string) => void
-+  cancelCopy: () => void
-+  setCopyId: (id: string) => void
-+  setCopyName: (name: string) => void
-+  confirmCopy: () => Promise<void>
-+  openModeFile: (id: string) => Promise<void>
-+  confirmDelete: (id: string | null) => void
-+  remove: () => Promise<void>
-+  makeDefault: (id: string) => Promise<void>
-+}
-+
-+export type AgentModeSectionProps =
-+  PropsRuntime<'settings.section'>
-+  & PropsLocale<'settings.agentMode'>
-+  & InjectFace<AgentModeSectionInjected>
-+
-+interface CopyDialogProps {
-+  state: AgentModeSectionState
-+  t: (key: AgentModeSettingsKey) => string
-+  actions: Pick<AgentModeSectionInjected,
-+    'cancelCopy' | 'confirmCopy' | 'setCopyId' | 'setCopyName'>
-+}
-+
-+function CopyDialog({ state, t, actions }: CopyDialogProps): ReactNode {
-+  const draft = state.copy
-+  const blocker = draft === null ? undefined : draftBlocker(draft, state.rows)
-+  const message = draft === null ? null : draft.error ?? (blocker === undefined ? null : t(blocker))
-+  const source = draft === null ? undefined : state.rows.find(row => row.id === draft.from)
-+  const sourceTitle = source === undefined ? draft?.fromTitle : modeDisplayText(source).name
-+  return (
-+    <Modal
-+      open={draft !== null}
-+      onClose={() => { actions.cancelCopy() }}
-+      title={draft === null ? t('copyTitle') : `${t('copyTitle')} · ${t('copyOf')} ${sourceTitle}`}
-+      closeLabel={t('close')}
-+      description={t('copyIntro')}
-+      className={css.dialog as string}
-+      footer={(
-+        <>
-+          <Button
-+            variant="outline"
-+            disabled={draft?.saving === true}
-+            onClick={() => { actions.cancelCopy() }}
-+          >
-+            {t('cancel')}
-+          </Button>
-+          <Button
-+            disabled={draft === null || draft.saving || blocker !== undefined}
-+            onClick={() => { void actions.confirmCopy() }}
-+          >
-+            {draft?.saving === true ? t('creating') : t('create')}
-+          </Button>
-+        </>
-+      )}
-+    >
-+      {draft === null ? null : (
-+        <div className={css.dialogFields}>
-+          <label className={css.field}>
-+            <span className={css.fieldLabel}>{t('modeId')}</span>
-+            <input
-+              className={css.input}
-+              value={draft.id}
-+              autoFocus
-+              spellCheck={false}
-+              placeholder={t('modeIdPlaceholder')}
-+              onChange={(event) => { actions.setCopyId(event.target.value) }}
-+            />
-+          </label>
-+          <label className={css.field}>
-+            <span className={css.fieldLabel}>{t('displayName')}</span>
-+            <input
-+              className={css.input}
-+              value={draft.name}
-+              spellCheck={false}
-+              placeholder={t('displayNamePlaceholder')}
-+              onChange={(event) => { actions.setCopyName(event.target.value) }}
-+            />
-+          </label>
-+          {message === null ? null : <p className={css.error} role="alert">{message}</p>}
-+        </div>
-+      )}
-+    </Modal>
-+  )
-+}
-+
-+function CardDescription({ text }: { text: string }): ReactNode {
-+  const ref = useRef<HTMLSpanElement | null>(null)
-+  const [truncated, setTruncated] = useState(false)
-+  useLayoutEffect(() => {
-+    const el = ref.current
-+    /* v8 ignore next -- the ref is attached before layout effects run. */
-+    if (el === null) return
-+    const measure = () => { setTruncated(el.scrollHeight > el.clientHeight) }
-+    measure()
-+    if (typeof ResizeObserver === 'undefined') return
-+    const observer = new ResizeObserver(measure)
-+    observer.observe(el)
-+    return () => { observer.disconnect() }
-+  }, [text])
-+  return (
-+    <Tooltip label={text} side="bottom" delayMs={400} disabled={!truncated} maxWidth={360}>
-+      <span ref={ref} className={css.cardDesc} title="">{text}</span>
-+    </Tooltip>
-+  )
-+}
-+
-+export function AgentModeSection(props: AgentModeSectionProps): ReactNode {
-+  const { useAgentModeSection, t, load } = props
-+  const state = useAgentModeSection(snapshot => snapshot)
-+  useEffect(() => { void load() }, [load])
-+
-+  if (state.status === 'unavailable') return null
-+  if (state.status === 'error') {
-+    const detail = state.error ?? ''
-+    return (
-+      <div className={css.section}>
-+        <p className={css.error} role="alert">{`${t('error')} ${detail}`}</p>
-+        <button type="button" className={css.secondaryButton} onClick={() => { void load() }}>
-+          {t('retry')}
-+        </button>
-+      </div>
-+    )
-+  }
-+
-+  return (
-+    <div className={css.section}>
-+      <h2 className={css.title}>{t('nav')}</h2>
-+      <p className={css.intro}>{t('sectionIntro')}</p>
-+      {state.error === null ? null : <p className={css.error} role="alert">{state.error}</p>}
-+      {([['builtin', t('builtInGroup')], ['user', t('customGroup')]] as const).map(([origin, heading]) => {
-+        const group = state.rows
-+          .filter(row => row.origin === origin)
-+          .map(row => ({ row, text: modeDisplayText(row) }))
-+        if (group.length === 0 && origin === 'builtin') return null
-+        return (
-+          <section className={css.group} key={origin}>
-+            <h3 className={css.groupHead}>{heading}</h3>
-+            {group.length === 0 ? null : (
-+              <ul className={css.cards}>
-+                {group.map(({ row, text }) => (
-+                  <li
-+                    className={row.broken !== undefined
-+                      ? `${css.card} ${css.cardBroken}`
-+                      : row.isDefault ? `${css.card} ${css.cardActive}` : css.card}
-+                    key={row.id}
-+                  >
-+                    <button
-+                      type="button"
-+                      className={css.cardMain}
-+                      aria-pressed={row.isDefault}
-+                      disabled={row.isDefault || row.broken !== undefined}
-+                      aria-label={`${row.broken !== undefined
-+                        ? t('brokenBadge')
-+                        : row.isDefault ? t('inUse') : t('setDefault')}: ${text.name}`}
-+                      title={row.broken ?? (row.isDefault ? t('inUse') : t('setDefault'))}
-+                      onClick={() => { void props.makeDefault(row.id) }}
-+                    >
-+                      <span className={css.cardHead}>
-+                        <span className={css.cardName}>{text.name}</span>
-+                        {row.broken === undefined
-+                          ? null
-+                          : <span className={css.brokenBadge}>{t('brokenBadge')}</span>}
-+                        <span className={css.badge}>
-+                          {row.origin === 'user' ? t('userOrigin') : t('builtIn')}
-+                        </span>
-+                        {row.isDefault ? <span className={css.inUse}>{t('inUse')}</span> : null}
-+                      </span>
-+                      <CardDescription text={text.description ?? t('noDescription')} />
-+                      {row.broken === undefined ? null : (
-+                        <span className={css.cardBrokenReason} role="alert">{row.broken}</span>
-+                      )}
-+                      <code className={css.cardId}>{row.id}</code>
-+                    </button>
-+                    <div className={css.cardFoot}>
-+                      {row.origin === 'builtin' ? (
-+                        <button
-+                          type="button"
-+                          className={css.iconButton}
-+                          data-tip={t('view')}
-+                          aria-label={`${t('view')}: ${text.name}`}
-+                          onClick={() => { void props.viewMode(row.id) }}
-+                        >
-+                          <IconBrowseOutline16 />
-+                        </button>
-+                      ) : (
-+                        <button
-+                          type="button"
-+                          className={css.iconButton}
-+                          data-tip={state.hasDocument ? t('openModeFile') : t('showModeFile')}
-+                          aria-label={`${t('edit')}: ${text.name}`}
-+                          onClick={() => { void props.openModeFile(row.id) }}
-+                        >
-+                          <IconFolderOpenOutline16 />
-+                        </button>
-+                      )}
-+                      <button
-+                        type="button"
-+                        className={css.iconButton}
-+                        disabled={!state.authorable || row.broken !== undefined}
-+                        data-tip={row.broken !== undefined
-+                          ? t('brokenNoCopy')
-+                          : state.authorable ? t('copy') : t('copyUnavailable')}
-+                        aria-label={`${t('copy')}: ${text.name}`}
-+                        onClick={() => { props.beginCopy(row.id) }}
-+                      >
-+                        <IconCopyOutline16 />
-+                      </button>
-+                      {row.origin === 'user' && !row.isDefault ? (
-+                        <button
-+                          type="button"
-+                          className={`${css.iconButton} ${css.iconDanger}`}
-+                          data-tip={t('delete')}
-+                          aria-label={`${t('delete')}: ${text.name}`}
-+                          onClick={() => { props.confirmDelete(row.id) }}
-+                        >
-+                          <IconTrashOutline16 />
-+                        </button>
-+                      ) : null}
-+                    </div>
-+                    {state.revealedPaths[row.id] === undefined ? null : (
-+                      <p className={css.revealedPath}>
-+                        <span className={css.revealedPathLabel}>{t('revealedPathLabel')}</span>
-+                        <code>{state.revealedPaths[row.id]}</code>
-+                      </p>
-+                    )}
-+                  </li>
-+                ))}
-+              </ul>
-+            )}
-+          </section>
-+        )
-+      })}
-+      <Modal
-+        open={state.viewer !== null}
-+        onClose={props.closeViewer}
-+        title={state.viewer === null ? t('viewTitle') : `${t('viewTitle')} · ${state.viewer.title}`}
-+        closeLabel={t('close')}
-+        className={css.dialog as string}
-+        footer={<Button variant="outline" onClick={props.closeViewer}>{t('close')}</Button>}
-+      >
-+        {state.viewer?.status === 'loading' ? <p>{t('viewLoading')}</p> : null}
-+        {state.viewer?.status === 'error'
-+          ? <p className={css.error} role="alert">{`${t('viewError')} ${state.viewer.error ?? ''}`}</p>
-+          : null}
-+        {state.viewer?.status === 'ready'
-+          ? <pre className={css.viewerCode}>{state.viewer.content}</pre>
-+          : null}
-+      </Modal>
-+      <CopyDialog state={state} t={t} actions={{
-+        cancelCopy: props.cancelCopy,
-+        confirmCopy: props.confirmCopy,
-+        setCopyId: props.setCopyId,
-+        setCopyName: props.setCopyName,
-+      }} />
-+      <Modal
-+        open={state.pendingDelete !== null}
-+        onClose={() => { props.confirmDelete(null) }}
-+        title={t('deleteTitle')}
-+        closeLabel={t('close')}
-+        description={t('deleteDescription')}
-+        className={css.deleteDialog as string}
-+        footer={(
-+          <>
-+            <Button
-+              variant="outline"
-+              autoFocus
-+              disabled={state.deleting}
-+              onClick={() => { props.confirmDelete(null) }}
-+            >
-+              {t('cancel')}
-+            </Button>
-+            <Button
-+              variant="outline"
-+              className={css.deleteConfirm as string}
-+              disabled={state.deleting}
-+              onClick={() => { void props.remove() }}
-+            >
-+              {state.deleting ? t('deleting') : t('deleteConfirm')}
-+            </Button>
-+          </>
-+        )}
-+      />
-+    </div>
-+  )
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/ModeMenu.tsx b/packages/client/ui-agent-preset/src/client/ModeMenu.tsx
-new file mode 100644
-index 00000000..4ba85666
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/ModeMenu.tsx
-@@ -0,0 +1,58 @@
-+/** Shared Agent Mode picker. */
-+import {
-+  IconChevronDownOutline14, Menu,
-+} from '@deepseek-ai/dsh-client-ui-primitives'
-+import type { AgentModeOption } from './settings-store.ts'
-+import { modeDisplayText, type AgentModeSettingsKey } from './locales.ts'
-+
-+export interface ModeMenuProps {
-+  options: readonly AgentModeOption[]
-+  selectedId: string
-+  label: string
-+  t: (key: AgentModeSettingsKey) => string
-+  buttonClassName: string | undefined
-+  chevronClassName: string | undefined
-+  disabled: boolean
-+  open: boolean
-+  onOpenChange: (open: boolean) => void
-+  onSelect: (id: string) => void
-+}
-+
-+export function ModeMenu({
-+  options, selectedId, label, t, buttonClassName, chevronClassName,
-+  disabled, open, onOpenChange, onSelect,
-+}: ModeMenuProps) {
-+  return (
-+    <Menu
-+      open={open}
-+      onClose={() => { onOpenChange(false) }}
-+      items={options.map((option) => {
-+        const name = modeDisplayText(option).name
-+        return {
-+          id: option.id,
-+          label: option.origin === 'user' ? `${name} · ${t('userOrigin')}` : name,
-+        }
-+      })}
-+      selectedId={selectedId}
-+      onSelect={(id) => {
-+        onOpenChange(false)
-+        onSelect(id)
-+      }}
-+      align="end"
-+      portal
-+      anchor={(
-+        <button
-+          type="button"
-+          className={buttonClassName}
-+          aria-haspopup="menu"
-+          aria-expanded={open}
-+          disabled={disabled}
-+          onClick={() => { onOpenChange(!open) }}
-+        >
-+          {label}
-+          <IconChevronDownOutline14 className={chevronClassName} />
-+        </button>
-+      )}
-+    />
-+  )
-+}
-diff --git a/packages/client/ui-agent-preset/src/client/mode-wire.ts b/packages/client/ui-agent-preset/src/client/mode-wire.ts
-new file mode 100644
-index 00000000..ea30880a
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/mode-wire.ts
-@@ -0,0 +1,135 @@
-+/** Browser-only adapter from Native Agent Mode semantics to the frozen agentPreset RPC contract. */
-+import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
-+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-+
-+export const AGENT_MODE_SETTINGS_WIRE_NAMESPACE = 'agent-presets'
-+export const AGENT_MODE_SELECTED_WIRE_EVENT = 'agent-preset/selected'
-+
-+export interface AgentModeSummary {
-+  id: string
-+  origin: 'builtin' | 'user'
-+  isDefault: boolean
-+  name?: string
-+  description?: string
-+  broken?: string
-+}
-+
-+export interface AgentModeRoster {
-+  modes: readonly AgentModeSummary[]
-+  authorable: boolean
-+  hasDocument: boolean
-+}
-+
-+export interface AgentModeDocument {
-+  id: string
-+  origin: 'builtin' | 'user'
-+  content: string
-+  name?: string
-+  description?: string
-+}
-+
-+export type AgentModeResult<T> = { ok: true; value: T } | { ok: false; error: string }
-+
-+type WireEnvelope<T> = {
-+  result: { ok: true; value: T } | { ok: false; error: { message: string } }
-+}
-+
-+async function call<T, U>(
-+  request: () => Promise<WireEnvelope<T>>,
-+  project: (value: T) => U,
-+): Promise<AgentModeResult<U>> {
-+  try {
-+    const response = await request()
-+    return response.result.ok
-+      ? { ok: true, value: project(response.result.value) }
-+      : { ok: false, error: response.result.error.message }
-+  } catch (error) {
-+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
-+  }
-+}
-+
-+export interface AgentModeWire {
-+  list: () => Promise<AgentModeResult<AgentModeRoster>>
-+  settingsWritable: () => Promise<AgentModeResult<boolean>>
-+  setDefault: (modeId: string) => Promise<AgentModeResult<void>>
-+  select: (sessionId: SessionId, modeId: string) => Promise<AgentModeResult<string>>
-+  read: (modeId: string) => Promise<AgentModeResult<AgentModeDocument>>
-+  copy: (from: string, modeId: string, name?: string) => Promise<AgentModeResult<string>>
-+  open: (modeId: string) => Promise<AgentModeResult<{ opened: true } | { opened: false; path: string }>>
-+  remove: (modeId: string) => Promise<AgentModeResult<void>>
-+}
-+
-+export function createAgentModeWire(api: IApiClient): AgentModeWire {
-+  return {
-+    list: () => call(
-+      () => api.agentPresets.list({}),
-+      value => ({
-+        modes: value.presets.map(entry => ({
-+          id: entry.id,
-+          origin: entry.trust === 'user' ? 'user' : 'builtin',
-+          isDefault: entry.isDefault,
-+          ...(entry.name === undefined ? {} : { name: entry.name }),
-+          ...(entry.description === undefined ? {} : { description: entry.description }),
-+          ...(entry.broken === undefined ? {} : { broken: entry.broken }),
-+        })),
-+        authorable: value.authorable,
-+        hasDocument: value.hasDocument,
-+      }),
-+    ),
-+    settingsWritable: () => call(
-+      () => api.settings.describe({}),
-+      value => value.writable,
-+    ),
-+    setDefault: modeId => call(
-+      () => api.settings.update({
-+        ns: AGENT_MODE_SETTINGS_WIRE_NAMESPACE,
-+        patch: { default: modeId },
-+      }),
-+      () => undefined,
-+    ),
-+    select: (sessionId, modeId) => call(
-+      () => api.agentPresets.select({ sessionId, agentPreset: modeId }),
-+      value => value.agentPreset,
-+    ),
-+    read: modeId => call(
-+      () => api.agentPresets.read({ agentPreset: modeId }),
-+      value => ({
-+        id: value.agentPreset,
-+        origin: value.trust === 'user' ? 'user' : 'builtin',
-+        content: value.content,
-+        ...(value.name === undefined ? {} : { name: value.name }),
-+        ...(value.description === undefined ? {} : { description: value.description }),
-+      }),
-+    ),
-+    copy: (from, modeId, name) => call(
-+      () => api.agentPresets.copy({
-+        from,
-+        agentPreset: modeId,
-+        ...(name === undefined ? {} : { name }),
-+      }),
-+      value => value.agentPreset,
-+    ),
-+    open: modeId => call(
-+      () => api.agentPresets.openDocument({ agentPreset: modeId }),
-+      value => value,
-+    ),
-+    remove: modeId => call(
-+      () => api.agentPresets.remove({ agentPreset: modeId }),
-+      () => undefined,
-+    ),
-+  }
-+}
-+
-+/** Read the compatibility session projection without leaking its field name into mode UI. */
-+export function modeIdFromSession(session: { agentPreset?: string } | undefined): string | undefined {
-+  return session?.agentPreset
-+}
-+
-+/** Publish a selected mode through the compatibility session-store boundary. */
-+export function recordSessionMode(
-+  sessions: { noteAgentPreset: (sessionId: SessionId, agentPreset: string) => void },
-+  sessionId: SessionId,
-+  modeId: string,
-+): void {
-+  sessions.noteAgentPreset(sessionId, modeId)
-+}
-diff --git a/packages/client/ui-agent-preset/tests/mode-wire.client.spec.ts b/packages/client/ui-agent-preset/tests/mode-wire.client.spec.ts
-new file mode 100644
-index 00000000..0a814a1b
---- /dev/null
-+++ b/packages/client/ui-agent-preset/tests/mode-wire.client.spec.ts
-@@ -0,0 +1,78 @@
-+import { describe, expect, it } from 'vitest'
-+import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
-+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-+import { createAgentModeWire, modeIdFromSession } from '../src/client/mode-wire.ts'
-+
-+const success = (value: unknown) => Promise.resolve({
-+  rpcId: 'r', result: { ok: true as const, value },
-+})
-+
-+describe('the frozen Browser RPC adapter', () => {
-+  it('projects the Native Agent Mode roster without leaking legacy semantics', async () => {
-+    const api = {
-+      agentPresets: {
-+        list: () => success({
-+          presets: [
-+            { id: 'standard', trust: 'system', isDefault: true, name: 'Standard' },
-+            { id: 'mine', trust: 'user', isDefault: false, name: 'Mine' },
-+          ],
-+          authorable: true,
-+          hasDocument: false,
-+        }),
-+      },
-+    } as unknown as IApiClient
-+
-+    const listed = await createAgentModeWire(api).list()
-+    expect(listed).toEqual({
-+      ok: true,
-+      value: {
-+        modes: [
-+          { id: 'standard', origin: 'builtin', isDefault: true, name: 'Standard' },
-+          { id: 'mine', origin: 'user', isDefault: false, name: 'Mine' },
-+        ],
-+        authorable: true,
-+        hasDocument: false,
-+      },
-+    })
-+  })
-+
-+  it('keeps every frozen method name and payload key inside one adapter', async () => {
-+    const calls: { method: string; payload: unknown }[] = []
-+    const api = {
-+      agentPresets: {
-+        list: () => success({ presets: [], authorable: true, hasDocument: false }),
-+        select: (payload: unknown) => { calls.push({ method: 'agentPreset.select', payload }); return success({ agentPreset: 'minimal' }) },
-+        read: (payload: unknown) => { calls.push({ method: 'agentPreset.read', payload }); return success({ agentPreset: 'minimal', trust: 'system', content: 'schema = 1\n' }) },
-+        copy: (payload: unknown) => { calls.push({ method: 'agentPreset.copy', payload }); return success({ agentPreset: 'mine' }) },
-+        openDocument: (payload: unknown) => { calls.push({ method: 'agentPreset.openDocument', payload }); return success({ opened: false, path: '/modes/mine/mode.toml' }) },
-+        remove: (payload: unknown) => { calls.push({ method: 'agentPreset.remove', payload }); return success({}) },
-+      },
-+      settings: {
-+        describe: () => success({ writable: true, hasDocument: true, namespaces: [] }),
-+        update: (payload: unknown) => { calls.push({ method: 'settings.update', payload }); return success({}) },
-+      },
-+    } as unknown as IApiClient
-+    const wire = createAgentModeWire(api)
-+
-+    await wire.select('s1' as SessionId, 'minimal')
-+    await wire.read('minimal')
-+    await wire.copy('minimal', 'mine', 'Mine')
-+    await wire.open('mine')
-+    await wire.remove('mine')
-+    await wire.setDefault('minimal')
-+
-+    expect(calls).toEqual([
-+      { method: 'agentPreset.select', payload: { sessionId: 's1', agentPreset: 'minimal' } },
-+      { method: 'agentPreset.read', payload: { agentPreset: 'minimal' } },
-+      { method: 'agentPreset.copy', payload: { from: 'minimal', agentPreset: 'mine', name: 'Mine' } },
-+      { method: 'agentPreset.openDocument', payload: { agentPreset: 'mine' } },
-+      { method: 'agentPreset.remove', payload: { agentPreset: 'mine' } },
-+      { method: 'settings.update', payload: { ns: 'agent-presets', patch: { default: 'minimal' } } },
-+    ])
-+  })
-+
-+  it('reads session projection only at the compatibility boundary', () => {
-+    expect(modeIdFromSession({ agentPreset: 'composition' })).toBe('composition')
-+    expect(modeIdFromSession(undefined)).toBeUndefined()
-+  })
-+})
-diff --git a/packages/client/ui-primitives/src/TessivumMark.tsx b/packages/client/ui-primitives/src/TessivumMark.tsx
-new file mode 100644
-index 00000000..5b7058f3
---- /dev/null
-+++ b/packages/client/ui-primitives/src/TessivumMark.tsx
-@@ -0,0 +1,20 @@
-+import type { IconProps } from './icons/props.ts'
-+
-+/** Render Tessivum's four-piece open-loop mark. */
-+export function TessivumMark({ size = 24, className }: IconProps) {
-+  return (
-+    <svg
-+      width={size}
-+      height={size}
-+      className={className}
-+      viewBox="0 0 24 24"
-+      fill="currentColor"
-+      aria-hidden="true"
-+    >
-+      <path d="M6 3H21V7H10L6 3Z" />
-+      <path d="M21 8V21H17V12L21 8Z" />
-+      <path d="M16 21H3V17H12L16 21Z" />
-+      <path d="M3 16V8H7V12L3 16Z" />
-+    </svg>
-+  )
-+}
-diff --git a/packages/client/ui-primitives/src/TessivumWordmark.tsx b/packages/client/ui-primitives/src/TessivumWordmark.tsx
-new file mode 100644
-index 00000000..74ef4acd
---- /dev/null
-+++ b/packages/client/ui-primitives/src/TessivumWordmark.tsx
-@@ -0,0 +1,27 @@
-+import type { IconProps } from './icons/props.ts'
-+
-+/** Render Tessivum's mark and custom vector wordmark. */
-+export function TessivumWordmark({ size = 24, className }: IconProps) {
-+  return (
-+    <svg
-+      width={(size * 126) / 24}
-+      height={size}
-+      className={className}
-+      viewBox="0 0 126 24"
-+      fill="none"
-+      aria-hidden="true"
-+    >
-+      <path d="M6 3H21V7H10L6 3Z" fill="currentColor" />
-+      <path d="M21 8V21H17V12L21 8Z" fill="currentColor" />
-+      <path d="M16 21H3V17H12L16 21Z" fill="currentColor" />
-+      <path d="M3 16V8H7V12L3 16Z" fill="currentColor" />
-+      <path
-+        d="M30 6H38M34 6V18 M50 6H42V18H50M42 12H48 M62 6H54V12H62V18H54 M74 6H66V12H74V18H66 M78 6H86M82 6V18M78 18H86 M90 6L94 18L98 6 M102 6V16C102 17.3 102.7 18 104 18H108C109.3 18 110 17.3 110 16V6 M114 18V6L118 12L122 6V18"
-+        stroke="currentColor"
-+        strokeWidth="2"
-+        strokeLinecap="square"
-+        strokeLinejoin="miter"
-+      />
-+    </svg>
-+  )
-+}

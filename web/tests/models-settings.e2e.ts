@@ -24,8 +24,25 @@ async function settingsDialog(harness: RustWebHarness) {
 }
 
 let harness: RustWebHarness | undefined
+let discoveryServer: ReturnType<typeof Bun.serve> | undefined
+
 
 test('models settings configures a dormant provider through the native host', async () => {
+  discoveryServer = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname !== '/v1/models') return new Response(null, { status: 404 })
+      return Response.json({
+        data: [{
+          id: 'acme-discovered',
+          name: 'Acme Discovered',
+          context_window: 65_536,
+          max_output_tokens: 8_192,
+        }],
+      })
+    },
+  })
   harness = await RustWebHarness.launch({
     name: 'models-settings-web-e2e',
     locale: 'zh-CN',
@@ -137,6 +154,12 @@ test('models settings configures a dormant provider through the native host', as
     const name = dialog.getByLabel('显示名称', { exact: true })
     expect(await name.inputValue()).toBe('Acme Gateway')
     await expectGolden(harness, DECLARED_EDIT_EXPECTED)
+    await dialog.getByLabel('API 地址').fill(`http://127.0.0.1:${discoveryServer.port}/v1`)
+    await dialog.getByRole('button', { name: '获取可用模型' }).click()
+    const discovered = harness.page.getByRole('dialog', { name: '选择要添加的模型' })
+    await discovered.getByText('acme-discovered', { exact: true }).waitFor({ timeout: 10_000 })
+    await discovered.getByRole('button', { name: '添加所选' }).click()
+    await dialog.locator('input[value="acme-discovered"]').waitFor({ timeout: 10_000 })
     await protocol.selectOption('anthropic-messages')
     await name.fill('Acme 网关')
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
@@ -167,6 +190,8 @@ test('models settings configures a dormant provider through the native host', as
     harness.assertClean()
   } finally {
     await harness.close()
+    discoveryServer?.stop(true)
+    discoveryServer = undefined
     harness = undefined
   }
 }, 120_000)

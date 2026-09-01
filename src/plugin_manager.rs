@@ -13,8 +13,8 @@ use tokio::{
     sync::mpsc,
 };
 
-use serde::{Deserialize, Serialize};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tessivum_core::{CancellationToken, Entry, EntryId, EntryOptions, EntryTree, RuntimeKind};
@@ -102,6 +102,9 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
                 let lock = ProfileLock::acquire(&profile)?;
                 let transaction = ProfileMutationSnapshot::capture(&profile)?;
                 let prepared = (|| {
+                    if let Some(mutation) = pnpm_request_mutation(&request_args) {
+                        preflight_materialized_candidate(&profile, &mutation)?;
+                    }
                     ensure_profile(&profile)?;
                     let args = route_pnpm_args(&request_args, &profile)
                         .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
@@ -136,22 +139,18 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Err(error) = set_process_group(&mut command) {
-            return Err(
-                restore_pnpm_boundary_failure(&profile, &transaction, false, error).await,
-            );
+            return Err(restore_pnpm_boundary_failure(&profile, &transaction, false, error).await);
         }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                return Err(
-                    restore_pnpm_boundary_failure(
-                        &profile,
-                        &transaction,
-                        false,
-                        BridgeError::Process(format!("could not run pnpm: {error}")),
-                    )
-                    .await,
-                );
+                return Err(restore_pnpm_boundary_failure(
+                    &profile,
+                    &transaction,
+                    false,
+                    BridgeError::Process(format!("could not run pnpm: {error}")),
+                )
+                .await);
             }
         };
         let (sender, mut receiver) = mpsc::channel(8);
@@ -188,21 +187,21 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         let status = match child.wait().await {
             Ok(status) => status,
             Err(error) => {
-                return Err(
-                    restore_pnpm_boundary_failure(
-                        &profile,
-                        &transaction,
-                        true,
-                        BridgeError::Process(format!("could not wait for pnpm: {error}")),
-                    )
-                    .await,
-                );
+                return Err(restore_pnpm_boundary_failure(
+                    &profile,
+                    &transaction,
+                    true,
+                    BridgeError::Process(format!("could not wait for pnpm: {error}")),
+                )
+                .await);
             }
         };
         for task in [stdout_task, stderr_task] {
             let output = task
                 .await
-                .map_err(|error| BridgeError::Process(format!("pnpm output worker failed: {error}")))
+                .map_err(|error| {
+                    BridgeError::Process(format!("pnpm output worker failed: {error}"))
+                })
                 .and_then(|result| {
                     result.map_err(|error| {
                         BridgeError::Process(format!("could not read pnpm output: {error}"))
@@ -213,16 +212,6 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
                     restore_pnpm_boundary_failure(&profile, &transaction, true, error).await,
                 );
             }
-        }
-        let cleanup = tokio::task::spawn_blocking({
-            let profile = profile.clone();
-            move || remove_legacy_package_lock(&profile)
-        })
-        .await
-        .map_err(|error| BridgeError::Process(format!("package-lock cleanup worker failed: {error}")))
-        .and_then(|result| result.map_err(|error| BridgeError::Process(error.to_string())));
-        if let Err(error) = cleanup {
-            return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
         }
         if let Some(error) = failure {
             return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
@@ -258,11 +247,14 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
                 let args = args.clone();
                 move || {
                     validate_pnpm_candidate(&profile, &args)?;
-                    reconcile_profile(&profile, &snapshot, reconciliation)
+                    reconcile_profile(&profile, &snapshot, reconciliation)?;
+                    remove_legacy_package_lock(&profile)
                 }
             })
             .await
-            .map_err(|error| BridgeError::Process(format!("profile reconciliation worker failed: {error}")))
+            .map_err(|error| {
+                BridgeError::Process(format!("profile reconciliation worker failed: {error}"))
+            })
             .and_then(|result| {
                 result.map_err(|error| {
                     BridgeError::Process(format!(
@@ -271,7 +263,9 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
                 })
             });
             if let Err(error) = validated {
-                return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
+                return Err(
+                    restore_pnpm_boundary_failure(&profile, &transaction, true, error).await,
+                );
             }
         }
         Ok(crate::bridge::PnpmRunResult {
@@ -328,7 +322,6 @@ fn validate_pnpm_candidate(profile: &Path, args: &[String]) -> Result<(), Plugin
         _ => Ok(()),
     }
 }
-
 
 async fn pump_pnpm_output<R: AsyncRead + Unpin>(
     mut reader: R,
@@ -582,6 +575,7 @@ pub fn mutate_plugins(
     let transaction = ProfileMutationSnapshot::capture(&profile)?;
     let mut pnpm_started = false;
     let result = (|| {
+        preflight_materialized_candidate(&profile, &mutation)?;
         ensure_profile(&profile)?;
         let snapshot = ProfileSnapshot::capture(&load_profile(&profile, true)?);
         let cwd = env::current_dir().map_err(|error| io_error(".", error))?;
@@ -589,10 +583,15 @@ pub fn mutate_plugins(
             PluginMutation::Add(specifier) => anchor_path_spec(specifier, &cwd)?,
             PluginMutation::Remove(package) => package.clone(),
         };
-        run_generic_mutation_pnpm(&profile, pnpm_arguments(&mutation), &argument, &mut pnpm_started)?;
-        remove_legacy_package_lock(&profile)?;
+        run_generic_mutation_pnpm(
+            &profile,
+            pnpm_arguments(&mutation),
+            &argument,
+            &mut pnpm_started,
+        )?;
         validate_mutation_candidate(&profile, &mutation)?;
-        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation)
+        reconcile_profile(&profile, &snapshot, ReconciliationMode::Mutation)?;
+        remove_legacy_package_lock(&profile)
     })();
     match result {
         Ok(()) => Ok(()),
@@ -1140,7 +1139,8 @@ impl ProfileMutationSnapshot {
 }
 
 fn reject_known_unsupported_mutation(mutation: &PluginMutation) -> Result<(), PluginManagerError> {
-    if matches!(mutation, PluginMutation::Add(specifier) if specifier == "@linxin666/dsh-remote-web-ui@0.3.6") {
+    if matches!(mutation, PluginMutation::Add(specifier) if specifier == "@linxin666/dsh-remote-web-ui@0.3.6")
+    {
         return Err(compatibility_error(
             PLUGIN_DSH_ENGINE_UNSUPPORTED,
             "@linxin666/dsh-remote-web-ui@0.3.6 requires DSH >=0.1.1-rc.1; this host is fixed at 0.1.0-rc.5",
@@ -1165,9 +1165,9 @@ fn run_generic_mutation_pnpm(
         .spawn()
         .map_err(|error| PluginManagerError::Invalid(format!("could not run pnpm: {error}")))?;
     *pnpm_started = true;
-    let status = child
-        .wait()
-        .map_err(|error| PluginManagerError::Invalid(format!("could not wait for pnpm: {error}")))?;
+    let status = child.wait().map_err(|error| {
+        PluginManagerError::Invalid(format!("could not wait for pnpm: {error}"))
+    })?;
     if status.success() {
         return Ok(());
     }
@@ -1251,15 +1251,14 @@ fn restore_profile_node_modules(
     if !scripts_allowed {
         command.arg("--ignore-scripts");
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| PluginManagerError::Invalid(format!("could not run pnpm restoration: {error}")))?;
+    let mut child = command.spawn().map_err(|error| {
+        PluginManagerError::Invalid(format!("could not run pnpm restoration: {error}"))
+    })?;
     let deadline = Instant::now() + PNPM_OPERATION_TIMEOUT;
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| PluginManagerError::Invalid(format!("could not wait for pnpm restoration: {error}")))?
-        {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            PluginManagerError::Invalid(format!("could not wait for pnpm restoration: {error}"))
+        })? {
             return status.success().then_some(()).ok_or_else(|| {
                 PluginManagerError::Invalid(status.code().map_or_else(
                     || "pnpm restoration terminated without an exit code".into(),
@@ -2013,6 +2012,19 @@ fn reconcile_profile(
 ) -> Result<(), PluginManagerError> {
     let mut document = read_profile_document(profile)?;
     let dependencies: BTreeSet<_> = document.dependencies.iter().cloned().collect();
+    if matches!(mode, ReconciliationMode::Mutation)
+        && document.bundles.as_ref() != Some(&snapshot.bundles)
+    {
+        if let Some(names) = document.bundles.as_deref() {
+            let names = names
+                .iter()
+                .filter(|name| dependencies.contains(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let bundles = resolve_profile_bundles(profile, &dependencies, &names)?;
+            validate_bundle_sequence(profile, &bundles)?;
+        }
+    }
     let mut names = match mode {
         ReconciliationMode::Mutation => snapshot.bundles.clone(),
         ReconciliationMode::Restore => document
@@ -2288,22 +2300,54 @@ fn validate_mutation_candidate(
     let PluginMutation::Add(specifier) = mutation else {
         return Ok(());
     };
-    let package = add_package_name(specifier).filter(|name| !name.is_empty()).ok_or_else(|| {
-        compatibility_error(
-            PLUGIN_PACKAGE_ENTRY_INVALID,
-            "the added package name could not be resolved",
-        )
-    })?;
+    let package = add_package_name(specifier)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                "the added package name could not be resolved",
+            )
+        })?;
     validate_candidate_package(profile, package)
+}
+
+fn preflight_materialized_candidate(
+    profile: &Path,
+    mutation: &PluginMutation,
+) -> Result<(), PluginManagerError> {
+    let PluginMutation::Add(specifier) = mutation else {
+        return Ok(());
+    };
+    let Some(package) = add_package_name(specifier) else {
+        return Ok(());
+    };
+    let Some(version) = specifier
+        .strip_prefix(package)
+        .and_then(|specifier| specifier.strip_prefix('@'))
+        .filter(|version| !version.is_empty())
+    else {
+        return Ok(());
+    };
+    let Ok(root) = installed_package_root(profile, package) else {
+        return Ok(());
+    };
+    let Ok(manifest) = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES) else {
+        return Ok(());
+    };
+    if manifest.get("version").and_then(Value::as_str) == Some(version) {
+        validate_dsh_engine(&manifest, package)?;
+    }
+    Ok(())
 }
 
 fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), PluginManagerError> {
     let root = installed_package_root(profile, package).map_err(|error| {
         compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
     })?;
-    let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES).map_err(
-        |error| compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}")),
-    )?;
+    let manifest =
+        read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES).map_err(|error| {
+            compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
+        })?;
     if manifest.get("name").and_then(Value::as_str) != Some(package) {
         return Err(compatibility_error(
             PLUGIN_PACKAGE_ENTRY_INVALID,
@@ -2327,12 +2371,15 @@ fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), Plugi
     })?;
     if let Some(dsh) = dsh {
         if dsh.contains_key("client") {
-            let client = dsh.get("client").and_then(Value::as_object).ok_or_else(|| {
-                compatibility_error(
-                    PLUGIN_CLIENT_ENTRY_INVALID,
-                    format!("{package} dsh.client must be an object"),
-                )
-            })?;
+            let client = dsh
+                .get("client")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    compatibility_error(
+                        PLUGIN_CLIENT_ENTRY_INVALID,
+                        format!("{package} dsh.client must be an object"),
+                    )
+                })?;
             if client.get("platform").and_then(Value::as_str) != Some("web") {
                 return Err(compatibility_error(
                     PLUGIN_CLIENT_ENTRY_INVALID,
@@ -2357,10 +2404,7 @@ fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), Plugi
     let report = PluginRouter::new()
         .inspect(&root, Some(PluginRuntime::LegacyNode))
         .map_err(|error| {
-            compatibility_error(
-                PLUGIN_PACKAGE_ENTRY_INVALID,
-                format!("{package}: {error}"),
-            )
+            compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
         })?;
     validate_declared_inject(&report.inject, package)?;
     validate_bundle_candidate(profile, &root, &manifest, package)
@@ -2369,7 +2413,8 @@ fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), Plugi
 fn validate_dsh_engine(manifest: &Value, package: &str) -> Result<(), PluginManagerError> {
     let Some(dsh) = dsh_declaration(manifest, package).map_err(|error| {
         compatibility_error(PLUGIN_DSH_ENGINE_UNSUPPORTED, format!("{package}: {error}"))
-    })? else {
+    })?
+    else {
         return Ok(());
     };
     let Some(engines) = dsh.get("engines") else {
@@ -2404,7 +2449,8 @@ fn validate_bundle_candidate(
 ) -> Result<(), PluginManagerError> {
     let Some(patch) = bundle_patch(manifest, package).map_err(|error| {
         compatibility_error(PLUGIN_BUNDLE_PATCH_INVALID, format!("{package}: {error}"))
-    })? else {
+    })?
+    else {
         return Ok(());
     };
     let patch_path = safe_join(root, patch).map_err(|error| {
@@ -2445,7 +2491,10 @@ fn validate_bundle_candidate(
         compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
     })?;
     for entry in entries.values() {
-        validate_declared_inject(&entry.options.inject, entry.options.name.as_deref().unwrap_or(package))?;
+        validate_declared_inject(
+            &entry.options.inject,
+            entry.options.name.as_deref().unwrap_or(package),
+        )?;
     }
     Ok(())
 }
@@ -2469,12 +2518,10 @@ fn resolve_package_entry(
 }
 
 fn package_export_entry<'a>(manifest: &'a Value, key: &str) -> Option<&'a str> {
-    manifest
-        .get("exports")
-        .and_then(|exports| match key {
-            "." => export_entry(exports),
-            key => exports.as_object()?.get(key).and_then(export_entry),
-        })
+    manifest.get("exports").and_then(|exports| match key {
+        "." => export_entry(exports),
+        key => exports.as_object()?.get(key).and_then(export_entry),
+    })
 }
 
 fn export_entry(value: &Value) -> Option<&str> {
@@ -2535,7 +2582,9 @@ fn validate_runtime_imports(
         }
         return Err(compatibility_error(
             PLUGIN_RUNTIME_DEPENDENCY_MISSING,
-            format!("{package} imports {import:?} without a runtime dependency, peer, or Host alias"),
+            format!(
+                "{package} imports {import:?} without a runtime dependency, peer, or Host alias"
+            ),
         ));
     }
     Ok(())
@@ -2548,7 +2597,9 @@ fn runtime_dependency_name(specifier: &str) -> Option<&str> {
     let package = if let Some(scoped) = specifier.strip_prefix('@') {
         let slash = scoped.find('/')? + 1;
         let rest = &specifier[slash..];
-        let end = rest.find('/').map_or(specifier.len(), |index| slash + index);
+        let end = rest
+            .find('/')
+            .map_or(specifier.len(), |index| slash + index);
         &specifier[..end]
     } else {
         specifier.split('/').next().unwrap_or_default()
@@ -2571,11 +2622,46 @@ const HOST_MODULE_ALIASES: &[&str] = &[
 ];
 
 const NODE_BUILTIN_MODULES: &[&str] = &[
-    "assert", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram",
-    "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2", "https", "module",
-    "net", "os", "path", "perf_hooks", "process", "punycode", "querystring", "readline", "repl",
-    "stream", "string_decoder", "sys", "timers", "tls", "trace_events", "tty", "url", "util", "v8",
-    "vm", "wasi", "worker_threads", "zlib",
+    "assert",
+    "buffer",
+    "child_process",
+    "cluster",
+    "console",
+    "constants",
+    "crypto",
+    "dgram",
+    "diagnostics_channel",
+    "dns",
+    "domain",
+    "events",
+    "fs",
+    "http",
+    "http2",
+    "https",
+    "module",
+    "net",
+    "os",
+    "path",
+    "perf_hooks",
+    "process",
+    "punycode",
+    "querystring",
+    "readline",
+    "repl",
+    "stream",
+    "string_decoder",
+    "sys",
+    "timers",
+    "tls",
+    "trace_events",
+    "tty",
+    "url",
+    "util",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
+    "zlib",
 ];
 
 fn validate_declared_inject(services: &[String], package: &str) -> Result<(), PluginManagerError> {
@@ -2642,7 +2728,10 @@ fn dsh_engine_supports_baseline(range: &str) -> bool {
 fn dsh_comparator_matches(baseline: &DshVersion, term: &str) -> bool {
     let (operator, version) = [">=", "<=", ">", "<", "=", "^", "~"]
         .into_iter()
-        .find_map(|operator| term.strip_prefix(operator).map(|version| (operator, version)))
+        .find_map(|operator| {
+            term.strip_prefix(operator)
+                .map(|version| (operator, version))
+        })
         .unwrap_or(("=", term));
     let Some(version) = parse_dsh_version(version) else {
         return false;
@@ -2654,24 +2743,34 @@ fn dsh_comparator_matches(baseline: &DshVersion, term: &str) -> bool {
         ">" => comparison.is_gt(),
         "<" => comparison.is_lt(),
         "=" => comparison.is_eq(),
-        "^" => comparison.is_ge() && compare_dsh_versions(baseline, &dsh_caret_upper(&version)).is_lt(),
-        "~" => comparison.is_ge() && compare_dsh_versions(baseline, &dsh_tilde_upper(&version)).is_lt(),
+        "^" => {
+            comparison.is_ge() && compare_dsh_versions(baseline, &dsh_caret_upper(&version)).is_lt()
+        }
+        "~" => {
+            comparison.is_ge() && compare_dsh_versions(baseline, &dsh_tilde_upper(&version)).is_lt()
+        }
         _ => false,
     }
 }
 
 fn parse_dsh_version(value: &str) -> Option<DshVersion> {
-    let (release, prerelease) = value.split_once('-').map_or((value, None), |(release, prerelease)| {
-        (release, (!prerelease.is_empty()).then_some(prerelease.to_owned()))
-    });
+    let (release, prerelease) =
+        value
+            .split_once('-')
+            .map_or((value, None), |(release, prerelease)| {
+                (
+                    release,
+                    (!prerelease.is_empty()).then_some(prerelease.to_owned()),
+                )
+            });
     let mut parts = release.split('.').map(str::parse::<u64>);
-    Some(DshVersion {
-        major: parts.next()??,
-        minor: parts.next()??,
-        patch: parts.next()??,
+    let version = DshVersion {
+        major: parts.next()?.ok()?,
+        minor: parts.next()?.ok()?,
+        patch: parts.next()?.ok()?,
         prerelease,
-    })
-    .filter(|_| parts.next().is_none())
+    };
+    parts.next().is_none().then_some(version)
 }
 
 fn compare_dsh_versions(left: &DshVersion, right: &DshVersion) -> std::cmp::Ordering {
@@ -2718,16 +2817,36 @@ fn compare_prerelease(left: &str, right: &str) -> std::cmp::Ordering {
 
 fn dsh_caret_upper(version: &DshVersion) -> DshVersion {
     if version.major > 0 {
-        DshVersion { major: version.major + 1, minor: 0, patch: 0, prerelease: None }
+        DshVersion {
+            major: version.major + 1,
+            minor: 0,
+            patch: 0,
+            prerelease: None,
+        }
     } else if version.minor > 0 {
-        DshVersion { major: 0, minor: version.minor + 1, patch: 0, prerelease: None }
+        DshVersion {
+            major: 0,
+            minor: version.minor + 1,
+            patch: 0,
+            prerelease: None,
+        }
     } else {
-        DshVersion { major: 0, minor: 0, patch: version.patch + 1, prerelease: None }
+        DshVersion {
+            major: 0,
+            minor: 0,
+            patch: version.patch + 1,
+            prerelease: None,
+        }
     }
 }
 
 fn dsh_tilde_upper(version: &DshVersion) -> DshVersion {
-    DshVersion { major: version.major, minor: version.minor + 1, patch: 0, prerelease: None }
+    DshVersion {
+        major: version.major,
+        minor: version.minor + 1,
+        patch: 0,
+        prerelease: None,
+    }
 }
 
 fn read_json(path: &Path, maximum: u64) -> Result<Value, PluginManagerError> {

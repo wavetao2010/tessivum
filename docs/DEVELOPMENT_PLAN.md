@@ -1,10 +1,10 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容与 Alpha.16 社区插件兼容发布已完成；Phase 7 第一方插件市场计划中
-> 计划校准日期：2026-08-31
-> Tessivum 实现基线：`v0.1.0-alpha.16`
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场与 Phase 8 Remote Access / 通用 Node facade 已完成
+> 计划校准日期：2026-09-01
+> Tessivum 实现基线：`v0.1.0-alpha.19`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
-> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场与 Web 模型配置面
+> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access 与 Web 模型配置面
 
 ## 1. 文档集
 
@@ -16,7 +16,8 @@
 - [Phase 4 品牌、分发与社区市场开发计划](PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)：已完成 Alpha.10 独立品牌/可安装分发与 Alpha.11 `dshmarket@1.29.2` 兼容实施。
 - [Phase 5 原生 Agent Mode 与插件组合开发计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)：已完成 Native Mode、`mode.toml`、Session 级能力隔离和 `agent.cordis.yml` clean cutover。
 - [Phase 6 DSH Profile 兼容与 `tsv` 命令开发计划](PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)：已完成 `dsh.profile.bundles` 权威语义、市场状态闭环、统一插件 mutation 与发行命令别名。
-- [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)：计划中的 Tessivum-owned 市场、确定性更新、新版本等待、旧市场迁移与 Host-owned 重启。
+- [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)：已完成 Tessivum-owned 市场、确定性更新、新版本等待、旧市场迁移与 Host-owned 重启。
+- [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)：通用 Node Host facade、Rust-owned Remote Access、自有最小配对/设备界面及发行门槛已完成。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
@@ -595,7 +596,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.18`，固定 `tessivum-core v0.1.6` / `4c3d7b7769e43e2eb228ebf43d46bef6119c4574`。本版本交付从固定 `dshmarket@1.38.1` MIT 源码派生的 `tessivum-market`，包含来源与许可证、checksum release artifact、旧市场事务迁移、精确 registry 版本更新、Host-owned 重启，以及 Native Rust Host + Bun client + Chromium 的安装/分类/主题/快照恢复场景。Standard/PTC/Minimal/Composition 继续由 Rust Native Mode Registry 解析并按 Session 固化；`mode.toml` 是唯一模式文件，Native/WASM/Legacy Node/Browser 四类插件平面继续保留。冻结 RPC、69 个上游 Chromium 场景加 1 个产品 Market 场景和社区插件回归继续分别以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md)、[`WEB_E2E_PORT_CHECKLIST.md`](WEB_E2E_PORT_CHECKLIST.md) 与 [`PLUGIN_COMPATIBILITY.md`](PLUGIN_COMPATIBILITY.md) 为门槛；这些已实现切片不代表 Agent/LLM 迁移完成。
+当前实现基线为 `v0.1.0-alpha.19`，固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`。本版本交付通用 Legacy Node Host facade，以及 Rust-owned Remote Access：单次配对、持久设备 session、撤销、exact HTTPS authority、默认关闭的 loopback listener 和发行包内固定的 `/remote` 桌面/移动界面。`tessivum-market` 继续保留固定来源、许可证、checksum、旧市场事务迁移、精确版本更新和 Host-owned 重启。Standard/PTC、Browser 与 Legacy Node 三类运行面继续通过同一 Host 状态、generation、取消和审计边界协同。
 
 ## 14.1 Alpha.9 发布记录
 

@@ -1,4 +1,5 @@
 /target/
+/target-linux-*/
 *.db-shm
 *.db-wal
 /web/node_modules/

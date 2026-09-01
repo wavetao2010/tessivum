@@ -1,6 +1,6 @@
 [package]
 name = "tessivum"
-version = "0.1.0-alpha.18"
+version = "0.1.0-alpha.19"
 edition = "2021"
 description = "Independent Rust-native agent harness inspired by DeepSeek Harness and Cordis"
 repository = "https://github.com/wavetao2010/tessivum"
@@ -11,9 +11,9 @@ default-run = "tessivum"
 build = "build.rs"
 
 [dependencies]
-tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "4c3d7b7769e43e2eb228ebf43d46bef6119c4574", version = "=0.1.6" }
-tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "4c3d7b7769e43e2eb228ebf43d46bef6119c4574", version = "=0.1.6" }
-tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "4c3d7b7769e43e2eb228ebf43d46bef6119c4574", version = "=0.1.6" }
+tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "bafb893f182d64b7b464b6cf827676f7ac368168", version = "=0.1.6" }
+tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "bafb893f182d64b7b464b6cf827676f7ac368168", version = "=0.1.6" }
+tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "bafb893f182d64b7b464b6cf827676f7ac368168", version = "=0.1.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
@@ -34,6 +34,7 @@ sha1 = "0.10"
 parking_lot = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 url = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 async-stream = "0.3"
 axum = { version = "0.8", features = ["json", "tokio", "ws"] }
 bytes = "1"

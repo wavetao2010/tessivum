@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.18` is a prerelease, not a production-stable API or data-format promise. It ships `tessivum-market`, a Tessivum-owned first-party market derived from `dshmarket@1.38.1`, as a checksum-verified release artifact and migrates older `dshmarket` profile entries transactionally.
+`v0.1.0-alpha.19` is a prerelease, not a production-stable API or data-format promise. It adds Rust-owned Remote Access with one-time pairing, persistent device sessions, exact trusted HTTPS authority, and a built-in `/remote` desktop/mobile surface; Remote Access remains disabled by default and the listener remains loopback-only.
 
 Current implementation foundation:
 
@@ -19,7 +19,7 @@ Current implementation foundation:
 - HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
 - Native/WASM/Browser routing plus a real Legacy Node compat-host over the bounded `cordis.node/v1` bridge and DomainBridge services;
 - Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the frozen upstream `AppWebEntry` source shell;
-- a pnpm-owned plugin profile with ordered Host Bundle authority, exact Loader/Fiber inventory, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, the first-party `tessivum-market`, and verified `dshmarket@1.29.2`, `dsh-better-sidebar@0.16.1`, and `dsh-dream-skin@8.30.1` community lifecycle behavior.
+- a pnpm-owned plugin profile with ordered Host Bundle authority, exact Loader/Fiber inventory, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, the first-party `tessivum-market`, verified `dshmarket@1.29.2`, `dsh-better-sidebar@0.16.1`, and `dsh-dream-skin@8.30.1` community lifecycle behavior, plus versioned Node Host facades and Rust-owned Remote Access.
 
 The frozen DeepSeek Harness `0.1.0-rc.5` baseline remains the compatibility target; the currently implemented slice is:
 
@@ -32,7 +32,8 @@ Full Agent/LLM compatibility is not complete: block/chunk/source/usage wire fide
 
 
 Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distribution-alias gates are recorded in [`docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md`](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md).
-Alpha.17 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
+Alpha.18 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
+Alpha.19-A/B compatibility preflight and Legacy Host facades plus Alpha.19-C/D Rust-owned Remote Access and its built-in pairing/device surface are complete. Contracts, security boundaries, exact compatibility status, Browser evidence, and release gates are recorded in [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md).
 
 
 ## Architecture
@@ -131,22 +132,22 @@ tsv --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates the `tessivum` and `tsv` launchers:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.18/install.sh
-sh install.sh 0.1.0-alpha.18
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.19/install.sh
+sh install.sh 0.1.0-alpha.19
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.18 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.18), verify the checksum, then run either packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.19 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.19), verify the checksum, then run either packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.18-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.18-$target.tar.gz"
-"./tessivum-0.1.0-alpha.18-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.18-$target/bin/tsv" --version
+sha256sum -c "tessivum-0.1.0-alpha.19-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.19-$target.tar.gz"
+"./tessivum-0.1.0-alpha.19-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.19-$target/bin/tsv" --version
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -228,6 +229,28 @@ cargo run --release -- web
 
 Open <http://127.0.0.1:3000>. Web can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
 
+### Remote Access
+
+Remote Access is off by default. Tessivum continues to bind only its loopback listener; an operator-owned TLS reverse tunnel exposes an exact HTTPS authority. Tessivum does not install or spawn a tunnel process.
+
+```bash
+export TESSIVUM_REMOTE_ACCESS=1
+export TESSIVUM_REMOTE_TRUSTED_TUNNEL=1
+export TESSIVUM_WEB_TRUSTED_AUTHORITIES=app.example.test
+export TESSIVUM_REMOTE_SESSION_TTL_SECONDS=2592000 # optional; 30-day default
+tessivum web
+```
+
+The tunnel must forward `https://app.example.test` to the loopback listener, preserve that exact `Host` and browser `Origin`, and set `X-Forwarded-Proto: https`. Multiple exact authorities are comma-separated. Remote startup fails if the authority list or trusted-TLS posture is missing; wildcard Hosts, plain remote HTTP, and automatic LAN binding are unsupported.
+
+Open <http://127.0.0.1:3000/remote> locally to generate the short-lived QR/link and manage devices. The link carries its one-time token only in the URL fragment. A successful remote exchange stores an `HttpOnly`, `Secure`, `SameSite=Strict` device cookie and redirects into the existing Tessivum Web shell; API, SSE, and WebSocket requests then pass the same Rust authority middleware. Anonymous remote access is limited to a bounded public-posture read, the pairing exchange, and fixed Browser assets. Remote browsers may read the redacted settings and credential metadata required to render that shell, but Legacy Node Web routes plus settings, credentials, workspace, filesystem, plugin-host activation, and Host shutdown mutations stay loopback-only. Revocation closes live streaming connections promptly and rejects later requests.
+
+Prompt admission is durable: accepted Agent work continues in the local Host after a tab reload, browser disconnect, session expiry, or device revocation. Revocation removes observation and control; it does not silently cancel work. Use the Web **Stop** action before disconnecting when the active run must be cancelled.
+
+Device sessions have a configurable bounded lifetime: `TESSIVUM_REMOTE_SESSION_TTL_SECONDS` accepts 300 seconds through 7,776,000 seconds (90 days) and defaults to 2,592,000 seconds (30 days). Startup rejects values outside that range.
+
+Only hashes and redacted device metadata are persisted in `${TESSIVUM_HOME:-$HOME/.tessivum}/remote-access.json` with mode `0600`. Stop Tessivum before deleting that file to reset every pairing and device. The original `@linxin666/dsh-remote-web-ui@0.3.6` remains an audited, unsupported reference fixture; its Node gate, loopback proxy, tunnel, update, and telemetry authority are not installed.
+
 ### SDK mode
 
 ```bash
@@ -260,7 +283,8 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - Host compatibility npm inputs are exact versions with registry URLs, SHA-512 integrities, file hashes, and licenses in `packaging/host-modules.json`; archives include `THIRD_PARTY_LICENSES.txt` and `release-metadata.json`.
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
-- Checksums detect corruption but are not signatures. Alpha.17 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
+- Remote requests require an explicitly trusted HTTPS authority, same-origin browser metadata, the trusted tunnel marker, and a live Rust-owned device session. Pairing issuance and other Host mutations remain loopback-only.
+- Checksums detect corruption but are not signatures. Alpha.19 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
 
 ## Verification
 
@@ -274,7 +298,7 @@ cd ../plugins/market && bun install --frozen-lockfile && bun run check && bun ru
 cd ../../web && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 1200000
 ```
 
-These gates exercise the Rust-native runtime, the pinned DeepSeek client packages, all 69 source-Web Chromium scenarios plus the native Host first-party Market scenario, Headless and SDK journeys, Extism permissions, persistence, rollback, workspace isolation, and shutdown.
+These gates exercise the Rust-native runtime, the pinned DeepSeek client packages, all 69 source-Web Chromium scenarios plus the first-party Market and Remote Access scenarios, Headless and SDK journeys, Extism permissions, persistence, rollback, workspace isolation, and shutdown.
 
 ## Known Alpha limits
 
@@ -296,7 +320,9 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Plugin compatibility](docs/PLUGIN_COMPATIBILITY.md)
 - [Phase 3 product capability plan](docs/PHASE3_PRODUCT_PLAN.md)
 - [Phase 4 branding, distribution, and dshmarket plan](docs/PHASE4_BRAND_DISTRIBUTION_MARKET_PLAN.md)
+- [Phase 6 DSH Profile compatibility and `tsv` command plan](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)
 - [Phase 7 first-party market and Host restart plan](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)
+- [Phase 8 Remote Access and newer Legacy Host compatibility plan](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)
 - [DeepSeek Harness compatibility baseline](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E port checklist (69 upstream files)](docs/WEB_E2E_PORT_CHECKLIST.md)
 

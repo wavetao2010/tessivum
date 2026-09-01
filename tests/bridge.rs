@@ -17,15 +17,20 @@ use tessivum::{
         AgentStatus, Inbox,
     },
     bridge::{
-        BridgeLimits, BridgeServices, DomainBridge, DomainEventSink, DomainLogger, DomainRequest,
-        LogLevel, WasmEffectivePolicy, WasmPolicyRegistry, AGENTS_SERVICE, CREDENTIALS_SERVICE,
-        LLM_SERVICE, LOGGER_SERVICE, SESSIONS_SERVICE, SETTINGS_SERVICE, SYSTEM_PROMPT_SERVICE,
-        TIMERS_SERVICE, TOOLS_SERVICE,
+        BridgeLimits, BridgeServices, DomainBridge, DomainEventSink, DomainHost, DomainLogger,
+        DomainRequest, LogLevel, WasmEffectivePolicy, WasmPolicyRegistry, AGENTS_SERVICE,
+        AGENT_MODES_SERVICE, COMMANDS_SERVICE, CREDENTIALS_SERVICE, HOST_EVENTS_SERVICE,
+        LLM_SERVICE, LOGGER_SERVICE, MODELS_SERVICE, SESSIONS_SERVICE, SETTINGS_SERVICE,
+        SYSTEM_PROMPT_SERVICE, TIMERS_SERVICE, TOOLS_SERVICE,
     },
     credentials::{Credentials, YamlCredentialFile},
+    host::{HostApi, HostNotification, HostSessionInfo},
     llm::LlmRuntime,
     plugins::ServiceMethodPermission,
-    protocol::{SessionEvent, SessionHeader, SessionId, SESSION_FORMAT_VERSION},
+    protocol::{
+        InitializeParams, InitializeResult, SessionEvent, SessionHeader, SessionId,
+        SessionPromptParams, SessionPromptResult, SessionStatus, SESSION_FORMAT_VERSION,
+    },
     session::{MemorySessionPersistence, Session, SessionPersistence, SessionStore},
     settings::{MemorySettingsProvider, Settings},
     subagent::{NativeSubagentProvider, SubagentService},
@@ -40,6 +45,7 @@ use tessivum_extism::{Capability, CapabilityHandler, CapabilityRequest, PluginEr
 use tessivum_node_bridge::{
     BridgeClient, BridgeError, BridgeHandler, ClientConfig, Frame, FrameKind,
 };
+use tokio::sync::broadcast;
 
 fn bridge_services() -> (BridgeServices, ToolRuntime, SystemPrompt, SessionStore) {
     let tools = ToolRuntime::new();
@@ -233,6 +239,199 @@ impl DomainEventSink for EchoEvents {
     ) -> Result<serde_json::Value, TessivumError> {
         Ok(json!({"event": event, "payload": payload}))
     }
+}
+
+struct FacadeHost {
+    notices: broadcast::Sender<HostNotification>,
+    events: Vec<SessionEvent>,
+}
+
+#[async_trait]
+impl HostApi for FacadeHost {
+    async fn initialize(
+        &self,
+        _params: InitializeParams,
+    ) -> Result<InitializeResult, TessivumError> {
+        unreachable!("not used by this test")
+    }
+
+    async fn prompt(
+        &self,
+        _params: SessionPromptParams,
+    ) -> Result<SessionPromptResult, TessivumError> {
+        unreachable!("not used by this test")
+    }
+
+    async fn cancel(
+        &self,
+        _session: SessionId,
+        _cause: tessivum::agent::AgentCancelCause,
+    ) -> Result<bool, TessivumError> {
+        Ok(true)
+    }
+
+    async fn events(
+        &self,
+        _session: SessionId,
+        _from_seq: u64,
+    ) -> Result<Vec<SessionEvent>, TessivumError> {
+        Ok(self.events.clone())
+    }
+
+    async fn status(&self, _session: SessionId) -> Result<Option<SessionStatus>, TessivumError> {
+        Ok(Some(SessionStatus::Idle))
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
+        Ok(vec![HostSessionInfo {
+            session_id: SessionId::from("session-1"),
+            workspace_id: None,
+            created_at: 1,
+            updated_at: 6,
+            running: false,
+            cwd: Some("/tmp/project".into()),
+            parent_session: None,
+            origin: None,
+            agent_mode: None,
+            event_count: self.events.len() as u64,
+            blank: false,
+        }])
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<HostNotification> {
+        self.notices.subscribe()
+    }
+
+    async fn shutdown(&self) -> Result<(), TessivumError> {
+        Ok(())
+    }
+}
+
+fn facade_event(seq: u64, event_type: &str) -> SessionEvent {
+    SessionEvent {
+        event_type: event_type.into(),
+        seq,
+        time: seq + 1,
+        data: json!({}),
+        ignorable: None,
+        source_event_seqs: None,
+        surface_op: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn product_facades_use_the_bound_host_and_remain_node_only() {
+    let (notices, _) = broadcast::channel(8);
+    let host = Arc::new(FacadeHost {
+        notices,
+        events: vec![
+            facade_event(0, "turn/start"),
+            facade_event(1, "user/message"),
+            facade_event(2, "turn/end"),
+            facade_event(3, "turn/start"),
+            facade_event(4, "assistant/message"),
+            facade_event(5, "turn/end"),
+        ],
+    });
+    let domain_host = DomainHost::new();
+    domain_host.bind(host).unwrap();
+    let (services, _, _, _) = bridge_services();
+    let bridge = DomainBridge::new(services.with_domain_host(domain_host)).unwrap();
+    bridge.attach_client(disconnected_client(21), 21).unwrap();
+
+    let listed = bridge
+        .dispatch(
+            21,
+            DomainRequest {
+                service: SESSIONS_SERVICE.into(),
+                method: "list".into(),
+                params: json!({}),
+            },
+        )
+        .unwrap();
+    assert_eq!(listed["items"][0]["sessionId"], "session-1");
+    assert_eq!(listed["items"][0]["blank"], false);
+
+    let history = bridge
+        .dispatch(
+            21,
+            DomainRequest {
+                service: SESSIONS_SERVICE.into(),
+                method: "history".into(),
+                params: json!({"sessionId": "session-1", "maxMessages": 1}),
+            },
+        )
+        .unwrap();
+    assert_eq!(history["hasMore"], true);
+    assert_eq!(history["events"][0]["event"]["seq"], 3);
+
+    for service in [AGENT_MODES_SERVICE, MODELS_SERVICE] {
+        assert!(bridge
+            .dispatch(
+                21,
+                DomainRequest {
+                    service: service.into(),
+                    method: "list".into(),
+                    params: json!({}),
+                },
+            )
+            .is_ok());
+    }
+    assert_eq!(
+        bridge
+            .dispatch(
+                21,
+                DomainRequest {
+                    service: COMMANDS_SERVICE.into(),
+                    method: "list".into(),
+                    params: json!({"sessionId": "session-1"}),
+                },
+            )
+            .unwrap(),
+        json!({"items": []})
+    );
+    assert_eq!(
+        bridge
+            .dispatch(
+                21,
+                DomainRequest {
+                    service: HOST_EVENTS_SERVICE.into(),
+                    method: "subscribe".into(),
+                    params: json!({
+                        "registrationId": "mux-events",
+                        "callbackId": "on-event",
+                        "stream": "mux",
+                    }),
+                },
+            )
+            .unwrap(),
+        json!({"registrationId": "mux-events"})
+    );
+    assert_eq!(
+        bridge
+            .dispatch(
+                21,
+                DomainRequest {
+                    service: HOST_EVENTS_SERVICE.into(),
+                    method: "unsubscribe".into(),
+                    params: json!({"registrationId": "mux-events"}),
+                },
+            )
+            .unwrap(),
+        json!({"removed": true})
+    );
+    assert_eq!(
+        remote_code(
+            bridge
+                .dispatch_native(DomainRequest {
+                    service: SESSIONS_SERVICE.into(),
+                    method: "list".into(),
+                    params: json!({}),
+                })
+                .unwrap_err(),
+        ),
+        "REGISTRATION_DENIED"
+    );
 }
 
 #[test]

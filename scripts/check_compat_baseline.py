@@ -16,7 +16,7 @@ CORDIS = Path(os.environ.get("TESSIVUM_CORDIS_SOURCE", WORKSPACE / "upstream/cor
 CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
-CORE_SHA = "4c3d7b7769e43e2eb228ebf43d46bef6119c4574"
+CORE_SHA = "bafb893f182d64b7b464b6cf827676f7ac368168"
 BASELINE = PROJECT / "docs/COMPATIBILITY_BASELINE.md"
 CHECKLIST = PROJECT / "docs/WEB_E2E_PORT_CHECKLIST.md"
 README = PROJECT / "README.md"
@@ -182,8 +182,9 @@ def main() -> int:
     check(len(upstream_e2e) == 69, f"upstream Web E2E count changed: {len(upstream_e2e)}", failures)
     check(listed_e2e == upstream_e2e, "Web E2E checklist differs from pinned upstream files", failures)
     check(upstream_e2e <= ported_e2e, "ported Web E2E files omit pinned upstream files", failures)
-    check(ported_e2e - upstream_e2e == {"market.e2e.ts"},
-          "product Web E2E inventory differs from the first-party market scenario", failures)
+    product_e2e = {"market.e2e.ts", "remote-access.e2e.ts"}
+    check(ported_e2e - upstream_e2e == product_e2e,
+          "product Web E2E inventory differs from approved first-party scenarios", failures)
     check(completed_e2e == upstream_e2e, "Web E2E checklist still contains unverified scenarios", failures)
     if failures:
         for failure in failures:
@@ -195,7 +196,7 @@ def main() -> int:
         f"RPC {len(implemented)}/{len(upstream_rpc)} implemented, "
         f"Remote {len(EXPECTED_REMOTES)}, Host events {len(EXPECTED_HOST_EVENTS)}, "
         f"Node kinds {len(node_kinds)}, Web source graph 38 (profile {len(profile_roster)}), "
-        f"Web E2E {len(ported_e2e)} ({len(upstream_e2e)} upstream + first-party market)"
+        f"Web E2E {len(ported_e2e)} ({len(upstream_e2e)} upstream + {len(product_e2e)} first-party)"
     )
     return 0
 

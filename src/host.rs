@@ -46,7 +46,10 @@ use crate::{
         attachments_service_key, decode_inline_image, AttachmentData, AttachmentError,
         AttachmentId, AttachmentInput, AttachmentLimits, AttachmentRef, AttachmentStore,
     },
-    bridge::{BridgeServices, DomainBridge, HostLifecycle, WasmPolicyRegistry},
+    bridge::{
+        BridgeServices, DomainBridge, DomainHost, HostLifecycle, WasmPolicyRegistry,
+        WebListenerRegistry,
+    },
     builtin_tools::{
         BashJobOwners, BuiltinTools, BuiltinToolsConfig, HostToolServices, PersistentShellSessions,
     },
@@ -90,6 +93,7 @@ use crate::{
         register_ask_user_question_tool, HostQuestionRegistration, HostQuestionRegistry,
         QuestionNotification, QuestionRequested, QuestionResolvedNotice,
     },
+    remote_access::RemoteAccess,
     sandbox::Sandbox,
     schedule::{ScheduleOwner, ScheduleOwners, ScheduleTools},
     session::{
@@ -861,6 +865,8 @@ pub struct HostConfig {
     pub legacy_profile: Option<LegacyProfile>,
     pub legacy_host: Option<LegacyHostConfig>,
     pub host_lifecycle: Option<Arc<dyn HostLifecycle>>,
+    pub web_listener: Option<WebListenerRegistry>,
+    pub remote_access: Option<RemoteAccess>,
     pub package_resolver: Option<Arc<dyn PackageResolver>>,
     pub wasm_limits: ResourceLimits,
     pub telemetry: Option<TelemetryCoordinator>,
@@ -894,6 +900,13 @@ impl std::fmt::Debug for HostConfig {
             )
             .field("has_adapter_factory", &self.adapter_factory.is_some())
             .field("has_directory_picker", &self.directory_picker.is_some())
+            .field(
+                "remote_access_enabled",
+                &self
+                    .remote_access
+                    .as_ref()
+                    .is_some_and(RemoteAccess::enabled),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -942,6 +955,8 @@ impl HostConfig {
             package_resolver: None,
             legacy_host: None,
             host_lifecycle: None,
+            web_listener: None,
+            remote_access: None,
             wasm_limits: ResourceLimits::default(),
             telemetry: None,
         }
@@ -2930,6 +2945,7 @@ impl HostRuntime {
             .map(|value| value.clone().publish(&root))
             .transpose()?;
 
+        let domain_host = DomainHost::new();
         let legacy = match (&config.legacy_profile, &config.legacy_host) {
             (Some(profile), _) => Some(profile.clone()),
             (None, Some(host)) => {
@@ -2947,8 +2963,15 @@ impl HostRuntime {
                     PnpmProfileBoundary::new(plugin_profile_root(&config.data_dir))
                         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
                 ));
+                services = services.with_domain_host(domain_host.clone());
                 if let Some(lifecycle) = &config.host_lifecycle {
                     services = services.with_host_lifecycle(Arc::clone(lifecycle));
+                }
+                if let Some(listener) = &config.web_listener {
+                    services = services.with_web_listener(listener.clone());
+                }
+                if let Some(remote_access) = &config.remote_access {
+                    services = services.with_remote_access(remote_access.clone());
                 }
                 Some(
                     LegacyProfile::new(host.command.clone(), host.client.clone(), services)
@@ -3221,6 +3244,9 @@ impl HostRuntime {
         });
         HostHandle::start_service_relays(&inner);
         let handle = HostHandle { inner };
+        domain_host
+            .bind(Arc::new(handle.clone()))
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         handle.start_approval_relay();
         handle.start_question_relay();
         Ok(Self { handle })

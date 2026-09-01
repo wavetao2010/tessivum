@@ -1,5 +1,5 @@
-- dialog "复制 Agent 模式 · 复制自 Minimal":
-  - heading "复制 Agent 模式 · 复制自 Minimal" [level=2]
+- dialog "复制 Agent 模式 · 复制自 极简模式":
+  - heading "复制 Agent 模式 · 复制自 极简模式" [level=2]
   - button "关闭":
     - img
   - paragraph: Host 会在你的 Agent 模式目录中写入新的 mode.toml。标识符将成为目录名，事后无法更改。

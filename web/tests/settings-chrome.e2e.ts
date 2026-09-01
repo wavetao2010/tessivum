@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import type { Page } from 'playwright-core'
 import { expect, test } from 'bun:test'
 import { acknowledgeReloadConnectionLoss, captureStableAria, fixture, RustWebHarness, waitUntil } from './support'
+const SETTINGS_DIALOG_EXPECTED = join(import.meta.dir, 'snapshots/settings-chrome/dialog.expected.md')
+
 
 interface ThemeState {
   attr: boolean
@@ -92,7 +94,7 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
     await waitUntil(() => openDocument.isEnabled(), Boolean, 5_000)
     await harness.page.unroute('**/api/settings.openDocument')
     expect(await captureStableAria(harness.page, '[role="dialog"]')).toBe(
-      (await readFile(await fixture('settings-chrome', 'dialog.expected.md'), 'utf8')).trim(),
+      (await readFile(SETTINGS_DIALOG_EXPECTED, 'utf8')).trim(),
     )
 
     await dialog.getByRole('button', { name: '模型' }).click()

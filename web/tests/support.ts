@@ -1,6 +1,8 @@
 import { expect } from 'bun:test'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
+import { request as httpRequest } from 'node:http'
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https'
+import { connect, createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -83,6 +85,51 @@ async function waitForServer(url: string): Promise<void> {
   throw new Error(`native Tessivum server did not become ready at ${url}`)
 }
 
+async function startRemoteProxy(port: number, backendPort: number, authority: string) {
+  const [key, cert] = await Promise.all([
+    readFile(join(HERE, 'remote.localhost-key.pem')),
+    readFile(join(HERE, 'remote.localhost-cert.pem')),
+  ])
+  const proxy = createHttpsServer({ key, cert }, (incoming, outgoing) => {
+    const upstream = httpRequest({
+      hostname: '127.0.0.1',
+      port: backendPort,
+      method: incoming.method,
+      path: incoming.url,
+      headers: { ...incoming.headers, host: authority, 'x-forwarded-proto': 'https' },
+    }, response => {
+      outgoing.writeHead(response.statusCode ?? 502, response.headers)
+      response.pipe(outgoing)
+    })
+    upstream.on('error', error => {
+      if (!outgoing.headersSent) outgoing.writeHead(502)
+      outgoing.end(error.message)
+    })
+    incoming.pipe(upstream)
+  })
+  proxy.on('upgrade', (request, socket, head) => {
+    const upstream = connect(backendPort, '127.0.0.1', () => {
+      const headers = [`${request.method} ${request.url} HTTP/${request.httpVersion}`]
+      for (let index = 0; index < request.rawHeaders.length; index += 2) {
+        const name = request.rawHeaders[index]
+        if (/^(?:host|x-forwarded-proto)$/i.test(name)) continue
+        headers.push(`${name}: ${request.rawHeaders[index + 1]}`)
+      }
+      headers.push(`Host: ${authority}`, 'X-Forwarded-Proto: https', '', '')
+      upstream.write(headers.join('\r\n'))
+      if (head.length !== 0) upstream.write(head)
+      socket.pipe(upstream).pipe(socket)
+    })
+    upstream.on('error', () => socket.destroy())
+    socket.on('error', () => upstream.destroy())
+  })
+  await new Promise<void>((resolve, reject) => {
+    proxy.once('error', reject)
+    proxy.listen(port, '127.0.0.1', resolve)
+  })
+  return proxy
+}
+
 export class RustWebHarness {
   readonly root: string
   readonly workspace: string
@@ -94,6 +141,7 @@ export class RustWebHarness {
   browser!: Browser
   page!: Page
   private server!: Bun.Subprocess
+  private remoteProxy?: HttpsServer
   private ownsBrowser = true
 
   private constructor(root: string, workspace: string, port: number) {
@@ -109,6 +157,8 @@ export class RustWebHarness {
     const workspace = join(root, 'workspace')
     await mkdir(workspace)
     const harness = new RustWebHarness(root, workspace, await freePort())
+    const remotePort = options.remoteAuthority === undefined ? undefined : await freePort()
+    const remoteAuthority = remotePort === undefined ? undefined : `${options.remoteAuthority}:${remotePort}`
     try {
       await options.beforeStart?.(harness)
       const env: Record<string, string> = {
@@ -120,8 +170,10 @@ export class RustWebHarness {
       if (options.clientPackageRoots !== undefined) {
         env.TESSIVUM_CLIENT_PACKAGES = options.clientPackageRoots.join(delimiter)
       }
-      if (options.remoteAuthority !== undefined) {
-        env.TESSIVUM_WEB_TRUSTED_AUTHORITIES = `${options.remoteAuthority}:${new URL(harness.baseUrl).port}`
+      if (remoteAuthority !== undefined) {
+        env.TESSIVUM_REMOTE_ACCESS ??= '1'
+        env.TESSIVUM_REMOTE_TRUSTED_TUNNEL ??= '1'
+        env.TESSIVUM_WEB_TRUSTED_AUTHORITIES = remoteAuthority
       }
       if (options.replayRecording !== undefined) {
         const replay = join(root, 'replay.jsonl')
@@ -156,6 +208,13 @@ export class RustWebHarness {
         stderr: 'inherit',
       })
       await waitForServer(harness.baseUrl)
+      if (remotePort !== undefined && remoteAuthority !== undefined) {
+        harness.remoteProxy = await startRemoteProxy(
+          remotePort,
+          Number(new URL(harness.baseUrl).port),
+          remoteAuthority,
+        )
+      }
       if (options.deepSeekSearch?.apiKey !== undefined) {
         const credential = await harness.rpc('credentials.set', {
           ref: options.deepSeekSearch.apiKeyEnv,
@@ -172,10 +231,12 @@ export class RustWebHarness {
         harness.browser = options.browser
         harness.ownsBrowser = false
       }
+      const remoteOrigin = remoteAuthority === undefined ? undefined : `https://${remoteAuthority}`
       harness.page = await harness.browser.newPage({
         viewport: options.viewport ?? { width: 1680, height: 1000 },
         locale: options.locale ?? 'en-US',
         timezoneId: options.timeZoneId,
+        ignoreHTTPSErrors: remoteOrigin !== undefined,
       })
       harness.page.on('pageerror', error => harness.pageErrors.push(error.message))
       harness.page.on('console', message => {
@@ -187,10 +248,29 @@ export class RustWebHarness {
           harness.httpErrors.push(`${response.status()} ${response.url()} ${response.request().postData() ?? ''} ${body}`)
         }
       })
-      const pageUrl = options.remoteAuthority === undefined
-        ? harness.baseUrl
-        : `http://${options.remoteAuthority}:${new URL(harness.baseUrl).port}`
-      await harness.page.goto(pageUrl, { waitUntil: 'domcontentloaded' })
+      const pageUrl = remoteOrigin ?? harness.baseUrl
+      if (options.remoteAuthority !== undefined) {
+        const response = await fetch(`${harness.baseUrl}/api/remoteAccess/issuePairing`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ requestId: crypto.randomUUID(), args: {} }),
+        })
+        const body = await response.json() as { ok?: boolean, output?: { token?: string } }
+        if (!response.ok || body.ok !== true || body.output?.token === undefined) {
+          throw new Error(`remote pairing issuance failed: ${JSON.stringify(body)}`)
+        }
+        await harness.page.goto(`${pageUrl}/remote#pair=${body.output.token}`, { waitUntil: 'domcontentloaded' })
+        await harness.page.getByRole('textbox', { name: 'Device name' }).fill(options.name)
+        await harness.page.getByRole('button', { name: 'Pair and open Tessivum' }).click()
+        await Promise.race([
+          harness.page.waitForURL(`${pageUrl}/`),
+          harness.page.getByRole('alert').waitFor().then(async () => {
+            throw new Error(`remote pairing failed: ${await harness.page.getByRole('alert').textContent()}`)
+          }),
+        ])
+      } else {
+        await harness.page.goto(pageUrl, { waitUntil: 'domcontentloaded' })
+      }
       try {
         await harness.page.locator('[class*="frame"]').waitFor({ timeout: 15_000 })
       } catch {
@@ -280,8 +360,8 @@ export class RustWebHarness {
 
   assertClean(): void {
     expect(this.pageErrors).toEqual([])
-    expect(this.warnings).toEqual([])
     expect(this.httpErrors).toEqual([])
+    expect(this.warnings).toEqual([])
   }
 
   async close(): Promise<void> {
@@ -290,6 +370,13 @@ export class RustWebHarness {
         ? this.browser.close()
         : this.page === undefined ? undefined : this.page.close()
       if (close !== undefined) await Promise.race([close.catch(() => {}), Bun.sleep(5_000)])
+    }
+    if (this.remoteProxy !== undefined) {
+      this.remoteProxy.closeAllConnections()
+      await Promise.race([
+        new Promise<void>(resolve => this.remoteProxy?.close(() => resolve())),
+        Bun.sleep(5_000),
+      ])
     }
     if (this.server !== undefined) {
       this.server.kill('SIGINT')

@@ -1,7 +1,7 @@
 {
   "name": "tessivum-web",
   "private": true,
-  "version": "0.1.0-alpha.18",
+  "version": "0.1.0-alpha.19",
   "type": "module",
   "scripts": {
     "audit:source": "bun run scripts/audit-deepseek-source.mjs",
@@ -9,7 +9,7 @@
     "build": "bun run audit:source && bun run build:clients && bun run typecheck && vite build",
     "dev": "vite",
     "test": "bun run test:source-client && bun run test:e2e",
-    "test:e2e": "bun run build && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 120000",
+    "test:e2e": "bun run build && bun test ./tests/migrated.test.ts ./tests/remote-access.e2e.ts --max-concurrency 1 --timeout 120000",
     "test:source-client": "bun run scripts/test-source-client.mjs",
     "typecheck": "bun run scripts/typecheck.mjs"
   },

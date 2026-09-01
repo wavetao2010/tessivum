@@ -40,6 +40,7 @@ pub mod plugins;
 pub mod projection;
 pub mod protocol;
 pub mod question;
+pub mod remote_access;
 pub mod sandbox;
 pub mod schedule;
 pub mod sdk;
