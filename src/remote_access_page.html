@@ -1,0 +1,1393 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Remote access · Tessivum</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      --bg: #f3f3ef;
+      --surface: #fafaf7;
+      --surface-raised: #fffffc;
+      --surface-muted: #ecece6;
+      --border: #d5d6ce;
+      --border-strong: #b8bab0;
+      --text: #242620;
+      --text-muted: #62665c;
+      --text-soft: #777b70;
+      --accent: #245b4b;
+      --accent-hover: #194739;
+      --accent-soft: #e1eee8;
+      --accent-text: #f7fbf8;
+      --danger: #963f34;
+      --danger-hover: #7f3027;
+      --danger-soft: #f5e5e1;
+      --warning: #80540f;
+      --warning-soft: #f3ead7;
+      --shadow: 0 12px 32px rgba(36, 38, 32, 0.07);
+      --focus: #337360;
+      --line: 1px;
+      --radius-sm: 4px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 20px;
+      --space-6: 24px;
+      --space-8: 32px;
+      --space-12: 48px;
+      --control-height: 44px;
+      --page-width: 896px;
+      --transition: 140ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171916;
+        --surface: #1e201d;
+        --surface-raised: #242622;
+        --surface-muted: #292c27;
+        --border: #3d4039;
+        --border-strong: #585c52;
+        --text: #eceee8;
+        --text-muted: #b4b8ae;
+        --text-soft: #989d92;
+        --accent: #82b3a2;
+        --accent-hover: #9ac5b6;
+        --accent-soft: #253d35;
+        --accent-text: #15221d;
+        --danger: #ef9b8e;
+        --danger-hover: #ffb1a5;
+        --danger-soft: #452b27;
+        --warning: #e4bc72;
+        --warning-soft: #3e3423;
+        --shadow: 0 12px 32px rgba(5, 7, 5, 0.24);
+        --focus: #a9d3c4;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input { font: inherit; }
+
+    button,
+    .button-link {
+      min-height: var(--control-height);
+      border: var(--line) solid transparent;
+      border-radius: var(--radius-md);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-2);
+      padding: var(--space-2) var(--space-4);
+      background: var(--accent);
+      color: var(--accent-text);
+      font-weight: 650;
+      line-height: 1.25;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background-color var(--transition), border-color var(--transition), color var(--transition);
+    }
+
+    button:hover:not(:disabled),
+    .button-link:hover { background: var(--accent-hover); }
+
+    button:disabled { cursor: not-allowed; opacity: 0.56; }
+
+    button.secondary,
+    .button-link.secondary {
+      border-color: var(--border-strong);
+      background: transparent;
+      color: var(--text);
+    }
+
+    button.secondary:hover:not(:disabled),
+    .button-link.secondary:hover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    button.danger {
+      border-color: var(--border-strong);
+      background: transparent;
+      color: var(--danger);
+    }
+
+    button.danger:hover:not(:disabled) {
+      border-color: var(--danger);
+      background: var(--danger-soft);
+      color: var(--danger-hover);
+    }
+
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+    [hidden] { display: none !important; }
+
+    .site-header {
+      min-height: 64px;
+      border-bottom: var(--line) solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: 0 max(var(--space-4), calc((100vw - var(--page-width)) / 2));
+      background: var(--surface);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      width: 20px;
+      height: 20px;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: var(--space-1);
+      transform: rotate(45deg);
+    }
+
+    .brand-mark span { border: var(--line) solid var(--accent); background: var(--accent-soft); }
+
+    .header-context {
+      border-left: var(--line) solid var(--border-strong);
+      padding-left: var(--space-3);
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    main {
+      width: min(100%, var(--page-width));
+      margin: 0 auto;
+      padding: var(--space-12) var(--space-4);
+    }
+
+    .view { min-width: 0; }
+    .page-intro { max-width: 656px; margin-bottom: var(--space-8); }
+
+    .eyebrow {
+      margin: 0 0 var(--space-2);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      margin-bottom: var(--space-3);
+      font-size: clamp(28px, 5vw, 40px);
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+    }
+
+    h2 { margin-bottom: var(--space-1); font-size: 20px; line-height: 1.3; letter-spacing: -0.015em; }
+    h3 { margin-bottom: var(--space-1); font-size: 16px; line-height: 1.35; }
+    .lede, .section-copy, .muted { color: var(--text-muted); }
+
+    .lede {
+      max-width: 608px;
+      margin-bottom: 0;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    .notice {
+      border: var(--line) solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: var(--radius-md);
+      display: flex;
+      align-items: baseline;
+      gap: var(--space-3);
+      margin-bottom: var(--space-6);
+      padding: var(--space-3) var(--space-4);
+      background: var(--surface-raised);
+      box-shadow: var(--shadow);
+    }
+
+    .notice.error { border-left-color: var(--danger); background: var(--danger-soft); }
+
+    .notice-code {
+      flex: none;
+      color: var(--danger);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .notice-message { margin: 0; }
+
+    .loading-panel {
+      min-height: 320px;
+      display: grid;
+      align-content: center;
+      justify-items: start;
+    }
+
+    .loading-line { width: 48px; border-top: 2px solid var(--accent); margin-bottom: var(--space-4); }
+
+    .authority-rail {
+      border-top: var(--line) solid var(--border-strong);
+      border-bottom: var(--line) solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-bottom: var(--space-8);
+    }
+
+    .authority-item { min-width: 0; padding: var(--space-4) var(--space-4) var(--space-4) 0; }
+
+    .authority-item + .authority-item {
+      border-left: var(--line) solid var(--border);
+      padding-left: var(--space-4);
+    }
+
+    .authority-label, .field-label, dt {
+      display: block;
+      color: var(--text-soft);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+
+    .authority-value {
+      display: block;
+      overflow: hidden;
+      margin-top: var(--space-1);
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .section {
+      border-top: var(--line) solid var(--border-strong);
+      padding: var(--space-6) 0 var(--space-8);
+    }
+
+    .section-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-4);
+      margin-bottom: var(--space-6);
+    }
+
+    .section-heading p { margin-bottom: 0; }
+
+    .section-actions {
+      flex: none;
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .empty-state,
+    .pairing-summary {
+      border: var(--line) dashed var(--border-strong);
+      border-radius: var(--radius-md);
+      padding: var(--space-5);
+      background: var(--surface);
+      color: var(--text-muted);
+    }
+
+    .empty-state strong,
+    .pairing-summary strong { display: block; margin-bottom: var(--space-1); color: var(--text); }
+
+    .expired { border-style: solid; border-color: var(--warning); background: var(--warning-soft); }
+
+    .pairing-layout {
+      display: grid;
+      grid-template-columns: minmax(184px, 224px) minmax(0, 1fr);
+      gap: var(--space-6);
+      align-items: start;
+    }
+
+    .qr-frame {
+      aspect-ratio: 1;
+      border: var(--line) solid var(--border);
+      border-radius: var(--radius-lg);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      padding: var(--space-4);
+      background: var(--surface-raised);
+      color: var(--text);
+    }
+
+    .qr-frame svg { display: block; width: 100%; height: 100%; }
+    .pairing-details { min-width: 0; }
+    .ttl { margin-bottom: var(--space-4); color: var(--accent); font-size: 13px; font-weight: 700; }
+
+    .link-block {
+      border: var(--line) solid var(--border);
+      border-radius: var(--radius-md);
+      margin-bottom: var(--space-4);
+      padding: var(--space-3);
+      background: var(--surface-muted);
+    }
+
+    .link-block code {
+      display: block;
+      overflow-wrap: anywhere;
+      margin-top: var(--space-1);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.55;
+      user-select: all;
+    }
+
+    .origins {
+      grid-column: 1 / -1;
+      border-top: var(--line) solid var(--border);
+      margin: 0;
+      padding: var(--space-3) 0 0;
+      list-style: none;
+    }
+
+    .origins li {
+      overflow-wrap: anywhere;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .origins li + li { margin-top: var(--space-1); }
+
+    .device-count {
+      min-width: 28px;
+      border: var(--line) solid var(--border);
+      border-radius: var(--radius-sm);
+      display: inline-flex;
+      justify-content: center;
+      padding: var(--space-1) var(--space-2);
+      background: var(--surface-muted);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .device-list { border-top: var(--line) solid var(--border); margin: 0; padding: 0; list-style: none; }
+    .device-row { border-bottom: var(--line) solid var(--border); padding: var(--space-5) 0; }
+
+    .device-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-4);
+    }
+
+    .device-identity { min-width: 0; }
+    .device-name { overflow-wrap: anywhere; font-size: 16px; font-weight: 700; }
+
+    .device-id {
+      display: block;
+      overflow-wrap: anywhere;
+      margin-top: var(--space-1);
+      color: var(--text-soft);
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+
+    .status-badge {
+      flex: none;
+      border: var(--line) solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: var(--space-1) var(--space-2);
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 750;
+      line-height: 1.35;
+    }
+
+    .status-badge[data-tone="positive"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+    .status-badge[data-tone="warning"] { border-color: var(--warning); background: var(--warning-soft); color: var(--warning); }
+
+    .device-details {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+
+    .device-details div { min-width: 0; }
+
+    dd {
+      overflow-wrap: anywhere;
+      margin: var(--space-1) 0 0;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .device-actions { display: flex; justify-content: flex-end; }
+
+    .device-actions button {
+      min-height: 36px;
+      padding: var(--space-2) var(--space-3);
+      font-size: 13px;
+    }
+
+    .pair-form,
+    .self-panel,
+    .fatal-panel {
+      border: var(--line) solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: var(--space-6);
+      background: var(--surface-raised);
+      box-shadow: var(--shadow);
+    }
+
+    .pair-form { max-width: 560px; }
+
+    .secure-note {
+      border-left: 3px solid var(--accent);
+      margin-bottom: var(--space-6);
+      padding-left: var(--space-3);
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .field { margin-bottom: var(--space-5); }
+    label { display: block; margin-bottom: var(--space-2); color: var(--text); font-weight: 700; }
+
+    input {
+      width: 100%;
+      min-height: var(--control-height);
+      border: var(--line) solid var(--border-strong);
+      border-radius: var(--radius-md);
+      padding: var(--space-2) var(--space-3);
+      background: var(--surface);
+      color: var(--text);
+    }
+
+    input:hover:not(:disabled) { border-color: var(--accent); }
+    input:disabled { cursor: not-allowed; opacity: 0.64; }
+    .field-hint { margin: var(--space-2) 0 0; color: var(--text-soft); font-size: 12px; }
+
+    .form-actions,
+    .self-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+
+    .self-panel { max-width: 720px; }
+    .self-panel .device-row { border-bottom: 0; padding: 0; }
+
+    .self-actions {
+      border-top: var(--line) solid var(--border);
+      margin-top: var(--space-5);
+      padding-top: var(--space-5);
+    }
+
+    .self-actions .danger { margin-left: auto; }
+    .fatal-panel { max-width: 640px; }
+
+    .fatal-code {
+      display: inline-block;
+      border-radius: var(--radius-sm);
+      margin-bottom: var(--space-3);
+      padding: var(--space-1) var(--space-2);
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .fatal-message { margin-bottom: var(--space-5); color: var(--text-muted); font-size: 16px; }
+
+    .copy-source {
+      position: fixed;
+      inset: auto auto 0 -10000px;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+    }
+
+    @media (max-width: 640px) {
+      main { padding-top: var(--space-8); }
+      .authority-rail { grid-template-columns: minmax(0, 1fr); }
+
+      .authority-item,
+      .authority-item + .authority-item {
+        border-left: 0;
+        border-top: var(--line) solid var(--border);
+        padding: var(--space-3) 0;
+      }
+
+      .authority-item:first-child { border-top: 0; }
+      .section-heading, .device-top { align-items: stretch; flex-direction: column; }
+      .section-actions { justify-content: flex-start; }
+      .pairing-layout { grid-template-columns: minmax(0, 1fr); }
+      .qr-frame { width: min(100%, 224px); }
+      .device-details { grid-template-columns: minmax(0, 1fr); }
+      .device-actions { justify-content: flex-start; }
+      .self-actions { align-items: stretch; flex-direction: column; }
+      .self-actions .danger { margin-left: 0; }
+    }
+
+    @media (max-width: 400px) {
+      .site-header { min-height: 56px; }
+      main { padding-inline: var(--space-3); }
+      .section-actions, .form-actions { align-items: stretch; flex-direction: column; }
+
+      .section-actions button,
+      .form-actions button,
+      .self-actions button,
+      .self-actions .button-link { width: 100%; }
+
+      .pair-form, .self-panel, .fatal-panel { padding: var(--space-4); }
+      .notice { align-items: flex-start; flex-direction: column; gap: var(--space-1); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Tessivum home">
+      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+      <span>Tessivum</span>
+    </a>
+    <span class="header-context">Remote access</span>
+  </header>
+
+  <main id="main" aria-busy="true">
+    <div id="notice" class="notice" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <span id="notice-code" class="notice-code" hidden></span>
+      <p id="notice-message" class="notice-message"></p>
+    </div>
+
+    <section id="loading-view" class="view loading-panel" aria-labelledby="loading-title">
+      <div class="loading-line" aria-hidden="true"></div>
+      <p class="eyebrow">Remote access</p>
+      <h1 id="loading-title">Checking this connection</h1>
+      <p class="lede" role="status" aria-live="polite">Loading the current access state…</p>
+    </section>
+
+    <section id="admin-view" class="view" aria-labelledby="admin-title" hidden>
+      <header class="page-intro">
+        <p class="eyebrow">Local authority</p>
+        <h1 id="admin-title">Remote access</h1>
+        <p class="lede">Pair trusted browsers and review every device that can reach this Tessivum instance.</p>
+      </header>
+
+      <div class="authority-rail" aria-label="Remote access status">
+        <div class="authority-item">
+          <span class="authority-label">Access service</span>
+          <span id="admin-enabled" class="authority-value"></span>
+        </div>
+        <div class="authority-item">
+          <span class="authority-label">Trusted tunnel</span>
+          <span id="admin-tunnel" class="authority-value"></span>
+        </div>
+        <div class="authority-item">
+          <span class="authority-label">Authority revision</span>
+          <span id="admin-revision" class="authority-value"></span>
+        </div>
+        <ul id="origin-list" class="origins" aria-label="Advertised origins"></ul>
+      </div>
+
+      <section class="section" aria-labelledby="pairing-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="pairing-heading">Pair a device</h2>
+            <p class="section-copy">Create a short-lived link for the browser you want to trust.</p>
+          </div>
+          <div class="section-actions">
+            <button id="issue-button" type="button">Create pairing link</button>
+          </div>
+        </div>
+
+        <div id="admin-disabled" class="empty-state" hidden>
+          <strong>Pairing is unavailable</strong>
+          Remote access and its trusted tunnel must both be available before a link can be created.
+        </div>
+
+        <div id="pairing-summary" class="pairing-summary"></div>
+
+        <div id="pairing-issued" class="pairing-layout" hidden>
+          <div id="qr-frame" class="qr-frame" role="img" aria-label="Pairing QR code"></div>
+          <div class="pairing-details">
+            <p id="pairing-ttl" class="ttl" role="status" aria-live="polite"></p>
+            <div class="link-block">
+              <span id="pairing-url-label" class="field-label">Public pairing link</span>
+              <code id="pairing-url" aria-labelledby="pairing-url-label"></code>
+            </div>
+            <div class="form-actions">
+              <button id="copy-button" type="button" class="secondary">Copy link</button>
+              <button id="replace-button" type="button">Replace link</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="devices-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="devices-heading">Trusted devices <span id="device-count" class="device-count" aria-label="Device count">0</span></h2>
+            <p class="section-copy">Revocation takes effect for the selected browser on its next request.</p>
+          </div>
+          <div class="section-actions">
+            <button id="revoke-all-button" type="button" class="danger">Revoke all devices</button>
+          </div>
+        </div>
+        <div id="devices-empty" class="empty-state" hidden>
+          <strong>No trusted devices yet</strong>
+          Create a pairing link above, then open it on the device you want to connect.
+        </div>
+        <ul id="device-list" class="device-list" aria-label="Trusted devices"></ul>
+      </section>
+    </section>
+
+    <section id="pair-view" class="view" aria-labelledby="pair-title" hidden>
+      <header class="page-intro">
+        <p class="eyebrow">Secure pairing</p>
+        <h1 id="pair-title">Connect this device</h1>
+        <p class="lede">Choose a recognizable name. Tessivum will use it to identify this browser in the local device list.</p>
+      </header>
+
+      <form id="pair-form" class="pair-form">
+        <p class="secure-note">The pairing token was read from this tab and removed from the address bar. It is not saved by this page.</p>
+        <div id="pair-expired" class="empty-state expired" hidden>
+          <strong>This pairing link has expired</strong>
+          Ask the local Tessivum authority to create a new link.
+        </div>
+        <div id="pair-fields">
+          <div class="field">
+            <label for="device-name">Device name</label>
+            <input id="device-name" name="deviceName" type="text" required autocomplete="off" aria-describedby="device-name-hint">
+            <p id="device-name-hint" class="field-hint">Use a name that distinguishes this browser without including sensitive information.</p>
+          </div>
+          <div class="form-actions">
+            <button id="pair-button" type="submit">Pair and enter Tessivum</button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section id="device-view" class="view" aria-labelledby="device-title" hidden>
+      <header class="page-intro">
+        <p class="eyebrow">Connected device</p>
+        <h1 id="device-title">Remote access is ready</h1>
+        <p class="lede">This browser is trusted by the local Tessivum authority.</p>
+      </header>
+
+      <section class="self-panel" aria-labelledby="self-heading">
+        <h2 id="self-heading">This device</h2>
+        <div id="self-device"></div>
+        <div id="self-empty" class="empty-state" hidden>
+          <strong>No device descriptor is available</strong>
+          This browser does not appear in the current remote access description.
+        </div>
+        <div class="self-actions">
+          <a class="button-link" href="/">Enter Tessivum</a>
+          <button id="disconnect-button" type="button" class="danger">Disconnect this device</button>
+        </div>
+      </section>
+    </section>
+
+    <section id="disconnected-view" class="view" aria-labelledby="disconnected-title" hidden>
+      <header class="page-intro">
+        <p class="eyebrow">Access removed</p>
+        <h1 id="disconnected-title">This device is disconnected</h1>
+        <p class="lede">This browser no longer has remote access. To reconnect it, open a new pairing link created by the local Tessivum authority.</p>
+      </header>
+    </section>
+
+    <section id="fatal-view" class="view" aria-labelledby="fatal-title" hidden>
+      <article class="fatal-panel">
+        <p class="eyebrow">Remote access</p>
+        <h1 id="fatal-title">This connection needs attention</h1>
+        <div id="fatal-code" class="fatal-code"></div>
+        <p id="fatal-message" class="fatal-message"></p>
+        <button id="retry-button" type="button" class="secondary">Try again</button>
+      </article>
+    </section>
+  </main>
+
+  <noscript><p class="fatal-panel">Tessivum Remote Access requires JavaScript.</p></noscript>
+
+  <script>
+    (() => {
+      'use strict'
+
+      const API_ROOT = '/api/remoteAccess/'
+      const SECOND_MS = 1000
+      const REFRESH_MS = 5000
+      const POSITIVE_STATUSES = new Set(['active', 'connected', 'online', 'trusted'])
+      const WARNING_STATUSES = new Set(['expired', 'revoked', 'offline', 'disabled'])
+      const viewIds = ['loading-view', 'admin-view', 'pair-view', 'device-view', 'disconnected-view', 'fatal-view']
+      const byId = id => document.getElementById(id)
+      const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+      class RemoteAccessError extends Error {
+        constructor(code, message, status) {
+          super(message)
+          this.name = 'RemoteAccessError'
+          this.code = code
+          this.status = status
+        }
+      }
+
+      let pairingToken = takePairingToken()
+      let currentDescription = null
+      let currentMode = null
+      let issuedPairing = null
+      let pairingTimer = null
+      let pairingWasExpired = false
+      let refreshTimer = null
+      let refreshInFlight = false
+      let refreshErrorVisible = false
+      let actionBusy = false
+
+      function takePairingToken() {
+        const prefix = '#pair='
+        if (!location.hash.startsWith(prefix)) return null
+
+        const encoded = location.hash.slice(prefix.length)
+        let token = encoded
+        try { token = decodeURIComponent(encoded) } catch (_) { /* The server will reject a malformed token. */ }
+        history.replaceState(null, '', location.pathname + location.search)
+        return token || null
+      }
+
+      function requestId() {
+        const words = crypto.getRandomValues(new Uint32Array(4))
+        return Array.from(words, word => word.toString(16).padStart(8, '0')).join('')
+      }
+
+      async function request(method, args) {
+        const id = requestId()
+        let response
+        try {
+          response = await fetch(API_ROOT + method, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: id, args })
+          })
+        } catch (_) {
+          throw new RemoteAccessError('REMOTE_ACCESS_UNAVAILABLE', 'Tessivum could not be reached from this page.', 0)
+        }
+
+        let body
+        try {
+          body = await response.json()
+        } catch (_) {
+          throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned a response that could not be read.', response.status)
+        }
+
+        if (!body || typeof body !== 'object' || body.requestId !== id) {
+          throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned a response for an unexpected request.', response.status)
+        }
+
+        if (body.ok === false) {
+          const error = body.error
+          if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') {
+            throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned an incomplete remote access error.', response.status)
+          }
+          throw new RemoteAccessError(error.code, error.message, response.status)
+        }
+
+        if (!response.ok || body.ok !== true) {
+          throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned an invalid remote access response.', response.status)
+        }
+
+        return body.output
+      }
+
+      function showView(id) {
+        for (const viewId of viewIds) byId(viewId).hidden = viewId !== id
+        byId('main').setAttribute('aria-busy', id === 'loading-view' ? 'true' : 'false')
+        if (id !== 'admin-view' && id !== 'device-view') {
+          currentMode = null
+          stopRefresh()
+        }
+      }
+
+      function clearNotice() {
+        byId('notice').hidden = true
+        byId('notice').className = 'notice'
+        byId('notice-code').hidden = true
+        byId('notice-code').textContent = ''
+        byId('notice-message').textContent = ''
+      }
+
+      function showNotice(message, code) {
+        const isError = typeof code === 'string' && code.length > 0
+        byId('notice').className = isError ? 'notice error' : 'notice'
+        byId('notice-code').hidden = !isError
+        byId('notice-code').textContent = isError ? code : ''
+        byId('notice-message').textContent = message
+        byId('notice').hidden = false
+      }
+
+      function showActionError(error) {
+        const safe = error instanceof RemoteAccessError
+          ? error
+          : new RemoteAccessError('REMOTE_ACCESS_ERROR', 'The remote access action could not be completed.', 0)
+        showNotice(safe.message, safe.code)
+      }
+
+      function nonEmptyText(value, fallback) {
+        return typeof value === 'string' && value.trim() ? value.trim() : fallback
+      }
+
+      function dateValue(value) {
+        if (typeof value !== 'string' && typeof value !== 'number') return null
+        let numeric = value
+        if (typeof value === 'number' && Number.isFinite(value) && Math.abs(value) < 100000000000) numeric *= SECOND_MS
+        const date = new Date(numeric)
+        return Number.isNaN(date.getTime()) ? null : date
+      }
+
+      function formatDate(value) {
+        const date = dateValue(value)
+        return date ? dateFormatter.format(date) : 'Unavailable'
+      }
+
+      function formatExpiry(value) {
+        const date = dateValue(value)
+        if (!date) return 'Unavailable'
+        return date.getTime() <= Date.now()
+          ? 'Expired · ' + dateFormatter.format(date)
+          : dateFormatter.format(date)
+      }
+
+      function statusTone(status) {
+        const normalized = status.toLowerCase()
+        if (POSITIVE_STATUSES.has(normalized)) return 'positive'
+        if (WARNING_STATUSES.has(normalized)) return 'warning'
+        return 'neutral'
+      }
+
+      function createDetail(label, value) {
+        const wrapper = document.createElement('div')
+        const term = document.createElement('dt')
+        const description = document.createElement('dd')
+        term.textContent = label
+        description.textContent = value
+        wrapper.append(term, description)
+        return wrapper
+      }
+
+      function createDeviceRow(device, includeRevoke) {
+        const row = document.createElement('li')
+        row.className = 'device-row'
+        const top = document.createElement('div')
+        top.className = 'device-top'
+        const identity = document.createElement('div')
+        identity.className = 'device-identity'
+        const name = document.createElement('div')
+        name.className = 'device-name'
+        name.textContent = nonEmptyText(device && device.name, 'Unnamed device')
+        const id = document.createElement('code')
+        id.className = 'device-id'
+        id.textContent = nonEmptyText(device && device.deviceId, 'Device ID unavailable')
+        identity.append(name, id)
+
+        const status = nonEmptyText(device && device.status, 'Unknown')
+        const badge = document.createElement('span')
+        badge.className = 'status-badge'
+        badge.dataset.tone = statusTone(status)
+        badge.textContent = status
+        top.append(identity, badge)
+
+        const details = document.createElement('dl')
+        details.className = 'device-details'
+        details.append(
+          createDetail('Paired', formatDate(device && device.createdAt)),
+          createDetail('Last activity', formatDate(device && device.lastActivityAt)),
+          createDetail('Access expires', formatExpiry(device && device.expiresAt))
+        )
+        row.append(top, details)
+
+        if (includeRevoke) {
+          const actions = document.createElement('div')
+          actions.className = 'device-actions'
+          const button = document.createElement('button')
+          button.type = 'button'
+          button.className = 'danger'
+          button.textContent = 'Revoke device'
+          const deviceId = nonEmptyText(device && device.deviceId, '')
+          button.disabled = !deviceId
+          button.addEventListener('click', () => revokeDevice(deviceId, button))
+          actions.append(button)
+          row.append(actions)
+        }
+
+        return row
+      }
+
+      function sameOrigin(value) {
+        if (typeof value !== 'string') return false
+        try { return new URL(value).origin === location.origin } catch (_) { return false }
+      }
+
+      function requireDescription(output) {
+        if (!output || typeof output !== 'object' || !Array.isArray(output.devices) || !Array.isArray(output.advertisedOrigins)) {
+          throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned an incomplete remote access description.', 200)
+        }
+        return output
+      }
+
+      async function loadDescription() {
+        return requireDescription(await request('describe', {}))
+      }
+
+      function stopRefresh() {
+        if (refreshTimer !== null) clearTimeout(refreshTimer)
+        refreshTimer = null
+      }
+
+      function canRefresh() {
+        return !document.hidden && currentDescription && currentDescription.enabled === true &&
+          (currentMode === 'admin' || currentMode === 'device')
+      }
+
+      function scheduleRefresh() {
+        stopRefresh()
+        if (canRefresh()) refreshTimer = setTimeout(refreshVisibleState, REFRESH_MS)
+      }
+
+      async function refreshVisibleState() {
+        refreshTimer = null
+        if (!canRefresh() || refreshInFlight || actionBusy) {
+          scheduleRefresh()
+          return
+        }
+
+        refreshInFlight = true
+        try {
+          const description = await loadDescription()
+          if (refreshErrorVisible) {
+            clearNotice()
+            refreshErrorVisible = false
+          }
+          renderDescription(description, false)
+        } catch (error) {
+          showActionError(error)
+          refreshErrorVisible = true
+        } finally {
+          refreshInFlight = false
+          scheduleRefresh()
+        }
+      }
+
+      function renderOrigins(origins) {
+        const list = byId('origin-list')
+        list.replaceChildren()
+        const validOrigins = origins.filter(origin => typeof origin === 'string' && origin.trim())
+        if (validOrigins.length === 0) {
+          const item = document.createElement('li')
+          item.textContent = 'No public origin is currently advertised.'
+          list.append(item)
+          return
+        }
+        for (const origin of validOrigins) {
+          const item = document.createElement('li')
+          item.textContent = origin
+          list.append(item)
+        }
+      }
+
+      function pairingExpiry(description) {
+        if (!description.pairing || typeof description.pairing !== 'object') return null
+        return dateValue(description.pairing.expiresAt)
+      }
+
+      function renderPairingSummary(description, pairingAvailable) {
+        const disabled = byId('admin-disabled')
+        const summary = byId('pairing-summary')
+        const issued = byId('pairing-issued')
+        disabled.hidden = pairingAvailable
+
+        if (!pairingAvailable) {
+          stopPairingTimer()
+          issuedPairing = null
+          summary.hidden = true
+          issued.hidden = true
+          return
+        }
+
+        if (issuedPairing) {
+          summary.hidden = true
+          issued.hidden = false
+          byId('pairing-url').textContent = issuedPairing.pairingUrl
+          byId('qr-frame').innerHTML = issuedPairing.qrSvg
+          startPairingTimer()
+          return
+        }
+
+        issued.hidden = true
+        summary.hidden = false
+        summary.className = 'pairing-summary'
+        const expires = pairingExpiry(description)
+        if (pairingWasExpired || (expires && expires.getTime() <= Date.now())) {
+          summary.className = 'pairing-summary expired'
+          summary.textContent = 'The previous pairing link has expired. Create a new link when the device is ready.'
+        } else if (expires) {
+          summary.textContent = 'A pairing window is active until ' + dateFormatter.format(expires) + '. Create a new link to display its URL and QR code here.'
+        } else {
+          summary.textContent = 'No pairing link is active. New links expire automatically and can be used once.'
+        }
+      }
+
+      function renderDevices(devices) {
+        const list = byId('device-list')
+        list.replaceChildren()
+        const validDevices = devices.filter(device => device && typeof device === 'object')
+        byId('device-count').textContent = String(validDevices.length)
+        byId('devices-empty').hidden = validDevices.length !== 0
+        list.hidden = validDevices.length === 0
+        byId('revoke-all-button').disabled = validDevices.length === 0
+        for (const device of validDevices) list.append(createDeviceRow(device, true))
+      }
+
+      function renderAdmin(description) {
+        currentDescription = description
+        const pairingAvailable = description.enabled === true && description.trustedTunnel === true
+        byId('admin-enabled').textContent = description.enabled === true ? 'Available' : 'Unavailable'
+        byId('admin-tunnel').textContent = description.trustedTunnel === true ? 'Trusted' : 'Unavailable'
+        byId('admin-revision').textContent = typeof description.revision === 'string' || typeof description.revision === 'number'
+          ? String(description.revision)
+          : 'Unavailable'
+        renderOrigins(description.advertisedOrigins)
+        byId('issue-button').disabled = !pairingAvailable
+        byId('replace-button').disabled = !pairingAvailable
+        renderPairingSummary(description, pairingAvailable)
+        renderDevices(description.devices)
+        showView('admin-view')
+        currentMode = 'admin'
+        scheduleRefresh()
+      }
+
+      function renderRemoteDevice(description) {
+        currentDescription = description
+        const device = description.devices.find(item => item && typeof item === 'object')
+        const host = byId('self-device')
+        host.replaceChildren()
+        byId('self-empty').hidden = Boolean(device)
+        byId('disconnect-button').disabled = !device
+        if (device) host.append(createDeviceRow(device, false))
+        showView('device-view')
+        currentMode = 'device'
+        scheduleRefresh()
+      }
+
+      function renderDescription(description, clear = true) {
+        if (clear) clearNotice()
+        if (description.advertisedOrigins.some(sameOrigin)) renderRemoteDevice(description)
+        else renderAdmin(description)
+      }
+
+      function renderFatal(error) {
+        const safe = error instanceof RemoteAccessError
+          ? error
+          : new RemoteAccessError('REMOTE_ACCESS_ERROR', 'Remote access could not be loaded.', 0)
+        clearNotice()
+        byId('fatal-code').textContent = safe.code
+        byId('fatal-message').textContent = safe.message
+        byId('retry-button').hidden = safe.code === 'REMOTE_AUTH_REQUIRED'
+        showView('fatal-view')
+      }
+
+      function remainingText(milliseconds) {
+        const totalSeconds = Math.max(0, Math.ceil(milliseconds / SECOND_MS))
+        const hours = Math.floor(totalSeconds / 3600)
+        const minutes = Math.floor((totalSeconds % 3600) / 60)
+        const seconds = totalSeconds % 60
+        if (hours > 0) return hours + ' hr ' + minutes + ' min'
+        if (minutes > 0) return minutes + ' min ' + String(seconds).padStart(2, '0') + ' sec'
+        return seconds + ' sec'
+      }
+
+      function stopPairingTimer() {
+        if (pairingTimer !== null) clearInterval(pairingTimer)
+        pairingTimer = null
+      }
+
+      function expireIssuedPairing() {
+        stopPairingTimer()
+        issuedPairing = null
+        pairingWasExpired = true
+        byId('pairing-url').textContent = ''
+        byId('qr-frame').replaceChildren()
+        byId('copy-button').disabled = true
+        byId('issue-button').textContent = 'Create new link'
+        byId('replace-button').textContent = 'Create new link'
+        renderPairingSummary(currentDescription, true)
+      }
+
+      function updatePairingTimer() {
+        if (!issuedPairing) return
+        const expiry = dateValue(issuedPairing.expiresAt)
+        if (!expiry) {
+          byId('pairing-ttl').textContent = 'Expiry time unavailable'
+          return
+        }
+        const remaining = expiry.getTime() - Date.now()
+        if (remaining <= 0) {
+          expireIssuedPairing()
+          return
+        }
+        byId('pairing-ttl').textContent = 'Expires in ' + remainingText(remaining) + ' · ' + dateFormatter.format(expiry)
+      }
+
+      function startPairingTimer() {
+        stopPairingTimer()
+        byId('copy-button').disabled = false
+        updatePairingTimer()
+        if (issuedPairing) pairingTimer = setInterval(updatePairingTimer, SECOND_MS)
+      }
+
+      function requirePairing(output) {
+        if (!output || typeof output !== 'object' || typeof output.token !== 'string' || !output.token ||
+            typeof output.expiresAt !== 'string' || typeof output.pairingUrl !== 'string' || !output.pairingUrl ||
+            typeof output.qrSvg !== 'string' || !output.qrSvg.startsWith('<svg')) {
+          throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned incomplete pairing details.', 200)
+        }
+        let url
+        try { url = new URL(output.pairingUrl) } catch (_) { url = null }
+        if (!url || url.protocol !== 'https:' || url.pathname !== '/remote' || !url.hash.startsWith('#pair=')) {
+          throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned an invalid public pairing link.', 200)
+        }
+        return { pairingUrl: output.pairingUrl, expiresAt: output.expiresAt, qrSvg: output.qrSvg }
+      }
+
+      async function issuePairing(button) {
+        if (actionBusy) return
+        actionBusy = true
+        clearNotice()
+        const original = button.textContent
+        button.disabled = true
+        button.textContent = 'Creating…'
+        try {
+          issuedPairing = requirePairing(await request('issuePairing', {}))
+          pairingWasExpired = false
+          renderPairingSummary(currentDescription, true)
+          byId('issue-button').textContent = 'Replace link'
+          byId('replace-button').textContent = 'Replace link'
+          showNotice('Pairing link created. It will expire automatically.')
+        } catch (error) {
+          showActionError(error)
+          button.textContent = original
+        } finally {
+          actionBusy = false
+          const available = currentDescription && currentDescription.enabled === true && currentDescription.trustedTunnel === true
+          byId('issue-button').disabled = !available
+          byId('replace-button').disabled = !available
+          scheduleRefresh()
+        }
+      }
+
+      function selectionCopy(text) {
+        const source = document.createElement('textarea')
+        const active = document.activeElement
+        source.className = 'copy-source'
+        source.value = text
+        source.readOnly = true
+        source.setAttribute('aria-hidden', 'true')
+        document.body.append(source)
+        source.focus({ preventScroll: true })
+        source.select()
+        source.setSelectionRange(0, source.value.length)
+        const copied = document.execCommand('copy')
+        source.remove()
+        if (active instanceof HTMLElement) active.focus({ preventScroll: true })
+        return copied
+      }
+
+      async function copyPairingLink() {
+        if (!issuedPairing) return
+        clearNotice()
+        let copied = false
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          try {
+            await navigator.clipboard.writeText(issuedPairing.pairingUrl)
+            copied = true
+          } catch (_) { /* Fall through to a selection-based copy. */ }
+        }
+        if (!copied) {
+          try { copied = selectionCopy(issuedPairing.pairingUrl) } catch (_) { copied = false }
+        }
+        if (copied) showNotice('Pairing link copied to the clipboard.')
+        else showNotice('The pairing link could not be copied. Select the visible link and copy it manually.', 'CLIPBOARD_UNAVAILABLE')
+      }
+
+      async function refreshAfterMutation() {
+        const description = await loadDescription()
+        renderDescription(description)
+      }
+
+      async function revokeDevice(deviceId, button) {
+        if (actionBusy || !deviceId || !window.confirm('Revoke remote access for this device?')) return
+        actionBusy = true
+        stopRefresh()
+        clearNotice()
+        button.disabled = true
+        button.textContent = 'Revoking…'
+        try {
+          await request('revoke', { deviceId })
+          await refreshAfterMutation()
+          showNotice('The device no longer has remote access.')
+        } catch (error) {
+          showActionError(error)
+          button.disabled = false
+          button.textContent = 'Revoke device'
+        } finally {
+          actionBusy = false
+          scheduleRefresh()
+        }
+      }
+
+      async function revokeAllDevices() {
+        if (actionBusy || !window.confirm('Revoke remote access for every trusted device?')) return
+        actionBusy = true
+        stopRefresh()
+        clearNotice()
+        const button = byId('revoke-all-button')
+        button.disabled = true
+        button.textContent = 'Revoking…'
+        try {
+          await request('revokeAll', {})
+          await refreshAfterMutation()
+          showNotice('All trusted devices have been revoked.')
+        } catch (error) {
+          showActionError(error)
+          button.disabled = false
+        } finally {
+          actionBusy = false
+          button.textContent = 'Revoke all devices'
+          scheduleRefresh()
+        }
+      }
+
+      function showPairingView() {
+        clearNotice()
+        byId('pair-expired').hidden = true
+        byId('pair-fields').hidden = false
+        byId('pair-button').disabled = false
+        showView('pair-view')
+        byId('device-name').focus()
+      }
+
+      function expireRemotePairing() {
+        pairingToken = null
+        byId('pair-expired').hidden = false
+        byId('pair-fields').hidden = true
+      }
+
+      async function exchangePairing(event) {
+        event.preventDefault()
+        const form = event.currentTarget
+        if (!pairingToken || !form.reportValidity()) return
+        const button = byId('pair-button')
+        const deviceName = byId('device-name').value.trim()
+        if (!deviceName) {
+          byId('device-name').value = ''
+          byId('device-name').focus()
+          form.reportValidity()
+          return
+        }
+
+        clearNotice()
+        button.disabled = true
+        button.textContent = 'Pairing…'
+        try {
+          const output = await request('exchangePairing', { token: pairingToken, deviceName })
+          if (!output || typeof output !== 'object' || !output.device || typeof output.device !== 'object') {
+            throw new RemoteAccessError('INVALID_RESPONSE', 'Tessivum returned an incomplete paired device.', 200)
+          }
+          pairingToken = null
+          location.replace('/')
+        } catch (error) {
+          showActionError(error)
+          if (error instanceof RemoteAccessError && /EXPIRED/i.test(error.code)) expireRemotePairing()
+          else {
+            button.disabled = false
+            button.textContent = 'Pair and enter Tessivum'
+          }
+        }
+      }
+
+      async function disconnectSelf() {
+        if (actionBusy || !window.confirm('Disconnect this browser from Tessivum?')) return
+        actionBusy = true
+        stopRefresh()
+        clearNotice()
+        const button = byId('disconnect-button')
+        button.disabled = true
+        button.textContent = 'Disconnecting…'
+        try {
+          await request('revokeSelf', {})
+          currentDescription = null
+          showView('disconnected-view')
+        } catch (error) {
+          showActionError(error)
+          button.disabled = false
+          button.textContent = 'Disconnect this device'
+        } finally {
+          actionBusy = false
+          scheduleRefresh()
+        }
+      }
+
+      async function bootstrap() {
+        stopPairingTimer()
+        clearNotice()
+        showView('loading-view')
+        if (pairingToken) {
+          showPairingView()
+          return
+        }
+        try {
+          renderDescription(await loadDescription())
+        } catch (error) {
+          renderFatal(error)
+        }
+      }
+
+      byId('issue-button').addEventListener('click', event => issuePairing(event.currentTarget))
+      byId('replace-button').addEventListener('click', event => issuePairing(event.currentTarget))
+      byId('copy-button').addEventListener('click', copyPairingLink)
+      byId('revoke-all-button').addEventListener('click', revokeAllDevices)
+      byId('pair-form').addEventListener('submit', exchangePairing)
+      byId('disconnect-button').addEventListener('click', disconnectSelf)
+      byId('retry-button').addEventListener('click', bootstrap)
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) stopRefresh()
+        else scheduleRefresh()
+      })
+
+      bootstrap()
+    })()
+  </script>
+</body>
+</html>
