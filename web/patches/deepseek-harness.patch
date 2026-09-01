@@ -497,35 +497,10 @@ index 05dd7841..df02a780 100644
    "version": "0.1.0-rc.5",
    "publishConfig": {
      "access": "public"
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
-new file mode 100644
-index 00000000..6d2cdd81
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
-@@ -0,0 +1,23 @@
-+/* Session-header agent-preset label: static chrome, never a control. */
-+
-+.label {
-+  display: inline-flex;
-+  align-items: center;
-+  gap: 4px;
-+  max-width: 180px;
-+  padding: 0 2px 0 0;
-+  height: 22px;
-+  border-radius: 6px;
-+  background: var(--dsw-alias-fill-tsp-secondary);
-+  font-size: 12px;
-+  line-height: 22px;
-+  color: var(--dsw-alias-label-secondary);
-+  white-space: nowrap;
-+  overflow: hidden;
-+  text-overflow: ellipsis;
-+}
-+
-+.icon {
-+  flex: none;
-+  opacity: 0.7;
-+}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetLabel.module.css b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
+similarity index 100%
+rename from packages/client/ui-agent-preset/src/client/AgentPresetLabel.module.css
+rename to packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx b/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx
 new file mode 100644
 index 00000000..41249bb7
@@ -573,72 +548,10 @@ index 00000000..41249bb7
 +    </span>
 +  )
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
-new file mode 100644
-index 00000000..d0f71343
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
-@@ -0,0 +1,60 @@
-+/* Agent-preset row: title/description plus the preset selector pill. */
-+
-+.row {
-+  display: flex;
-+  align-items: center;
-+  gap: 8px;
-+  padding: 16px 0;
-+  border-bottom: 1px solid var(--dsw-alias-border-l2);
-+}
-+
-+.rowText {
-+  flex: 1;
-+  min-width: 0;
-+  display: flex;
-+  flex-direction: column;
-+  gap: 4px;
-+  padding-right: 48px;
-+}
-+
-+.title {
-+  font-size: 14px;
-+  font-weight: 400;
-+  line-height: 22px;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.desc {
-+  font-size: 12px;
-+  font-weight: 400;
-+  line-height: 18px;
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+.selector {
-+  display: inline-flex;
-+  align-items: center;
-+  gap: 12px;
-+  height: 36px;
-+  padding: 0 14px;
-+  border: none;
-+  border-radius: 18px;
-+  background: var(--dsw-alias-bg-module-platform);
-+  font: inherit;
-+  font-size: 14px;
-+  line-height: 22px;
-+  color: var(--dsw-alias-label-primary);
-+  cursor: pointer;
-+}
-+
-+.selector:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover);
-+}
-+
-+.selector:disabled {
-+  cursor: default;
-+}
-+
-+.chevron {
-+  flex: none;
-+}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetRow.module.css b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
+similarity index 100%
+rename from packages/client/ui-agent-preset/src/client/AgentPresetRow.module.css
+rename to packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx b/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx
 new file mode 100644
 index 00000000..8d5bdf31
@@ -710,131 +623,10 @@ index 00000000..8d5bdf31
 +    'settings.agentMode': AgentModeSettingsKey
 +  }
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
-new file mode 100644
-index 00000000..55fe22e8
---- /dev/null
-+++ b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
-@@ -0,0 +1,119 @@
-+/* Agent-preset chip on the new-session screen, beside the workspace picker.
-+   Geometry mirrors HeroShell's .workspace so the two read as one row. */
-+
-+.seat {
-+  display: inline-flex;
-+  align-items: center;
-+  gap: 4px;
-+  max-width: min(100%, 240px);
-+  min-height: 28px;
-+  padding: 0 8px;
-+  border: none;
-+  border-radius: 16px;
-+  background: transparent;
-+  color: var(--dsw-alias-label-primary);
-+  font-size: 13px;
-+  line-height: 20px;
-+  font-weight: 500;
-+  white-space: nowrap;
-+  overflow: hidden;
-+  text-overflow: ellipsis;
-+  cursor: pointer;
-+}
-+
-+.seat:not(:disabled):hover,
-+.seat[aria-expanded='true'] {
-+  background: var(--dsw-alias-interactive-bg-hover);
-+}
-+
-+.seat:disabled {
-+  cursor: default;
-+  color: var(--dsw-alias-label-quaternary);
-+}
-+
-+.seatIcon {
-+  flex: none;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+/* Introduce cue: the icon eases in on an overshoot-free expo curve (duration
-+   matches INTRO_TEXT_DELAY_MS, so the characters start the moment it lands),
-+   then the name's characters fade up on a stagger (delays set inline per
-+   character). All chars occupy their width from the start, so nothing
-+   reflows mid-run. */
-+.introIcon {
-+  animation: seat-icon-in 0.15s cubic-bezier(0.16, 1, 0.3, 1) both;
-+}
-+
-+@keyframes seat-icon-in {
-+  from {
-+    opacity: 0;
-+    transform: scale(0.5);
-+  }
-+
-+  to {
-+    opacity: 1;
-+    transform: scale(1);
-+  }
-+}
-+
-+/* Wraps the staggered characters into one flex item, so the chip's gap
-+   applies around the name as a whole rather than between characters. */
-+.introText {
-+  display: inline-block;
-+  white-space: pre;
-+}
-+
-+.introChar {
-+  display: inline-block;
-+  white-space: pre;
-+  opacity: 0;
-+  animation: seat-char-in 0.4s ease-out forwards;
-+}
-+
-+@keyframes seat-char-in {
-+  from {
-+    opacity: 0;
-+    transform: translateY(4px);
-+  }
-+
-+  to {
-+    opacity: 1;
-+    transform: none;
-+  }
-+}
-+
-+@media (prefers-reduced-motion: reduce) {
-+  .introIcon,
-+  .introChar {
-+    animation: none;
-+    opacity: 1;
-+  }
-+}
-+
-+.chevron {
-+  flex: none;
-+  color: var(--dsw-alias-label-caption);
-+}
-+
-+/* Menu rows carry the name over its description: the id alone never said what
-+   a preset does, which is why the metadata exists. */
-+.item {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 2px;
-+  max-width: 280px;
-+}
-+
-+.itemName {
-+  font-size: 13px;
-+  line-height: 20px;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.itemDesc {
-+  font-size: 12px;
-+  line-height: 16px;
-+  color: var(--dsw-alias-label-caption);
-+  white-space: normal;
-+}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
+similarity index 100%
+rename from packages/client/ui-agent-preset/src/client/AgentPresetSeat.module.css
+rename to packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx b/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx
 new file mode 100644
 index 00000000..3d61a6c1
@@ -917,421 +709,65 @@ index 00000000..3d61a6c1
 +    />
 +  )
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-new file mode 100644
-index 00000000..a9e1a684
---- /dev/null
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
+similarity index 95%
+rename from packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
+rename to packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
+index 0a8d2fa8..a9e1a684 100644
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
 +++ b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-@@ -0,0 +1,409 @@
-+.section {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 12px;
-+  max-width: 720px;
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.title {
-+  margin: 0;
-+  font-size: 18px;
-+  font-weight: 600;
-+}
-+
-+.intro {
-+  margin: 0;
-+  font-size: 13px;
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
+@@ -18,7 +18,7 @@
+   color: var(--dsw-alias-label-tertiary);
+ }
+ 
+-/* Cards, not rows: a preset is a thing you pick, and the description is the
 +/* Cards, not rows: a mode is a thing you pick, and the description is the
-+   part that tells them apart — a row would bury it beside the actions. */
-+.group {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 10px;
-+}
-+
-+/* Group-to-group breathing room: the section's 12px gap plus 20px reads the
-+   two rosters as separate blocks (32px total). */
-+.group + .group {
-+  margin-top: 20px;
-+}
-+
-+.groupHead {
-+  margin: 0;
-+  font-size: 12px;
-+  font-weight: 600;
-+  letter-spacing: .06em;
-+  text-transform: uppercase;
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+.cards {
-+  list-style: none;
-+  margin: 0;
-+  padding: 0;
-+  display: grid;
-+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
-+  /* Every row the same height, so a short description does not make its card
-+     shorter than the one beside it. */
-+  grid-auto-rows: 1fr;
-+  gap: 12px;
-+}
-+
-+.card {
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 12px;
-+  display: flex;
-+  flex-direction: column;
-+  background: var(--dsw-alias-bg-layer-3);
-+  transition: border-color .16s, background .16s;
-+}
-+
-+
-+.card:hover:not(.cardActive) {
-+  border-color: var(--dsw-alias-label-dimmed);
-+}
-+
+    part that tells them apart — a row would bury it beside the actions. */
+ .group {
+   display: flex;
+@@ -67,13 +67,13 @@
+   border-color: var(--dsw-alias-label-dimmed);
+ }
+ 
+-/* The default preset reads as selected, not merely badged. */
 +/* The default mode reads as selected, not merely badged. */
-+.cardActive {
-+  background: var(--dsw-alias-bg-layer-2);
-+  border-color: var(--dsw-alias-label-primary);
-+}
-+
+ .cardActive {
+   background: var(--dsw-alias-bg-layer-2);
+   border-color: var(--dsw-alias-label-primary);
+ }
+ 
+-/* A broken preset reads as damaged before anything else: the card cannot be
 +/* A broken mode reads as damaged before anything else: the card cannot be
-+   picked, so its border carries the warning the disabled body cannot. */
-+.cardBroken {
-+  border-color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.cardBroken:hover {
-+  border-color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.brokenBadge {
-+  border-radius: 999px;
-+  padding: 1px 8px;
-+  font-size: 11px;
-+  line-height: 17px;
-+  white-space: nowrap;
-+  font-weight: 500;
-+  background: var(--dsw-alias-state-error-primary);
-+  color: var(--dsw-alias-bg-layer-3);
-+}
-+
-+/* The discovery-reported reason, verbatim: it names the file and the fix. */
-+.cardBrokenReason {
-+  font-size: 12px;
-+  line-height: 1.5;
-+  color: var(--dsw-alias-state-error-primary);
-+  overflow-wrap: anywhere;
-+}
-+
+    picked, so its border carries the warning the disabled body cannot. */
+ .cardBroken {
+   border-color: var(--dsw-alias-state-error-primary);
+@@ -102,7 +102,7 @@
+   overflow-wrap: anywhere;
+ }
+ 
+-/* The card body is the control that picks the preset. */
 +/* The card body is the control that picks the mode. */
-+.cardMain {
-+  flex: 1;
-+  appearance: none;
-+  border: 0;
-+  background: none;
-+  font: inherit;
-+  color: inherit;
-+  text-align: left;
-+  cursor: pointer;
-+  display: flex;
-+  flex-direction: column;
-+  gap: 8px;
-+  padding: 14px 16px 12px;
-+  border-radius: 12px 12px 0 0;
-+}
-+
-+.cardMain:disabled {
-+  cursor: default;
-+}
-+
-+.cardMain:focus-visible {
-+  outline: 2px solid var(--dsw-alias-brand-primary);
-+  outline-offset: -2px;
-+}
-+
-+.cardHead {
-+  display: flex;
-+  align-items: center;
-+  gap: 8px;
-+}
-+
-+.cardName {
-+  font-size: 15px;
-+  font-weight: 600;
-+  line-height: 1.4;
-+}
-+
-+.badge,
-+.inUse {
-+  border-radius: 999px;
-+  padding: 1px 8px;
-+  font-size: 11px;
-+  line-height: 17px;
-+  white-space: nowrap;
-+  font-weight: 500;
-+}
-+
-+.badge {
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  color: var(--dsw-alias-label-tertiary);
-+}
-+
-+.inUse {
-+  margin-left: auto;
-+  background: var(--dsw-alias-label-primary);
-+  color: var(--dsw-alias-bg-layer-3);
-+}
-+
+ .cardMain {
+   flex: 1;
+   appearance: none;
+@@ -161,7 +161,7 @@
+   color: var(--dsw-alias-bg-layer-3);
+ }
+ 
+-/* Bounded to four lines. A preset publishes its own description, so one long
 +/* Bounded to four lines. A mode publishes its own description, so one long
-+   one would otherwise stretch every card in its grid row (`.cards` sizes rows
-+   1fr). Clamping is CSS alone: the whole text stays in the DOM for assistive
-+   tech, and the card offers it on hover when it is actually cut off. The
-+   description does not grow to fill the card — `-webkit-line-clamp` on a
-+   flex-stretched box leaves the clamp height and the box height disagreeing,
-+   so `.cardId` takes the free space with an auto margin instead. */
-+.cardDesc {
-+  font-size: 13px;
-+  line-height: 1.55;
-+  color: var(--dsw-alias-label-secondary);
-+  min-height: 42px;
-+  display: -webkit-box;
-+  -webkit-box-orient: vertical;
-+  -webkit-line-clamp: 4;
-+  overflow: hidden;
-+  /* A user-authored description may carry an unbreakable path or URL. */
-+  overflow-wrap: anywhere;
-+}
-+
-+.cardId {
-+  margin-top: auto;
-+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-+  font-size: 11px;
-+  color: var(--dsw-alias-label-dimmed);
-+}
-+
-+.cardFoot {
-+  display: flex;
-+  justify-content: flex-end;
-+  gap: 2px;
-+  padding: 6px 10px;
-+  border-top: 1px solid var(--dsw-alias-border-l2);
-+}
-+
-+/* Icon-only actions: the label rides `title` so the row stays quiet until
-+   someone reaches for it. */
-+.iconButton {
-+  position: relative;
-+  appearance: none;
-+  border: 0;
-+  border-radius: 7px;
-+  padding: 6px;
-+  background: none;
-+  color: var(--dsw-alias-label-tertiary);
-+  cursor: pointer;
-+  display: inline-flex;
-+  align-items: center;
-+}
-+
-+.iconButton:disabled {
-+  opacity: 0.4;
-+  cursor: default;
-+}
-+
-+.iconButton:hover:not(:disabled) {
-+  background: var(--dsw-alias-bg-layer-1);
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.iconButton:focus-visible {
-+  outline: 2px solid var(--dsw-alias-brand-primary);
-+  outline-offset: -1px;
-+}
-+
-+.iconButton::after {
-+  content: attr(data-tip);
-+  position: absolute;
-+  bottom: calc(100% + 6px);
-+  left: 50%;
-+  transform: translateX(-50%);
-+  padding: 3px 8px;
-+  border-radius: 6px;
-+  background: var(--dsw-alias-label-primary);
-+  color: var(--dsw-alias-bg-layer-3);
-+  font-size: 11px;
-+  line-height: 17px;
-+  white-space: nowrap;
-+  opacity: 0;
-+  pointer-events: none;
-+  transition: opacity .12s;
-+}
-+
-+.iconButton:hover::after,
-+.iconButton:focus-visible::after {
-+  opacity: 1;
-+}
-+
-+.iconDanger:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover-danger);
-+  color: var(--dsw-alias-state-error-primary);
-+}
-+
-+/* Where the host has no desktop opener, the row answers with the directory
-+   itself — text to copy, not a control that would spawn into nothing. */
-+.revealedPath {
-+  margin: 0;
-+  padding: 6px 16px 10px;
-+  font-size: 11px;
-+  color: var(--dsw-alias-label-tertiary);
-+  display: flex;
-+  gap: 6px;
-+  align-items: baseline;
-+}
-+
-+.revealedPath code {
-+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-+  color: var(--dsw-alias-label-secondary);
-+  user-select: all;
-+  overflow-wrap: anywhere;
-+}
-+
-+.revealedPathLabel {
-+  white-space: nowrap;
-+}
-+
-+.secondaryButton {
-+  border: none;
-+  border-radius: 7px;
-+  padding: 5px 8px;
-+  background: none;
-+  color: var(--dsw-alias-label-secondary);
-+  font: inherit;
-+  font-size: 12.5px;
-+  cursor: pointer;
-+}
-+
-+
-+.secondaryButton:hover:not(:disabled) {
-+  background: var(--dsw-alias-bg-layer-1);
-+}
-+
-+.secondaryButton:disabled {
-+  opacity: 0.5;
-+  cursor: default;
-+}
-+
-+.field {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 6px;
-+}
-+
-+.fieldLabel {
-+  font-size: 12px;
-+  font-weight: 500;
-+  color: var(--dsw-alias-label-secondary);
-+}
-+
-+.input {
-+  box-sizing: border-box;
-+  padding: 9px 12px;
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 10px;
-+  font: inherit;
-+  font-size: 13px;
-+  background: var(--dsw-alias-bg-layer-1);
-+  color: var(--dsw-alias-label-primary);
-+}
-+
-+.input:focus {
-+  outline: none;
-+  border-color: var(--dsw-alias-brand-primary);
-+}
-+
-+.input::placeholder {
-+  color: var(--dsw-alias-label-dimmed);
-+}
-+
-+.dialog {
-+  width: min(560px, 100%);
-+}
-+
-+.dialogFields {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 12px;
-+}
-+
-+/* A shipped composition can be long; the dialog scrolls it rather than grow. */
-+.viewerCode {
-+  margin: 0;
-+  padding: 12px;
-+  max-height: min(52vh, 480px);
-+  overflow: auto;
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 10px;
-+  background: var(--dsw-alias-bg-layer-2);
-+  color: var(--dsw-alias-label-secondary);
-+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-+  font-size: 12.5px;
-+  line-height: 1.5;
-+  white-space: pre;
-+  tab-size: 2;
-+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
-+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
-+}
-+
-+.error {
-+  margin: 0;
-+  font-size: 12px;
-+  color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.deleteDialog {
-+  width: min(480px, 100%);
-+}
-+
-+.deleteConfirm:not(:disabled) {
-+  border-color: var(--dsw-alias-state-error-primary);
-+  color: var(--dsw-alias-state-error-primary);
-+}
-+
-+.deleteConfirm:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover-danger);
-+}
-+
-+/* The conversational authoring entry, after the card grid in the spot the
-+   create button vacated. Dashed like the Models page's add affordances: it
+    one would otherwise stretch every card in its grid row (`.cards` sizes rows
+    1fr). Clamping is CSS alone: the whole text stays in the DOM for assistive
+    tech, and the card offers it on hover when it is actually cut off. The
+@@ -380,7 +380,7 @@
+ 
+ /* The conversational authoring entry, after the card grid in the spot the
+    create button vacated. Dashed like the Models page's add affordances: it
+-   reads as a place a preset will appear, not a command. */
 +   reads as a place a mode will appear, not a command. */
-+.creatorButton {
-+  box-sizing: border-box;
-+  align-self: stretch;
-+  display: flex;
-+  align-items: center;
-+  justify-content: center;
-+  gap: 6px;
-+  height: 44px;
-+  border: 1px dashed var(--dsw-alias-border-l3);
-+  border-radius: 12px;
-+  font: inherit;
-+  font-size: 14px;
-+  line-height: 22px;
-+  background: transparent;
-+  color: var(--dsw-alias-label-primary);
-+  cursor: pointer;
-+}
-+
-+.creatorButton:hover:not(:disabled) {
-+  background: var(--dsw-alias-interactive-bg-hover);
-+}
-+
-+.creatorButton:disabled {
-+  opacity: 0.4;
-+  cursor: default;
-+}
+ .creatorButton {
+   box-sizing: border-box;
+   align-self: stretch;
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx b/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx
 new file mode 100644
 index 00000000..a2cfa964
@@ -1646,6 +1082,774 @@ index 00000000..a2cfa964
 +    </div>
 +  )
 +}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx
+deleted file mode 100644
+index 3e98310c..00000000
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx
++++ /dev/null
+@@ -1,64 +0,0 @@
+-/**
+- * The session header's agent-preset label.
+- *
+- * Read-only by construction: a session's composition is fixed once its
+- * conversation starts, and a header is only worth reading after that. Offering
+- * a control here would promise a switch the host refuses; naming what the
+- * session runs is the honest affordance, and the choice itself lives on the
+- * new-session screen ({@link AgentPresetSeat}).
+- */
+-
+-import { useEffect } from 'react'
+-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import { IconAgentPresetOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+-// Type-only: pulls the ui-conversation SlotMap merge (the header actions).
+-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+-import type { AgentPresetSettingsState } from './settings-store.ts'
+-import { presetDisplayText } from './locales.ts'
+-import css from './AgentPresetLabel.module.css'
+-
+-/** Registration-side business face for the header label. */
+-export interface AgentPresetLabelInjected {
+-  hooks: {
+-    /** Roster snapshot bound by the renderer as useAgentPresets. */
+-    agentPresets: SnapshotStore<AgentPresetSettingsState>
+-  }
+-  /** Read the roster, so the label can show a name rather than an id. */
+-  load: () => Promise<void>
+-}
+-
+-/** Full component props. */
+-export type AgentPresetLabelProps =
+-  PropsRuntime<'conversation.session.header.actions'>
+-  & PropsLocale<'settings.agentPreset'>
+-  & InjectFace<AgentPresetLabelInjected>
+-
+-/**
+- * Render this session's agent-preset name beside its title.
+- * @param props - composed slot props.
+- * @returns the label, or null when the session records no preset.
+- */
+-export function AgentPresetLabel({
+-  sessionId, useSessions, useAgentPresets, load, t,
+-}: AgentPresetLabelProps) {
+-  const preset = useSessions(state => state.byId[sessionId]?.agentPreset)
+-  const options = useAgentPresets(state => state.options)
+-
+-  useEffect(() => {
+-    // Deployments that compose no presets never label anything, so the roster
+-    // is only worth a request once a session reports one.
+-    if (preset !== undefined) void load()
+-  }, [preset, load])
+-
+-  if (preset === undefined) return null
+-
+-  const option = options.find(entry => entry.id === preset)
+-  const text = option === undefined ? undefined : presetDisplayText(option, t)
+-  return (
+-    <span className={css.label} title={text?.description ?? t('headerHint')}>
+-      <IconAgentPresetOutline16 size={14} className={css.icon} />
+-      {text?.name ?? preset}
+-    </span>
+-  )
+-}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetRow.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetRow.tsx
+deleted file mode 100644
+index eab36312..00000000
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetRow.tsx
++++ /dev/null
+@@ -1,89 +0,0 @@
+-/**
+- * Agent-preset preference row: the preset new sessions are composed from.
+- * A running session keeps the composition it began with, so this row never
+- * disturbs work in progress.
+- */
+-
+-import { useEffect, useState } from 'react'
+-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import type { AgentPresetSettingsState } from './settings-store.ts'
+-import { presetDisplayText, type AgentPresetSettingsKey } from './locales.ts'
+-import { PresetMenu } from './PresetMenu.tsx'
+-import css from './AgentPresetRow.module.css'
+-
+-/** Registration-side business face for the host-backed preference. */
+-export interface AgentPresetRowInjected {
+-  hooks: {
+-    /** Agent-preset settings snapshot bound by the renderer as useAgentPreset. */
+-    agentPreset: SnapshotStore<AgentPresetSettingsState>
+-  }
+-  /** Load the roster when the row first renders. */
+-  load: () => Promise<void>
+-  /** Persist one preset as the default for later sessions. */
+-  select: (id: string) => Promise<void>
+-}
+-
+-/** Full component props. */
+-export type AgentPresetRowProps =
+-  PropsRuntime<'settings.general.item'>
+-  & PropsLocale<'settings.agentPreset'>
+-  & InjectFace<AgentPresetRowInjected>
+-
+-/**
+- * Render the new-session agent-preset selector.
+- * @param props - composed slot props.
+- * @returns the row, or null when the deployment composes no presets.
+- */
+-export function AgentPresetRow({ load, select, useAgentPreset, t }: AgentPresetRowProps) {
+-  const state = useAgentPreset(snapshot => snapshot)
+-  const [open, setOpen] = useState(false)
+-
+-  useEffect(() => {
+-    void load()
+-  }, [load])
+-
+-  useEffect(() => {
+-    if (state.writable && state.status !== 'unavailable') return
+-    setOpen(false)
+-  }, [state.status, state.writable])
+-
+-  // A deployment that composes no presets has nothing to choose between, and
+-  // every session shares the host composition — the row simply does not exist.
+-  if (state.status === 'unavailable') return null
+-  const busy = state.status === 'loading' || state.status === 'saving'
+-  // Every preset surface applies the same display-copy rule. The id remains
+-  // addressing rather than a label, except where no display name exists.
+-  const chosen = state.options.find(option => option.id === state.currentValue)
+-  const chosenText = chosen === undefined ? undefined : presetDisplayText(chosen, t)
+-  const label = state.currentValue === '' ? t('loading') : (chosenText?.name ?? state.currentValue)
+-  const description: string = state.error ?? t('description')
+-
+-  return (
+-    <div className={css.row}>
+-      <div className={css.rowText}>
+-        <div className={css.title}>{t('title')}</div>
+-        <div className={css.desc} role={state.error === null ? undefined : 'alert'}>{description}</div>
+-      </div>
+-      <PresetMenu
+-        options={state.options}
+-        selectedId={state.currentValue}
+-        label={label}
+-        t={t}
+-        buttonClassName={css.selector}
+-        chevronClassName={css.chevron}
+-        disabled={busy || !state.writable || state.options.length === 0}
+-        open={open}
+-        onOpenChange={setOpen}
+-        onSelect={(id) => { void select(id) }}
+-      />
+-    </div>
+-  )
+-}
+-
+-declare module '@deepseek-ai/dsh-client-ui-slots' {
+-  interface LocaleNamespaceMap {
+-    /** Agent-preset row copy. */
+-    'settings.agentPreset': AgentPresetSettingsKey
+-  }
+-}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
+deleted file mode 100644
+index f7350076..00000000
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
++++ /dev/null
+@@ -1,170 +0,0 @@
+-/**
+- * The agent-preset chip on the new-session screen, beside the workspace
+- * picker.
+- *
+- * It lives here rather than in the composer because the choice is only
+- * available before a conversation starts: once a turn has run, the session's
+- * history was produced under that preset's tools and the host refuses to swap
+- * them. A control that spends most of its life disabled belongs on the screen
+- * where it still works.
+- *
+- * The menu opens on the staged choice, which starts as the deployment default.
+- * Picking stages; the choice reaches a session when one becomes current.
+- */
+-
+-import { useEffect, useState } from 'react'
+-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import { IconAgentPresetOutline16, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+-// Type-only: pulls the ui-conversation SlotMap merge (the hero seat).
+-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+-import type { AgentPresetSeatState } from './seat-store.ts'
+-import { presetDisplayText } from './locales.ts'
+-import css from './AgentPresetSeat.module.css'
+-
+-/** Registration-side business face for the hero chip. */
+-export interface AgentPresetSeatInjected {
+-  hooks: {
+-    /** Seat snapshot bound by the renderer as useAgentPresetSeat. */
+-    agentPresetSeat: SnapshotStore<AgentPresetSeatState>
+-  }
+-  /** Read the roster when the chip first renders. */
+-  load: () => Promise<void>
+-  /** Stage one preset for the next session. */
+-  select: (id: string) => Promise<void>
+-  /** Clear the one-shot introduce cue once the chip has played it. */
+-  introduced: () => void
+-}
+-
+-/* Introduce timeline: the icon eases in first (the CSS animation shares this
+-   duration); the name's characters start fading up the moment it lands, each
+-   taking the fade duration to settle. The cue clears after the last one. The
+-   stagger is capped twice: per tick for short CJK names, and by one shared
+-   reveal window so a long Latin name finishes in the same time as its CJK
+-   counterpart instead of dragging the run out per character. */
+-const INTRO_TEXT_DELAY_MS = 150
+-const INTRO_CHAR_STAGGER_MS = 40
+-const INTRO_TEXT_REVEAL_MS = 200
+-const INTRO_CHAR_FADE_MS = 400
+-
+-/**
+- * Per-character start offset for the introduce reveal.
+- * @param count - character count of the shown preset name.
+- * @returns milliseconds between successive character starts.
+- */
+-function introStaggerMs(count: number): number {
+-  if (count <= 1) return 0
+-  return Math.min(INTRO_CHAR_STAGGER_MS, INTRO_TEXT_REVEAL_MS / (count - 1))
+-}
+-
+-/** Full component props. */
+-export type AgentPresetSeatProps =
+-  PropsRuntime<'conversation.hero.agentPreset'>
+-  & PropsLocale<'settings.agentPreset'>
+-  & InjectFace<AgentPresetSeatInjected>
+-
+-/**
+- * Render the new-session agent-preset chip.
+- * @param props - composed slot props.
+- * @returns the chip, or null when the deployment composes no presets.
+- */
+-export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat, t }: AgentPresetSeatProps) {
+-  const state = useAgentPresetSeat(snapshot => snapshot)
+-  const [open, setOpen] = useState(false)
+-
+-  useEffect(() => {
+-    void load()
+-  }, [load])
+-
+-  const chosen = state.options.find(option => option.id === state.current)
+-  const chosenText = chosen === undefined ? undefined : presetDisplayText(chosen, t)
+-  const label = chosenText?.name ?? state.current
+-  const ready = state.options.length > 0 && state.current !== ''
+-
+-  // The introduce cue: the pick was staged from another screen (the settings
+-  // creator entry), so the chip announces it — the icon eases in and each
+-  // character of the name fades up on a stagger (CSS owns the motion; this
+-  // effect only arms it and acknowledges the cue once the run is over).
+-  const [introducing, setIntroducing] = useState(false)
+-  useEffect(() => {
+-    if (!state.introduce || !ready) return
+-    const characters = Array.from(label)
+-    if (characters.length === 0 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+-      introduced()
+-      return
+-    }
+-    setIntroducing(true)
+-    const done = window.setTimeout(() => {
+-      setIntroducing(false)
+-      introduced()
+-    }, INTRO_TEXT_DELAY_MS + (characters.length - 1) * introStaggerMs(characters.length) + INTRO_CHAR_FADE_MS)
+-    return () => { window.clearTimeout(done) }
+-  }, [state.introduce, ready, label, introduced])
+-
+-  // Nothing to choose between: the deployment composes no presets and every
+-  // session shares the host composition.
+-  if (!ready) return null
+-
+-  // One wrapper span: the chip is a flex row with a gap, so loose character
+-  // spans would each pick up the gap between them.
+-  const characters = Array.from(label)
+-  const stagger = introStaggerMs(characters.length)
+-  const shownLabel = introducing
+-    ? (
+-      <span className={css.introText}>
+-        {characters.map((character, index) => (
+-          <span
+-            key={index}
+-            className={css.introChar}
+-            style={{ animationDelay: `${INTRO_TEXT_DELAY_MS + index * stagger}ms` }}
+-          >
+-            {character}
+-          </span>
+-        ))}
+-      </span>
+-    )
+-    : label
+-
+-  return (
+-    <Menu
+-      open={open}
+-      onClose={() => { setOpen(false) }}
+-      items={state.options.map((option) => {
+-        const text = presetDisplayText(option, t)
+-        return {
+-          id: option.id,
+-          // Name and description together: the id alone never says what a
+-          // preset does, which is why the roster carries display copy.
+-          label: (
+-            <span className={css.item}>
+-              <span className={css.itemName}>{text.name}</span>
+-              <span className={css.itemDesc}>{text.description ?? t('noDescription')}</span>
+-            </span>
+-          ),
+-        }
+-      })}
+-      selectedId={state.current}
+-      onSelect={(id) => {
+-        setOpen(false)
+-        void select(id)
+-      }}
+-      align="start"
+-      portal
+-      anchor={(
+-        <button
+-          type="button"
+-          className={css.seat}
+-          aria-haspopup="menu"
+-          aria-expanded={open}
+-          title={state.error ?? t('seatHint')}
+-          disabled={state.busy}
+-          onClick={() => { setOpen(value => !value) }}
+-        >
+-          <IconAgentPresetOutline16 className={introducing ? `${css.seatIcon} ${css.introIcon}` : css.seatIcon} />
+-          {shownLabel}
+-          <IconChevronDownOutline14 className={css.chevron} />
+-        </button>
+-      )}
+-    />
+-  )
+-}
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSection.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetSection.tsx
+deleted file mode 100644
+index cac8452f..00000000
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetSection.tsx
++++ /dev/null
+@@ -1,421 +0,0 @@
+-/**
+- * Agent-presets settings section: the roster as cards, a copy dialog as the
+- * only way a preset is created, and a read-only viewer over the shipped
+- * compositions.
+- *
+- * The browser edits no composition text — a shipped preset opens read-only to
+- * be READ (it is the known-good composition a copy starts from), and a custom
+- * preset is edited in its own files, which is what the location action leads
+- * to. Deleting a preset leaves running sessions alone: a composition is
+- * mounted once at session creation and nothing re-reads the file.
+- */
+-
+-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+-import type { ReactNode } from 'react'
+-import {
+-  Button, IconBrowseOutline16, IconCopyOutline16, IconFolderOpenOutline16, IconPlusOutline16, IconTrashOutline16, Modal, Tooltip,
+-} from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import { draftBlocker, type AgentPresetSectionState } from './section-store.ts'
+-import { presetDisplayText, type AgentPresetSettingsKey } from './locales.ts'
+-import css from './AgentPresetSection.module.css'
+-
+-/** Registration-side business face for the management section. */
+-export interface AgentPresetSectionInjected {
+-  hooks: {
+-    /** Page snapshot bound by the renderer as useAgentPresetSection. */
+-    agentPresetSection: SnapshotStore<AgentPresetSectionState>
+-  }
+-  /** Read the roster; called once when the section first renders. */
+-  load: () => Promise<void>
+-  /** Open one shipped preset's composition in the read-only viewer. */
+-  view: (id: string) => Promise<void>
+-  /** Close the read-only viewer. */
+-  closeView: () => void
+-  /** Open the copy dialog over one preset. */
+-  beginCopy: (from: string) => void
+-  /** Close the copy dialog, discarding the draft. */
+-  cancelCopy: () => void
+-  /** Name the preset the copy creates. */
+-  setCopyId: (id: string) => void
+-  /** Name the copy's display name. */
+-  setCopyName: (name: string) => void
+-  /** Submit the copy. */
+-  confirmCopy: () => Promise<void>
+-  /** Open one preset's directory, or reveal its path where there is no desktop. */
+-  openLocation: (id: string) => Promise<void>
+-  /**
+-   * Stage the self-referential preset and start a new session on it — the
+-   * guided way to author a preset, beside copying. Absent when the surface
+-   * is composed without the conversation flow to land the session in.
+-   */
+-  startCreatorDraft?: () => void
+-  /** Ask for delete confirmation, or dismiss it with null. */
+-  confirmDelete: (id: string | null) => void
+-  /** Delete the preset awaiting confirmation. */
+-  remove: () => Promise<void>
+-  /** Make one preset the default for sessions created later. */
+-  makeDefault: (id: string) => Promise<void>
+-}
+-
+-/** Full component props. */
+-export type AgentPresetSectionProps =
+-  PropsRuntime<'settings.section'>
+-  & PropsLocale<'settings.agentPreset'>
+-  & InjectFace<AgentPresetSectionInjected>
+-
+-/** Copy-dialog sub-view props: the draft plus the actions that mutate it. */
+-interface CopyDialogProps {
+-  state: AgentPresetSectionState
+-  t: (key: AgentPresetSettingsKey) => string
+-  actions: Pick<AgentPresetSectionInjected,
+-    'cancelCopy' | 'confirmCopy' | 'setCopyId' | 'setCopyName'>
+-}
+-
+-function CopyDialog({ state, t, actions }: CopyDialogProps): ReactNode {
+-  const draft = state.copy
+-  const blocker = draft === null ? undefined : draftBlocker(draft, state.rows)
+-  const message = draft === null ? null : draft.error ?? (blocker === undefined ? null : t(blocker))
+-  const source = draft === null ? undefined : state.rows.find(row => row.id === draft.from)
+-  const sourceTitle = source === undefined ? draft?.fromTitle : presetDisplayText(source, t).name
+-  return (
+-    <Modal
+-      open={draft !== null}
+-      onClose={() => { actions.cancelCopy() }}
+-      title={draft === null ? t('copyTitle') : `${t('copyTitle')} · ${t('copyOf')} ${sourceTitle}`}
+-      closeLabel={t('close')}
+-      description={t('copyIntro')}
+-      className={css.dialog as string}
+-      footer={(
+-        <>
+-          <Button
+-            variant="outline"
+-            disabled={draft?.saving === true}
+-            onClick={() => { actions.cancelCopy() }}
+-          >
+-            {t('cancel')}
+-          </Button>
+-          <Button
+-            disabled={draft === null || draft.saving || blocker !== undefined}
+-            onClick={() => { void actions.confirmCopy() }}
+-          >
+-            {draft?.saving === true ? t('creating') : t('create')}
+-          </Button>
+-        </>
+-      )}
+-    >
+-      {draft === null
+-        ? null
+-        : (
+-          <div className={css.dialogFields}>
+-            <label className={css.field}>
+-              <span className={css.fieldLabel}>{t('presetId')}</span>
+-              <input
+-                className={css.input}
+-                value={draft.id}
+-                autoFocus
+-                spellCheck={false}
+-                placeholder={t('presetIdPlaceholder')}
+-                onChange={(event) => { actions.setCopyId(event.target.value) }}
+-              />
+-            </label>
+-            <label className={css.field}>
+-              <span className={css.fieldLabel}>{t('displayName')}</span>
+-              <input
+-                className={css.input}
+-                value={draft.name}
+-                spellCheck={false}
+-                placeholder={t('displayNamePlaceholder')}
+-                onChange={(event) => { actions.setCopyName(event.target.value) }}
+-              />
+-            </label>
+-            {message === null ? null : <p className={css.error} role="alert">{message}</p>}
+-          </div>
+-        )}
+-    </Modal>
+-  )
+-}
+-
+-/**
+- * Render one card's description, clamped by CSS and offered in full on hover.
+- * The tooltip is attached only while the text is actually cut off, so a short
+- * description does not answer a hover with a bubble repeating the card.
+- * @param props.text - the description as rendered, already localized.
+- * @returns the description element, tooltip-anchored while it overflows.
+- */
+-function CardDescription({ text }: { text: string }): ReactNode {
+-  const ref = useRef<HTMLSpanElement | null>(null)
+-  const [truncated, setTruncated] = useState(false)
+-  useLayoutEffect(() => {
+-    const el = ref.current
+-    /* v8 ignore next -- the ref is attached before layout effects run. */
+-    if (el === null) return
+-    const measure = () => { setTruncated(el.scrollHeight > el.clientHeight) }
+-    measure()
+-    // Card width follows the settings pane, which resizes with the window.
+-    if (typeof ResizeObserver === 'undefined') return
+-    const observer = new ResizeObserver(measure)
+-    observer.observe(el)
+-    return () => { observer.disconnect() }
+-  }, [text])
+-  return (
+-    // Capped near the card's own width: the default half-viewport bubble would
+-    // spill a description out of the settings dialog and across the app behind it.
+-    <Tooltip label={text} side="bottom" delayMs={400} disabled={!truncated} maxWidth={360}>
+-      {/* The empty title stops the card body's native tooltip from climbing to
+-        this span: a cut-off description answers with one bubble, not two. */}
+-      <span ref={ref} className={css.cardDesc} title="">{text}</span>
+-    </Tooltip>
+-  )
+-}
+-
+-/**
+- * Render the Agent presets section content column.
+- * @param props - composed slot props.
+- * @returns the section, or null when the deployment composes no presets.
+- */
+-export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
+-  const { useAgentPresetSection, t, load } = props
+-  const state = useAgentPresetSection(snapshot => snapshot)
+-  const viewedId = state.view?.id
+-  const viewedRow = viewedId === undefined ? undefined : state.rows.find(row => row.id === viewedId)
+-  const viewedTitle = state.view === null
+-    ? ''
+-    : viewedRow === undefined ? state.view.title : presetDisplayText(viewedRow, t).name
+-
+-  useEffect(() => {
+-    void load()
+-  }, [load])
+-
+-  // A deployment that composes no presets has nothing to manage: every
+-  // session shares the host composition and the page would be an empty list.
+-  if (state.status === 'unavailable') return null
+-  if (state.status === 'error') {
+-    /* v8 ignore next -- an error status always carries text; the fallback satisfies the nullable type */
+-    const detail = state.error ?? ''
+-    return (
+-      <div className={css.section}>
+-        <p className={css.error} role="alert">{`${t('error')} ${detail}`}</p>
+-        <button type="button" className={css.secondaryButton} onClick={() => { void load() }}>
+-          {t('retry')}
+-        </button>
+-      </div>
+-    )
+-  }
+-
+-  /* The guided alternative to copying: the self-referential preset can
+-     read this very composition and author a new one in conversation.
+-     Offered only where that preset is actually on the roster and a
+-     session can be landed; without a writable root the draft could
+-     never be discovered, so the reason rides the disabled button. */
+-  const creatorButton = props.startCreatorDraft !== undefined && state.rows.some(row => row.id === 'cordis')
+-    ? (
+-      <button
+-        type="button"
+-        className={css.creatorButton}
+-        disabled={!state.authorable}
+-        title={state.authorable ? undefined : t('duplicateUnavailable')}
+-        onClick={() => {
+-          props.startCreatorDraft?.()
+-          props.close()
+-        }}
+-      >
+-        {/* Same glyph as the Models page's add affordances. */}
+-        <IconPlusOutline16 size={14} />
+-        {t('creatorDraft')}
+-      </button>
+-    )
+-    : null
+-
+-  return (
+-    <div className={css.section}>
+-      <h2 className={css.title}>{t('nav')}</h2>
+-      <p className={css.intro}>{t('sectionIntro')}</p>
+-      {state.error === null ? null : <p className={css.error} role="alert">{state.error}</p>}
+-      {([['system', t('builtInGroup')], ['user', t('customGroup')]] as const).map(([trust, heading]) => {
+-        const group = state.rows
+-          .filter(row => row.trust === trust)
+-          .map(row => ({ row, text: presetDisplayText(row, t) }))
+-        // The custom group is where a preset of one's own will appear, so it
+-        // stays on screen even while empty: heading plus the creator entry.
+-        const tail = trust === 'user' ? creatorButton : null
+-        if (group.length === 0 && tail === null) return null
+-        return (
+-          <section key={trust} className={css.group}>
+-            <h3 className={css.groupHead}>{heading}</h3>
+-            {group.length === 0 ? null : (
+-              <ul className={css.cards}>
+-                {group.map(({ row, text }) => (
+-                  <li
+-                    key={row.id}
+-                    className={row.broken !== undefined
+-                      ? `${css.card} ${css.cardBroken}`
+-                      : row.isDefault ? `${css.card} ${css.cardActive}` : css.card}
+-                  >
+-                    {/* The card body IS the control: picking a preset is the
+-                      common act, so it should not hide behind a small button.
+-                      The action row sits outside it — nesting buttons is
+-                      invalid, and these act on the card rather than select it.
+-                      A broken preset cannot compose a session, so its body is
+-                      disabled and the card says why instead of offering it. */}
+-                    <button
+-                      type="button"
+-                      className={css.cardMain}
+-                      aria-pressed={row.isDefault}
+-                      disabled={row.isDefault || row.broken !== undefined}
+-                      // Without this the name is the whole card read aloud —
+-                      // title, badge, description, id.
+-                      aria-label={`${row.broken !== undefined ? t('brokenBadge') : row.isDefault ? t('inUse') : t('setDefault')}: ${text.name}`}
+-                      title={row.broken ?? (row.isDefault ? t('inUse') : t('setDefault'))}
+-                      onClick={() => { void props.makeDefault(row.id) }}
+-                    >
+-                      <span className={css.cardHead}>
+-                        <span className={css.cardName}>{text.name}</span>
+-                        {row.broken !== undefined
+-                          ? <span className={css.brokenBadge}>{t('brokenBadge')}</span>
+-                          : null}
+-                        <span className={css.badge}>
+-                          {row.trust === 'user' ? t('userTrust') : t('builtIn')}
+-                        </span>
+-                        {row.isDefault ? <span className={css.inUse}>{t('inUse')}</span> : null}
+-                      </span>
+-                      <CardDescription text={text.description ?? t('noDescription')} />
+-                      {row.broken === undefined
+-                        ? null
+-                        : <span className={css.cardBrokenReason} role="alert">{row.broken}</span>}
+-                      <code className={css.cardId}>{row.id}</code>
+-                    </button>
+-                    <div className={css.cardFoot}>
+-                      {/* Shipped presets are the compositions a copy starts
+-                        from, so READING one is the point; a custom preset is
+-                        edited in its files instead, which the location action
+-                        leads to. A broken shipped preset has no readable
+-                        composition to offer, so its viewer is withheld; a
+-                        broken custom one keeps the location action — the
+-                        files are where it gets fixed. */}
+-                      {row.trust === 'system'
+-                        ? row.broken === undefined
+-                          ? (
+-                            <button
+-                              type="button"
+-                              className={css.iconButton}
+-                              data-tip={t('view')}
+-                              aria-label={`${t('view')}: ${text.name}`}
+-                              onClick={() => { void props.view(row.id) }}
+-                            >
+-                              <IconBrowseOutline16 />
+-                            </button>
+-                          )
+-                          : null
+-                        : (
+-                          <button
+-                            type="button"
+-                            className={css.iconButton}
+-                            data-tip={state.hasDocument ? t('openLocation') : t('showLocation')}
+-                            aria-label={`${state.hasDocument ? t('openLocation') : t('showLocation')}: ${text.name}`}
+-                            onClick={() => { void props.openLocation(row.id) }}
+-                          >
+-                            <IconFolderOpenOutline16 />
+-                          </button>
+-                        )}
+-                      <button
+-                        type="button"
+-                        className={css.iconButton}
+-                        disabled={!state.authorable || row.broken !== undefined}
+-                        data-tip={row.broken !== undefined
+-                          ? t('brokenNoCopy')
+-                          : state.authorable ? t('duplicate') : t('duplicateUnavailable')}
+-                        aria-label={`${t('duplicate')}: ${text.name}`}
+-                        onClick={() => { props.beginCopy(row.id) }}
+-                      >
+-                        <IconCopyOutline16 />
+-                      </button>
+-                      {row.trust === 'user'
+-                        ? (
+-                          <button
+-                            type="button"
+-                            className={`${css.iconButton} ${css.iconDanger}`}
+-                            data-tip={t('delete')}
+-                            aria-label={`${t('delete')}: ${text.name}`}
+-                            onClick={() => { props.confirmDelete(row.id) }}
+-                          >
+-                            <IconTrashOutline16 />
+-                          </button>
+-                        )
+-                        : null}
+-                    </div>
+-                    {state.revealedPaths[row.id] === undefined
+-                      ? null
+-                      : (
+-                        <p className={css.revealedPath}>
+-                          <span className={css.revealedPathLabel}>{t('revealedPathLabel')}</span>
+-                          <code>{state.revealedPaths[row.id]}</code>
+-                        </p>
+-                      )}
+-                  </li>
+-                ))}
+-              </ul>
+-            )}
+-            {tail}
+-          </section>
+-        )
+-      })}
+-      <CopyDialog
+-        state={state}
+-        t={t}
+-        actions={{
+-          cancelCopy: props.cancelCopy,
+-          confirmCopy: props.confirmCopy,
+-          setCopyId: props.setCopyId,
+-          setCopyName: props.setCopyName,
+-        }}
+-      />
+-      <Modal
+-        open={state.view !== null}
+-        onClose={() => { props.closeView() }}
+-        title={state.view === null ? '' : `${t('view')} · ${viewedTitle}`}
+-        closeLabel={t('close')}
+-        description={t('composition')}
+-        className={css.dialog as string}
+-        footer={(
+-          <Button variant="outline" autoFocus onClick={() => { props.closeView() }}>
+-            {t('close')}
+-          </Button>
+-        )}
+-      >
+-        {state.view === null
+-          ? null
+-          : <pre className={css.viewerCode}>{state.view.content}</pre>}
+-      </Modal>
+-      <Modal
+-        open={state.pendingDelete !== null}
+-        onClose={() => { props.confirmDelete(null) }}
+-        title={t('deleteTitle')}
+-        closeLabel={t('close')}
+-        description={t('deleteDescription')}
+-        className={css.deleteDialog as string}
+-        footer={(
+-          <>
+-            <Button
+-              variant="outline"
+-              autoFocus
+-              disabled={state.deleting}
+-              onClick={() => { props.confirmDelete(null) }}
+-            >
+-              {t('cancel')}
+-            </Button>
+-            <Button
+-              variant="outline"
+-              className={css.deleteConfirm}
+-              disabled={state.deleting}
+-              onClick={() => { void props.remove() }}
+-            >
+-              {state.deleting ? t('deleting') : t('deleteConfirm')}
+-            </Button>
+-          </>
+-        )}
+-      />
+-    </div>
+-  )
+-}
 diff --git a/packages/client/ui-agent-preset/src/client/ModeMenu.tsx b/packages/client/ui-agent-preset/src/client/ModeMenu.tsx
 new file mode 100644
 index 00000000..ed374b20
@@ -1718,6 +1922,96 @@ index 00000000..ed374b20
 +    />
 +  )
 +}
+diff --git a/packages/client/ui-agent-preset/src/client/PresetMenu.tsx b/packages/client/ui-agent-preset/src/client/PresetMenu.tsx
+deleted file mode 100644
+index 4b78d8ce..00000000
+--- a/packages/client/ui-agent-preset/src/client/PresetMenu.tsx
++++ /dev/null
+@@ -1,84 +0,0 @@
+-/**
+- * The preset picker both surfaces render: a menu of presets over a button
+- * naming the current one.
+- *
+- * The settings row and the composer seat differ in where they sit, what they
+- * call the current value, and when they refuse a pick — not in how the picker
+- * itself behaves. Trust is the one thing the list always says: a locally
+- * authored preset is exactly as privileged as the plugins it names, so the
+- * label marks it rather than presenting every preset as shipped and vetted.
+- */
+-
+-import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { AgentPresetOption } from './settings-store.ts'
+-import { presetDisplayText, type AgentPresetSettingsKey } from './locales.ts'
+-
+-/** What one surface passes to the shared picker. */
+-export interface PresetMenuProps {
+-  /** Presets to offer, in roster order. */
+-  options: readonly AgentPresetOption[]
+-  /** The preset the button names and the menu marks selected. */
+-  selectedId: string
+-  /** Text on the button; the surfaces word a pending roster differently. */
+-  label: string
+-  /** Active Web locale lookup. */
+-  t: (key: AgentPresetSettingsKey) => string
+-  /** Class for the trigger button, owned by the calling surface. */
+-  buttonClassName: string | undefined
+-  /** Class for the chevron, owned by the calling surface. */
+-  chevronClassName: string | undefined
+-  /** Whether the trigger refuses interaction. */
+-  disabled: boolean
+-  /** Whether the menu is open — the surface owns this so it can force it shut. */
+-  open: boolean
+-  /** Report the menu's next open state. */
+-  onOpenChange: (open: boolean) => void
+-  /** Called with the picked preset once the menu has closed. */
+-  onSelect: (id: string) => void
+-}
+-
+-/**
+- * Render the preset picker.
+- * @param props - the calling surface's copy, styling, and handlers.
+- * @returns the menu and its trigger.
+- */
+-export function PresetMenu({
+-  options, selectedId, label, t, buttonClassName, chevronClassName,
+-  disabled, open, onOpenChange, onSelect,
+-}: PresetMenuProps) {
+-  return (
+-    <Menu
+-      open={open}
+-      onClose={() => { onOpenChange(false) }}
+-      items={options.map((option) => {
+-        const name = presetDisplayText(option, t).name
+-        return {
+-          id: option.id,
+-          // All preset surfaces resolve copy the same way; the id is addressing,
+-          // not a label, except where no display name exists.
+-          label: option.trust === 'user' ? `${name} · ${t('userTrust')}` : name,
+-        }
+-      })}
+-      selectedId={selectedId}
+-      onSelect={(id) => {
+-        onOpenChange(false)
+-        onSelect(id)
+-      }}
+-      align="end"
+-      portal
+-      anchor={(
+-        <button
+-          type="button"
+-          className={buttonClassName}
+-          aria-haspopup="menu"
+-          aria-expanded={open}
+-          disabled={disabled}
+-          onClick={() => { onOpenChange(!open) }}
+-        >
+-          {label}
+-          <IconChevronDownOutline14 className={chevronClassName} />
+-        </button>
+-      )}
+-    />
+-  )
+-}
 diff --git a/packages/client/ui-agent-preset/src/client/index.ts b/packages/client/ui-agent-preset/src/client/index.ts
 index f3274796..00322995 100644
 --- a/packages/client/ui-agent-preset/src/client/index.ts
@@ -3436,6 +3730,594 @@ index 61f59ec5..86a35b4b 100644
   * appears in the host cordis.yml / Loader; the browser half ships the
   * General-settings row through exports["./client"], discovered from the
   * package.json dsh.client declaration.
+diff --git a/packages/client/ui-agent-preset/tests/apply.client.spec.ts b/packages/client/ui-agent-preset/tests/apply.client.spec.ts
+deleted file mode 100644
+index 7ff47416..00000000
+--- a/packages/client/ui-agent-preset/tests/apply.client.spec.ts
++++ /dev/null
+@@ -1,582 +0,0 @@
+-/**
+- * Registration: the General row, the settings section, the new-session chip,
+- * and the header label all come from one apply, and each defers until the slot
+- * it fills has been declared. A pushed settings change refreshes the surfaces
+- * that are already showing, so a default set from one converges the other.
+- */
+-
+-import { Context } from '@deepseek-ai/cordis'
+-import { describe, expect, it, vi } from 'vitest'
+-import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
+-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+-import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+-import { TestRemote, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+-import { apply, inject } from '@deepseek-ai/dsh-client-ui-agent-preset/client'
+-import { AgentPresetLabel } from '../src/client/AgentPresetLabel.tsx'
+-import type { AgentPresetLabelInjected } from '../src/client/AgentPresetLabel.tsx'
+-import { AgentPresetRow } from '../src/client/AgentPresetRow.tsx'
+-import type { AgentPresetRowInjected } from '../src/client/AgentPresetRow.tsx'
+-import { AgentPresetSection } from '../src/client/AgentPresetSection.tsx'
+-import type { AgentPresetSectionInjected } from '../src/client/AgentPresetSection.tsx'
+-import { AgentPresetSeat } from '../src/client/AgentPresetSeat.tsx'
+-import type { AgentPresetSeatInjected } from '../src/client/AgentPresetSeat.tsx'
+-
+-// The service reads its initial locale from the browser; these specs assert
+-// the shipped Chinese copy, so they state the browser they assume.
+-usePinnedBrowserLanguages('zh-CN')
+-
+-const ROSTER_ONE = {
+-  rpcId: 'r',
+-  result: {
+-    ok: true as const,
+-    value: {
+-      presets: [{ id: 'standard', trust: 'system', isDefault: true }],
+-      authorable: true,
+-      hasDocument: true,
+-    },
+-  },
+-}
+-
+-/** The roster after this browser copied one preset of its own. */
+-const ROSTER_AUTHORED = {
+-  rpcId: 'r',
+-  result: {
+-    ok: true as const,
+-    value: {
+-      presets: [
+-        { id: 'standard', trust: 'system', isDefault: true },
+-        { id: 'mine', trust: 'user', isDefault: false },
+-      ],
+-      authorable: true,
+-      hasDocument: true,
+-    },
+-  },
+-}
+-
+-/** The same roster with a second preset carrying the default. */
+-const ROSTER_MOVED = {
+-  rpcId: 'r',
+-  result: {
+-    ok: true as const,
+-    value: {
+-      presets: [
+-        { id: 'standard', trust: 'system', isDefault: false },
+-        { id: 'minimal', trust: 'system', isDefault: true },
+-      ],
+-      authorable: true,
+-      hasDocument: true,
+-    },
+-  },
+-}
+-
+-async function bench() {
+-  const ctx = new Context()
+-  // The host's answer, mutable so a spec can move the default the way the
+-  // settings surface does and watch who re-reads it.
+-  let ROSTER: typeof ROSTER_ONE | typeof ROSTER_MOVED | typeof ROSTER_AUTHORED = ROSTER_ONE
+-  const moveDefault = (): void => { ROSTER = ROSTER_MOVED }
+-  await ctx.plugin(SlotRegistry).await()
+-  const locale = new LocaleRuntime(ctx)
+-  ctx.provide('locale', locale)
+-  // The plugins inject `remote`; forwarded events reach them through the
+-  // same `$dispatch` handoff the connection sink makes.
+-  new TestRemote(ctx)
+-  const calls: string[] = []
+-  ctx.provide('connection', {
+-    api: {
+-      agentPresets: {
+-        list: () => { calls.push('list'); return Promise.resolve(ROSTER) },
+-        read: () => Promise.resolve({
+-          rpcId: 'r',
+-          result: { ok: true as const, value: { agentPreset: 'standard', trust: 'system', content: '' } },
+-        }),
+-        copy: (payload: { from: string; agentPreset: string }) => {
+-          calls.push(`copy:${payload.agentPreset}`)
+-          // The host's roster now contains it, which is the whole point of the
+-          // copy and what every surface must converge on.
+-          ROSTER = ROSTER_AUTHORED
+-          return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: { agentPreset: payload.agentPreset } } })
+-        },
+-        openDocument: (payload: { agentPreset: string }) => {
+-          calls.push(`openDocument:${payload.agentPreset}`)
+-          return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: { opened: true as const } } })
+-        },
+-        remove: () => Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: {} } }),
+-        select: (payload: { agentPreset: string }) => {
+-          calls.push(`select:${payload.agentPreset}`)
+-          return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: { agentPreset: payload.agentPreset } } })
+-        },
+-      },
+-      settings: {
+-        // The row reads this to learn whether this browser may write at all.
+-        describe: () => Promise.resolve({
+-          rpcId: 'r',
+-          result: { ok: true as const, value: { writable: true, hasDocument: true, namespaces: [] } },
+-        }),
+-        update: (payload: { patch: unknown }) => { calls.push(`settings:${JSON.stringify(payload.patch)}`); return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: {} } }) },
+-      },
+-    },
+-  } as never)
+-  return { ctx, slots: ctx.get('slots') as SlotRegistry, calls, moveDefault }
+-}
+-
+-function declareRoot(slots: SlotRegistry): () => void {
+-  return slots.register({
+-    name: 'root',
+-    children: {
+-      'settings.general.item': { kind: 'list', scope: 'root' },
+-      'settings.section': { kind: 'list', scope: 'root' },
+-      conversation: { kind: 'single', scope: 'root' },
+-    },
+-  } as never, () => null)
+-}
+-
+-/** The conversation's own declarations, which the chip and label wait for. */
+-function declareConversation(slots: SlotRegistry): () => void {
+-  return slots.register({
+-    name: 'conversation',
+-    children: {
+-      'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },
+-      'conversation.session.header.actions': { kind: 'list', scope: 'session' },
+-    },
+-  } as never, () => null)
+-}
+-
+-/** A workspaces double recording new-session starts. */
+-function workspacesDouble() {
+-  const starts: unknown[] = []
+-  return {
+-    starts,
+-    startSession: (workspaceId?: unknown) => { starts.push(workspaceId ?? null) },
+-  }
+-}
+-
+-/** A sessions double whose list can be moved and whose changes are pushed. */
+-function sessionsDouble(state: {
+-  current?: string
+-  byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
+-}) {
+-  const listeners = new Set<() => void>()
+-  return {
+-    list: {
+-      getSnapshot: () => state,
+-      subscribe: (fn: () => void) => {
+-        listeners.add(fn)
+-        return () => listeners.delete(fn)
+-      },
+-    },
+-    noteAgentPreset: (sessionId: string, agentPreset: string) => {
+-      const summary = state.byId[sessionId]
+-      if (summary === undefined || summary.agentPreset === agentPreset) return
+-      summary.agentPreset = agentPreset
+-      for (const fn of listeners) fn()
+-    },
+-    /** Push a list change the way the runtime's store does. */
+-    notify: () => { for (const fn of listeners) fn() },
+-  }
+-}
+-
+-describe('ui-agent-preset apply', () => {
+-  it('declares the services it uses', () => {
+-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote'])
+-  })
+-
+-  it('registers the General row and the settings section', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-
+-    const row = slots.entries('settings.general.item')[0]!
+-    expect(row.component).toBe(AgentPresetRow)
+-    expect(row.options).toMatchObject({ id: 'agent-preset', order: -25 })
+-    const section = slots.entries('settings.section')[0]!
+-    expect(section.component).toBe(AgentPresetSection)
+-    expect(section.options).toMatchObject({ id: 'agent-presets', order: 20 })
+-    // The nav label is a locale-following thunk; owners resolve it at read time.
+-    expect(resolveSlotLabel(section.options.label)).toBe('Agent 预设')
+-  })
+-
+-  it('registers into a declaration that arrives after apply', async () => {
+-    const { ctx, slots } = await bench()
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-
+-    declareRoot(slots)
+-
+-    await vi.waitFor(() => { expect(slots.entries('settings.section')).toHaveLength(1) })
+-  })
+-
+-  it('hands each surface its own store and actions', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-
+-    const row = (slots.entries('settings.general.item')[0]!.inject as unknown as () => AgentPresetRowInjected)()
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-
+-    expect(row.hooks.agentPreset).not.toBe(section.hooks.agentPresetSection)
+-    // Each thunk reaches its own controller: the row's load fills the row's
+-    // store, and the section's default write does not go through the row.
+-    await row.load()
+-    await row.select('standard')
+-    await section.makeDefault('standard')
+-    expect(row.hooks.agentPreset.getSnapshot().options).toEqual([{ id: 'standard', trust: 'system' }])
+-    expect(section.hooks.agentPresetSection.getSnapshot().rows)
+-      .toEqual([{ id: 'standard', trust: 'system', isDefault: true }])
+-  })
+-
+-  it('routes the section actions to one controller', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-
+-    await section.load()
+-    section.beginCopy('standard')
+-    section.cancelCopy()
+-    section.beginCopy('standard')
+-    section.setCopyId('mine')
+-    section.setCopyName('我的模式')
+-    await section.confirmCopy()
+-    await section.view('standard')
+-    section.closeView()
+-    section.confirmDelete('mine')
+-    await Promise.all([section.openLocation('mine'), section.remove()])
+-
+-    // One controller behind every action: the copy the dialog named is the
+-    // one the roster re-read reflects, and the delete the section confirmed
+-    // is the one its remove() sees.
+-    expect(calls).toContain('copy:mine')
+-    expect(calls.filter(call => call === 'openDocument:mine').length).toBeGreaterThan(0)
+-    expect(section.hooks.agentPresetSection.getSnapshot().rows).toHaveLength(2)
+-  })
+-
+-  it('refreshes a showing surface when its namespace changes, and ignores others', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-    await section.load()
+-    const before = calls.length
+-
+-    ctx.remote.$dispatch('settings/document-updated', ['agent-presets', 1])
+-    await vi.waitFor(() => { expect(calls.length).toBe(before + 2) })
+-    const afterRelevant = calls.length
+-
+-    ctx.remote.$dispatch('settings/document-updated', ['llm-deepseek', 1])
+-    await Promise.resolve()
+-
+-    // Both surfaces re-read on their own namespace; an unrelated one moves
+-    // neither, so this rules out a blanket refresh on every settings write.
+-    expect(calls.length).toBe(afterRelevant)
+-  })
+-
+-  it('re-reads both surfaces when the connection comes back', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-    await section.load()
+-    const before = calls.length
+-
+-    ctx.emit('connection/reset')
+-
+-    // A reconnect can land on a host whose roster changed under the browser.
+-    await vi.waitFor(() => { expect(calls.length).toBe(before + 2) })
+-  })
+-
+-  it('leaves the section alone until it has been opened once', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-    const before = calls.length
+-
+-    ctx.remote.$dispatch('settings/document-updated', ['agent-presets', 1])
+-    await vi.waitFor(() => { expect(calls.length).toBeGreaterThan(before) })
+-
+-    // Only the General row reloads: a section nobody opened has nothing to
+-    // converge, and reading the roster for it would be a wasted round trip.
+-    expect(calls.length - before).toBe(1)
+-  })
+-
+-  it('registers the new-session chip and the header label, and drops both on disposal', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-    const conversation = declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    const fiber = ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply })
+-    await fiber.await()
+-
+-    const chip = slots.entries('conversation.hero.agentPreset')[0]!
+-    expect(chip.component).toBe(AgentPresetSeat)
+-    const label = slots.entries('conversation.session.header.actions')[0]!
+-    expect(label.component).toBe(AgentPresetLabel)
+-    expect(label.options).toMatchObject({ id: 'agent-preset', order: -10 })
+-    await fiber.dispose()
+-    expect(slots.entries('conversation.hero.agentPreset')).toHaveLength(0)
+-    expect(slots.entries('conversation.session.header.actions')).toHaveLength(0)
+-    expect(slots.entries('settings.section')).toHaveLength(0)
+-    conversation()
+-  })
+-
+-  it('moves the chip when the default changes on the settings surface', async () => {
+-    const { ctx, slots, moveDefault } = await bench()
+-    declareRoot(slots)
+-    const conversation = declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-
+-    const chip = slots.entries('conversation.hero.agentPreset')[0]!
+-    const seat = (chip.inject as unknown as () => AgentPresetSeatInjected)()
+-    await seat.load()
+-    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('standard')
+-
+-    // The chip opens on the deployment default, and the setting it comes from
+-    // lives on another screen: without this the next session — the very one
+-    // the setting governs — would be composed from the previous default until
+-    // a reload.
+-    // An unrelated namespace moves nothing: the chip re-reads on its own
+-    // setting, not on every settings write in the process.
+-    moveDefault()
+-    ctx.remote.$dispatch('settings/document-updated', ['llm-deepseek', 1])
+-    await Promise.resolve()
+-    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('standard')
+-
+-    ctx.remote.$dispatch('settings/document-updated', ['agent-presets', 1])
+-    await vi.waitFor(() => {
+-      expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('minimal')
+-    })
+-    conversation()
+-  })
+-
+-  it('folds a remote preset commit into the shared session row', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-    declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    const state = {
+-      current: 's1',
+-      byId: { s1: { id: 's1', blank: true, agentPreset: 'standard' } },
+-    }
+-    ctx.provide('sessions', sessionsDouble(state) as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-
+-    ctx.remote.$dispatch('agent-preset/selected', ['s1', 'minimal'])
+-
+-    expect(state.byId.s1.agentPreset).toBe('minimal')
+-  })
+-
+-  it('offers a just-authored preset on the new-session chip', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-    const conversation = declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-
+-    const chip = slots.entries('conversation.hero.agentPreset')[0]!
+-    const seat = (chip.inject as unknown as () => AgentPresetSeatInjected)()
+-    await seat.load()
+-    expect(seat.hooks.agentPresetSeat.getSnapshot().options.map(option => option.id)).toEqual(['standard'])
+-
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-    await section.load()
+-    section.beginCopy('standard')
+-    section.setCopyId('mine')
+-    section.setCopyName('我的模式')
+-    await section.confirmCopy()
+-
+-    // Authoring copies a directory rather than writing a setting, so nothing
+-    // on the wire announces it: a preset created to be used must appear on
+-    // the one screen that starts sessions, without a reload.
+-    await vi.waitFor(() => {
+-      expect(seat.hooks.agentPresetSeat.getSnapshot().options.map(option => option.id)).toEqual(['standard', 'mine'])
+-    })
+-    conversation()
+-  })
+-
+-  it('applies the staged choice to the blank session the flow lands on', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    const state: {
+-      current?: string
+-      byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
+-    } = { byId: {} }
+-    const sessions = sessionsDouble(state)
+-    ctx.provide('sessions', sessions as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
+-      .inject as unknown as () => AgentPresetSeatInjected)()
+-
+-    await chip.load()
+-    // Picked on the hero screen, where there is no session yet.
+-    await chip.select('minimal')
+-    expect(calls).not.toContain('select:minimal')
+-
+-    state.current = 's1'
+-    state.byId['s1'] = { id: 's1', blank: true, agentPreset: 'standard' }
+-    sessions.notify()
+-
+-    // Connecting a workspace produced the session; the stage reaches it there.
+-    await vi.waitFor(() => { expect(calls).toContain('select:minimal') })
+-  })
+-
+-  it('applies the stage to a session that records no preset of its own', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    const sessions = sessionsDouble({
+-      current: 's1',
+-      byId: { s1: { id: 's1', blank: true } },
+-    })
+-    ctx.provide('sessions', sessions as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
+-      .inject as unknown as () => AgentPresetSeatInjected)()
+-
+-    await chip.load()
+-    await chip.select('minimal')
+-
+-    // A session created before the deployment composed presets records none;
+-    // reading that as "already runs it" would drop the pick on the floor.
+-    expect(calls).toContain('select:minimal')
+-  })
+-
+-  it('forgets the stage once it has been spent', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    const state = {
+-      current: 's1',
+-      byId: { s1: { id: 's1', blank: true, agentPreset: 'standard' } },
+-    }
+-    const sessions = sessionsDouble(state)
+-    ctx.provide('sessions', sessions as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
+-      .inject as unknown as () => AgentPresetSeatInjected)()
+-
+-    await chip.load()
+-    await chip.select('minimal')
+-    const spent = calls.filter(call => call === 'select:minimal').length
+-    sessions.notify()
+-    sessions.notify()
+-
+-    // Every later list movement would re-apply a stage that was not cleared,
+-    // switching sessions the user never picked for.
+-    await Promise.resolve()
+-    expect(calls.filter(call => call === 'select:minimal')).toHaveLength(spent)
+-  })
+-
+-  it('gives the header label the same roster the General row reads', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-    declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-    const label = (slots.entries('conversation.session.header.actions')[0]!
+-      .inject as unknown as () => AgentPresetLabelInjected)()
+-    const row = (slots.entries('settings.general.item')[0]!
+-      .inject as unknown as () => AgentPresetRowInjected)()
+-
+-    await label.load()
+-
+-    // One roster behind both: the label resolves a name the settings row's own
+-    // load already fetched, rather than issuing a second read per session.
+-    expect(label.hooks.agentPresets).toBe(row.hooks.agentPreset)
+-    expect(label.hooks.agentPresets.getSnapshot().options).toEqual([{ id: 'standard', trust: 'system' }])
+-  })
+-
+-  it('stages the creator preset and starts a session from the section', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-    const conversation = declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
+-    const workspaces = workspacesDouble()
+-    ctx.provide('workspaces', workspaces as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-    const seat = (slots.entries('conversation.hero.agentPreset')[0]!
+-      .inject as unknown as () => AgentPresetSeatInjected)()
+-
+-    section.startCreatorDraft?.()
+-
+-    // The pick is staged on the chip's own controller — the session the
+-    // workspace start produces is what the stage lands on — and exactly one
+-    // new-session flow began.
+-    expect(section.startCreatorDraft).toBeDefined()
+-    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('cordis')
+-    expect(workspaces.starts).toHaveLength(1)
+-
+-    // A cross-screen stage carries the introduce cue; the chip acknowledges
+-    // it once, and a repeat acknowledgement leaves the snapshot untouched.
+-    expect(seat.hooks.agentPresetSeat.getSnapshot().introduce).toBe(true)
+-    seat.introduced()
+-    const acknowledged = seat.hooks.agentPresetSeat.getSnapshot()
+-    expect(acknowledged.introduce).toBe(false)
+-    seat.introduced()
+-    expect(seat.hooks.agentPresetSeat.getSnapshot()).toBe(acknowledged)
+-    conversation()
+-  })
+-
+-  it('keeps the applied composition when the roster load lands late', async () => {
+-    const { ctx, slots, calls } = await bench()
+-    declareRoot(slots)
+-    const conversation = declareConversation(slots)
+-    ctx.provide('conversation', {} as never)
+-    const state: {
+-      current?: string
+-      byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
+-    } = { byId: {} }
+-    const sessions = sessionsDouble(state)
+-    ctx.provide('sessions', sessions as never)
+-    ctx.provide('workspaces', workspacesDouble() as never)
+-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-    const seat = (slots.entries('conversation.hero.agentPreset')[0]!
+-      .inject as unknown as () => AgentPresetSeatInjected)()
+-
+-    section.startCreatorDraft?.()
+-    state.current = 's1'
+-    state.byId['s1'] = { id: 's1', blank: true }
+-    sessions.notify()
+-    await vi.waitFor(() => { expect(calls).toContain('select:cordis') })
+-
+-    // The chip mounts with the flow's session, so its roster load can land
+-    // AFTER the stage was consumed; the session's own composition is what
+-    // the display must keep — not the deployment default.
+-    state.byId['s1'] = { id: 's1', blank: true, agentPreset: 'cordis' }
+-    await seat.load()
+-
+-    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('cordis')
+-    conversation()
+-  })
+-
+-  it('offers no creator draft while the conversation flow is absent', async () => {
+-    const { ctx, slots } = await bench()
+-    declareRoot(slots)
+-
+-    await ctx.plugin({ inject: [...inject], apply }).await()
+-
+-    // No conversation scope mounted: the face omits the affordance and the
+-    // section hides its button rather than staging into nowhere.
+-    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
+-    expect(section.startCreatorDraft).toBeUndefined()
+-  })
+-})
 diff --git a/packages/client/ui-agent-preset/tests/components.client.spec.tsx b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
 index 0c29175a..8f7d5c65 100644
 --- a/packages/client/ui-agent-preset/tests/components.client.spec.tsx
