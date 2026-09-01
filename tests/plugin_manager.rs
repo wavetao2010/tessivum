@@ -531,6 +531,106 @@ fn unsupported_remote_engine_is_rejected_before_any_profile_mutation() {
 
 #[cfg(unix)]
 #[test]
+fn candidate_dsh_engine_preflight_accepts_baseline_and_rejects_invalid_ranges_before_mutation() {
+    let accepted = TempDir::new();
+    let (profile, _, _) = generic_profile(&accepted);
+    write_package(
+        &profile,
+        "candidate",
+        json!({"dsh": {"engines": {"dsh": "0.1.0-rc.5"}}}),
+    );
+    let package = generic_package(
+        &accepted,
+        json!({
+            "name": "candidate",
+            "version": "1.0.0",
+            "main": "./lib/index.js",
+            "dsh": {"engines": {"dsh": "0.1.0-rc.5"}}
+        }),
+        "export default () => {}\n",
+        None,
+    );
+    let next = accepted.0.join("next.json");
+    write_json(
+        &next,
+        json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+    );
+    let log = accepted.0.join("pnpm.log");
+    let _pnpm = GenericPnpm::new(
+        &accepted,
+        &package,
+        "candidate",
+        &next,
+        None,
+        false,
+        false,
+        false,
+        &log,
+    );
+
+    mutate_plugins(
+        &accepted.0,
+        PluginMutation::Add("candidate@1.0.0".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        read_json_file(&profile.join("package.json")).pointer("/dependencies/candidate"),
+        Some(&json!("1.0.0"))
+    );
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\n");
+    drop(_pnpm);
+
+    for engine in [">=0.1.x", ">=0.1.0-rc.6"] {
+        let temp = TempDir::new();
+        let (profile, manifest, lock) = generic_profile(&temp);
+        write_package(
+            &profile,
+            "candidate",
+            json!({"dsh": {"engines": {"dsh": engine}}}),
+        );
+        let package = generic_package(
+            &temp,
+            json!({
+                "name": "candidate",
+                "version": "1.0.0",
+                "main": "./lib/index.js",
+                "dsh": {"engines": {"dsh": engine}}
+            }),
+            "export default () => {}\n",
+            None,
+        );
+        let next = temp.0.join("next.json");
+        write_json(
+            &next,
+            json!({"dependencies": {"old": "1.0.0", "candidate": "1.0.0"}}),
+        );
+        let log = temp.0.join("pnpm.log");
+        let _pnpm = GenericPnpm::new(
+            &temp,
+            &package,
+            "candidate",
+            &next,
+            None,
+            false,
+            false,
+            false,
+            &log,
+        );
+
+        let error =
+            mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap_err();
+        assert!(
+            error.to_string().contains("PLUGIN_DSH_ENGINE_UNSUPPORTED"),
+            "{engine}: {error}"
+        );
+        assert_eq!(fs::read(profile.join("package.json")).unwrap(), manifest);
+        assert_eq!(fs::read(profile.join("pnpm-lock.yaml")).unwrap(), lock);
+        assert_eq!(fs::read_to_string(&log).unwrap_or_default(), "");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn candidate_preflight_reports_entry_patch_client_dependency_and_inject_failures() {
     let cases = [
         (
