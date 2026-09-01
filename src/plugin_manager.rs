@@ -24,7 +24,7 @@ use thiserror::Error;
 use crate::{
     host::{HostConfig, LegacyHostConfig},
     legacy::ProductPackageResolver,
-    plugins::{PluginRouter, PluginRuntime},
+    plugins::{assignment_strings, PluginRouter, PluginRuntime},
 };
 
 const MAX_PROFILE_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -2365,6 +2365,19 @@ fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), Plugi
             )
         })?;
     let entry = resolve_package_entry(&root, entry, package, PLUGIN_PACKAGE_ENTRY_INVALID)?;
+    let entry_source = read_bounded(&entry, MAX_BUNDLE_PATCH_BYTES).map_err(|error| {
+        compatibility_error(
+            PLUGIN_PACKAGE_ENTRY_INVALID,
+            format!("{}: {error}", entry.display()),
+        )
+    })?;
+    let entry_source = std::str::from_utf8(&entry_source).map_err(|error| {
+        compatibility_error(
+            PLUGIN_PACKAGE_ENTRY_INVALID,
+            format!("{} is not UTF-8: {error}", entry.display()),
+        )
+    })?;
+    validate_declared_inject(&assignment_strings(entry_source, "inject"), package)?;
     let mut runtime_entries = vec![entry];
     let dsh = dsh_declaration(&manifest, package).map_err(|error| {
         compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
@@ -2401,12 +2414,6 @@ fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), Plugi
         }
     }
     validate_runtime_imports(&manifest, &runtime_entries, package)?;
-    let report = PluginRouter::new()
-        .inspect(&root, Some(PluginRuntime::LegacyNode))
-        .map_err(|error| {
-            compatibility_error(PLUGIN_PACKAGE_ENTRY_INVALID, format!("{package}: {error}"))
-        })?;
-    validate_declared_inject(&report.inject, package)?;
     validate_bundle_candidate(profile, &root, &manifest, package)
 }
 
@@ -2594,12 +2601,11 @@ fn runtime_dependency_name(specifier: &str) -> Option<&str> {
     if specifier.starts_with('.') || specifier.starts_with('/') || specifier.starts_with("node:") {
         return None;
     }
-    let package = if let Some(scoped) = specifier.strip_prefix('@') {
-        let slash = scoped.find('/')? + 1;
-        let rest = &specifier[slash..];
-        let end = rest
+    let package = if specifier.starts_with('@') {
+        let scope_end = specifier.find('/')?;
+        let end = specifier[scope_end + 1..]
             .find('/')
-            .map_or(specifier.len(), |index| slash + index);
+            .map_or(specifier.len(), |index| scope_end + 1 + index);
         &specifier[..end]
     } else {
         specifier.split('/').next().unwrap_or_default()

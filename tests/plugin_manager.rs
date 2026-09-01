@@ -948,10 +948,25 @@ fn successful_generic_add_update_and_remove_keep_profile_semantics() {
     let (profile, _, _) = generic_profile(&temp);
     let package = generic_package(
         &temp,
-        json!({"name": "candidate", "version": "1.0.0", "main": "./lib/index.js"}),
-        "export default () => {}\n",
+        json!({
+            "name": "candidate",
+            "version": "1.0.0",
+            "main": "./lib/index.js",
+            "exports": {
+                ".": "./lib/index.js",
+                "./client": "./lib/client.js"
+            },
+            "dsh": {"client": {"platform": "web"}},
+            "peerDependencies": {"@scope/runtime": "^1.0.0"}
+        }),
+        "import '@scope/runtime/client'\nexport const inject = ['webServer']\nexport default () => {}\n",
         None,
     );
+    fs::write(
+        package.join("lib/client.js"),
+        "export const inject = ['locale']\nexport default () => {}\n",
+    )
+    .unwrap();
     let added = temp.0.join("added.json");
     write_json(
         &added,

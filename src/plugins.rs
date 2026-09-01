@@ -1245,7 +1245,7 @@ fn has_exported_name(source: &str, name: &str) -> bool {
         || source.contains(&format!("exports.{name}"))
 }
 
-fn assignment_strings(source: &str, name: &str) -> Vec<String> {
+pub(crate) fn assignment_strings(source: &str, name: &str) -> Vec<String> {
     let assignment = Regex::new(&format!(
         r"(?s)\b(?:export\s+(?:const|let|var)\s+)?{name}\s*=\s*\[([^\]]*)\]"
     ))
