@@ -846,6 +846,9 @@ fn mutation_target_entry_state(profile: &Path, mutation: &PluginMutation) -> Str
 }
 
 fn add_package_name(specifier: &str) -> Option<&str> {
+    if is_local_package_specifier(specifier) {
+        return None;
+    }
     if let Some(scoped) = specifier.strip_prefix('@') {
         let slash = scoped.find('/')? + 1;
         let version = specifier[slash..].find('@').map(|offset| slash + offset);
@@ -853,6 +856,48 @@ fn add_package_name(specifier: &str) -> Option<&str> {
     } else {
         Some(specifier.split('@').next().unwrap_or_default())
     }
+}
+
+fn is_local_package_specifier(specifier: &str) -> bool {
+    let path = specifier.strip_prefix("file:").unwrap_or(specifier);
+    specifier.starts_with("file:")
+        || Path::new(path).is_absolute()
+        || path == "."
+        || path == ".."
+        || path.starts_with("./")
+        || path.starts_with("../")
+}
+
+fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerError> {
+    if let Some(package) = add_package_name(specifier).filter(|name| !name.is_empty()) {
+        return Ok(package.into());
+    }
+    if !is_local_package_specifier(specifier) {
+        return Err(compatibility_error(
+            PLUGIN_PACKAGE_ENTRY_INVALID,
+            "the added package name could not be resolved",
+        ));
+    }
+    let path = Path::new(specifier.strip_prefix("file:").unwrap_or(specifier));
+    let root = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| io_error(".", error))?
+            .join(path)
+    };
+    let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+    manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                format!("{} does not declare a package name", root.display()),
+            )
+        })
 }
 
 fn anchor_path_spec(specifier: &str, cwd: &Path) -> Result<String, PluginManagerError> {
@@ -2300,15 +2345,8 @@ fn validate_mutation_candidate(
     let PluginMutation::Add(specifier) = mutation else {
         return Ok(());
     };
-    let package = add_package_name(specifier)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| {
-            compatibility_error(
-                PLUGIN_PACKAGE_ENTRY_INVALID,
-                "the added package name could not be resolved",
-            )
-        })?;
-    validate_candidate_package(profile, package)
+    let package = resolve_add_package_name(specifier)?;
+    validate_candidate_package(profile, &package)
 }
 
 fn preflight_materialized_candidate(

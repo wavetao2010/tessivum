@@ -987,7 +987,11 @@ fn successful_generic_add_update_and_remove_keep_profile_semantics() {
         false,
         &log,
     );
-    mutate_plugins(&temp.0, PluginMutation::Add("candidate@1.0.0".into())).unwrap();
+    mutate_plugins(
+        &temp.0,
+        PluginMutation::Add(format!("file:{}", package.display())),
+    )
+    .unwrap();
     assert_eq!(
         read_json_file(&profile.join("package.json")).pointer("/dependencies/candidate"),
         Some(&json!("1.0.0"))
