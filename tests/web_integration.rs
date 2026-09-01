@@ -15,6 +15,8 @@ use tessivum::{
     host::{HostApi, HostConfig, HostRuntime},
     plugin_manager::configure_host_plugins,
 };
+#[cfg(unix)]
+use tessivum::plugin_manager::{mutate_plugins, PluginMutation};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -516,6 +518,205 @@ async fn web_command_combines_explicit_enabled_and_client_only_packages() {
         !status.success(),
         "forced process termination reports failure"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_plugin_add_keeps_the_last_good_profile_bootable_by_web() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("failed-plugin-add-web-boot");
+    let (dist, packages) = install_web_half(&fixture);
+    let data_dir = fixture.path().join("state");
+    let profile = data_dir.join("plugins");
+    fixture.write(
+        "state/plugins/package.json",
+        r#"{"private":true,"dependencies":{"old-plugin":"1.0.0"},"dsh":{"profile":{"bundles":["old-plugin"]}}}"#,
+    );
+    fixture.write("state/plugins/pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    fixture.write(
+        "state/plugins/node_modules/old-plugin/package.json",
+        r#"{"name":"old-plugin","exports":{"./client":"./dist/client.js"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+    );
+    fixture.write("state/plugins/node_modules/old-plugin/cordis.patch.yml", "[]\n");
+    fixture.write(
+        "state/plugins/node_modules/old-plugin/dist/client.js",
+        "export const oldPlugin = true;",
+    );
+    let manifest = fs::read(profile.join("package.json")).expect("last-good manifest reads");
+    let lock = fs::read(profile.join("pnpm-lock.yaml")).expect("last-good lock reads");
+    let old_manifest = fs::read(profile.join("node_modules/old-plugin/package.json"))
+        .expect("last-good plugin manifest reads");
+    let old_patch = fs::read(profile.join("node_modules/old-plugin/cordis.patch.yml"))
+        .expect("last-good plugin patch reads");
+    let old_client = fs::read(profile.join("node_modules/old-plugin/dist/client.js"))
+        .expect("last-good plugin client reads");
+
+    let fake_bin = fixture.path().join("fake-pnpm");
+    let backup = fake_bin.join("last-known-good/node_modules/old-plugin");
+    fs::create_dir_all(backup.join("dist")).expect("fake pnpm backup creates");
+    fs::copy(
+        profile.join("node_modules/old-plugin/package.json"),
+        backup.join("package.json"),
+    )
+    .expect("fake pnpm saves old manifest");
+    fs::copy(
+        profile.join("node_modules/old-plugin/cordis.patch.yml"),
+        backup.join("cordis.patch.yml"),
+    )
+    .expect("fake pnpm saves old patch");
+    fs::copy(
+        profile.join("node_modules/old-plugin/dist/client.js"),
+        backup.join("dist/client.js"),
+    )
+    .expect("fake pnpm saves old client");
+    let pnpm = fake_bin.join("pnpm");
+    fixture.write(
+        "fake-pnpm/pnpm",
+        r#"#!/bin/sh
+case "$1" in
+  add)
+    printf '{"private":true,"dependencies":{"candidate":"1.0.0"}}' > "$PWD/package.json"
+    printf "lockfileVersion: '9.0'\npackages: {}\n" > "$PWD/pnpm-lock.yaml"
+    rm -rf "$PWD/node_modules"
+    mkdir -p "$PWD/node_modules/candidate"
+    printf '{"name":"candidate","version":"1.0.0"}' > "$PWD/node_modules/candidate/package.json"
+    exit 23
+    ;;
+  install)
+    rm -rf "$PWD/node_modules"
+    cp -R "$(dirname "$0")/last-known-good/node_modules" "$PWD/node_modules"
+    ;;
+esac
+"#,
+    );
+    fs::set_permissions(&pnpm, fs::Permissions::from_mode(0o755))
+        .expect("fake pnpm is executable");
+
+    let previous_path = std::env::var_os("PATH");
+    let mut path = fake_bin.into_os_string();
+    if let Some(previous) = &previous_path {
+        path.push(":");
+        path.push(previous);
+    }
+    std::env::set_var("PATH", path);
+    let mutation = mutate_plugins(&data_dir, PluginMutation::Add("candidate@1.0.0".into()));
+    match previous_path {
+        Some(previous) => std::env::set_var("PATH", previous),
+        None => std::env::remove_var("PATH"),
+    }
+    let error = mutation.expect_err("fake pnpm add fails");
+    assert!(error.to_string().contains("pnpm exited with code 23"));
+    assert_eq!(
+        fs::read(profile.join("package.json")).expect("restored manifest reads"),
+        manifest
+    );
+    assert_eq!(
+        fs::read(profile.join("pnpm-lock.yaml")).expect("restored lock reads"),
+        lock
+    );
+    assert_eq!(
+        fs::read(profile.join("node_modules/old-plugin/package.json"))
+            .expect("restored plugin manifest reads"),
+        old_manifest
+    );
+    assert_eq!(
+        fs::read(profile.join("node_modules/old-plugin/cordis.patch.yml"))
+            .expect("restored plugin patch reads"),
+        old_patch
+    );
+    assert_eq!(
+        fs::read(profile.join("node_modules/old-plugin/dist/client.js"))
+            .expect("restored plugin client reads"),
+        old_client
+    );
+    assert!(
+        !profile.join("node_modules/candidate").exists(),
+        "failed plugin is removed during rollback"
+    );
+
+    let package_paths = std::env::join_paths([packages]).expect("package path list encodes");
+    let mut child = ChildCleanup(Some(
+        Command::new(env!("CARGO_BIN_EXE_tessivum"))
+            .current_dir(fixture.path())
+            .env("TESSIVUM_WEB_DIST", dist)
+            .env("TESSIVUM_CLIENT_PACKAGES", package_paths)
+            .env("TESSIVUM_REPLAY", WEB_REPLAY)
+            .env("TESSIVUM_WEB_ADDR", "127.0.0.1:0")
+            .arg("web")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("web command starts"),
+    ));
+    let stderr = child
+        .0
+        .as_mut()
+        .expect("child exists")
+        .stderr
+        .take()
+        .expect("stderr is piped");
+    let mut lines = BufReader::new(stderr).lines();
+    let listen = timeout(Duration::from_secs(5), async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .expect("web stderr reads")
+                .expect("web command stays alive");
+            if line.starts_with("Tessivum web listening at http://") {
+                return line;
+            }
+        }
+    })
+    .await
+    .expect("web command logs its bound URL");
+    let base = listen
+        .strip_prefix("Tessivum web listening at ")
+        .expect("bound URL prefix")
+        .to_owned();
+    drop(lines);
+
+    let index = reqwest::Client::new()
+        .get(&base)
+        .send()
+        .await
+        .expect("index is served");
+    assert_eq!(index.status(), reqwest::StatusCode::OK);
+    let graph = boot_graph(&index.text().await.expect("index is text"));
+    assert!(
+        graph["entries"]
+            .as_array()
+            .expect("boot entries")
+            .iter()
+            .any(|entry| entry["id"] == "old-plugin"),
+        "web boot keeps the last-known-good plugin active"
+    );
+
+    unsafe {
+        assert_eq!(
+            libc::kill(
+                child
+                    .0
+                    .as_ref()
+                    .expect("child exists")
+                    .id()
+                    .expect("child has PID") as i32,
+                libc::SIGTERM,
+            ),
+            0,
+            "SIGTERM is delivered"
+        );
+    }
+    let status = timeout(
+        Duration::from_secs(5),
+        child.0.as_mut().expect("child exists").wait(),
+    )
+    .await
+    .expect("web command stops")
+    .expect("web command waits");
+    assert!(status.success(), "SIGTERM is graceful");
 }
 
 #[tokio::test]
