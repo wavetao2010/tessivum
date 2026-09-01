@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "hostBaseline": {
+    "dshVersion": "0.1.0-rc.5",
+    "status": "frozen",
+    "versionSpoofing": false
+  },
+  "upstream": {
+    "repository": "https://github.com/zhu1090093659/dsh-web",
+    "tag": "v0.3.6",
+    "commit": "fb3f1df1f5be2df1a2a72e9971c0d2936e0307c8",
+    "packagePath": "packages/dsh-remote-web-ui"
+  },
+  "npm": {
+    "package": "@linxin666/dsh-remote-web-ui",
+    "version": "0.3.6",
+    "tarball": "https://registry.npmjs.org/@linxin666/dsh-remote-web-ui/-/dsh-remote-web-ui-0.3.6.tgz",
+    "shasum": "003dd635e9a9edd8dee12e463e71e877d39960a5",
+    "integrity": "sha512-uDtYXrR1eI5iea6GRqerefAHS67VEr4ibcKiyH19GAg5HiluwbnAiId8c+EK7uFDlqpfp/lKXRY4syG1qOuoXg=="
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "upstreamPath": "packages/dsh-remote-web-ui/LICENSE",
+    "upstreamGitBlob": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+    "localCopy": "LICENSE.upstream"
+  },
+  "scope": {
+    "sourceCopied": false,
+    "packageCreated": false,
+    "releaseScriptsChanged": false,
+    "selectedCode": "presentation-only reference for a future Tessivum adapter"
+  },
+  "authorityBoundary": {
+    "owner": "Tessivum Rust Host",
+    "cloudflared": {
+      "dependency": "cloudflared@^0.7.3",
+      "decision": "excluded"
+    },
+    "nodeSecurityAuthority": {
+      "decision": "excluded",
+      "replacement": "Rust-owned Remote Access domain with fail-closed HTTP and WebSocket authorization"
+    },
+    "prohibitedUpstreamMechanisms": [
+      "Node pairing token and device-session authority",
+      "Node api/gate authorization waterfall",
+      "loopback proxy that bypasses Host authority",
+      "webserver/index-inject or inline bootstrap injection",
+      "Node tunnel runtime"
+    ]
+  }
+}

@@ -1,0 +1,279 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/zhu1090093659/dsh-web",
+    "tag": "v0.3.6",
+    "commit": "fb3f1df1f5be2df1a2a72e9971c0d2936e0307c8",
+    "package": "@linxin666/dsh-remote-web-ui@0.3.6",
+    "packageRoot": "packages/dsh-remote-web-ui"
+  },
+  "selection": {
+    "mode": "reference-only",
+    "sourceCopiedInThisPhase": false,
+    "rule": "Only the listed desktop and mobile presentation sources and static assets are eligible for a future Tessivum adapter; every omitted authority remains Rust-owned."
+  },
+  "selectedPresentation": {
+    "desktop": {
+      "sourcePaths": [
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/FenceNotice.tsx",
+          "gitBlob": "ce11bdee7fe02abf9d714d55e4e0120cec6753c0",
+          "role": "unpaired desktop notice presentation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/FooterRemoteEntry.tsx",
+          "gitBlob": "0591a3384243d57e22aa82661cc2fea2c1e22372",
+          "role": "sidebar footer remote-access trigger"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/PairFailedNotice.tsx",
+          "gitBlob": "582b4c57e213adef2c2669699924d40bb1a6d389",
+          "role": "pairing-failure notice presentation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/PhoneIcon.tsx",
+          "gitBlob": "2348f1bda40c43c4cdf66350135b63673406bace",
+          "role": "remote-access icon"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/RemoteEntry.tsx",
+          "gitBlob": "5640f614c3b0b3718ff656bd6fe4882f4ab66a7a",
+          "role": "desktop remote-access entry behavior and view composition"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/RemotePanel.tsx",
+          "gitBlob": "b53f4c420858db7150cbcc35185b3a7d289e44e8",
+          "role": "QR, device-status, and revocation panel presentation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/RemoteSettingsCard.tsx",
+          "gitBlob": "8ae0453006e4777a171aa6faa3818f83d5d2cfd0",
+          "role": "remote-access settings card presentation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/deep-link.ts",
+          "gitBlob": "7eb12b7bd537ba18fa403298f041edc3b1943322",
+          "role": "browser pair-link navigation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/device-name.ts",
+          "gitBlob": "0062e9e7438e2226fe5de9e9f0b5d057d1c7182e",
+          "role": "display-only device-name derivation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/locales.ts",
+          "gitBlob": "be7e35f3f6807afe51d0f1d825c50223740e41b9",
+          "role": "desktop presentation locale dictionaries"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/remote.module.css",
+          "gitBlob": "4a71e52ee810fafe62dfda8e44b9aec131d4cbf7",
+          "role": "remote panel styles"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/settings-card.module.css",
+          "gitBlob": "a661065e0a8bb739b7fe5fd4a6928d539c149b85",
+          "role": "remote settings-card styles"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/client/settings-form.ts",
+          "gitBlob": "444b881acd2478d041a367b6e87a2c3a05cd6903",
+          "role": "settings-form presentation state"
+        }
+      ],
+      "assetPaths": []
+    },
+    "mobile": {
+      "sourcePaths": [
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/index.tsx",
+          "gitBlob": "e0abe907973a583e33cc1a37bbc4069c2d03697f",
+          "role": "mobile React entry"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/PairRequiredView.tsx",
+          "gitBlob": "7f8368ec862ac5cd619ad191cd2c4a7f3079784e",
+          "role": "mobile pairing-required view"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/api.ts",
+          "gitBlob": "0bd074ce1606272c6ea40cfcd355002b14532322",
+          "role": "mobile API presentation client to be rebound to Rust contracts"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/markdown.ts",
+          "gitBlob": "a712145ec1e44b80a371580e90b3d1b1bfe81c73",
+          "role": "chat markdown rendering"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/messages.ts",
+          "gitBlob": "d1c6c6b1695760f9ed88f6ef5448de4d5eea358d",
+          "role": "chat message presentation mapping"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/mobile-styles.ts",
+          "gitBlob": "f6c111fc01cfe41fd88b589f82d0277deb45bab7",
+          "role": "mobile styles"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/mobile-theme.ts",
+          "gitBlob": "61bed4a42bdb3a131bea8bfe2fafa699d3c6a4ba",
+          "role": "mobile theme presentation"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/mux.ts",
+          "gitBlob": "ce4f451d2d4f42d9cac6dfae506f1fe35f0034aa",
+          "role": "mobile live-event client to be rebound to Rust contracts"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/pairing.ts",
+          "gitBlob": "ce2c5bbfcb18a495a041e527068949f44e3dad09",
+          "role": "mobile pair-link UX"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/rpc.ts",
+          "gitBlob": "454005648e99245bf9d9f138190849d52402b1d1",
+          "role": "mobile RPC presentation client to be rebound to Rust contracts"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/theme-toggle.tsx",
+          "gitBlob": "ee76eeff7d287edad3a84e95d6767fbcc91233a2",
+          "role": "mobile theme-toggle control"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/views/App.tsx",
+          "gitBlob": "74347994b71402fc97dc1dbec0d3109783b464bc",
+          "role": "mobile application shell"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/views/ChatView.tsx",
+          "gitBlob": "84a5be50b7d7f0b5fd676855989c2d2e82ddc08d",
+          "role": "mobile chat view"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/views/SessionListView.tsx",
+          "gitBlob": "4bd1c6f569d28b2904ca26bc7a43bca14897744a",
+          "role": "mobile session-list view"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile/views/WorkspaceView.tsx",
+          "gitBlob": "1381307c0f984938f541bd2f358909f4476abc2b",
+          "role": "mobile workspace view"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/src/mobile-pwa.ts",
+          "gitBlob": "b45ba882a5719fcd79d02f4bc2a1e6eeb39ea6bd",
+          "role": "mobile PWA registration"
+        }
+      ],
+      "assetPaths": [
+        {
+          "path": "packages/dsh-remote-web-ui/assets/apple-touch-icon.png",
+          "gitBlob": "05f27640c87c022bed3a78dbc5aeadd260d435d7",
+          "role": "mobile Apple touch icon"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/assets/mobile-icon-192.png",
+          "gitBlob": "fd5ea97c1efbf02cdcc5392a28c7c2fd09341a2",
+          "role": "mobile PWA 192px icon"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/assets/mobile-icon-512.png",
+          "gitBlob": "766734f7d727ad1147dab45fd048465db68ef6f6",
+          "role": "mobile PWA 512px icon"
+        },
+        {
+          "path": "packages/dsh-remote-web-ui/assets/mobile-service-worker.js",
+          "gitBlob": "caaddf15e9433dd2b82e1edde723dcaca0c679b4",
+          "role": "mobile PWA static-shell worker"
+        }
+      ]
+    }
+  },
+  "excludedAuthority": [
+    {
+      "category": "Node plugin lifecycle and security authority",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/index.ts",
+        "packages/dsh-remote-web-ui/src/mount-once.ts",
+        "packages/dsh-remote-web-ui/src/dsh-home.ts"
+      ],
+      "decision": "excluded; Rust owns remote-access lifecycle, configuration, and persistent state"
+    },
+    {
+      "category": "pairing and device-session authority",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/pairing.ts",
+        "packages/dsh-remote-web-ui/src/pairing-access.ts"
+      ],
+      "decision": "excluded; Rust mints, stores, validates, expires, and revokes all pairing and device credentials"
+    },
+    {
+      "category": "api/gate authorization waterfall",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/gate.ts",
+        "packages/dsh-remote-web-ui/src/index.ts"
+      ],
+      "decision": "excluded; no generic api/gate is provided"
+    },
+    {
+      "category": "Node HTTP, mobile API, and WebSocket route authority",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/http.ts",
+        "packages/dsh-remote-web-ui/src/routes.ts",
+        "packages/dsh-remote-web-ui/src/mobile-api.ts",
+        "packages/dsh-remote-web-ui/src/mobile-pending.ts",
+        "packages/dsh-remote-web-ui/src/mobile-routes.ts",
+        "packages/dsh-remote-web-ui/src/paired-model-catalog.ts",
+        "packages/dsh-remote-web-ui/src/remote-api.ts",
+        "packages/dsh-remote-web-ui/src/posture.ts"
+      ],
+      "decision": "excluded; Rust HTTP and WebSocket middleware performs the authority checks before domain handling"
+    },
+    {
+      "category": "loopback proxy and remote-channel privilege translation",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/loopback.ts",
+        "packages/dsh-remote-web-ui/src/loopback-proxy.ts",
+        "packages/dsh-remote-web-ui/src/remote-channel-rules.ts",
+        "packages/dsh-remote-web-ui/src/remote-methods.ts",
+        "packages/dsh-remote-web-ui/src/client/pair-api.ts",
+        "packages/dsh-remote-web-ui/src/client/remote-channel.ts"
+      ],
+      "decision": "excluded; remote requests must not be converted to loopback or inherit Host authority"
+    },
+    {
+      "category": "index injection and inline bootstrap",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/remote-channel-boot.ts",
+        "packages/dsh-remote-web-ui/src/uuid-polyfill.ts",
+        "packages/dsh-remote-web-ui/src/index.ts"
+      ],
+      "decision": "excluded; no webserver/index-inject, tapIndex, runtime HTML, or inline script injection"
+    },
+    {
+      "category": "tunnel runtime and network discovery",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/tunnel.ts",
+        "packages/dsh-remote-web-ui/src/lan.ts"
+      ],
+      "dependencies": [
+        "cloudflared@^0.7.3"
+      ],
+      "decision": "excluded; Tessivum does not import, spawn, or delegate security authority to cloudflared or a Node tunnel runtime"
+    },
+    {
+      "category": "unrelated self-update and telemetry feature",
+      "paths": [
+        "packages/dsh-remote-web-ui/src/update.ts",
+        "packages/dsh-remote-web-ui/src/update-routes.ts",
+        "packages/dsh-remote-web-ui/src/client/PluginSettingsCard.tsx",
+        "packages/dsh-remote-web-ui/src/client/UpdateEntry.tsx",
+        "packages/dsh-remote-web-ui/src/client/UpdatePanel.tsx",
+        "packages/dsh-remote-web-ui/src/client/update-api.ts",
+        "packages/dsh-remote-web-ui/src/client/telemetry.ts"
+      ],
+      "decision": "excluded; self-update and telemetry are outside Remote Access presentation reuse"
+    }
+  ]
+}
