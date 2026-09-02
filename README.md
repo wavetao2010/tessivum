@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.19` is a prerelease, not a production-stable API or data-format promise. It adds Rust-owned Remote Access with one-time pairing, persistent device sessions, exact trusted HTTPS authority, and a built-in `/remote` desktop/mobile surface; Remote Access remains disabled by default and the listener remains loopback-only.
+`v0.1.0-alpha.20` is a prerelease, not a production-stable API or data-format promise. It adds account-free, Rust-supervised Cloudflare Quick Tunnels to Rust-owned Remote Access; Remote Access remains disabled by default and the listener remains loopback-only.
 
 Current implementation foundation:
 
@@ -132,22 +132,22 @@ tsv --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates the `tessivum` and `tsv` launchers:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.19/install.sh
-sh install.sh 0.1.0-alpha.19
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.20/install.sh
+sh install.sh 0.1.0-alpha.20
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.19 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.19), verify the checksum, then run either packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.20 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.20), verify the checksum, then run either packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.19-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.19-$target.tar.gz"
-"./tessivum-0.1.0-alpha.19-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.19-$target/bin/tsv" --version
+sha256sum -c "tessivum-0.1.0-alpha.20-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.20-$target.tar.gz"
+"./tessivum-0.1.0-alpha.20-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.20-$target/bin/tsv" --version
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -231,17 +231,27 @@ Open <http://127.0.0.1:3000>. Web can configure a relay from the published Model
 
 ### Remote Access
 
-Remote Access is off by default. Tessivum continues to bind only its loopback listener; an operator-owned TLS reverse tunnel exposes an exact HTTPS authority. Tessivum does not install or spawn a tunnel process.
+Remote Access is off by default and the Rust listener remains loopback-only. For one-command remote transport, enable a Cloudflare Quick Tunnel; no domain, DNS change, or Cloudflare account is required:
+
+```bash
+export TESSIVUM_REMOTE_ACCESS=1
+export TESSIVUM_REMOTE_AUTO_TUNNEL=cloudflare
+export TESSIVUM_REMOTE_SESSION_TTL_SECONDS=2592000 # optional; 30-day default
+tessivum web
+```
+
+Tessivum uses an absolute `TESSIVUM_CLOUDFLARED` override first, then `cloudflared` on `PATH`; otherwise it downloads the pinned release for supported macOS/Linux architectures, verifies its SHA-256 digest, and caches it under the selected data root's `bin` directory. It prints the temporary `https://*.trycloudflare.com/remote` URL after startup. The Rust Host owns pairing and authorization; `cloudflared` only transports traffic. If the tunnel exits, Tessivum immediately removes its old authority, restarts with bounded exponential backoff, and atomically installs the replacement authority.
+
+For a stable operator-owned domain or named tunnel, omit `TESSIVUM_REMOTE_AUTO_TUNNEL` and configure the existing manual path instead:
 
 ```bash
 export TESSIVUM_REMOTE_ACCESS=1
 export TESSIVUM_REMOTE_TRUSTED_TUNNEL=1
 export TESSIVUM_WEB_TRUSTED_AUTHORITIES=app.example.test
-export TESSIVUM_REMOTE_SESSION_TTL_SECONDS=2592000 # optional; 30-day default
 tessivum web
 ```
 
-The tunnel must forward `https://app.example.test` to the loopback listener, preserve that exact `Host` and browser `Origin`, and set `X-Forwarded-Proto: https`. Multiple exact authorities are comma-separated. Remote startup fails if the authority list or trusted-TLS posture is missing; wildcard Hosts, plain remote HTTP, and automatic LAN binding are unsupported.
+The manual tunnel must forward `https://app.example.test` to the loopback listener, preserve that exact `Host` and browser `Origin`, and set `X-Forwarded-Proto: https`. Multiple exact authorities are comma-separated. Wildcard Hosts, plain remote HTTP, and automatic LAN binding are unsupported. Cloudflare terminates Quick Tunnel TLS and can observe proxied traffic; Quick Tunnel URLs are temporary and carry no uptime guarantee.
 
 Open <http://127.0.0.1:3000/remote> locally to generate the short-lived QR/link and manage devices. The link carries its one-time token only in the URL fragment. A successful remote exchange stores an `HttpOnly`, `Secure`, `SameSite=Strict` device cookie and redirects into the existing Tessivum Web shell; API, SSE, and WebSocket requests then pass the same Rust authority middleware. Anonymous remote access is limited to a bounded public-posture read, the pairing exchange, and fixed Browser assets. Remote browsers may read the redacted settings and credential metadata required to render that shell, but Legacy Node Web routes plus settings, credentials, workspace, filesystem, plugin-host activation, and Host shutdown mutations stay loopback-only. Revocation closes live streaming connections promptly and rejects later requests.
 
@@ -284,7 +294,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
 - Remote requests require an explicitly trusted HTTPS authority, same-origin browser metadata, the trusted tunnel marker, and a live Rust-owned device session. Pairing issuance and other Host mutations remain loopback-only.
-- Checksums detect corruption but are not signatures. Alpha.19 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
+- Checksums detect corruption but are not signatures. Alpha.20 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
 
 ## Verification
 

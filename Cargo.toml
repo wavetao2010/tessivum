@@ -1,6 +1,6 @@
 [package]
 name = "tessivum"
-version = "0.1.0-alpha.19"
+version = "0.1.0-alpha.20"
 edition = "2021"
 description = "Independent Rust-native agent harness inspired by DeepSeek Harness and Cordis"
 repository = "https://github.com/wavetao2010/tessivum"
@@ -44,3 +44,5 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 mime_guess = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
+flate2 = "1"
+tar = "0.4"

@@ -20,7 +20,7 @@ elif [ "${1:-}" != "" ]; then
     case "$1" in -*) usage ;; esac
 fi
 
-version=${1:-${VERSION:-0.1.0-alpha.19}}
+version=${1:-${VERSION:-0.1.0-alpha.20}}
 repository=${REPOSITORY:-https://github.com/wavetao2010/tessivum}
 fixture_url=${FIXTURE_URL:-}
 test_mode=${TESSIVUM_INSTALLER_TEST:-}

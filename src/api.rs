@@ -11,7 +11,7 @@ use std::{
     io,
     net::{Ipv4Addr, SocketAddr},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -121,6 +121,7 @@ pub struct ApiServer {
     socket_shutdown: broadcast::Sender<()>,
     listener_shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<io::Result<()>>>,
+    authority_guard: AuthorityGuard,
 }
 
 impl ApiServer {
@@ -202,7 +203,7 @@ impl ApiServer {
             host,
             config.frontend,
             socket_shutdown.clone(),
-            Some(authority_guard),
+            Some(authority_guard.clone()),
             web_routes,
             remote_access,
         );
@@ -218,6 +219,7 @@ impl ApiServer {
             address,
             socket_shutdown,
             listener_shutdown: Some(listener_shutdown),
+            authority_guard,
             task: Some(task),
         })
     }
@@ -225,6 +227,11 @@ impl ApiServer {
     /// The actual bound socket address, including an OS-selected port.
     pub fn local_addr(&self) -> SocketAddr {
         self.address
+    }
+
+    /// Atomically replaces every non-loopback Web authority.
+    pub fn replace_trusted_authorities(&self, trusted_authorities: Vec<String>) -> io::Result<()> {
+        self.authority_guard.replace(trusted_authorities)
     }
 
     /// Stops accepts, wakes every SSE/WebSocket handler, and waits for them.
@@ -269,10 +276,6 @@ fn router_with_shutdown(
     web_routes: Option<DomainBridge>,
     remote_access: Option<RemoteAccess>,
 ) -> Router {
-    let advertised_origins = authority_guard
-        .as_ref()
-        .map(AuthorityGuard::advertised_origins)
-        .unwrap_or_default();
     let compat = Arc::new(CompatibilityState::new(host.descriptor()));
     let state = ApiState {
         host,
@@ -281,7 +284,7 @@ fn router_with_shutdown(
         web_routes: web_routes.clone(),
         compat,
         remote_access: remote_access.clone(),
-        advertised_origins: Arc::from(advertised_origins),
+        authority_guard: authority_guard.clone(),
         workspace_mutation: Arc::new(AsyncMutex::new(())),
     };
     let router = Router::new()
@@ -378,9 +381,19 @@ struct ApiState {
     compat: Arc<CompatibilityState>,
     workspace_mutation: Arc<AsyncMutex<()>>,
     remote_access: Option<RemoteAccess>,
-    advertised_origins: Arc<[String]>,
+    authority_guard: Option<AuthorityGuard>,
 }
 
+impl ApiState {
+    fn advertised_origins(&self) -> Vec<String> {
+        self.authority_guard
+            .as_ref()
+            .map(AuthorityGuard::advertised_origins)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone)]
 struct ExactAuthority {
     host: HeaderValue,
     origin: HeaderValue,
@@ -421,9 +434,10 @@ impl ExactAuthority {
     }
 }
 
+#[derive(Clone)]
 struct AuthorityGuard {
     bound: ExactAuthority,
-    trusted: Vec<ExactAuthority>,
+    trusted: Arc<RwLock<Vec<ExactAuthority>>>,
 }
 
 #[derive(Clone)]
@@ -447,15 +461,23 @@ impl AuthorityGuard {
     fn new(address: SocketAddr, trusted: Vec<String>) -> io::Result<Self> {
         Ok(Self {
             bound: ExactAuthority::bound(address),
-            trusted: trusted
-                .iter()
-                .map(|authority| ExactAuthority::trusted(authority))
-                .collect::<io::Result<Vec<_>>>()?,
+            trusted: Arc::new(RwLock::new(parse_trusted_authorities(trusted)?)),
         })
+    }
+
+    fn replace(&self, trusted: Vec<String>) -> io::Result<()> {
+        *self
+            .trusted
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            parse_trusted_authorities(trusted)?;
+        Ok(())
     }
 
     fn advertised_origins(&self) -> Vec<String> {
         self.trusted
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(|authority| {
                 authority
@@ -484,6 +506,9 @@ impl AuthorityGuard {
         }
         let trusted = self
             .trusted
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let trusted = trusted
             .iter()
             .find(|authority| host == authority.host)
             .ok_or(AuthorityFailure::Host)?;
@@ -500,6 +525,13 @@ impl AuthorityGuard {
         }
         Ok(AuthorityKind::Remote)
     }
+}
+
+fn parse_trusted_authorities(trusted: Vec<String>) -> io::Result<Vec<ExactAuthority>> {
+    trusted
+        .iter()
+        .map(|authority| ExactAuthority::trusted(authority))
+        .collect()
 }
 
 fn one_header(headers: &HeaderMap, name: header::HeaderName) -> Option<&HeaderValue> {
@@ -6541,7 +6573,7 @@ async fn remote_access_api(
                     }
                     object.insert(
                         "advertisedOrigins".into(),
-                        json!(state.advertised_origins.as_ref()),
+                        json!(state.advertised_origins()),
                     );
                     object.insert("authority".into(), json!(authority_name));
                     Ok(value)
@@ -6565,7 +6597,8 @@ async fn remote_access_api(
                     .await
                     .map_err(remote_access_api_error)
                     .and_then(|issued| {
-                        let origin = state.advertised_origins.first().ok_or_else(|| {
+                        let origins = state.advertised_origins();
+                        let origin = origins.first().ok_or_else(|| {
                             ApiError::unavailable("remote access has no advertised origin")
                         })?;
                         let pairing_url = format!("{origin}/remote#pair={}", issued.token);
@@ -7672,6 +7705,30 @@ mod tests {
         assert!(matches!(
             guard.classify(&local, &Method::POST, "/api/session/list"),
             Ok(AuthorityKind::Local)
+        ));
+    }
+
+    #[test]
+    fn trusted_authority_replacement_is_atomic() {
+        let guard = AuthorityGuard::new(
+            "127.0.0.1:3000".parse().unwrap(),
+            vec!["old.example.test".into()],
+        )
+        .unwrap();
+        assert!(guard.replace(vec!["invalid/path".into()]).is_err());
+        assert_eq!(guard.advertised_origins(), vec!["https://old.example.test"]);
+
+        guard.replace(vec!["new.example.test".into()]).unwrap();
+        assert_eq!(guard.advertised_origins(), vec!["https://new.example.test"]);
+        let mut old = HeaderMap::new();
+        old.insert(header::HOST, HeaderValue::from_static("old.example.test"));
+        old.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://old.example.test"),
+        );
+        assert!(matches!(
+            guard.classify(&old, &Method::GET, "/remote"),
+            Err(AuthorityFailure::Host)
         ));
     }
 

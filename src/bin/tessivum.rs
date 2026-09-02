@@ -21,6 +21,9 @@ use tessivum::{
         parse_cli, resolve_data_root, CliCommand, DataRootError, ExitClass, HeadlessCommand,
         PluginAction, PluginCommand, SdkCommand,
     },
+    cloudflare_tunnel::{
+        resolve_cloudflared, CloudflareQuickTunnel, CloudflareTunnelEndpoint, CloudflareTunnelEvent,
+    },
     frontend::{FrontendHtmlTap, FrontendStatic, FrontendTapRegistration},
     headless::{run_headless, run_headless_with_adapter, HeadlessConfig},
     host::{shutdown_signal, HostApi, HostConfig, HostRuntime},
@@ -367,7 +370,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         .parse::<SocketAddr>()
         .map_err(|error| Diagnostic::usage(format!("invalid TESSIVUM_WEB_ADDR: {error}")))?;
     env::set_var("DSH_WEB_URL", format!("http://{address}"));
-    let trusted_authorities = environment("TESSIVUM_WEB_TRUSTED_AUTHORITIES")?
+    let manual_trusted_authorities = environment("TESSIVUM_WEB_TRUSTED_AUTHORITIES")?
         .map(|authorities| {
             authorities
                 .split(',')
@@ -375,8 +378,17 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let auto_tunnel_enabled = match environment("TESSIVUM_REMOTE_AUTO_TUNNEL")?.as_deref() {
+        None => false,
+        Some("cloudflare") => true,
+        Some(_) => {
+            return Err(Diagnostic::usage(
+                "TESSIVUM_REMOTE_AUTO_TUNNEL must be cloudflare when set",
+            ))
+        }
+    };
     let remote_enabled = environment_flag("TESSIVUM_REMOTE_ACCESS")?;
-    let trusted_tunnel = environment_flag("TESSIVUM_REMOTE_TRUSTED_TUNNEL")?;
+    let trusted_tunnel = environment_flag("TESSIVUM_REMOTE_TRUSTED_TUNNEL")? || auto_tunnel_enabled;
     let session_ttl_seconds = environment("TESSIVUM_REMOTE_SESSION_TTL_SECONDS")?
         .map(|value| {
             value
@@ -394,14 +406,16 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         })
         .transpose()?
         .unwrap_or(DEFAULT_REMOTE_SESSION_TTL_SECONDS);
-    if !remote_enabled && (!trusted_authorities.is_empty() || trusted_tunnel) {
+    if !remote_enabled
+        && (!manual_trusted_authorities.is_empty() || trusted_tunnel || auto_tunnel_enabled)
+    {
         return Err(Diagnostic::usage(
             "trusted Web authorities and tunnel posture require TESSIVUM_REMOTE_ACCESS=1",
         ));
     }
-    if remote_enabled && trusted_authorities.is_empty() {
+    if remote_enabled && manual_trusted_authorities.is_empty() && !auto_tunnel_enabled {
         return Err(Diagnostic::usage(
-            "TESSIVUM_REMOTE_ACCESS=1 requires TESSIVUM_WEB_TRUSTED_AUTHORITIES",
+            "TESSIVUM_REMOTE_ACCESS=1 requires TESSIVUM_WEB_TRUSTED_AUTHORITIES or TESSIVUM_REMOTE_AUTO_TUNNEL=cloudflare",
         ));
     }
     if remote_enabled && !address.ip().is_loopback() {
@@ -409,6 +423,27 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             "Remote Access requires a loopback TESSIVUM_WEB_ADDR behind the trusted TLS tunnel",
         ));
     }
+    if auto_tunnel_enabled && address.port() == 0 {
+        return Err(Diagnostic::usage(
+            "Cloudflare Quick Tunnel requires a non-zero TESSIVUM_WEB_ADDR port",
+        ));
+    }
+    let mut auto_tunnel = if auto_tunnel_enabled {
+        let executable = resolve_cloudflared(&data_dir)
+            .await
+            .map_err(|error| Diagnostic::runtime("CLOUDFLARED_SETUP_FAILED", error))?;
+        eprintln!("Starting Cloudflare Quick Tunnel...");
+        Some(
+            CloudflareQuickTunnel::start(executable, format!("http://{address}"))
+                .await
+                .map_err(|error| Diagnostic::runtime("CLOUDFLARE_TUNNEL_FAILED", error))?,
+        )
+    } else {
+        None
+    };
+    let tunnel_endpoint = auto_tunnel.as_ref().map(|tunnel| tunnel.endpoint().clone());
+    let trusted_authorities =
+        effective_trusted_authorities(&manual_trusted_authorities, tunnel_endpoint.as_ref());
     let remote_access = RemoteAccess::open(
         data_dir.join("remote-access.json"),
         RemoteAccessConfig {
@@ -420,18 +455,12 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     )
     .await
     .map_err(|error| Diagnostic::runtime(error.code(), error))?;
-    let advertised_origins = std::iter::once(format!("http://{address}"))
-        .chain(
-            trusted_authorities
-                .iter()
-                .map(|authority| format!("https://{authority}")),
-        )
-        .collect::<Vec<_>>();
+    let initial_origins = advertised_origins(address, &trusted_authorities);
     let listener = WebListenerRegistry::new(WebListenerSnapshot {
         host: address.ip().to_string(),
         port: address.port(),
         loopback: address.ip().is_loopback(),
-        advertised_origins: advertised_origins.clone(),
+        advertised_origins: initial_origins.clone(),
         remote_access_enabled: remote_enabled,
     });
     if let Some(dist) = env::var_os("TESSIVUM_WEB_DIST") {
@@ -468,7 +497,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             bind_addr: address,
             frontend: Some(frontend),
         },
-        trusted_authorities,
+        trusted_authorities.clone(),
         web_routes,
         Some(remote_access),
     )
@@ -485,40 +514,99 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         host: bound.ip().to_string(),
         port: bound.port(),
         loopback: bound.ip().is_loopback(),
-        advertised_origins,
+        advertised_origins: initial_origins,
         remote_access_enabled: remote_enabled,
     });
     eprintln!("Tessivum web listening at http://{}", server.local_addr());
+    if let Some(endpoint) = tunnel_endpoint.as_ref() {
+        eprintln!("Tessivum remote access at {}/remote", endpoint.origin);
+    }
     enum WebStop {
         Signal(i32),
         Restart,
+        TunnelFailed(String),
     }
-    let stop = tokio::select! {
-        signal = shutdown_signal() => match signal {
-            Ok(signal) => WebStop::Signal(signal),
-            Err(error) => {
-                lifecycle.begin_shutdown();
-                let _ = shutdown_with_escalation(
-                    async {
-                        let _ = server.shutdown().await;
-                        let _ = runtime.shutdown().await;
-                    },
-                    ExitClass::Runtime.code(),
-                )
-                .await;
-                return Err(Diagnostic::runtime("SIGNAL_FAILED", error));
+    let stop = loop {
+        let tunnel_event = async {
+            match auto_tunnel.as_mut() {
+                Some(tunnel) => tunnel.next_event().await,
+                None => std::future::pending().await,
             }
-        },
-        () = lifecycle.wait_for_restart() => WebStop::Restart,
+        };
+        tokio::select! {
+            signal = shutdown_signal() => break match signal {
+                Ok(signal) => WebStop::Signal(signal),
+                Err(error) => {
+                    lifecycle.begin_shutdown();
+                    let _ = shutdown_with_escalation(
+                        async {
+                            if let Some(tunnel) = auto_tunnel.take() {
+                                tunnel.shutdown().await;
+                            }
+                            let _ = server.shutdown().await;
+                            let _ = runtime.shutdown().await;
+                        },
+                        ExitClass::Runtime.code(),
+                    )
+                    .await;
+                    return Err(Diagnostic::runtime("SIGNAL_FAILED", error));
+                }
+            },
+            () = lifecycle.wait_for_restart() => break WebStop::Restart,
+            event = tunnel_event => {
+                match event {
+                    Some(CloudflareTunnelEvent::Down) => {
+                        let authorities = effective_trusted_authorities(
+                            &manual_trusted_authorities,
+                            None,
+                        );
+                        if let Err(error) = server.replace_trusted_authorities(authorities.clone()) {
+                            break WebStop::TunnelFailed(error.to_string());
+                        }
+                        listener.publish(WebListenerSnapshot {
+                            host: bound.ip().to_string(),
+                            port: bound.port(),
+                            loopback: bound.ip().is_loopback(),
+                            advertised_origins: advertised_origins(bound, &authorities),
+                            remote_access_enabled: remote_enabled,
+                        });
+                        eprintln!("Cloudflare Quick Tunnel is unavailable; remote authority removed");
+                    }
+                    Some(CloudflareTunnelEvent::Running(endpoint)) => {
+                        let authorities = effective_trusted_authorities(
+                            &manual_trusted_authorities,
+                            Some(&endpoint),
+                        );
+                        if let Err(error) = server.replace_trusted_authorities(authorities.clone()) {
+                            break WebStop::TunnelFailed(error.to_string());
+                        }
+                        listener.publish(WebListenerSnapshot {
+                            host: bound.ip().to_string(),
+                            port: bound.port(),
+                            loopback: bound.ip().is_loopback(),
+                            advertised_origins: advertised_origins(bound, &authorities),
+                            remote_access_enabled: remote_enabled,
+                        });
+                        eprintln!("Tessivum remote access at {}/remote", endpoint.origin);
+                    }
+                    None => break WebStop::TunnelFailed(
+                        "Cloudflare Quick Tunnel supervisor stopped".into(),
+                    ),
+                }
+            }
+        }
     };
     lifecycle.begin_shutdown();
     listener.clear();
     let shutdown_exit = match stop {
         WebStop::Signal(130) => 130,
-        WebStop::Signal(_) | WebStop::Restart => 0,
+        WebStop::Signal(_) | WebStop::Restart | WebStop::TunnelFailed(_) => 0,
     };
     let (server_result, host_result) = shutdown_with_escalation(
         async {
+            if let Some(tunnel) = auto_tunnel.take() {
+                tunnel.shutdown().await;
+            }
             let server_result = server
                 .shutdown()
                 .await
@@ -538,7 +626,34 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         WebStop::Signal(130) => Err(Diagnostic::cancelled("interrupted")),
         WebStop::Signal(_) => Ok(()),
         WebStop::Restart => relaunch_web_process(),
+        WebStop::TunnelFailed(error) => Err(Diagnostic::runtime("CLOUDFLARE_TUNNEL_FAILED", error)),
     }
+}
+fn effective_trusted_authorities(
+    configured: &[String],
+    tunnel: Option<&CloudflareTunnelEndpoint>,
+) -> Vec<String> {
+    let mut authorities = Vec::with_capacity(configured.len() + usize::from(tunnel.is_some()));
+    if let Some(tunnel) = tunnel {
+        authorities.push(tunnel.authority.clone());
+    }
+    authorities.extend(
+        configured
+            .iter()
+            .filter(|authority| tunnel.is_none_or(|tunnel| *authority != &tunnel.authority))
+            .cloned(),
+    );
+    authorities
+}
+
+fn advertised_origins(address: SocketAddr, authorities: &[String]) -> Vec<String> {
+    std::iter::once(format!("http://{address}"))
+        .chain(
+            authorities
+                .iter()
+                .map(|authority| format!("https://{authority}")),
+        )
+        .collect()
 }
 
 fn web_frontend(
@@ -985,6 +1100,25 @@ fn diagnostic_message(message: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_quick_tunnel_precedes_manual_authorities() {
+        let tunnel = CloudflareTunnelEndpoint {
+            origin: "https://quick.trycloudflare.com".into(),
+            authority: "quick.trycloudflare.com".into(),
+        };
+        assert_eq!(
+            effective_trusted_authorities(
+                &[
+                    "stable.example.test".into(),
+                    "quick.trycloudflare.com".into()
+                ],
+                Some(&tunnel),
+            ),
+            ["quick.trycloudflare.com", "stable.example.test"],
+        );
+    }
+
     fn patch_dir(name: &str) -> PathBuf {
         let root = env::temp_dir().join(format!(
             "tessivum-cli-{name}-{}-{}",

@@ -1,8 +1,8 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场与 Phase 8 Remote Access / 通用 Node facade 已完成
-> 计划校准日期：2026-09-01
-> Tessivum 实现基线：`v0.1.0-alpha.19`
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场、Phase 8 Remote Access / 通用 Node facade 与 Alpha.20 Cloudflare Quick Tunnel 已完成
+> 计划校准日期：2026-09-02
+> Tessivum 实现基线：`v0.1.0-alpha.20`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access 与 Web 模型配置面
 
@@ -596,7 +596,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.19`，固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`。本版本交付通用 Legacy Node Host facade，以及 Rust-owned Remote Access：单次配对、持久设备 session、撤销、exact HTTPS authority、默认关闭的 loopback listener 和发行包内固定的 `/remote` 桌面/移动界面。`tessivum-market` 继续保留固定来源、许可证、checksum、旧市场事务迁移、精确版本更新和 Host-owned 重启。Standard/PTC、Browser 与 Legacy Node 三类运行面继续通过同一 Host 状态、generation、取消和审计边界协同。
+当前实现基线为 `v0.1.0-alpha.20`，固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`。本版本在 Rust-owned Remote Access 上增加由 Rust 监督的 Cloudflare Quick Tunnel：固定版本下载与 SHA-256 校验、动态 authority 轮换、失效即撤权、指数退避重启和进程树清理；既有单次配对、持久设备 session、loopback listener 与 `/remote` 界面保持不变。`tessivum-market` 继续保留固定来源、许可证、checksum、旧市场事务迁移、精确版本更新和 Host-owned 重启。Standard/PTC、Browser 与 Legacy Node 三类运行面继续通过同一 Host 状态、generation、取消和审计边界协同。
 
 ## 14.1 Alpha.9 发布记录
 

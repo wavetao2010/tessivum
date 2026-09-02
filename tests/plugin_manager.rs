@@ -1110,7 +1110,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
         &package.join("package.json"),
         json!({
             "name": "tessivum-market",
-            "version": "0.1.0-alpha.19",
+            "version": "0.1.0-alpha.20",
             "type": "module",
             "main": "./lib/index.js",
             "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
@@ -1123,7 +1123,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
 
 #[cfg(unix)]
 fn stable_market_artifact(data_dir: &Path) -> PathBuf {
-    data_dir.join("artifacts/market/0.1.0-alpha.19/tessivum-market-0.1.0-alpha.19.tgz")
+    data_dir.join("artifacts/market/0.1.0-alpha.20/tessivum-market-0.1.0-alpha.20.tgz")
 }
 
 #[cfg(unix)]

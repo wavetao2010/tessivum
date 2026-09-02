@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.20 - 2026-09-02
+
+### Added
+
+- Rust-supervised Cloudflare Quick Tunnels for account-free Remote Access, including explicit executable/PATH discovery and checksum-verified pinned downloads on supported macOS and Linux targets.
+
+### Security
+
+- Quick Tunnel authority rotation is atomic and fail-closed: an exited tunnel immediately loses Host/Origin admission before bounded exponential restart installs its replacement URL.
+
+### Changed
+
+- `TESSIVUM_REMOTE_AUTO_TUNNEL=cloudflare` now supplies the trusted-TLS posture and generated authority; the existing operator-owned tunnel configuration remains available for stable domains.
+
 ## 0.1.0-alpha.19 - 2026-09-01
 
 ### Added

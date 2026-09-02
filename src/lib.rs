@@ -12,6 +12,7 @@ pub mod boot_theme;
 pub mod bridge;
 pub mod builtin_tools;
 pub mod cli;
+pub mod cloudflare_tunnel;
 pub mod code_runtime;
 pub mod compaction;
 pub mod compatible_api;
