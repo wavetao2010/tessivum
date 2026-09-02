@@ -14,6 +14,8 @@ env:
   TESSIVUM_DEEPSEEK_SOURCE: ${{ github.workspace }}/.ci/deepseek-harness
   TESSIVUM_CORDIS_SOURCE: ${{ github.workspace }}/.ci/cordis
   TESSIVUM_CORE_SOURCE: ${{ github.workspace }}/.ci/tessivum-core
+  TESSIVUM_COMPAT_HOST: ${{ github.workspace }}/.ci/tessivum-core/node/compat-host/src/index.ts
+  CORDIS_VENDOR_ROOT: ${{ github.workspace }}/.ci/deepseek-harness/vendor
 
 jobs:
   verify:
