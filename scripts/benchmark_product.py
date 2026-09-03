@@ -133,7 +133,7 @@ def repository_provenance(path: Path, expected_revision: str | None = None, expe
         return {"path": str(path), "revision": revision, "clean": True}
     if any(not line.startswith(" ") for line in status):
         raise ValueError(f"repository has staged or unsupported tracked changes: {path}: {status}")
-    diff = bytes(git_output(path, "diff", "--binary", "--no-ext-diff", text=False))
+    diff = bytes(git_output(path, "diff", "--binary", "--full-index", "--no-ext-diff", text=False))
     actual_diff_sha256 = hashlib.sha256(diff).hexdigest()
     if actual_diff_sha256 != expected_diff_sha256:
         raise ValueError(f"repository patch mismatch for {path}: expected {expected_diff_sha256}, received {actual_diff_sha256}")

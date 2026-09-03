@@ -1,5 +1,5 @@
 diff --git a/apps/web/index.html b/apps/web/index.html
-index a14de72d..1e114df4 100644
+index a14de72d40f36bfb982d11bc27fd6e51ccfcb111..1e114df4f9a4c701a2e353e791c99dacb7ffb29a 100644
 --- a/apps/web/index.html
 +++ b/apps/web/index.html
 @@ -5,7 +5,7 @@
@@ -12,7 +12,7 @@ index a14de72d..1e114df4 100644
    <body>
      <div id="root"></div>
 diff --git a/apps/web/public/favicon.svg b/apps/web/public/favicon.svg
-index c92f15d4..f93bb90a 100644
+index c92f15d43b4e12aafac4e09728db9696384b6b99..f93bb90a666a659d2eafdae1d96abc07e3b74350 100644
 --- a/apps/web/public/favicon.svg
 +++ b/apps/web/public/favicon.svg
 @@ -1,8 +1,7 @@
@@ -31,7 +31,7 @@ index c92f15d4..f93bb90a 100644
 +  <path d="M3 16V8H7V12L3 16Z" />
  </svg>
 diff --git a/apps/web/public/manifest.webmanifest b/apps/web/public/manifest.webmanifest
-index 20a428fe..3f0fa417 100644
+index 20a428fee6dd96628cfe97abf5af509225962318..3f0fa41773483a3af92767c799c1b93490da4a64 100644
 --- a/apps/web/public/manifest.webmanifest
 +++ b/apps/web/public/manifest.webmanifest
 @@ -1,7 +1,7 @@
@@ -45,7 +45,7 @@ index 20a428fe..3f0fa417 100644
    "scope": "/",
    "display": "fullscreen",
 diff --git a/apps/web/tests/assembled-boot.ts b/apps/web/tests/assembled-boot.ts
-index 52c0658e..9ebb8855 100644
+index 52c0658e4e5fde665883f0bfc168950db8585f73..9ebb8855aee7bdf5a7dcd3fcc46285b86bb7a07b 100644
 --- a/apps/web/tests/assembled-boot.ts
 +++ b/apps/web/tests/assembled-boot.ts
 @@ -82,7 +82,7 @@ export function installAssembledBootEnv(): void {
@@ -58,7 +58,7 @@ index 52c0658e..9ebb8855 100644
      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
        setTimeout(() => { callback(0) }, 0) as unknown as number)
 diff --git a/apps/web/tests/pwa-manifest.e2e.ts b/apps/web/tests/pwa-manifest.e2e.ts
-index fe97e42d..8bc04386 100644
+index fe97e42da9f81e0105547d8bd947bdc535c70f07..8bc04386cb26695be0d6885d05e465946d7d7c2b 100644
 --- a/apps/web/tests/pwa-manifest.e2e.ts
 +++ b/apps/web/tests/pwa-manifest.e2e.ts
 @@ -12,8 +12,8 @@ it('ships install metadata with the built web application', async () => {
@@ -88,7 +88,7 @@ index fe97e42d..8bc04386 100644
 +  expect(favicon.match(/<path /g)).toHaveLength(4)
  })
 diff --git a/apps/web/tests/scaffold.ts b/apps/web/tests/scaffold.ts
-index f1ba62d8..9814635a 100644
+index f1ba62d8816e2db940b62abbf9645101fe233889..9814635a6eb7b6fa4ce9dc1bd99ad99ba260f10c 100644
 --- a/apps/web/tests/scaffold.ts
 +++ b/apps/web/tests/scaffold.ts
 @@ -73,11 +73,11 @@ import { REPO_ROOT, requireDist } from './support.ts'
@@ -106,7 +106,7 @@ index f1ba62d8..9814635a 100644
    },
  } as const
 diff --git a/apps/web/tests/smoke-real.e2e.ts b/apps/web/tests/smoke-real.e2e.ts
-index 5d479e95..b3596ba6 100644
+index 5d479e955261e98fbdc046d1933b8b272862a11b..b3596ba6dedb412be3720492e6117dcfd579b918 100644
 --- a/apps/web/tests/smoke-real.e2e.ts
 +++ b/apps/web/tests/smoke-real.e2e.ts
 @@ -549,7 +549,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY || notReady.length > 0)('web smoke
@@ -128,7 +128,7 @@ index 5d479e95..b3596ba6 100644
        { timeout: 15_000 },
      )
 diff --git a/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md b/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
-index c53567f3..2a90a091 100644
+index c53567f36b56babb068ea0501a70e049be99322e..2a90a091d85a82238ad7d0fe1cca917fe1dc4ac7 100644
 --- a/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
 +++ b/apps/web/tests/snapshots/fresh-round-trip/system-prompt.expected.md
 @@ -1,7 +1,7 @@
@@ -143,7 +143,7 @@ index c53567f3..2a90a091 100644
  
  You are a coding agent powered by the deepseek-v4-flash model. Your working directory is {{cwd}}.
 diff --git a/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md b/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
-index de65e02f..3dd57f67 100644
+index de65e02fc7d04c4900c9c3ad4e73ad5cd96282fe..3dd57f67f0377fd87b87cbbb77abab4958881e03 100644
 --- a/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
 +++ b/apps/web/tests/snapshots/onboarding-deepseek-config/welcome.expected.md
 @@ -1,5 +1,5 @@
@@ -155,7 +155,7 @@ index de65e02f..3dd57f67 100644
 +  - paragraph: 我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球开发者加入 Tessivum 插件生态。
    - button "继续"
 diff --git a/apps/web/tests/snapshots/settings-chrome/dialog.expected.md b/apps/web/tests/snapshots/settings-chrome/dialog.expected.md
-index 89cff5df..7350acf0 100644
+index 89cff5df3f59db210b3e7d3ea8c22a2f45b82ecb..7350acf027a9ef5d543c596082750c519b67d5f4 100644
 --- a/apps/web/tests/snapshots/settings-chrome/dialog.expected.md
 +++ b/apps/web/tests/snapshots/settings-chrome/dialog.expected.md
 @@ -10,16 +10,16 @@
@@ -181,14 +181,14 @@ index 89cff5df..7350acf0 100644
    - text: 权限 选择新会话的默认权限模式
    - button "Workspace Write":
 diff --git a/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md b/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
-index bb37e36c..6536d167 100644
+index bb37e36cfb843012bd240e9579cf2e2708728516..6536d167a8cfb1f55da5b15a2f5d10f807e3eff3 100644
 --- a/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
 +++ b/apps/web/tests/snapshots/web-runtime-context/web-surface-prompt.expected.md
 @@ -1 +1 @@
 -You are interacting with the user through the DeepSeek Harness Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
 +You are interacting with the user through the Tessivum Web GUI at {{webUrl}}. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context. The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. Starting another server does not update this GUI. The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.
 diff --git a/packages/boot/app-boot/src/index.ts b/packages/boot/app-boot/src/index.ts
-index 9be66947..f493d0e6 100644
+index 9be66947bb5fab60e6e28c6cafd3fa946f50954f..f493d0e6f42c850b4b9b7444101f9d7d6ccf3e2a 100644
 --- a/packages/boot/app-boot/src/index.ts
 +++ b/packages/boot/app-boot/src/index.ts
 @@ -824,6 +824,6 @@ export function addHarnessSourceSection(ctx: Context, sourceRoot: string): (() =
@@ -200,7 +200,7 @@ index 9be66947..f493d0e6 100644
    })
  }
 diff --git a/packages/boot/app-boot/tests/app-boot.spec.ts b/packages/boot/app-boot/tests/app-boot.spec.ts
-index 9eec6202..da313a5f 100644
+index 9eec6202854ba65d2f7784f1bbad920608159e50..da313a5fc4ed5c00c13962b6a0b6a60f11121d24 100644
 --- a/packages/boot/app-boot/tests/app-boot.spec.ts
 +++ b/packages/boot/app-boot/tests/app-boot.spec.ts
 @@ -783,7 +783,7 @@ describe('boot', () => {
@@ -222,7 +222,7 @@ index 9eec6202..da313a5f 100644
        const personaAt = rendered.indexOf('You are a coding agent.')
        expect(identityAt).toBeGreaterThanOrEqual(0)
 diff --git a/packages/bundle/web-app/src/index.ts b/packages/bundle/web-app/src/index.ts
-index 9b5207dd..a1ce5735 100644
+index 9b5207dd023faee829b9dd635ab906d14f9658ed..a1ce5735c2f76b87808609f34ec5094f63fa38a1 100644
 --- a/packages/bundle/web-app/src/index.ts
 +++ b/packages/bundle/web-app/src/index.ts
 @@ -96,7 +96,7 @@ function webSurfacePrompt(webUrl: string): string {
@@ -244,7 +244,7 @@ index 9b5207dd..a1ce5735 100644
          resolve: () => ({ [DSH_WEB_URL]: localWebUrl(runtimeCtx) }),
        })
 diff --git a/packages/bundle/web-app/src/startup.ts b/packages/bundle/web-app/src/startup.ts
-index af6997cf..2c3a2d46 100644
+index af6997cff7543a7309f0e34f704e0c198cce7183..2c3a2d46759f8fea9d03470cbea0be9ea7d7749e 100644
 --- a/packages/bundle/web-app/src/startup.ts
 +++ b/packages/bundle/web-app/src/startup.ts
 @@ -43,7 +43,7 @@ interface WebOptions {
@@ -257,7 +257,7 @@ index af6997cf..2c3a2d46 100644
      .option('--host <host>', 'bind host')
      .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
 diff --git a/packages/bundle/web-app/tests/startup.spec.ts b/packages/bundle/web-app/tests/startup.spec.ts
-index 26e347a5..b6ddfc3b 100644
+index 26e347a503fcea21d338acb52104b7c1bfd6cd59..b6ddfc3b22e6db8944d35209685dd4b9fcbdf83f 100644
 --- a/packages/bundle/web-app/tests/startup.spec.ts
 +++ b/packages/bundle/web-app/tests/startup.spec.ts
 @@ -115,6 +115,7 @@ describe('web command-line provider', () => {
@@ -269,7 +269,7 @@ index 26e347a5..b6ddfc3b 100644
      expect(values).toBeUndefined()
      expect(observed.readerConfig).toBeUndefined()
 diff --git a/packages/bundle/web-app/tests/web-app.spec.ts b/packages/bundle/web-app/tests/web-app.spec.ts
-index a4e99e8e..a01e3858 100644
+index a4e99e8e9bd267e7282be2935a6d4d8cfb67a577..a01e38586ac8daa84b937b46f5e274f88a99bd1a 100644
 --- a/packages/bundle/web-app/tests/web-app.spec.ts
 +++ b/packages/bundle/web-app/tests/web-app.spec.ts
 @@ -96,9 +96,9 @@ describe('web-app runtime glue', () => {
@@ -285,7 +285,7 @@ index a4e99e8e..a01e3858 100644
      // reloads additionally need the rebuild watcher.
      expect(section?.text).toContain('pnpm run dev:web')
 diff --git a/packages/client/runtime/src/client/sessions/steering-history.ts b/packages/client/runtime/src/client/sessions/steering-history.ts
-index a28c3376..c1f838e3 100644
+index a28c3376a88dac0780364310b8a3d2049cd91b35..c1f838e36cb88f67d0a856bbd2c5cdfaf509846a 100644
 --- a/packages/client/runtime/src/client/sessions/steering-history.ts
 +++ b/packages/client/runtime/src/client/sessions/steering-history.ts
 @@ -15,6 +15,9 @@ interface InboxSplice {
@@ -316,7 +316,7 @@ index a28c3376..c1f838e3 100644
      for (const identity of inserted) this.claimedNextStep.delete(identity.id)
      if (target !== 'next-step' || outcome === 'canceled') return
 diff --git a/packages/client/ui-agent-preset/README.md b/packages/client/ui-agent-preset/README.md
-index f0fdff4b..560d003d 100644
+index f0fdff4b1f2453be9e8b4c1d20f7ca0fee506d55..560d003d0f92382b45bdf431cfc10f4d7ee75abe 100644
 --- a/packages/client/ui-agent-preset/README.md
 +++ b/packages/client/ui-agent-preset/README.md
 @@ -2,70 +2,22 @@
@@ -401,7 +401,7 @@ index f0fdff4b..560d003d 100644
 -- **Composition edits are invisible to the page** — the files are edited outside the browser and nothing on the wire announces a file change, so the roster re-reads on its own actions, `settings/changed`, and `connection/reset`, not on every disk edit.
 +An empty roster hides all four surfaces. A deployment without a writable user-mode root keeps built-ins readable but disables copy, open, and delete actions with an explicit reason.
 diff --git a/packages/client/ui-agent-preset/README.zh.md b/packages/client/ui-agent-preset/README.zh.md
-index 7d78d50c..61ac436d 100644
+index 7d78d50c9198363c7a04cc2eb1c9292126feb9e8..61ac436dde4e468a6001a7b948bb55bfd96437ae 100644
 --- a/packages/client/ui-agent-preset/README.zh.md
 +++ b/packages/client/ui-agent-preset/README.zh.md
 @@ -2,70 +2,22 @@
@@ -486,7 +486,7 @@ index 7d78d50c..61ac436d 100644
 -- **组装编辑对页面不可见** —— 文件在浏览器之外编辑，传输层不广播文件变动，因此名单只在自身操作、`settings/changed` 与 `connection/reset` 时重读，而非每次磁盘编辑。
 +空名单会隐藏全部四个表层。部署未配置可写用户 Mode 根目录时，内置 Mode 仍可读取，但复制、打开和删除操作会带明确原因地禁用。
 diff --git a/packages/client/ui-agent-preset/package.json b/packages/client/ui-agent-preset/package.json
-index 05dd7841..df02a780 100644
+index 05dd7841f4b220b272e7fc90f0e3cd5e95b41dd1..df02a7807100daf8d5fb48aac9ca7331a272d32f 100644
 --- a/packages/client/ui-agent-preset/package.json
 +++ b/packages/client/ui-agent-preset/package.json
 @@ -1,6 +1,6 @@
@@ -497,13 +497,38 @@ index 05dd7841..df02a780 100644
    "version": "0.1.0-rc.5",
    "publishConfig": {
      "access": "public"
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetLabel.module.css b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
-similarity index 100%
-rename from packages/client/ui-agent-preset/src/client/AgentPresetLabel.module.css
-rename to packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
+diff --git a/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d2cdd814b0fadadf7e45d070d0d3e7a55aec2e7
+--- /dev/null
++++ b/packages/client/ui-agent-preset/src/client/AgentModeLabel.module.css
+@@ -0,0 +1,23 @@
++/* Session-header agent-preset label: static chrome, never a control. */
++
++.label {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  max-width: 180px;
++  padding: 0 2px 0 0;
++  height: 22px;
++  border-radius: 6px;
++  background: var(--dsw-alias-fill-tsp-secondary);
++  font-size: 12px;
++  line-height: 22px;
++  color: var(--dsw-alias-label-secondary);
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++}
++
++.icon {
++  flex: none;
++  opacity: 0.7;
++}
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx b/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx
 new file mode 100644
-index 00000000..41249bb7
+index 0000000000000000000000000000000000000000..41249bb734072f15cf4d32ec9ae21cd225e4bde7
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/AgentModeLabel.tsx
 @@ -0,0 +1,41 @@
@@ -548,13 +573,75 @@ index 00000000..41249bb7
 +    </span>
 +  )
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetRow.module.css b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
-similarity index 100%
-rename from packages/client/ui-agent-preset/src/client/AgentPresetRow.module.css
-rename to packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
+diff --git a/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0f7134329d37225bebf3453740f4b5c00d457d6
+--- /dev/null
++++ b/packages/client/ui-agent-preset/src/client/AgentModeRow.module.css
+@@ -0,0 +1,60 @@
++/* Agent-preset row: title/description plus the preset selector pill. */
++
++.row {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 16px 0;
++  border-bottom: 1px solid var(--dsw-alias-border-l2);
++}
++
++.rowText {
++  flex: 1;
++  min-width: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  padding-right: 48px;
++}
++
++.title {
++  font-size: 14px;
++  font-weight: 400;
++  line-height: 22px;
++  color: var(--dsw-alias-label-primary);
++}
++
++.desc {
++  font-size: 12px;
++  font-weight: 400;
++  line-height: 18px;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.selector {
++  display: inline-flex;
++  align-items: center;
++  gap: 12px;
++  height: 36px;
++  padding: 0 14px;
++  border: none;
++  border-radius: 18px;
++  background: var(--dsw-alias-bg-module-platform);
++  font: inherit;
++  font-size: 14px;
++  line-height: 22px;
++  color: var(--dsw-alias-label-primary);
++  cursor: pointer;
++}
++
++.selector:hover:not(:disabled) {
++  background: var(--dsw-alias-interactive-bg-hover);
++}
++
++.selector:disabled {
++  cursor: default;
++}
++
++.chevron {
++  flex: none;
++}
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx b/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx
 new file mode 100644
-index 00000000..8d5bdf31
+index 0000000000000000000000000000000000000000..8d5bdf315cf0d567dbc48912c0633b84c4d5f605
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/AgentModeRow.tsx
 @@ -0,0 +1,65 @@
@@ -623,13 +710,134 @@ index 00000000..8d5bdf31
 +    'settings.agentMode': AgentModeSettingsKey
 +  }
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
-similarity index 100%
-rename from packages/client/ui-agent-preset/src/client/AgentPresetSeat.module.css
-rename to packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
+diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..55fe22e81b0b62e1b76d48d01d0a0b377047a895
+--- /dev/null
++++ b/packages/client/ui-agent-preset/src/client/AgentModeSeat.module.css
+@@ -0,0 +1,119 @@
++/* Agent-preset chip on the new-session screen, beside the workspace picker.
++   Geometry mirrors HeroShell's .workspace so the two read as one row. */
++
++.seat {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  max-width: min(100%, 240px);
++  min-height: 28px;
++  padding: 0 8px;
++  border: none;
++  border-radius: 16px;
++  background: transparent;
++  color: var(--dsw-alias-label-primary);
++  font-size: 13px;
++  line-height: 20px;
++  font-weight: 500;
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  cursor: pointer;
++}
++
++.seat:not(:disabled):hover,
++.seat[aria-expanded='true'] {
++  background: var(--dsw-alias-interactive-bg-hover);
++}
++
++.seat:disabled {
++  cursor: default;
++  color: var(--dsw-alias-label-quaternary);
++}
++
++.seatIcon {
++  flex: none;
++  color: var(--dsw-alias-label-primary);
++}
++
++/* Introduce cue: the icon eases in on an overshoot-free expo curve (duration
++   matches INTRO_TEXT_DELAY_MS, so the characters start the moment it lands),
++   then the name's characters fade up on a stagger (delays set inline per
++   character). All chars occupy their width from the start, so nothing
++   reflows mid-run. */
++.introIcon {
++  animation: seat-icon-in 0.15s cubic-bezier(0.16, 1, 0.3, 1) both;
++}
++
++@keyframes seat-icon-in {
++  from {
++    opacity: 0;
++    transform: scale(0.5);
++  }
++
++  to {
++    opacity: 1;
++    transform: scale(1);
++  }
++}
++
++/* Wraps the staggered characters into one flex item, so the chip's gap
++   applies around the name as a whole rather than between characters. */
++.introText {
++  display: inline-block;
++  white-space: pre;
++}
++
++.introChar {
++  display: inline-block;
++  white-space: pre;
++  opacity: 0;
++  animation: seat-char-in 0.4s ease-out forwards;
++}
++
++@keyframes seat-char-in {
++  from {
++    opacity: 0;
++    transform: translateY(4px);
++  }
++
++  to {
++    opacity: 1;
++    transform: none;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .introIcon,
++  .introChar {
++    animation: none;
++    opacity: 1;
++  }
++}
++
++.chevron {
++  flex: none;
++  color: var(--dsw-alias-label-caption);
++}
++
++/* Menu rows carry the name over its description: the id alone never said what
++   a preset does, which is why the metadata exists. */
++.item {
++  display: flex;
++  flex-direction: column;
++  gap: 2px;
++  max-width: 280px;
++}
++
++.itemName {
++  font-size: 13px;
++  line-height: 20px;
++  color: var(--dsw-alias-label-primary);
++}
++
++.itemDesc {
++  font-size: 12px;
++  line-height: 16px;
++  color: var(--dsw-alias-label-caption);
++  white-space: normal;
++}
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx b/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx
 new file mode 100644
-index 00000000..3d61a6c1
+index 0000000000000000000000000000000000000000..3d61a6c17bb90be0c993def208670f39a3385b2f
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/AgentModeSeat.tsx
 @@ -0,0 +1,76 @@
@@ -709,68 +917,424 @@ index 00000000..3d61a6c1
 +    />
 +  )
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-similarity index 95%
-rename from packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
-rename to packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-index 0a8d2fa8..a9e1a684 100644
---- a/packages/client/ui-agent-preset/src/client/AgentPresetSection.module.css
+diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9e1a68437db63056372cf237398fabd92199a88
+--- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/AgentModeSection.module.css
-@@ -18,7 +18,7 @@
-   color: var(--dsw-alias-label-tertiary);
- }
- 
--/* Cards, not rows: a preset is a thing you pick, and the description is the
+@@ -0,0 +1,409 @@
++.section {
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++  max-width: 720px;
++  color: var(--dsw-alias-label-primary);
++}
++
++.title {
++  margin: 0;
++  font-size: 18px;
++  font-weight: 600;
++}
++
++.intro {
++  margin: 0;
++  font-size: 13px;
++  color: var(--dsw-alias-label-tertiary);
++}
++
 +/* Cards, not rows: a mode is a thing you pick, and the description is the
-    part that tells them apart — a row would bury it beside the actions. */
- .group {
-   display: flex;
-@@ -67,13 +67,13 @@
-   border-color: var(--dsw-alias-label-dimmed);
- }
- 
--/* The default preset reads as selected, not merely badged. */
++   part that tells them apart — a row would bury it beside the actions. */
++.group {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++}
++
++/* Group-to-group breathing room: the section's 12px gap plus 20px reads the
++   two rosters as separate blocks (32px total). */
++.group + .group {
++  margin-top: 20px;
++}
++
++.groupHead {
++  margin: 0;
++  font-size: 12px;
++  font-weight: 600;
++  letter-spacing: .06em;
++  text-transform: uppercase;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.cards {
++  list-style: none;
++  margin: 0;
++  padding: 0;
++  display: grid;
++  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
++  /* Every row the same height, so a short description does not make its card
++     shorter than the one beside it. */
++  grid-auto-rows: 1fr;
++  gap: 12px;
++}
++
++.card {
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 12px;
++  display: flex;
++  flex-direction: column;
++  background: var(--dsw-alias-bg-layer-3);
++  transition: border-color .16s, background .16s;
++}
++
++
++.card:hover:not(.cardActive) {
++  border-color: var(--dsw-alias-label-dimmed);
++}
++
 +/* The default mode reads as selected, not merely badged. */
- .cardActive {
-   background: var(--dsw-alias-bg-layer-2);
-   border-color: var(--dsw-alias-label-primary);
- }
- 
--/* A broken preset reads as damaged before anything else: the card cannot be
++.cardActive {
++  background: var(--dsw-alias-bg-layer-2);
++  border-color: var(--dsw-alias-label-primary);
++}
++
 +/* A broken mode reads as damaged before anything else: the card cannot be
-    picked, so its border carries the warning the disabled body cannot. */
- .cardBroken {
-   border-color: var(--dsw-alias-state-error-primary);
-@@ -102,7 +102,7 @@
-   overflow-wrap: anywhere;
- }
- 
--/* The card body is the control that picks the preset. */
++   picked, so its border carries the warning the disabled body cannot. */
++.cardBroken {
++  border-color: var(--dsw-alias-state-error-primary);
++}
++
++.cardBroken:hover {
++  border-color: var(--dsw-alias-state-error-primary);
++}
++
++.brokenBadge {
++  border-radius: 999px;
++  padding: 1px 8px;
++  font-size: 11px;
++  line-height: 17px;
++  white-space: nowrap;
++  font-weight: 500;
++  background: var(--dsw-alias-state-error-primary);
++  color: var(--dsw-alias-bg-layer-3);
++}
++
++/* The discovery-reported reason, verbatim: it names the file and the fix. */
++.cardBrokenReason {
++  font-size: 12px;
++  line-height: 1.5;
++  color: var(--dsw-alias-state-error-primary);
++  overflow-wrap: anywhere;
++}
++
 +/* The card body is the control that picks the mode. */
- .cardMain {
-   flex: 1;
-   appearance: none;
-@@ -161,7 +161,7 @@
-   color: var(--dsw-alias-bg-layer-3);
- }
- 
--/* Bounded to four lines. A preset publishes its own description, so one long
++.cardMain {
++  flex: 1;
++  appearance: none;
++  border: 0;
++  background: none;
++  font: inherit;
++  color: inherit;
++  text-align: left;
++  cursor: pointer;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  padding: 14px 16px 12px;
++  border-radius: 12px 12px 0 0;
++}
++
++.cardMain:disabled {
++  cursor: default;
++}
++
++.cardMain:focus-visible {
++  outline: 2px solid var(--dsw-alias-brand-primary);
++  outline-offset: -2px;
++}
++
++.cardHead {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
++
++.cardName {
++  font-size: 15px;
++  font-weight: 600;
++  line-height: 1.4;
++}
++
++.badge,
++.inUse {
++  border-radius: 999px;
++  padding: 1px 8px;
++  font-size: 11px;
++  line-height: 17px;
++  white-space: nowrap;
++  font-weight: 500;
++}
++
++.badge {
++  border: 1px solid var(--dsw-alias-border-l2);
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.inUse {
++  margin-left: auto;
++  background: var(--dsw-alias-label-primary);
++  color: var(--dsw-alias-bg-layer-3);
++}
++
 +/* Bounded to four lines. A mode publishes its own description, so one long
-    one would otherwise stretch every card in its grid row (`.cards` sizes rows
-    1fr). Clamping is CSS alone: the whole text stays in the DOM for assistive
-    tech, and the card offers it on hover when it is actually cut off. The
-@@ -380,7 +380,7 @@
- 
- /* The conversational authoring entry, after the card grid in the spot the
-    create button vacated. Dashed like the Models page's add affordances: it
--   reads as a place a preset will appear, not a command. */
++   one would otherwise stretch every card in its grid row (`.cards` sizes rows
++   1fr). Clamping is CSS alone: the whole text stays in the DOM for assistive
++   tech, and the card offers it on hover when it is actually cut off. The
++   description does not grow to fill the card — `-webkit-line-clamp` on a
++   flex-stretched box leaves the clamp height and the box height disagreeing,
++   so `.cardId` takes the free space with an auto margin instead. */
++.cardDesc {
++  font-size: 13px;
++  line-height: 1.55;
++  color: var(--dsw-alias-label-secondary);
++  min-height: 42px;
++  display: -webkit-box;
++  -webkit-box-orient: vertical;
++  -webkit-line-clamp: 4;
++  overflow: hidden;
++  /* A user-authored description may carry an unbreakable path or URL. */
++  overflow-wrap: anywhere;
++}
++
++.cardId {
++  margin-top: auto;
++  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
++  font-size: 11px;
++  color: var(--dsw-alias-label-dimmed);
++}
++
++.cardFoot {
++  display: flex;
++  justify-content: flex-end;
++  gap: 2px;
++  padding: 6px 10px;
++  border-top: 1px solid var(--dsw-alias-border-l2);
++}
++
++/* Icon-only actions: the label rides `title` so the row stays quiet until
++   someone reaches for it. */
++.iconButton {
++  position: relative;
++  appearance: none;
++  border: 0;
++  border-radius: 7px;
++  padding: 6px;
++  background: none;
++  color: var(--dsw-alias-label-tertiary);
++  cursor: pointer;
++  display: inline-flex;
++  align-items: center;
++}
++
++.iconButton:disabled {
++  opacity: 0.4;
++  cursor: default;
++}
++
++.iconButton:hover:not(:disabled) {
++  background: var(--dsw-alias-bg-layer-1);
++  color: var(--dsw-alias-label-primary);
++}
++
++.iconButton:focus-visible {
++  outline: 2px solid var(--dsw-alias-brand-primary);
++  outline-offset: -1px;
++}
++
++.iconButton::after {
++  content: attr(data-tip);
++  position: absolute;
++  bottom: calc(100% + 6px);
++  left: 50%;
++  transform: translateX(-50%);
++  padding: 3px 8px;
++  border-radius: 6px;
++  background: var(--dsw-alias-label-primary);
++  color: var(--dsw-alias-bg-layer-3);
++  font-size: 11px;
++  line-height: 17px;
++  white-space: nowrap;
++  opacity: 0;
++  pointer-events: none;
++  transition: opacity .12s;
++}
++
++.iconButton:hover::after,
++.iconButton:focus-visible::after {
++  opacity: 1;
++}
++
++.iconDanger:hover:not(:disabled) {
++  background: var(--dsw-alias-interactive-bg-hover-danger);
++  color: var(--dsw-alias-state-error-primary);
++}
++
++/* Where the host has no desktop opener, the row answers with the directory
++   itself — text to copy, not a control that would spawn into nothing. */
++.revealedPath {
++  margin: 0;
++  padding: 6px 16px 10px;
++  font-size: 11px;
++  color: var(--dsw-alias-label-tertiary);
++  display: flex;
++  gap: 6px;
++  align-items: baseline;
++}
++
++.revealedPath code {
++  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
++  color: var(--dsw-alias-label-secondary);
++  user-select: all;
++  overflow-wrap: anywhere;
++}
++
++.revealedPathLabel {
++  white-space: nowrap;
++}
++
++.secondaryButton {
++  border: none;
++  border-radius: 7px;
++  padding: 5px 8px;
++  background: none;
++  color: var(--dsw-alias-label-secondary);
++  font: inherit;
++  font-size: 12.5px;
++  cursor: pointer;
++}
++
++
++.secondaryButton:hover:not(:disabled) {
++  background: var(--dsw-alias-bg-layer-1);
++}
++
++.secondaryButton:disabled {
++  opacity: 0.5;
++  cursor: default;
++}
++
++.field {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++
++.fieldLabel {
++  font-size: 12px;
++  font-weight: 500;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.input {
++  box-sizing: border-box;
++  padding: 9px 12px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 10px;
++  font: inherit;
++  font-size: 13px;
++  background: var(--dsw-alias-bg-layer-1);
++  color: var(--dsw-alias-label-primary);
++}
++
++.input:focus {
++  outline: none;
++  border-color: var(--dsw-alias-brand-primary);
++}
++
++.input::placeholder {
++  color: var(--dsw-alias-label-dimmed);
++}
++
++.dialog {
++  width: min(560px, 100%);
++}
++
++.dialogFields {
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++}
++
++/* A shipped composition can be long; the dialog scrolls it rather than grow. */
++.viewerCode {
++  margin: 0;
++  padding: 12px;
++  max-height: min(52vh, 480px);
++  overflow: auto;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 10px;
++  background: var(--dsw-alias-bg-layer-2);
++  color: var(--dsw-alias-label-secondary);
++  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
++  font-size: 12.5px;
++  line-height: 1.5;
++  white-space: pre;
++  tab-size: 2;
++  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
++  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
++}
++
++.error {
++  margin: 0;
++  font-size: 12px;
++  color: var(--dsw-alias-state-error-primary);
++}
++
++.deleteDialog {
++  width: min(480px, 100%);
++}
++
++.deleteConfirm:not(:disabled) {
++  border-color: var(--dsw-alias-state-error-primary);
++  color: var(--dsw-alias-state-error-primary);
++}
++
++.deleteConfirm:hover:not(:disabled) {
++  background: var(--dsw-alias-interactive-bg-hover-danger);
++}
++
++/* The conversational authoring entry, after the card grid in the spot the
++   create button vacated. Dashed like the Models page's add affordances: it
 +   reads as a place a mode will appear, not a command. */
- .creatorButton {
-   box-sizing: border-box;
-   align-self: stretch;
++.creatorButton {
++  box-sizing: border-box;
++  align-self: stretch;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  gap: 6px;
++  height: 44px;
++  border: 1px dashed var(--dsw-alias-border-l3);
++  border-radius: 12px;
++  font: inherit;
++  font-size: 14px;
++  line-height: 22px;
++  background: transparent;
++  color: var(--dsw-alias-label-primary);
++  cursor: pointer;
++}
++
++.creatorButton:hover:not(:disabled) {
++  background: var(--dsw-alias-interactive-bg-hover);
++}
++
++.creatorButton:disabled {
++  opacity: 0.4;
++  cursor: default;
++}
 diff --git a/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx b/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx
 new file mode 100644
-index 00000000..a2cfa964
+index 0000000000000000000000000000000000000000..a2cfa96469da1ee4a6aceecb2bb2aa417149afed
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/AgentModeSection.tsx
 @@ -0,0 +1,308 @@
@@ -1082,777 +1646,9 @@ index 00000000..a2cfa964
 +    </div>
 +  )
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx
-deleted file mode 100644
-index 3e98310c..00000000
---- a/packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx
-+++ /dev/null
-@@ -1,64 +0,0 @@
--/**
-- * The session header's agent-preset label.
-- *
-- * Read-only by construction: a session's composition is fixed once its
-- * conversation starts, and a header is only worth reading after that. Offering
-- * a control here would promise a switch the host refuses; naming what the
-- * session runs is the honest affordance, and the choice itself lives on the
-- * new-session screen ({@link AgentPresetSeat}).
-- */
--
--import { useEffect } from 'react'
--import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
--import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
--import { IconAgentPresetOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
--// Type-only: pulls the ui-conversation SlotMap merge (the header actions).
--import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
--import type { AgentPresetSettingsState } from './settings-store.ts'
--import { presetDisplayText } from './locales.ts'
--import css from './AgentPresetLabel.module.css'
--
--/** Registration-side business face for the header label. */
--export interface AgentPresetLabelInjected {
--  hooks: {
--    /** Roster snapshot bound by the renderer as useAgentPresets. */
--    agentPresets: SnapshotStore<AgentPresetSettingsState>
--  }
--  /** Read the roster, so the label can show a name rather than an id. */
--  load: () => Promise<void>
--}
--
--/** Full component props. */
--export type AgentPresetLabelProps =
--  PropsRuntime<'conversation.session.header.actions'>
--  & PropsLocale<'settings.agentPreset'>
--  & InjectFace<AgentPresetLabelInjected>
--
--/**
-- * Render this session's agent-preset name beside its title.
-- * @param props - composed slot props.
-- * @returns the label, or null when the session records no preset.
-- */
--export function AgentPresetLabel({
--  sessionId, useSessions, useAgentPresets, load, t,
--}: AgentPresetLabelProps) {
--  const preset = useSessions(state => state.byId[sessionId]?.agentPreset)
--  const options = useAgentPresets(state => state.options)
--
--  useEffect(() => {
--    // Deployments that compose no presets never label anything, so the roster
--    // is only worth a request once a session reports one.
--    if (preset !== undefined) void load()
--  }, [preset, load])
--
--  if (preset === undefined) return null
--
--  const option = options.find(entry => entry.id === preset)
--  const text = option === undefined ? undefined : presetDisplayText(option, t)
--  return (
--    <span className={css.label} title={text?.description ?? t('headerHint')}>
--      <IconAgentPresetOutline16 size={14} className={css.icon} />
--      {text?.name ?? preset}
--    </span>
--  )
--}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetRow.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetRow.tsx
-deleted file mode 100644
-index eab36312..00000000
---- a/packages/client/ui-agent-preset/src/client/AgentPresetRow.tsx
-+++ /dev/null
-@@ -1,89 +0,0 @@
--/**
-- * Agent-preset preference row: the preset new sessions are composed from.
-- * A running session keeps the composition it began with, so this row never
-- * disturbs work in progress.
-- */
--
--import { useEffect, useState } from 'react'
--import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
--import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
--import type { AgentPresetSettingsState } from './settings-store.ts'
--import { presetDisplayText, type AgentPresetSettingsKey } from './locales.ts'
--import { PresetMenu } from './PresetMenu.tsx'
--import css from './AgentPresetRow.module.css'
--
--/** Registration-side business face for the host-backed preference. */
--export interface AgentPresetRowInjected {
--  hooks: {
--    /** Agent-preset settings snapshot bound by the renderer as useAgentPreset. */
--    agentPreset: SnapshotStore<AgentPresetSettingsState>
--  }
--  /** Load the roster when the row first renders. */
--  load: () => Promise<void>
--  /** Persist one preset as the default for later sessions. */
--  select: (id: string) => Promise<void>
--}
--
--/** Full component props. */
--export type AgentPresetRowProps =
--  PropsRuntime<'settings.general.item'>
--  & PropsLocale<'settings.agentPreset'>
--  & InjectFace<AgentPresetRowInjected>
--
--/**
-- * Render the new-session agent-preset selector.
-- * @param props - composed slot props.
-- * @returns the row, or null when the deployment composes no presets.
-- */
--export function AgentPresetRow({ load, select, useAgentPreset, t }: AgentPresetRowProps) {
--  const state = useAgentPreset(snapshot => snapshot)
--  const [open, setOpen] = useState(false)
--
--  useEffect(() => {
--    void load()
--  }, [load])
--
--  useEffect(() => {
--    if (state.writable && state.status !== 'unavailable') return
--    setOpen(false)
--  }, [state.status, state.writable])
--
--  // A deployment that composes no presets has nothing to choose between, and
--  // every session shares the host composition — the row simply does not exist.
--  if (state.status === 'unavailable') return null
--  const busy = state.status === 'loading' || state.status === 'saving'
--  // Every preset surface applies the same display-copy rule. The id remains
--  // addressing rather than a label, except where no display name exists.
--  const chosen = state.options.find(option => option.id === state.currentValue)
--  const chosenText = chosen === undefined ? undefined : presetDisplayText(chosen, t)
--  const label = state.currentValue === '' ? t('loading') : (chosenText?.name ?? state.currentValue)
--  const description: string = state.error ?? t('description')
--
--  return (
--    <div className={css.row}>
--      <div className={css.rowText}>
--        <div className={css.title}>{t('title')}</div>
--        <div className={css.desc} role={state.error === null ? undefined : 'alert'}>{description}</div>
--      </div>
--      <PresetMenu
--        options={state.options}
--        selectedId={state.currentValue}
--        label={label}
--        t={t}
--        buttonClassName={css.selector}
--        chevronClassName={css.chevron}
--        disabled={busy || !state.writable || state.options.length === 0}
--        open={open}
--        onOpenChange={setOpen}
--        onSelect={(id) => { void select(id) }}
--      />
--    </div>
--  )
--}
--
--declare module '@deepseek-ai/dsh-client-ui-slots' {
--  interface LocaleNamespaceMap {
--    /** Agent-preset row copy. */
--    'settings.agentPreset': AgentPresetSettingsKey
--  }
--}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
-deleted file mode 100644
-index f7350076..00000000
---- a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
-+++ /dev/null
-@@ -1,170 +0,0 @@
--/**
-- * The agent-preset chip on the new-session screen, beside the workspace
-- * picker.
-- *
-- * It lives here rather than in the composer because the choice is only
-- * available before a conversation starts: once a turn has run, the session's
-- * history was produced under that preset's tools and the host refuses to swap
-- * them. A control that spends most of its life disabled belongs on the screen
-- * where it still works.
-- *
-- * The menu opens on the staged choice, which starts as the deployment default.
-- * Picking stages; the choice reaches a session when one becomes current.
-- */
--
--import { useEffect, useState } from 'react'
--import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
--import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
--import { IconAgentPresetOutline16, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
--// Type-only: pulls the ui-conversation SlotMap merge (the hero seat).
--import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
--import type { AgentPresetSeatState } from './seat-store.ts'
--import { presetDisplayText } from './locales.ts'
--import css from './AgentPresetSeat.module.css'
--
--/** Registration-side business face for the hero chip. */
--export interface AgentPresetSeatInjected {
--  hooks: {
--    /** Seat snapshot bound by the renderer as useAgentPresetSeat. */
--    agentPresetSeat: SnapshotStore<AgentPresetSeatState>
--  }
--  /** Read the roster when the chip first renders. */
--  load: () => Promise<void>
--  /** Stage one preset for the next session. */
--  select: (id: string) => Promise<void>
--  /** Clear the one-shot introduce cue once the chip has played it. */
--  introduced: () => void
--}
--
--/* Introduce timeline: the icon eases in first (the CSS animation shares this
--   duration); the name's characters start fading up the moment it lands, each
--   taking the fade duration to settle. The cue clears after the last one. The
--   stagger is capped twice: per tick for short CJK names, and by one shared
--   reveal window so a long Latin name finishes in the same time as its CJK
--   counterpart instead of dragging the run out per character. */
--const INTRO_TEXT_DELAY_MS = 150
--const INTRO_CHAR_STAGGER_MS = 40
--const INTRO_TEXT_REVEAL_MS = 200
--const INTRO_CHAR_FADE_MS = 400
--
--/**
-- * Per-character start offset for the introduce reveal.
-- * @param count - character count of the shown preset name.
-- * @returns milliseconds between successive character starts.
-- */
--function introStaggerMs(count: number): number {
--  if (count <= 1) return 0
--  return Math.min(INTRO_CHAR_STAGGER_MS, INTRO_TEXT_REVEAL_MS / (count - 1))
--}
--
--/** Full component props. */
--export type AgentPresetSeatProps =
--  PropsRuntime<'conversation.hero.agentPreset'>
--  & PropsLocale<'settings.agentPreset'>
--  & InjectFace<AgentPresetSeatInjected>
--
--/**
-- * Render the new-session agent-preset chip.
-- * @param props - composed slot props.
-- * @returns the chip, or null when the deployment composes no presets.
-- */
--export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat, t }: AgentPresetSeatProps) {
--  const state = useAgentPresetSeat(snapshot => snapshot)
--  const [open, setOpen] = useState(false)
--
--  useEffect(() => {
--    void load()
--  }, [load])
--
--  const chosen = state.options.find(option => option.id === state.current)
--  const chosenText = chosen === undefined ? undefined : presetDisplayText(chosen, t)
--  const label = chosenText?.name ?? state.current
--  const ready = state.options.length > 0 && state.current !== ''
--
--  // The introduce cue: the pick was staged from another screen (the settings
--  // creator entry), so the chip announces it — the icon eases in and each
--  // character of the name fades up on a stagger (CSS owns the motion; this
--  // effect only arms it and acknowledges the cue once the run is over).
--  const [introducing, setIntroducing] = useState(false)
--  useEffect(() => {
--    if (!state.introduce || !ready) return
--    const characters = Array.from(label)
--    if (characters.length === 0 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
--      introduced()
--      return
--    }
--    setIntroducing(true)
--    const done = window.setTimeout(() => {
--      setIntroducing(false)
--      introduced()
--    }, INTRO_TEXT_DELAY_MS + (characters.length - 1) * introStaggerMs(characters.length) + INTRO_CHAR_FADE_MS)
--    return () => { window.clearTimeout(done) }
--  }, [state.introduce, ready, label, introduced])
--
--  // Nothing to choose between: the deployment composes no presets and every
--  // session shares the host composition.
--  if (!ready) return null
--
--  // One wrapper span: the chip is a flex row with a gap, so loose character
--  // spans would each pick up the gap between them.
--  const characters = Array.from(label)
--  const stagger = introStaggerMs(characters.length)
--  const shownLabel = introducing
--    ? (
--      <span className={css.introText}>
--        {characters.map((character, index) => (
--          <span
--            key={index}
--            className={css.introChar}
--            style={{ animationDelay: `${INTRO_TEXT_DELAY_MS + index * stagger}ms` }}
--          >
--            {character}
--          </span>
--        ))}
--      </span>
--    )
--    : label
--
--  return (
--    <Menu
--      open={open}
--      onClose={() => { setOpen(false) }}
--      items={state.options.map((option) => {
--        const text = presetDisplayText(option, t)
--        return {
--          id: option.id,
--          // Name and description together: the id alone never says what a
--          // preset does, which is why the roster carries display copy.
--          label: (
--            <span className={css.item}>
--              <span className={css.itemName}>{text.name}</span>
--              <span className={css.itemDesc}>{text.description ?? t('noDescription')}</span>
--            </span>
--          ),
--        }
--      })}
--      selectedId={state.current}
--      onSelect={(id) => {
--        setOpen(false)
--        void select(id)
--      }}
--      align="start"
--      portal
--      anchor={(
--        <button
--          type="button"
--          className={css.seat}
--          aria-haspopup="menu"
--          aria-expanded={open}
--          title={state.error ?? t('seatHint')}
--          disabled={state.busy}
--          onClick={() => { setOpen(value => !value) }}
--        >
--          <IconAgentPresetOutline16 className={introducing ? `${css.seatIcon} ${css.introIcon}` : css.seatIcon} />
--          {shownLabel}
--          <IconChevronDownOutline14 className={css.chevron} />
--        </button>
--      )}
--    />
--  )
--}
-diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSection.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetSection.tsx
-deleted file mode 100644
-index cac8452f..00000000
---- a/packages/client/ui-agent-preset/src/client/AgentPresetSection.tsx
-+++ /dev/null
-@@ -1,421 +0,0 @@
--/**
-- * Agent-presets settings section: the roster as cards, a copy dialog as the
-- * only way a preset is created, and a read-only viewer over the shipped
-- * compositions.
-- *
-- * The browser edits no composition text — a shipped preset opens read-only to
-- * be READ (it is the known-good composition a copy starts from), and a custom
-- * preset is edited in its own files, which is what the location action leads
-- * to. Deleting a preset leaves running sessions alone: a composition is
-- * mounted once at session creation and nothing re-reads the file.
-- */
--
--import { useEffect, useLayoutEffect, useRef, useState } from 'react'
--import type { ReactNode } from 'react'
--import {
--  Button, IconBrowseOutline16, IconCopyOutline16, IconFolderOpenOutline16, IconPlusOutline16, IconTrashOutline16, Modal, Tooltip,
--} from '@deepseek-ai/dsh-client-ui-primitives'
--import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
--import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
--import { draftBlocker, type AgentPresetSectionState } from './section-store.ts'
--import { presetDisplayText, type AgentPresetSettingsKey } from './locales.ts'
--import css from './AgentPresetSection.module.css'
--
--/** Registration-side business face for the management section. */
--export interface AgentPresetSectionInjected {
--  hooks: {
--    /** Page snapshot bound by the renderer as useAgentPresetSection. */
--    agentPresetSection: SnapshotStore<AgentPresetSectionState>
--  }
--  /** Read the roster; called once when the section first renders. */
--  load: () => Promise<void>
--  /** Open one shipped preset's composition in the read-only viewer. */
--  view: (id: string) => Promise<void>
--  /** Close the read-only viewer. */
--  closeView: () => void
--  /** Open the copy dialog over one preset. */
--  beginCopy: (from: string) => void
--  /** Close the copy dialog, discarding the draft. */
--  cancelCopy: () => void
--  /** Name the preset the copy creates. */
--  setCopyId: (id: string) => void
--  /** Name the copy's display name. */
--  setCopyName: (name: string) => void
--  /** Submit the copy. */
--  confirmCopy: () => Promise<void>
--  /** Open one preset's directory, or reveal its path where there is no desktop. */
--  openLocation: (id: string) => Promise<void>
--  /**
--   * Stage the self-referential preset and start a new session on it — the
--   * guided way to author a preset, beside copying. Absent when the surface
--   * is composed without the conversation flow to land the session in.
--   */
--  startCreatorDraft?: () => void
--  /** Ask for delete confirmation, or dismiss it with null. */
--  confirmDelete: (id: string | null) => void
--  /** Delete the preset awaiting confirmation. */
--  remove: () => Promise<void>
--  /** Make one preset the default for sessions created later. */
--  makeDefault: (id: string) => Promise<void>
--}
--
--/** Full component props. */
--export type AgentPresetSectionProps =
--  PropsRuntime<'settings.section'>
--  & PropsLocale<'settings.agentPreset'>
--  & InjectFace<AgentPresetSectionInjected>
--
--/** Copy-dialog sub-view props: the draft plus the actions that mutate it. */
--interface CopyDialogProps {
--  state: AgentPresetSectionState
--  t: (key: AgentPresetSettingsKey) => string
--  actions: Pick<AgentPresetSectionInjected,
--    'cancelCopy' | 'confirmCopy' | 'setCopyId' | 'setCopyName'>
--}
--
--function CopyDialog({ state, t, actions }: CopyDialogProps): ReactNode {
--  const draft = state.copy
--  const blocker = draft === null ? undefined : draftBlocker(draft, state.rows)
--  const message = draft === null ? null : draft.error ?? (blocker === undefined ? null : t(blocker))
--  const source = draft === null ? undefined : state.rows.find(row => row.id === draft.from)
--  const sourceTitle = source === undefined ? draft?.fromTitle : presetDisplayText(source, t).name
--  return (
--    <Modal
--      open={draft !== null}
--      onClose={() => { actions.cancelCopy() }}
--      title={draft === null ? t('copyTitle') : `${t('copyTitle')} · ${t('copyOf')} ${sourceTitle}`}
--      closeLabel={t('close')}
--      description={t('copyIntro')}
--      className={css.dialog as string}
--      footer={(
--        <>
--          <Button
--            variant="outline"
--            disabled={draft?.saving === true}
--            onClick={() => { actions.cancelCopy() }}
--          >
--            {t('cancel')}
--          </Button>
--          <Button
--            disabled={draft === null || draft.saving || blocker !== undefined}
--            onClick={() => { void actions.confirmCopy() }}
--          >
--            {draft?.saving === true ? t('creating') : t('create')}
--          </Button>
--        </>
--      )}
--    >
--      {draft === null
--        ? null
--        : (
--          <div className={css.dialogFields}>
--            <label className={css.field}>
--              <span className={css.fieldLabel}>{t('presetId')}</span>
--              <input
--                className={css.input}
--                value={draft.id}
--                autoFocus
--                spellCheck={false}
--                placeholder={t('presetIdPlaceholder')}
--                onChange={(event) => { actions.setCopyId(event.target.value) }}
--              />
--            </label>
--            <label className={css.field}>
--              <span className={css.fieldLabel}>{t('displayName')}</span>
--              <input
--                className={css.input}
--                value={draft.name}
--                spellCheck={false}
--                placeholder={t('displayNamePlaceholder')}
--                onChange={(event) => { actions.setCopyName(event.target.value) }}
--              />
--            </label>
--            {message === null ? null : <p className={css.error} role="alert">{message}</p>}
--          </div>
--        )}
--    </Modal>
--  )
--}
--
--/**
-- * Render one card's description, clamped by CSS and offered in full on hover.
-- * The tooltip is attached only while the text is actually cut off, so a short
-- * description does not answer a hover with a bubble repeating the card.
-- * @param props.text - the description as rendered, already localized.
-- * @returns the description element, tooltip-anchored while it overflows.
-- */
--function CardDescription({ text }: { text: string }): ReactNode {
--  const ref = useRef<HTMLSpanElement | null>(null)
--  const [truncated, setTruncated] = useState(false)
--  useLayoutEffect(() => {
--    const el = ref.current
--    /* v8 ignore next -- the ref is attached before layout effects run. */
--    if (el === null) return
--    const measure = () => { setTruncated(el.scrollHeight > el.clientHeight) }
--    measure()
--    // Card width follows the settings pane, which resizes with the window.
--    if (typeof ResizeObserver === 'undefined') return
--    const observer = new ResizeObserver(measure)
--    observer.observe(el)
--    return () => { observer.disconnect() }
--  }, [text])
--  return (
--    // Capped near the card's own width: the default half-viewport bubble would
--    // spill a description out of the settings dialog and across the app behind it.
--    <Tooltip label={text} side="bottom" delayMs={400} disabled={!truncated} maxWidth={360}>
--      {/* The empty title stops the card body's native tooltip from climbing to
--        this span: a cut-off description answers with one bubble, not two. */}
--      <span ref={ref} className={css.cardDesc} title="">{text}</span>
--    </Tooltip>
--  )
--}
--
--/**
-- * Render the Agent presets section content column.
-- * @param props - composed slot props.
-- * @returns the section, or null when the deployment composes no presets.
-- */
--export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
--  const { useAgentPresetSection, t, load } = props
--  const state = useAgentPresetSection(snapshot => snapshot)
--  const viewedId = state.view?.id
--  const viewedRow = viewedId === undefined ? undefined : state.rows.find(row => row.id === viewedId)
--  const viewedTitle = state.view === null
--    ? ''
--    : viewedRow === undefined ? state.view.title : presetDisplayText(viewedRow, t).name
--
--  useEffect(() => {
--    void load()
--  }, [load])
--
--  // A deployment that composes no presets has nothing to manage: every
--  // session shares the host composition and the page would be an empty list.
--  if (state.status === 'unavailable') return null
--  if (state.status === 'error') {
--    /* v8 ignore next -- an error status always carries text; the fallback satisfies the nullable type */
--    const detail = state.error ?? ''
--    return (
--      <div className={css.section}>
--        <p className={css.error} role="alert">{`${t('error')} ${detail}`}</p>
--        <button type="button" className={css.secondaryButton} onClick={() => { void load() }}>
--          {t('retry')}
--        </button>
--      </div>
--    )
--  }
--
--  /* The guided alternative to copying: the self-referential preset can
--     read this very composition and author a new one in conversation.
--     Offered only where that preset is actually on the roster and a
--     session can be landed; without a writable root the draft could
--     never be discovered, so the reason rides the disabled button. */
--  const creatorButton = props.startCreatorDraft !== undefined && state.rows.some(row => row.id === 'cordis')
--    ? (
--      <button
--        type="button"
--        className={css.creatorButton}
--        disabled={!state.authorable}
--        title={state.authorable ? undefined : t('duplicateUnavailable')}
--        onClick={() => {
--          props.startCreatorDraft?.()
--          props.close()
--        }}
--      >
--        {/* Same glyph as the Models page's add affordances. */}
--        <IconPlusOutline16 size={14} />
--        {t('creatorDraft')}
--      </button>
--    )
--    : null
--
--  return (
--    <div className={css.section}>
--      <h2 className={css.title}>{t('nav')}</h2>
--      <p className={css.intro}>{t('sectionIntro')}</p>
--      {state.error === null ? null : <p className={css.error} role="alert">{state.error}</p>}
--      {([['system', t('builtInGroup')], ['user', t('customGroup')]] as const).map(([trust, heading]) => {
--        const group = state.rows
--          .filter(row => row.trust === trust)
--          .map(row => ({ row, text: presetDisplayText(row, t) }))
--        // The custom group is where a preset of one's own will appear, so it
--        // stays on screen even while empty: heading plus the creator entry.
--        const tail = trust === 'user' ? creatorButton : null
--        if (group.length === 0 && tail === null) return null
--        return (
--          <section key={trust} className={css.group}>
--            <h3 className={css.groupHead}>{heading}</h3>
--            {group.length === 0 ? null : (
--              <ul className={css.cards}>
--                {group.map(({ row, text }) => (
--                  <li
--                    key={row.id}
--                    className={row.broken !== undefined
--                      ? `${css.card} ${css.cardBroken}`
--                      : row.isDefault ? `${css.card} ${css.cardActive}` : css.card}
--                  >
--                    {/* The card body IS the control: picking a preset is the
--                      common act, so it should not hide behind a small button.
--                      The action row sits outside it — nesting buttons is
--                      invalid, and these act on the card rather than select it.
--                      A broken preset cannot compose a session, so its body is
--                      disabled and the card says why instead of offering it. */}
--                    <button
--                      type="button"
--                      className={css.cardMain}
--                      aria-pressed={row.isDefault}
--                      disabled={row.isDefault || row.broken !== undefined}
--                      // Without this the name is the whole card read aloud —
--                      // title, badge, description, id.
--                      aria-label={`${row.broken !== undefined ? t('brokenBadge') : row.isDefault ? t('inUse') : t('setDefault')}: ${text.name}`}
--                      title={row.broken ?? (row.isDefault ? t('inUse') : t('setDefault'))}
--                      onClick={() => { void props.makeDefault(row.id) }}
--                    >
--                      <span className={css.cardHead}>
--                        <span className={css.cardName}>{text.name}</span>
--                        {row.broken !== undefined
--                          ? <span className={css.brokenBadge}>{t('brokenBadge')}</span>
--                          : null}
--                        <span className={css.badge}>
--                          {row.trust === 'user' ? t('userTrust') : t('builtIn')}
--                        </span>
--                        {row.isDefault ? <span className={css.inUse}>{t('inUse')}</span> : null}
--                      </span>
--                      <CardDescription text={text.description ?? t('noDescription')} />
--                      {row.broken === undefined
--                        ? null
--                        : <span className={css.cardBrokenReason} role="alert">{row.broken}</span>}
--                      <code className={css.cardId}>{row.id}</code>
--                    </button>
--                    <div className={css.cardFoot}>
--                      {/* Shipped presets are the compositions a copy starts
--                        from, so READING one is the point; a custom preset is
--                        edited in its files instead, which the location action
--                        leads to. A broken shipped preset has no readable
--                        composition to offer, so its viewer is withheld; a
--                        broken custom one keeps the location action — the
--                        files are where it gets fixed. */}
--                      {row.trust === 'system'
--                        ? row.broken === undefined
--                          ? (
--                            <button
--                              type="button"
--                              className={css.iconButton}
--                              data-tip={t('view')}
--                              aria-label={`${t('view')}: ${text.name}`}
--                              onClick={() => { void props.view(row.id) }}
--                            >
--                              <IconBrowseOutline16 />
--                            </button>
--                          )
--                          : null
--                        : (
--                          <button
--                            type="button"
--                            className={css.iconButton}
--                            data-tip={state.hasDocument ? t('openLocation') : t('showLocation')}
--                            aria-label={`${state.hasDocument ? t('openLocation') : t('showLocation')}: ${text.name}`}
--                            onClick={() => { void props.openLocation(row.id) }}
--                          >
--                            <IconFolderOpenOutline16 />
--                          </button>
--                        )}
--                      <button
--                        type="button"
--                        className={css.iconButton}
--                        disabled={!state.authorable || row.broken !== undefined}
--                        data-tip={row.broken !== undefined
--                          ? t('brokenNoCopy')
--                          : state.authorable ? t('duplicate') : t('duplicateUnavailable')}
--                        aria-label={`${t('duplicate')}: ${text.name}`}
--                        onClick={() => { props.beginCopy(row.id) }}
--                      >
--                        <IconCopyOutline16 />
--                      </button>
--                      {row.trust === 'user'
--                        ? (
--                          <button
--                            type="button"
--                            className={`${css.iconButton} ${css.iconDanger}`}
--                            data-tip={t('delete')}
--                            aria-label={`${t('delete')}: ${text.name}`}
--                            onClick={() => { props.confirmDelete(row.id) }}
--                          >
--                            <IconTrashOutline16 />
--                          </button>
--                        )
--                        : null}
--                    </div>
--                    {state.revealedPaths[row.id] === undefined
--                      ? null
--                      : (
--                        <p className={css.revealedPath}>
--                          <span className={css.revealedPathLabel}>{t('revealedPathLabel')}</span>
--                          <code>{state.revealedPaths[row.id]}</code>
--                        </p>
--                      )}
--                  </li>
--                ))}
--              </ul>
--            )}
--            {tail}
--          </section>
--        )
--      })}
--      <CopyDialog
--        state={state}
--        t={t}
--        actions={{
--          cancelCopy: props.cancelCopy,
--          confirmCopy: props.confirmCopy,
--          setCopyId: props.setCopyId,
--          setCopyName: props.setCopyName,
--        }}
--      />
--      <Modal
--        open={state.view !== null}
--        onClose={() => { props.closeView() }}
--        title={state.view === null ? '' : `${t('view')} · ${viewedTitle}`}
--        closeLabel={t('close')}
--        description={t('composition')}
--        className={css.dialog as string}
--        footer={(
--          <Button variant="outline" autoFocus onClick={() => { props.closeView() }}>
--            {t('close')}
--          </Button>
--        )}
--      >
--        {state.view === null
--          ? null
--          : <pre className={css.viewerCode}>{state.view.content}</pre>}
--      </Modal>
--      <Modal
--        open={state.pendingDelete !== null}
--        onClose={() => { props.confirmDelete(null) }}
--        title={t('deleteTitle')}
--        closeLabel={t('close')}
--        description={t('deleteDescription')}
--        className={css.deleteDialog as string}
--        footer={(
--          <>
--            <Button
--              variant="outline"
--              autoFocus
--              disabled={state.deleting}
--              onClick={() => { props.confirmDelete(null) }}
--            >
--              {t('cancel')}
--            </Button>
--            <Button
--              variant="outline"
--              className={css.deleteConfirm}
--              disabled={state.deleting}
--              onClick={() => { void props.remove() }}
--            >
--              {state.deleting ? t('deleting') : t('deleteConfirm')}
--            </Button>
--          </>
--        )}
--      />
--    </div>
--  )
--}
 diff --git a/packages/client/ui-agent-preset/src/client/ModeMenu.tsx b/packages/client/ui-agent-preset/src/client/ModeMenu.tsx
 new file mode 100644
-index 00000000..ed374b20
+index 0000000000000000000000000000000000000000..ed374b20e6df0cb66900ede7c54689d437688b79
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/ModeMenu.tsx
 @@ -0,0 +1,66 @@
@@ -1922,98 +1718,8 @@ index 00000000..ed374b20
 +    />
 +  )
 +}
-diff --git a/packages/client/ui-agent-preset/src/client/PresetMenu.tsx b/packages/client/ui-agent-preset/src/client/PresetMenu.tsx
-deleted file mode 100644
-index 4b78d8ce..00000000
---- a/packages/client/ui-agent-preset/src/client/PresetMenu.tsx
-+++ /dev/null
-@@ -1,84 +0,0 @@
--/**
-- * The preset picker both surfaces render: a menu of presets over a button
-- * naming the current one.
-- *
-- * The settings row and the composer seat differ in where they sit, what they
-- * call the current value, and when they refuse a pick — not in how the picker
-- * itself behaves. Trust is the one thing the list always says: a locally
-- * authored preset is exactly as privileged as the plugins it names, so the
-- * label marks it rather than presenting every preset as shipped and vetted.
-- */
--
--import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
--import type { AgentPresetOption } from './settings-store.ts'
--import { presetDisplayText, type AgentPresetSettingsKey } from './locales.ts'
--
--/** What one surface passes to the shared picker. */
--export interface PresetMenuProps {
--  /** Presets to offer, in roster order. */
--  options: readonly AgentPresetOption[]
--  /** The preset the button names and the menu marks selected. */
--  selectedId: string
--  /** Text on the button; the surfaces word a pending roster differently. */
--  label: string
--  /** Active Web locale lookup. */
--  t: (key: AgentPresetSettingsKey) => string
--  /** Class for the trigger button, owned by the calling surface. */
--  buttonClassName: string | undefined
--  /** Class for the chevron, owned by the calling surface. */
--  chevronClassName: string | undefined
--  /** Whether the trigger refuses interaction. */
--  disabled: boolean
--  /** Whether the menu is open — the surface owns this so it can force it shut. */
--  open: boolean
--  /** Report the menu's next open state. */
--  onOpenChange: (open: boolean) => void
--  /** Called with the picked preset once the menu has closed. */
--  onSelect: (id: string) => void
--}
--
--/**
-- * Render the preset picker.
-- * @param props - the calling surface's copy, styling, and handlers.
-- * @returns the menu and its trigger.
-- */
--export function PresetMenu({
--  options, selectedId, label, t, buttonClassName, chevronClassName,
--  disabled, open, onOpenChange, onSelect,
--}: PresetMenuProps) {
--  return (
--    <Menu
--      open={open}
--      onClose={() => { onOpenChange(false) }}
--      items={options.map((option) => {
--        const name = presetDisplayText(option, t).name
--        return {
--          id: option.id,
--          // All preset surfaces resolve copy the same way; the id is addressing,
--          // not a label, except where no display name exists.
--          label: option.trust === 'user' ? `${name} · ${t('userTrust')}` : name,
--        }
--      })}
--      selectedId={selectedId}
--      onSelect={(id) => {
--        onOpenChange(false)
--        onSelect(id)
--      }}
--      align="end"
--      portal
--      anchor={(
--        <button
--          type="button"
--          className={buttonClassName}
--          aria-haspopup="menu"
--          aria-expanded={open}
--          disabled={disabled}
--          onClick={() => { onOpenChange(!open) }}
--        >
--          {label}
--          <IconChevronDownOutline14 className={chevronClassName} />
--        </button>
--      )}
--    />
--  )
--}
 diff --git a/packages/client/ui-agent-preset/src/client/index.ts b/packages/client/ui-agent-preset/src/client/index.ts
-index f3274796..00322995 100644
+index f327479660ee2e57776d36edec4762abcfb8ac5a..00322995e5686be2c534b70a786f7d688ef0fe96 100644
 --- a/packages/client/ui-agent-preset/src/client/index.ts
 +++ b/packages/client/ui-agent-preset/src/client/index.ts
 @@ -1,224 +1,164 @@
@@ -2326,7 +2032,7 @@ index f3274796..00322995 100644
 +  }, AgentModeSection))
  }
 diff --git a/packages/client/ui-agent-preset/src/client/locales.ts b/packages/client/ui-agent-preset/src/client/locales.ts
-index 54acc298..1de16275 100644
+index 54acc298a188ab73620ff53c4fd8fd9fdd5b607e..1de16275a6c793940025c833316cb42aa07315a8 100644
 --- a/packages/client/ui-agent-preset/src/client/locales.ts
 +++ b/packages/client/ui-agent-preset/src/client/locales.ts
 @@ -1,56 +1,49 @@
@@ -2623,7 +2329,7 @@ index 54acc298..1de16275 100644
  }
 diff --git a/packages/client/ui-agent-preset/src/client/mode-wire.ts b/packages/client/ui-agent-preset/src/client/mode-wire.ts
 new file mode 100644
-index 00000000..ea30880a
+index 0000000000000000000000000000000000000000..ea30880a9dc7af444c8e409a647dce9403755456
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/src/client/mode-wire.ts
 @@ -0,0 +1,135 @@
@@ -2763,7 +2469,7 @@ index 00000000..ea30880a
 +  sessions.noteAgentPreset(sessionId, modeId)
 +}
 diff --git a/packages/client/ui-agent-preset/src/client/seat-store.ts b/packages/client/ui-agent-preset/src/client/seat-store.ts
-index c91e77bb..82cf3078 100644
+index c91e77bbd5be436514172ed32ed354554283a317..82cf30783c3d7cd2eae7932597dc8f6e80abc56e 100644
 --- a/packages/client/ui-agent-preset/src/client/seat-store.ts
 +++ b/packages/client/ui-agent-preset/src/client/seat-store.ts
 @@ -1,177 +1,80 @@
@@ -2980,7 +2686,7 @@ index c91e77bb..82cf3078 100644
    }
  }
 diff --git a/packages/client/ui-agent-preset/src/client/section-store.ts b/packages/client/ui-agent-preset/src/client/section-store.ts
-index 0499d24a..e31edd13 100644
+index 0499d24a3bbb5974d956abd73925afe292335428..e31edd13d57848b04324f53c96c4da3c03779e76 100644
 --- a/packages/client/ui-agent-preset/src/client/section-store.ts
 +++ b/packages/client/ui-agent-preset/src/client/section-store.ts
 @@ -1,346 +1,211 @@
@@ -3421,7 +3127,7 @@ index 0499d24a..e31edd13 100644
      }
      await this.load()
 diff --git a/packages/client/ui-agent-preset/src/client/settings-store.ts b/packages/client/ui-agent-preset/src/client/settings-store.ts
-index 4f4e26bd..e2fe2807 100644
+index 4f4e26bdf8bcf8b876eff9678f4c3b21d5c25ac0..e2fe2807b4a8e283cd3a95e049df6f6efd72b919 100644
 --- a/packages/client/ui-agent-preset/src/client/settings-store.ts
 +++ b/packages/client/ui-agent-preset/src/client/settings-store.ts
 @@ -1,255 +1,88 @@
@@ -3720,7 +3426,7 @@ index 4f4e26bd..e2fe2807 100644
    }
  }
 diff --git a/packages/client/ui-agent-preset/src/index.ts b/packages/client/ui-agent-preset/src/index.ts
-index 61f59ec5..86a35b4b 100644
+index 61f59ec50d01e7e74a08db4d21a5834c2856a0fd..86a35b4bcb8ca51626aec99449f8032c85387205 100644
 --- a/packages/client/ui-agent-preset/src/index.ts
 +++ b/packages/client/ui-agent-preset/src/index.ts
 @@ -1,5 +1,5 @@
@@ -3730,596 +3436,8 @@ index 61f59ec5..86a35b4b 100644
   * appears in the host cordis.yml / Loader; the browser half ships the
   * General-settings row through exports["./client"], discovered from the
   * package.json dsh.client declaration.
-diff --git a/packages/client/ui-agent-preset/tests/apply.client.spec.ts b/packages/client/ui-agent-preset/tests/apply.client.spec.ts
-deleted file mode 100644
-index 7ff47416..00000000
---- a/packages/client/ui-agent-preset/tests/apply.client.spec.ts
-+++ /dev/null
-@@ -1,582 +0,0 @@
--/**
-- * Registration: the General row, the settings section, the new-session chip,
-- * and the header label all come from one apply, and each defers until the slot
-- * it fills has been declared. A pushed settings change refreshes the surfaces
-- * that are already showing, so a default set from one converges the other.
-- */
--
--import { Context } from '@deepseek-ai/cordis'
--import { describe, expect, it, vi } from 'vitest'
--import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
--import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
--import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
--import { TestRemote, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
--import { apply, inject } from '@deepseek-ai/dsh-client-ui-agent-preset/client'
--import { AgentPresetLabel } from '../src/client/AgentPresetLabel.tsx'
--import type { AgentPresetLabelInjected } from '../src/client/AgentPresetLabel.tsx'
--import { AgentPresetRow } from '../src/client/AgentPresetRow.tsx'
--import type { AgentPresetRowInjected } from '../src/client/AgentPresetRow.tsx'
--import { AgentPresetSection } from '../src/client/AgentPresetSection.tsx'
--import type { AgentPresetSectionInjected } from '../src/client/AgentPresetSection.tsx'
--import { AgentPresetSeat } from '../src/client/AgentPresetSeat.tsx'
--import type { AgentPresetSeatInjected } from '../src/client/AgentPresetSeat.tsx'
--
--// The service reads its initial locale from the browser; these specs assert
--// the shipped Chinese copy, so they state the browser they assume.
--usePinnedBrowserLanguages('zh-CN')
--
--const ROSTER_ONE = {
--  rpcId: 'r',
--  result: {
--    ok: true as const,
--    value: {
--      presets: [{ id: 'standard', trust: 'system', isDefault: true }],
--      authorable: true,
--      hasDocument: true,
--    },
--  },
--}
--
--/** The roster after this browser copied one preset of its own. */
--const ROSTER_AUTHORED = {
--  rpcId: 'r',
--  result: {
--    ok: true as const,
--    value: {
--      presets: [
--        { id: 'standard', trust: 'system', isDefault: true },
--        { id: 'mine', trust: 'user', isDefault: false },
--      ],
--      authorable: true,
--      hasDocument: true,
--    },
--  },
--}
--
--/** The same roster with a second preset carrying the default. */
--const ROSTER_MOVED = {
--  rpcId: 'r',
--  result: {
--    ok: true as const,
--    value: {
--      presets: [
--        { id: 'standard', trust: 'system', isDefault: false },
--        { id: 'minimal', trust: 'system', isDefault: true },
--      ],
--      authorable: true,
--      hasDocument: true,
--    },
--  },
--}
--
--async function bench() {
--  const ctx = new Context()
--  // The host's answer, mutable so a spec can move the default the way the
--  // settings surface does and watch who re-reads it.
--  let ROSTER: typeof ROSTER_ONE | typeof ROSTER_MOVED | typeof ROSTER_AUTHORED = ROSTER_ONE
--  const moveDefault = (): void => { ROSTER = ROSTER_MOVED }
--  await ctx.plugin(SlotRegistry).await()
--  const locale = new LocaleRuntime(ctx)
--  ctx.provide('locale', locale)
--  // The plugins inject `remote`; forwarded events reach them through the
--  // same `$dispatch` handoff the connection sink makes.
--  new TestRemote(ctx)
--  const calls: string[] = []
--  ctx.provide('connection', {
--    api: {
--      agentPresets: {
--        list: () => { calls.push('list'); return Promise.resolve(ROSTER) },
--        read: () => Promise.resolve({
--          rpcId: 'r',
--          result: { ok: true as const, value: { agentPreset: 'standard', trust: 'system', content: '' } },
--        }),
--        copy: (payload: { from: string; agentPreset: string }) => {
--          calls.push(`copy:${payload.agentPreset}`)
--          // The host's roster now contains it, which is the whole point of the
--          // copy and what every surface must converge on.
--          ROSTER = ROSTER_AUTHORED
--          return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: { agentPreset: payload.agentPreset } } })
--        },
--        openDocument: (payload: { agentPreset: string }) => {
--          calls.push(`openDocument:${payload.agentPreset}`)
--          return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: { opened: true as const } } })
--        },
--        remove: () => Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: {} } }),
--        select: (payload: { agentPreset: string }) => {
--          calls.push(`select:${payload.agentPreset}`)
--          return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: { agentPreset: payload.agentPreset } } })
--        },
--      },
--      settings: {
--        // The row reads this to learn whether this browser may write at all.
--        describe: () => Promise.resolve({
--          rpcId: 'r',
--          result: { ok: true as const, value: { writable: true, hasDocument: true, namespaces: [] } },
--        }),
--        update: (payload: { patch: unknown }) => { calls.push(`settings:${JSON.stringify(payload.patch)}`); return Promise.resolve({ rpcId: 'r', result: { ok: true as const, value: {} } }) },
--      },
--    },
--  } as never)
--  return { ctx, slots: ctx.get('slots') as SlotRegistry, calls, moveDefault }
--}
--
--function declareRoot(slots: SlotRegistry): () => void {
--  return slots.register({
--    name: 'root',
--    children: {
--      'settings.general.item': { kind: 'list', scope: 'root' },
--      'settings.section': { kind: 'list', scope: 'root' },
--      conversation: { kind: 'single', scope: 'root' },
--    },
--  } as never, () => null)
--}
--
--/** The conversation's own declarations, which the chip and label wait for. */
--function declareConversation(slots: SlotRegistry): () => void {
--  return slots.register({
--    name: 'conversation',
--    children: {
--      'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },
--      'conversation.session.header.actions': { kind: 'list', scope: 'session' },
--    },
--  } as never, () => null)
--}
--
--/** A workspaces double recording new-session starts. */
--function workspacesDouble() {
--  const starts: unknown[] = []
--  return {
--    starts,
--    startSession: (workspaceId?: unknown) => { starts.push(workspaceId ?? null) },
--  }
--}
--
--/** A sessions double whose list can be moved and whose changes are pushed. */
--function sessionsDouble(state: {
--  current?: string
--  byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
--}) {
--  const listeners = new Set<() => void>()
--  return {
--    list: {
--      getSnapshot: () => state,
--      subscribe: (fn: () => void) => {
--        listeners.add(fn)
--        return () => listeners.delete(fn)
--      },
--    },
--    noteAgentPreset: (sessionId: string, agentPreset: string) => {
--      const summary = state.byId[sessionId]
--      if (summary === undefined || summary.agentPreset === agentPreset) return
--      summary.agentPreset = agentPreset
--      for (const fn of listeners) fn()
--    },
--    /** Push a list change the way the runtime's store does. */
--    notify: () => { for (const fn of listeners) fn() },
--  }
--}
--
--describe('ui-agent-preset apply', () => {
--  it('declares the services it uses', () => {
--    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote'])
--  })
--
--  it('registers the General row and the settings section', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--
--    await ctx.plugin({ inject: [...inject], apply }).await()
--
--    const row = slots.entries('settings.general.item')[0]!
--    expect(row.component).toBe(AgentPresetRow)
--    expect(row.options).toMatchObject({ id: 'agent-preset', order: -25 })
--    const section = slots.entries('settings.section')[0]!
--    expect(section.component).toBe(AgentPresetSection)
--    expect(section.options).toMatchObject({ id: 'agent-presets', order: 20 })
--    // The nav label is a locale-following thunk; owners resolve it at read time.
--    expect(resolveSlotLabel(section.options.label)).toBe('Agent 预设')
--  })
--
--  it('registers into a declaration that arrives after apply', async () => {
--    const { ctx, slots } = await bench()
--    await ctx.plugin({ inject: [...inject], apply }).await()
--
--    declareRoot(slots)
--
--    await vi.waitFor(() => { expect(slots.entries('settings.section')).toHaveLength(1) })
--  })
--
--  it('hands each surface its own store and actions', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--    await ctx.plugin({ inject: [...inject], apply }).await()
--
--    const row = (slots.entries('settings.general.item')[0]!.inject as unknown as () => AgentPresetRowInjected)()
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--
--    expect(row.hooks.agentPreset).not.toBe(section.hooks.agentPresetSection)
--    // Each thunk reaches its own controller: the row's load fills the row's
--    // store, and the section's default write does not go through the row.
--    await row.load()
--    await row.select('standard')
--    await section.makeDefault('standard')
--    expect(row.hooks.agentPreset.getSnapshot().options).toEqual([{ id: 'standard', trust: 'system' }])
--    expect(section.hooks.agentPresetSection.getSnapshot().rows)
--      .toEqual([{ id: 'standard', trust: 'system', isDefault: true }])
--  })
--
--  it('routes the section actions to one controller', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    await ctx.plugin({ inject: [...inject], apply }).await()
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--
--    await section.load()
--    section.beginCopy('standard')
--    section.cancelCopy()
--    section.beginCopy('standard')
--    section.setCopyId('mine')
--    section.setCopyName('我的模式')
--    await section.confirmCopy()
--    await section.view('standard')
--    section.closeView()
--    section.confirmDelete('mine')
--    await Promise.all([section.openLocation('mine'), section.remove()])
--
--    // One controller behind every action: the copy the dialog named is the
--    // one the roster re-read reflects, and the delete the section confirmed
--    // is the one its remove() sees.
--    expect(calls).toContain('copy:mine')
--    expect(calls.filter(call => call === 'openDocument:mine').length).toBeGreaterThan(0)
--    expect(section.hooks.agentPresetSection.getSnapshot().rows).toHaveLength(2)
--  })
--
--  it('refreshes a showing surface when its namespace changes, and ignores others', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    await ctx.plugin({ inject: [...inject], apply }).await()
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--    await section.load()
--    const before = calls.length
--
--    ctx.remote.$dispatch('settings/document-updated', ['agent-presets', 1])
--    await vi.waitFor(() => { expect(calls.length).toBe(before + 2) })
--    const afterRelevant = calls.length
--
--    ctx.remote.$dispatch('settings/document-updated', ['llm-deepseek', 1])
--    await Promise.resolve()
--
--    // Both surfaces re-read on their own namespace; an unrelated one moves
--    // neither, so this rules out a blanket refresh on every settings write.
--    expect(calls.length).toBe(afterRelevant)
--  })
--
--  it('re-reads both surfaces when the connection comes back', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    await ctx.plugin({ inject: [...inject], apply }).await()
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--    await section.load()
--    const before = calls.length
--
--    ctx.emit('connection/reset')
--
--    // A reconnect can land on a host whose roster changed under the browser.
--    await vi.waitFor(() => { expect(calls.length).toBe(before + 2) })
--  })
--
--  it('leaves the section alone until it has been opened once', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    await ctx.plugin({ inject: [...inject], apply }).await()
--    const before = calls.length
--
--    ctx.remote.$dispatch('settings/document-updated', ['agent-presets', 1])
--    await vi.waitFor(() => { expect(calls.length).toBeGreaterThan(before) })
--
--    // Only the General row reloads: a section nobody opened has nothing to
--    // converge, and reading the roster for it would be a wasted round trip.
--    expect(calls.length - before).toBe(1)
--  })
--
--  it('registers the new-session chip and the header label, and drops both on disposal', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--    const conversation = declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    const fiber = ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply })
--    await fiber.await()
--
--    const chip = slots.entries('conversation.hero.agentPreset')[0]!
--    expect(chip.component).toBe(AgentPresetSeat)
--    const label = slots.entries('conversation.session.header.actions')[0]!
--    expect(label.component).toBe(AgentPresetLabel)
--    expect(label.options).toMatchObject({ id: 'agent-preset', order: -10 })
--    await fiber.dispose()
--    expect(slots.entries('conversation.hero.agentPreset')).toHaveLength(0)
--    expect(slots.entries('conversation.session.header.actions')).toHaveLength(0)
--    expect(slots.entries('settings.section')).toHaveLength(0)
--    conversation()
--  })
--
--  it('moves the chip when the default changes on the settings surface', async () => {
--    const { ctx, slots, moveDefault } = await bench()
--    declareRoot(slots)
--    const conversation = declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--
--    const chip = slots.entries('conversation.hero.agentPreset')[0]!
--    const seat = (chip.inject as unknown as () => AgentPresetSeatInjected)()
--    await seat.load()
--    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('standard')
--
--    // The chip opens on the deployment default, and the setting it comes from
--    // lives on another screen: without this the next session — the very one
--    // the setting governs — would be composed from the previous default until
--    // a reload.
--    // An unrelated namespace moves nothing: the chip re-reads on its own
--    // setting, not on every settings write in the process.
--    moveDefault()
--    ctx.remote.$dispatch('settings/document-updated', ['llm-deepseek', 1])
--    await Promise.resolve()
--    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('standard')
--
--    ctx.remote.$dispatch('settings/document-updated', ['agent-presets', 1])
--    await vi.waitFor(() => {
--      expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('minimal')
--    })
--    conversation()
--  })
--
--  it('folds a remote preset commit into the shared session row', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--    declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    const state = {
--      current: 's1',
--      byId: { s1: { id: 's1', blank: true, agentPreset: 'standard' } },
--    }
--    ctx.provide('sessions', sessionsDouble(state) as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--
--    ctx.remote.$dispatch('agent-preset/selected', ['s1', 'minimal'])
--
--    expect(state.byId.s1.agentPreset).toBe('minimal')
--  })
--
--  it('offers a just-authored preset on the new-session chip', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--    const conversation = declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--
--    const chip = slots.entries('conversation.hero.agentPreset')[0]!
--    const seat = (chip.inject as unknown as () => AgentPresetSeatInjected)()
--    await seat.load()
--    expect(seat.hooks.agentPresetSeat.getSnapshot().options.map(option => option.id)).toEqual(['standard'])
--
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--    await section.load()
--    section.beginCopy('standard')
--    section.setCopyId('mine')
--    section.setCopyName('我的模式')
--    await section.confirmCopy()
--
--    // Authoring copies a directory rather than writing a setting, so nothing
--    // on the wire announces it: a preset created to be used must appear on
--    // the one screen that starts sessions, without a reload.
--    await vi.waitFor(() => {
--      expect(seat.hooks.agentPresetSeat.getSnapshot().options.map(option => option.id)).toEqual(['standard', 'mine'])
--    })
--    conversation()
--  })
--
--  it('applies the staged choice to the blank session the flow lands on', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    const state: {
--      current?: string
--      byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
--    } = { byId: {} }
--    const sessions = sessionsDouble(state)
--    ctx.provide('sessions', sessions as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
--      .inject as unknown as () => AgentPresetSeatInjected)()
--
--    await chip.load()
--    // Picked on the hero screen, where there is no session yet.
--    await chip.select('minimal')
--    expect(calls).not.toContain('select:minimal')
--
--    state.current = 's1'
--    state.byId['s1'] = { id: 's1', blank: true, agentPreset: 'standard' }
--    sessions.notify()
--
--    // Connecting a workspace produced the session; the stage reaches it there.
--    await vi.waitFor(() => { expect(calls).toContain('select:minimal') })
--  })
--
--  it('applies the stage to a session that records no preset of its own', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    const sessions = sessionsDouble({
--      current: 's1',
--      byId: { s1: { id: 's1', blank: true } },
--    })
--    ctx.provide('sessions', sessions as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
--      .inject as unknown as () => AgentPresetSeatInjected)()
--
--    await chip.load()
--    await chip.select('minimal')
--
--    // A session created before the deployment composed presets records none;
--    // reading that as "already runs it" would drop the pick on the floor.
--    expect(calls).toContain('select:minimal')
--  })
--
--  it('forgets the stage once it has been spent', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    const state = {
--      current: 's1',
--      byId: { s1: { id: 's1', blank: true, agentPreset: 'standard' } },
--    }
--    const sessions = sessionsDouble(state)
--    ctx.provide('sessions', sessions as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--    const chip = (slots.entries('conversation.hero.agentPreset')[0]!
--      .inject as unknown as () => AgentPresetSeatInjected)()
--
--    await chip.load()
--    await chip.select('minimal')
--    const spent = calls.filter(call => call === 'select:minimal').length
--    sessions.notify()
--    sessions.notify()
--
--    // Every later list movement would re-apply a stage that was not cleared,
--    // switching sessions the user never picked for.
--    await Promise.resolve()
--    expect(calls.filter(call => call === 'select:minimal')).toHaveLength(spent)
--  })
--
--  it('gives the header label the same roster the General row reads', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--    declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--    const label = (slots.entries('conversation.session.header.actions')[0]!
--      .inject as unknown as () => AgentPresetLabelInjected)()
--    const row = (slots.entries('settings.general.item')[0]!
--      .inject as unknown as () => AgentPresetRowInjected)()
--
--    await label.load()
--
--    // One roster behind both: the label resolves a name the settings row's own
--    // load already fetched, rather than issuing a second read per session.
--    expect(label.hooks.agentPresets).toBe(row.hooks.agentPreset)
--    expect(label.hooks.agentPresets.getSnapshot().options).toEqual([{ id: 'standard', trust: 'system' }])
--  })
--
--  it('stages the creator preset and starts a session from the section', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--    const conversation = declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
--    const workspaces = workspacesDouble()
--    ctx.provide('workspaces', workspaces as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--    const seat = (slots.entries('conversation.hero.agentPreset')[0]!
--      .inject as unknown as () => AgentPresetSeatInjected)()
--
--    section.startCreatorDraft?.()
--
--    // The pick is staged on the chip's own controller — the session the
--    // workspace start produces is what the stage lands on — and exactly one
--    // new-session flow began.
--    expect(section.startCreatorDraft).toBeDefined()
--    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('cordis')
--    expect(workspaces.starts).toHaveLength(1)
--
--    // A cross-screen stage carries the introduce cue; the chip acknowledges
--    // it once, and a repeat acknowledgement leaves the snapshot untouched.
--    expect(seat.hooks.agentPresetSeat.getSnapshot().introduce).toBe(true)
--    seat.introduced()
--    const acknowledged = seat.hooks.agentPresetSeat.getSnapshot()
--    expect(acknowledged.introduce).toBe(false)
--    seat.introduced()
--    expect(seat.hooks.agentPresetSeat.getSnapshot()).toBe(acknowledged)
--    conversation()
--  })
--
--  it('keeps the applied composition when the roster load lands late', async () => {
--    const { ctx, slots, calls } = await bench()
--    declareRoot(slots)
--    const conversation = declareConversation(slots)
--    ctx.provide('conversation', {} as never)
--    const state: {
--      current?: string
--      byId: Record<string, { id: string; blank: boolean; agentPreset?: string }>
--    } = { byId: {} }
--    const sessions = sessionsDouble(state)
--    ctx.provide('sessions', sessions as never)
--    ctx.provide('workspaces', workspacesDouble() as never)
--    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'workspaces'], apply }).await()
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--    const seat = (slots.entries('conversation.hero.agentPreset')[0]!
--      .inject as unknown as () => AgentPresetSeatInjected)()
--
--    section.startCreatorDraft?.()
--    state.current = 's1'
--    state.byId['s1'] = { id: 's1', blank: true }
--    sessions.notify()
--    await vi.waitFor(() => { expect(calls).toContain('select:cordis') })
--
--    // The chip mounts with the flow's session, so its roster load can land
--    // AFTER the stage was consumed; the session's own composition is what
--    // the display must keep — not the deployment default.
--    state.byId['s1'] = { id: 's1', blank: true, agentPreset: 'cordis' }
--    await seat.load()
--
--    expect(seat.hooks.agentPresetSeat.getSnapshot().current).toBe('cordis')
--    conversation()
--  })
--
--  it('offers no creator draft while the conversation flow is absent', async () => {
--    const { ctx, slots } = await bench()
--    declareRoot(slots)
--
--    await ctx.plugin({ inject: [...inject], apply }).await()
--
--    // No conversation scope mounted: the face omits the affordance and the
--    // section hides its button rather than staging into nowhere.
--    const section = (slots.entries('settings.section')[0]!.inject as unknown as () => AgentPresetSectionInjected)()
--    expect(section.startCreatorDraft).toBeUndefined()
--  })
--})
 diff --git a/packages/client/ui-agent-preset/tests/components.client.spec.tsx b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
-index 0c29175a..8f7d5c65 100644
+index 0c29175a6008df52af318710f445aa9a8b8f8bba..8f7d5c65d0e0c2b1dd9bcc6933b3e15049d736b3 100644
 --- a/packages/client/ui-agent-preset/tests/components.client.spec.tsx
 +++ b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
 @@ -1,405 +1,63 @@
@@ -4773,7 +3891,7 @@ index 0c29175a..8f7d5c65 100644
    })
  })
 diff --git a/packages/client/ui-agent-preset/tests/invariant.client.spec.ts b/packages/client/ui-agent-preset/tests/invariant.client.spec.ts
-index 768a6487..7bf70b73 100644
+index 768a64871ff61dc4cacf5e9e34c6141497ad62e6..7bf70b73fb55e8e02e546e381df3a51500924c7b 100644
 --- a/packages/client/ui-agent-preset/tests/invariant.client.spec.ts
 +++ b/packages/client/ui-agent-preset/tests/invariant.client.spec.ts
 @@ -1,25 +1,19 @@
@@ -4809,7 +3927,7 @@ index 768a6487..7bf70b73 100644
    })
  })
 diff --git a/packages/client/ui-agent-preset/tests/locales.client.spec.ts b/packages/client/ui-agent-preset/tests/locales.client.spec.ts
-index 02623e7d..3926aaa7 100644
+index 02623e7d7bda52dc64b80834d77f9b452bcd7d01..3926aaa7331f12c3e0afe1309b28fdb14b15f93d 100644
 --- a/packages/client/ui-agent-preset/tests/locales.client.spec.ts
 +++ b/packages/client/ui-agent-preset/tests/locales.client.spec.ts
 @@ -1,33 +1,25 @@
@@ -4863,7 +3981,7 @@ index 02623e7d..3926aaa7 100644
  })
 diff --git a/packages/client/ui-agent-preset/tests/mode-wire.client.spec.ts b/packages/client/ui-agent-preset/tests/mode-wire.client.spec.ts
 new file mode 100644
-index 00000000..0a814a1b
+index 0000000000000000000000000000000000000000..0a814a1b7e4e477fd01e0393189983846418b2d8
 --- /dev/null
 +++ b/packages/client/ui-agent-preset/tests/mode-wire.client.spec.ts
 @@ -0,0 +1,78 @@
@@ -4946,7 +4064,7 @@ index 00000000..0a814a1b
 +  })
 +})
 diff --git a/packages/client/ui-agent-preset/tests/section-store.client.spec.ts b/packages/client/ui-agent-preset/tests/section-store.client.spec.ts
-index dc62f74a..6a41abfe 100644
+index dc62f74aff156accb6827fb2855bbfe4e3ea0cbf..6a41abfef8b3f184215bb8c2aa1dad0420b8cb65 100644
 --- a/packages/client/ui-agent-preset/tests/section-store.client.spec.ts
 +++ b/packages/client/ui-agent-preset/tests/section-store.client.spec.ts
 @@ -1,580 +1,106 @@
@@ -5615,7 +4733,7 @@ index dc62f74a..6a41abfe 100644
    })
  })
 diff --git a/packages/client/ui-agent-preset/tests/section.client.spec.tsx b/packages/client/ui-agent-preset/tests/section.client.spec.tsx
-index 6cf819b2..1d457b51 100644
+index 6cf819b2bddad13ae87e0125de4536d29adc152a..1d457b518bf890096078686cf26fd55c05e872a5 100644
 --- a/packages/client/ui-agent-preset/tests/section.client.spec.tsx
 +++ b/packages/client/ui-agent-preset/tests/section.client.spec.tsx
 @@ -1,519 +1,112 @@
@@ -6199,7 +5317,7 @@ index 6cf819b2..1d457b51 100644
 -  })
 -})
 diff --git a/packages/client/ui-agent-preset/tests/settings-store.client.spec.ts b/packages/client/ui-agent-preset/tests/settings-store.client.spec.ts
-index 0a981382..ec560dd6 100644
+index 0a98138233fbed69764c54edab3c001da4c93e0e..ec560dd611f3951510cafcf427a4b207d2618c2d 100644
 --- a/packages/client/ui-agent-preset/tests/settings-store.client.spec.ts
 +++ b/packages/client/ui-agent-preset/tests/settings-store.client.spec.ts
 @@ -1,458 +1,54 @@
@@ -6699,30 +5817,8 @@ index 0a981382..ec560dd6 100644
 -
 -
  })
-diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
-index c9b6f658..26d05604 100644
---- a/packages/client/ui-conversation/src/client/locales.ts
-+++ b/packages/client/ui-conversation/src/client/locales.ts
-@@ -71,7 +71,7 @@ export const zh = {
-   'access.confirm.cancel': '取消',
-   'access.confirm.enable': '启用 Full access',
--  'hero.headline': '探索未至之境',
-+  'hero.headline': '道器相成',
-   'hero.preview': '预览版',
-   'hero.chooseWorkspace': '选择工作区',
-   'session.hierarchy': '会话层级',
-   'details.title': '详情',
-@@ -240,7 +240,7 @@ export const en = {
-   'access.confirm.cancel': 'Cancel',
-   'access.confirm.enable': 'Enable Full access',
--  'hero.headline': 'Into the Unknown',
-+  'hero.headline': 'Principle and implementation, in concert.',
-   'hero.preview': 'Preview',
-   'hero.chooseWorkspace': 'Choose workspace',
-   'session.hierarchy': 'Session hierarchy',
-   'details.title': 'Details',
 diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
-index f57caea9..8d1ae687 100644
+index f57caea9e5ad6f82e36f45a110c81b538feb090f..8d1ae68794e38dfb2a50398c4a59763967355434 100644
 --- a/packages/client/ui-conversation/src/client/apply.ts
 +++ b/packages/client/ui-conversation/src/client/apply.ts
 @@ -207,7 +207,7 @@ export function apply(ctx: Context): void {
@@ -6735,7 +5831,7 @@ index f57caea9..8d1ae687 100644
      inject: (sessionId: SessionId | undefined): ConversationInjected => ({
        hooks: { composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId) },
 diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
-index 21259146..a083be83 100644
+index 21259146a748fd4ec9520f8509048608ec239c10..a083be83d457ad1d87410b715371a5a7d035a509 100644
 --- a/packages/client/ui-conversation/src/client/contract/slots.ts
 +++ b/packages/client/ui-conversation/src/client/contract/slots.ts
 @@ -138,11 +138,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -6773,7 +5869,7 @@ index 21259146..a083be83 100644
    & InjectFace<ConversationInjected>
    & PropsLocale<'conversation'>
 diff --git a/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts b/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts
-index 4d8fb6d3..692435de 100644
+index 4d8fb6d3e2cb2ddf2805e0ea393dfed131006aa2..692435de0d53e56fa7d31d35c30f3f835b48f128 100644
 --- a/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts
 +++ b/packages/client/ui-conversation/src/client/conversation-nodes/inbox.ts
 @@ -14,6 +14,9 @@ interface InboxSplice {
@@ -6822,8 +5918,30 @@ index 4d8fb6d3..692435de 100644
      },
      update: context => context.state,
      publication: () => 'none',
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index c9b6f658caa7abbbc79b87406aacce8fadc31a0b..26d05604c2ea44cc752a36bf194a281d692d41c0 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -70,7 +70,7 @@ export const zh = {
+   'access.confirm.acknowledge': '我已了解风险，并愿意继续',
+   'access.confirm.cancel': '取消',
+   'access.confirm.enable': '启用 Full access',
+-  'hero.headline': '探索未至之境',
++  'hero.headline': '道器相成',
+   'hero.preview': '预览版',
+   'hero.chooseWorkspace': '选择工作区',
+   'session.hierarchy': '会话层级',
+@@ -239,7 +239,7 @@ export const en = {
+   'access.confirm.acknowledge': 'I understand the risks and want to continue',
+   'access.confirm.cancel': 'Cancel',
+   'access.confirm.enable': 'Enable Full access',
+-  'hero.headline': 'Into the Unknown',
++  'hero.headline': 'Principle and implementation, in concert.',
+   'hero.preview': 'Preview',
+   'hero.chooseWorkspace': 'Choose workspace',
+   'session.hierarchy': 'Session hierarchy',
 diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
-index ef1221cd..f5426322 100644
+index ef1221cd99ecb91cadf48570c8724604932e4010..f5426322c1f08277f6da45531fd76ae001a12266 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 +++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 @@ -119,7 +119,7 @@ export function ConversationRoot({
@@ -6836,7 +5954,7 @@ index ef1221cd..f5426322 100644
    )
  
 diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx
-index d576aa17..9724c93d 100644
+index d576aa175d34b1231d618de8eac2bcbd5497e4c7..9724c93d23b5854772613fbfcae01995cd5a670f 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx
 +++ b/packages/client/ui-conversation/src/client/skeleton/ConversationSession.tsx
 @@ -73,6 +73,7 @@ export function ConversationSessionHeader({
@@ -6848,7 +5966,7 @@ index d576aa17..9724c93d 100644
        aria-hidden={hideChrome || undefined}
      >
 diff --git a/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx b/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
-index 4865ceec..fb3ee930 100644
+index 4865ceecfa5b194286be14dcc954209943afce0f..fb3ee930fbe95c44465578d2cfad592647ec2f72 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
 +++ b/packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx
 @@ -1,4 +1,4 @@
@@ -6879,7 +5997,7 @@ index 4865ceec..fb3ee930 100644
            <span className={css.headlineText}>{t('hero.headline')}</span>
            <span className={css.previewBadge}>{t('hero.preview')}</span>
 diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
-index 9585677a..a8638d4f 100644
+index 9585677ae32000b708b52de45be4a714fc6ca9cb..a8638d4fc57375e90622dd85ed1862584885d678 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
 +++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
 @@ -544,6 +544,7 @@ export function InputBar({
@@ -6906,7 +6024,7 @@ index 9585677a..a8638d4f 100644
                  onClick={onPrimary}
                >
 diff --git a/packages/client/ui-conversation/tests/chat-apply.client.spec.tsx b/packages/client/ui-conversation/tests/chat-apply.client.spec.tsx
-index c9f2dedb..a4f6698d 100644
+index c9f2dedb149992010fb8a6abbb0c9d71286b7c69..a4f6698d6a01d12311633b830585c6a706c7fb2b 100644
 --- a/packages/client/ui-conversation/tests/chat-apply.client.spec.tsx
 +++ b/packages/client/ui-conversation/tests/chat-apply.client.spec.tsx
 @@ -92,7 +92,7 @@ describe('apply wiring', () => {
@@ -6919,10 +6037,11 @@ index c9f2dedb..a4f6698d 100644
      await b.runtime.dispose()
    })
 diff --git a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
-index acf618fb..2e76d0f7 100644
+index acf618fb2be30a87dce5123953f7c634fd91d2ac..1e2601dbfc5eca0bc141a577295d532da4c785f1 100644
 --- a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
 +++ b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
-@@ -261,6 +261,6 @@ describe('Hero chrome', () => {
+@@ -260,7 +260,7 @@ function mount(
+ describe('Hero chrome', () => {
    it('renders the English preview badge through the hero locale seat', () => {
      const view = render(<HeroShell t={makeTranslate(en, commonEn)} />)
 -    expect(view.getByText('Into the Unknown')).toBeTruthy()
@@ -6979,7 +6098,7 @@ index acf618fb..2e76d0f7 100644
  
    it('prompt failure renders the promptError strip (ordinary failure, no transaction UI)', () => {
 diff --git a/packages/client/ui-primitives/src/BrandWordmark.tsx b/packages/client/ui-primitives/src/BrandWordmark.tsx
-index 768fcdf9..e359cbba 100644
+index 768fcdf92c65e17434b4dd596d9fc23a2834ac13..e359cbba484b7af6e5d2a5ee91919c2e03d19560 100644
 --- a/packages/client/ui-primitives/src/BrandWordmark.tsx
 +++ b/packages/client/ui-primitives/src/BrandWordmark.tsx
 @@ -1,56 +1,7 @@
@@ -7044,7 +6163,7 @@ index 768fcdf9..e359cbba 100644
 +  return <TessivumWordmark {...props} />
  }
 diff --git a/packages/client/ui-primitives/src/FishLogo.tsx b/packages/client/ui-primitives/src/FishLogo.tsx
-index 9b882a85..c22c02cf 100644
+index 9b882a850cfde30f48dd478f706d75904ca7cb52..c22c02cf1af2a8f4afbc65e2d184406c28e2d25e 100644
 --- a/packages/client/ui-primitives/src/FishLogo.tsx
 +++ b/packages/client/ui-primitives/src/FishLogo.tsx
 @@ -1,27 +1,7 @@
@@ -7081,7 +6200,7 @@ index 9b882a85..c22c02cf 100644
  }
 diff --git a/packages/client/ui-primitives/src/TessivumMark.tsx b/packages/client/ui-primitives/src/TessivumMark.tsx
 new file mode 100644
-index 00000000..5b7058f3
+index 0000000000000000000000000000000000000000..5b7058f3984d525c2cdc49538df82e42a09e396e
 --- /dev/null
 +++ b/packages/client/ui-primitives/src/TessivumMark.tsx
 @@ -0,0 +1,20 @@
@@ -7107,7 +6226,7 @@ index 00000000..5b7058f3
 +}
 diff --git a/packages/client/ui-primitives/src/TessivumWordmark.tsx b/packages/client/ui-primitives/src/TessivumWordmark.tsx
 new file mode 100644
-index 00000000..74ef4acd
+index 0000000000000000000000000000000000000000..74ef4acd8e68c5b422e7650db4f9a384e5eacbee
 --- /dev/null
 +++ b/packages/client/ui-primitives/src/TessivumWordmark.tsx
 @@ -0,0 +1,27 @@
@@ -7139,7 +6258,7 @@ index 00000000..74ef4acd
 +  )
 +}
 diff --git a/packages/client/ui-primitives/src/index.ts b/packages/client/ui-primitives/src/index.ts
-index 05baf26f..3b4c5c8e 100644
+index 05baf26f8d5881e2e11f5065837fa3461672a851..3b4c5c8e52d844562a62422b04d77b2aba25a826 100644
 --- a/packages/client/ui-primitives/src/index.ts
 +++ b/packages/client/ui-primitives/src/index.ts
 @@ -19,6 +19,8 @@ export { OnboardingSurface } from './OnboardingSurface.tsx'
@@ -7152,7 +6271,7 @@ index 05baf26f..3b4c5c8e 100644
  export { BrandWordmark } from './BrandWordmark.tsx'
  export { Tooltip } from './Tooltip.tsx'
 diff --git a/packages/client/ui-primitives/tests/icons.client.spec.tsx b/packages/client/ui-primitives/tests/icons.client.spec.tsx
-index 469c5aaf..34bd596b 100644
+index 469c5aaf5589e40932114ff4098f84f76ebd782c..34bd596b2b0503b511fa26292badb5691e28bff8 100644
 --- a/packages/client/ui-primitives/tests/icons.client.spec.tsx
 +++ b/packages/client/ui-primitives/tests/icons.client.spec.tsx
 @@ -54,15 +54,27 @@ describe('ic_ds_ icon set', () => {
@@ -7191,7 +6310,7 @@ index 469c5aaf..34bd596b 100644
    })
  })
 diff --git a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
-index c4bb82e1..d3008a1b 100644
+index c4bb82e12f3e6ef0b45667d835e766e50675c429..d3008a1bc5b4be90b691077accb7cbf042bcc9c1 100644
 --- a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
 +++ b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
 @@ -3,6 +3,8 @@
@@ -7204,7 +6323,7 @@ index c4bb82e1..d3008a1b 100644
  
  .error {
 diff --git a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
-index bfe8a813..b5364170 100644
+index bfe8a813bbbffcb66287bd9a0f6774a3c92f2ad4..b5364170a7a1c7d7617e360fe7f5b41d028d8125 100644
 --- a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
 +++ b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
 @@ -1,4 +1,4 @@
@@ -7248,7 +6367,7 @@ index bfe8a813..b5364170 100644
      </div>
    )
 diff --git a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
-index 76274750..25bb2564 100644
+index 762747500d627d79594dfc1448df95d17d3028f0..25bb2564d72a81b47dbbe06bc5cd0bea622e510f 100644
 --- a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
 +++ b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
 @@ -13,7 +13,7 @@
@@ -7270,7 +6389,7 @@ index 76274750..25bb2564 100644
    return <IconSettingsOutline16 className={css.navIcon} size={16} />
  }
 diff --git a/packages/client/ui-settings-general/src/client/locales.ts b/packages/client/ui-settings-general/src/client/locales.ts
-index a5578553..636e6bf3 100644
+index a557855323daccdd5477524d6090d01342530e17..636e6bf31e19b8897454f520381e050d7606ce7f 100644
 --- a/packages/client/ui-settings-general/src/client/locales.ts
 +++ b/packages/client/ui-settings-general/src/client/locales.ts
 @@ -7,6 +7,7 @@ export const zh = {
@@ -7289,7 +6408,7 @@ index a5578553..636e6bf3 100644
    'general.nav': 'General',
  } satisfies Record<SettingsKey, string>
 diff --git a/packages/client/ui-settings-general/tests/components.client.spec.tsx b/packages/client/ui-settings-general/tests/components.client.spec.tsx
-index 874bd446..64646905 100644
+index 874bd446307890648a14c2d6659259f19c704443..64646905ab440c19caed4e961c19dc5c434216d8 100644
 --- a/packages/client/ui-settings-general/tests/components.client.spec.tsx
 +++ b/packages/client/ui-settings-general/tests/components.client.spec.tsx
 @@ -59,6 +59,17 @@ describe('GeneralSection', () => {
@@ -7311,7 +6430,7 @@ index 874bd446..64646905 100644
      const openDocument = vi.fn(() => Promise.resolve({
        rpcId: 'document-open' as never,
 diff --git a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
-index c9ec5939..55d021de 100644
+index c9ec5939747bc6b9eb2cbc066e1675a18969dd13..55d021de7e08ad41cf6897c1d3b2b9d25625ab60 100644
 --- a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
 +++ b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
 @@ -24,7 +24,7 @@ function mount({
@@ -7341,7 +6460,7 @@ index c9ec5939..55d021de 100644
  
      expect(glyphs.every(glyph => glyph !== undefined && glyph !== '')).toBe(true)
 diff --git a/packages/client/ui-settings-models/src/onboarding-copy.ts b/packages/client/ui-settings-models/src/onboarding-copy.ts
-index d52371a9..f7ad102c 100644
+index d52371a9cf5952e60081ef6f4486bc72e39a75b3..f7ad102ca83d812c9f94e13abc99928efb5d6698 100644
 --- a/packages/client/ui-settings-models/src/onboarding-copy.ts
 +++ b/packages/client/ui-settings-models/src/onboarding-copy.ts
 @@ -8,18 +8,18 @@ export const WELCOME_NOTICE_ACK_FIELD = 'welcomeNoticeVersion'
@@ -7367,7 +6486,7 @@ index d52371a9..f7ad102c 100644
    },
  } as const
 diff --git a/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx b/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
-index 8b8858c6..a84e04a8 100644
+index 8b8858c64a16cd8e4f8677ce5c78f82b72e54893..a84e04a8e62d0985ff9143d55e2ba8009003e58c 100644
 --- a/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
 +++ b/packages/client/ui-settings-models/tests/welcome-notice.client.spec.tsx
 @@ -64,7 +64,7 @@ describe('WelcomeNotice', () => {
@@ -7380,7 +6499,7 @@ index 8b8858c6..a84e04a8 100644
      })
      expect(en.welcomeBody).toBe(WELCOME_NOTICE_COPY.en.body)
 diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-index d3fe6a63..449fa089 100644
+index d3fe6a63c15b637ad463ada46bc2bb63ba85faed..449fa0893f99c52ec6eaed268fdb480d94109ec5 100644
 --- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
 +++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
 @@ -18,7 +18,7 @@
@@ -7415,7 +6534,7 @@ index d3fe6a63..449fa089 100644
              <IconPanelLeftOutline16 className={css.panelIcon} size={wide ? 16 : 18} />
            </button>
 diff --git a/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap b/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
-index f82fbc16..c29f9272 100644
+index f82fbc165677faa3c14b68bed0229b3d0525cba0..c29f9272d3415a297c9b988f6649477a473940dd 100644
 --- a/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
 +++ b/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
 @@ -20,10 +20,10 @@ exports[`sidebar shell snapshots > renders the collapsed rail after the crossfad
@@ -7464,7 +6583,7 @@ index f82fbc16..c29f9272 100644
        </button>
        <button
 diff --git a/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts b/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
-index 4139a318..78327664 100644
+index 4139a318db179ec9e1acf8db7ed0577c41b26a98..7832766490fa633d04ee420893645527690cc71e 100644
 --- a/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
 +++ b/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts
 @@ -21,6 +21,9 @@ interface InboxSplice {
@@ -7490,7 +6609,7 @@ index 4139a318..78327664 100644
    for (const identity of splice.inserted) claimed.delete(identity.id)
    if (splice.outcome !== 'canceled') {
 diff --git a/packages/client/ui-trajectory/tests/table.client.spec.tsx b/packages/client/ui-trajectory/tests/table.client.spec.tsx
-index 467da808..49f7d2f7 100644
+index 467da8088a872d8afce25c3f13dcf9febae17295..49f7d2f7073d24e396a0c988536b4232411df61c 100644
 --- a/packages/client/ui-trajectory/tests/table.client.spec.tsx
 +++ b/packages/client/ui-trajectory/tests/table.client.spec.tsx
 @@ -664,6 +664,7 @@ describe('TrajectoryTable', () => {
@@ -7502,7 +6621,7 @@ index 467da808..49f7d2f7 100644
  
    it('keeps running and failure semantics distinct from record roles', () => {
 diff --git a/packages/client/web-react/src/scoped-slots.tsx b/packages/client/web-react/src/scoped-slots.tsx
-index dea05113..f8d380cd 100644
+index dea0511319d3317924e6cab0e75c46e2071d173f..f8d380cd03087f66ab80ab7d6dd9d2e87b83e630 100644
 --- a/packages/client/web-react/src/scoped-slots.tsx
 +++ b/packages/client/web-react/src/scoped-slots.tsx
 @@ -544,6 +544,12 @@ function SessionMaybeEntryBody({ entry, ownerProps, info, slotKey, slotInjected,
@@ -7570,7 +6689,7 @@ index dea05113..f8d380cd 100644
  function RootEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext }: {
    entry: StoredEntry
 diff --git a/packages/client/web/tests/document-title.client.spec.tsx b/packages/client/web/tests/document-title.client.spec.tsx
-index ed336a1c..8e188ade 100644
+index ed336a1ccccff9fda29ca97b8a39e921ca51a73d..8e188ade5891a7fd30725650b031c6ae5afa845e 100644
 --- a/packages/client/web/tests/document-title.client.spec.tsx
 +++ b/packages/client/web/tests/document-title.client.spec.tsx
 @@ -10,19 +10,19 @@ afterEach(() => {
@@ -7600,7 +6719,7 @@ index ed336a1c..8e188ade 100644
    })
  })
 diff --git a/packages/core/agent-loop/tests/loop.spec.ts b/packages/core/agent-loop/tests/loop.spec.ts
-index ca4a5309..605d60b6 100644
+index ca4a5309c9ab0ff4da54c97748f0bedf1adbf055..605d60b6c9bc7ca67728678a8656020dda80d323 100644
 --- a/packages/core/agent-loop/tests/loop.spec.ts
 +++ b/packages/core/agent-loop/tests/loop.spec.ts
 @@ -252,7 +252,7 @@ describe('agent loop', () => {
@@ -7640,7 +6759,7 @@ index ca4a5309..605d60b6 100644
  
    it('omits the system field when system-prompt/assemble short-circuits with an empty assembly', async () => {
 diff --git a/packages/core/agent/src/types.ts b/packages/core/agent/src/types.ts
-index b54e56ea..51b3517b 100644
+index b54e56ea8f9dc61674167dff98dbbe7dc5c857e4..51b3517b8f69b741c919791426cffd97edc211ce 100644
 --- a/packages/core/agent/src/types.ts
 +++ b/packages/core/agent/src/types.ts
 @@ -22,6 +22,9 @@ declare module '@deepseek-ai/dsh-session/types' {
@@ -7654,7 +6773,7 @@ index b54e56ea..51b3517b 100644
    }
  }
 diff --git a/packages/core/system-prompt/src/index.ts b/packages/core/system-prompt/src/index.ts
-index ffc052e0..df357968 100644
+index ffc052e0b9b1a7c1e3eefa0851ac1499266d02ea..df357968b7233f2b773232d574a1799fe2502bce 100644
 --- a/packages/core/system-prompt/src/index.ts
 +++ b/packages/core/system-prompt/src/index.ts
 @@ -358,7 +358,7 @@ export class SystemPrompt extends Service {
@@ -7667,7 +6786,7 @@ index ffc052e0..df357968 100644
      }
      this.section({
 diff --git a/packages/core/system-prompt/tests/system-prompt.spec.ts b/packages/core/system-prompt/tests/system-prompt.spec.ts
-index cf196892..f724d09a 100644
+index cf196892a767306588ce826c694ab5d3ba3fbf98..f724d09a9a27137da0d3c7291b4248e379a5362c 100644
 --- a/packages/core/system-prompt/tests/system-prompt.spec.ts
 +++ b/packages/core/system-prompt/tests/system-prompt.spec.ts
 @@ -9,7 +9,7 @@ import SystemPrompt, { AssembleContext, PromptAssembly, renderContextSnapshot, r
@@ -7680,7 +6799,7 @@ index cf196892..f724d09a 100644
    return assembly.sections.filter(section => !BUILT_IN.includes(section.name))
  }
 diff --git a/packages/examples/agent-spine-demo/tests/agent-core.spec.ts b/packages/examples/agent-spine-demo/tests/agent-core.spec.ts
-index 56f7903f..52d967b3 100644
+index 56f7903fcbe9c2ed0634777d8604c6bb82efc789..52d967b3ce68a3dc0d41e8358f79d6199199f87c 100644
 --- a/packages/examples/agent-spine-demo/tests/agent-core.spec.ts
 +++ b/packages/examples/agent-spine-demo/tests/agent-core.spec.ts
 @@ -375,7 +375,7 @@ describe('dsh-agent-spine-demo bundle', () => {
@@ -7693,7 +6812,7 @@ index 56f7903f..52d967b3 100644
        await handle.dispose()
        await ctx.fiber.dispose()
 diff --git a/packages/extensions/cordis-client-runner/src/client/slot-catalog.ts b/packages/extensions/cordis-client-runner/src/client/slot-catalog.ts
-index 0cd1f51c..9aee5068 100644
+index 0cd1f51cd21307cd369c8310dac423381e9377de..9aee5068c8ddae9ad913dce4766bf9ae7a857703 100644
 --- a/packages/extensions/cordis-client-runner/src/client/slot-catalog.ts
 +++ b/packages/extensions/cordis-client-runner/src/client/slot-catalog.ts
 @@ -458,14 +458,14 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
@@ -7756,7 +6875,7 @@ index 0cd1f51c..9aee5068 100644
        'client-ui-settings-models ModelsSection id \'models\'',
        'client-ui-settings-plugins PluginsSettingsSection id \'plugins\'',
 diff --git a/packages/subagent/subagent-codex/src/wire.ts b/packages/subagent/subagent-codex/src/wire.ts
-index bc00ff0a..079280df 100644
+index bc00ff0acf21ae52f7059ca772dbb2938c6b3568..079280df5f90cd961f95c72e32f4a4eba3a2e2e2 100644
 --- a/packages/subagent/subagent-codex/src/wire.ts
 +++ b/packages/subagent/subagent-codex/src/wire.ts
 @@ -133,7 +133,7 @@ export class CodexAppServerWire {
@@ -7769,7 +6888,7 @@ index bc00ff0a..079280df 100644
        },
        capabilities: {
 diff --git a/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts b/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
-index 37b2e9ff..66c4c010 100644
+index 37b2e9ff0b6fc5a77e6ac37fe3f20c4908fe9763..66c4c01038e9cfb1b64bda370e829cbdddeaa07a 100644
 --- a/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
 +++ b/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
 @@ -372,7 +372,7 @@ describe('CodexAppServerWire', () => {

@@ -30,10 +30,11 @@ product_target=${PRODUCT_CARGO_TARGET_DIR:-$cargo_target/product}
 
 patch="$product/web/patches/deepseek-harness.patch"
 expected_dsh_diff=$(jq -r '.source.deepseekHarness.trackedDiffSha256' "$product/benchmarks/manifests/base.json")
-actual_dsh_diff=$(git -C "$dsh" diff --binary --no-ext-diff | sha256sum | cut -d' ' -f1)
+actual_dsh_diff=$(git -C "$dsh" diff --binary --full-index --no-ext-diff | sha256sum | cut -d' ' -f1)
 if [[ $actual_dsh_diff == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]]; then
   git -C "$dsh" apply "$patch"
-  actual_dsh_diff=$(git -C "$dsh" diff --binary --no-ext-diff | sha256sum | cut -d' ' -f1)
+  while IFS= read -r -d '' path; do git -C "$dsh" add --intent-to-add -- "$path"; done < <(git -C "$dsh" ls-files --others --exclude-standard -z)
+  actual_dsh_diff=$(git -C "$dsh" diff --binary --full-index --no-ext-diff | sha256sum | cut -d' ' -f1)
 fi
 [[ $actual_dsh_diff == "$expected_dsh_diff" ]] || { echo "DeepSeek Harness tracked diff does not match $patch" >&2; exit 2; }
 
