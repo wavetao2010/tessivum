@@ -75,7 +75,7 @@ def validate_lifecycle_evidence(path: Path, entry: dict[str, Any]) -> None:
         raise ValueError(f"{entry['npm']}@{entry['version']}: product evidence link is missing")
     product_path = (path.parent / product_link["path"]).resolve()
     if (not product_path.is_relative_to(ROOT) or not product_path.is_file()
-            or product_link.get("sha256") != sha256(product_path.read_bytes())):
+            or product_link.get("sha256") != hashlib.sha256(product_path.read_bytes()).hexdigest()):
         raise ValueError(f"{entry['npm']}@{entry['version']}: product evidence hash does not match")
     product = json.loads(product_path.read_text(encoding="utf-8"))
     repositories = product.get("provenance", {}).get("repositories", {})
@@ -176,7 +176,7 @@ def validate(network: bool) -> None:
         evidence = (ROOT / entry["evidence"]).resolve()
         if not evidence.is_relative_to(ROOT) or not evidence.is_file():
             raise ValueError(f"{name}@{version}: missing repository-local evidence file {entry['evidence']}")
-        if sha256(evidence.read_bytes()) != entry.get("sha256"):
+        if hashlib.sha256(evidence.read_bytes()).hexdigest() != entry.get("sha256"):
             raise ValueError(f"{name}@{version}: lifecycle evidence hash does not match")
         if status == "verified":
             validate_lifecycle_evidence(evidence, entry)

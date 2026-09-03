@@ -77,9 +77,15 @@ def main() -> int:
         probe = browser["result"]
         require(sample["success"] is True and sample["failures"] == [], "a product raw sample failed")
         require(probe["errors"] == [] and probe["promptSubmitted"] is True and probe["sessionsCompleted"] == 10, "a Browser probe failed")
-        require(sample["headless"]["cleanup"]["residueAfterDispose"] == 0, "headless process residue is non-zero")
-        require(browser["cleanup"]["residueAfterDispose"] == 0, "Browser process residue is non-zero")
-        require(sample["web"]["cleanup"]["residueAfterDispose"] == 0, "Web Host process residue is non-zero")
+        cleanup_rows = {
+            "headless": sample["headless"]["cleanup"],
+            "browser": browser["cleanup"],
+            "web": sample["web"]["cleanup"],
+        }
+        for stage, cleanup in cleanup_rows.items():
+            require(cleanup["residueAfterDispose"] == 0, f"{stage} process residue is non-zero")
+            require(cleanup["forcedCleanupRequired"] is False, f"{stage} required forced cleanup")
+            require(cleanup["residueAfterForcedCleanup"] == 0, f"{stage} cleanup left process residue")
 
     expected_hashes = {
         CORE_PATH.name: "325f9b16352263f17d0b04b629cc22a1c6ec73adbde0eacb6882caf51485d69c",

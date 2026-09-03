@@ -16,6 +16,11 @@ Runtime: Legacy Node Host + Browser Cordis
 
 `python3 scripts/check_plugin_verification.py --network` confirms that the community identity, npm repository, version, license, registry integrity and downloaded tarball digest match the ledger.
 
+Published evidence:
+
+- [Lifecycle summary JSON](../plugins/market/evidence/dsh-better-sidebar-0.16.1.json) — SHA-256 `4802e4732277a89c96e4b7121ebfc88d89fceaa957cc2b52f531e5acc52475f5`
+- [Product/Chromium raw JSON](../plugins/market/evidence/dsh-better-sidebar-0.16.1-product.json) — SHA-256 `b477d3246b1d180ffa823f6c62b66bcfd4eb56367012edecea8498f89a04797c`
+
 ## Matrix result
 
 | Check | Result |
@@ -25,11 +30,12 @@ Runtime: Legacy Node Host + Browser Cordis
 | Market install request resolves to `dsh-better-sidebar@0.16.1` | pass |
 | Legacy Host starts after restart | pass |
 | Real Chromium receives the `dsh-better-sidebar` boot entry | pass |
+| Browser mounts one visible plugin-owned `[data-dsh-panel-host]` surface | pass |
 | Browser boot has no exception, console error or failed plugin asset | pass |
 | Exact update to `0.17.1` records `0.17.1` | pass; state becomes unverified |
 | Removal clears dependency, bundle row and package link | pass |
 | Failed `99.99.99` install restores both profile files byte-for-byte | pass |
-| Host shutdown leaves no benchmark residue | pass |
+| Headless, Chromium and Web Host exit gracefully without forced cleanup or residue | pass |
 
 Observed Browser boot entry:
 
