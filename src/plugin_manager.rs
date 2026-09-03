@@ -30,6 +30,7 @@ use crate::{
 const MAX_PROFILE_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_PROFILE_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BUNDLE_PATCH_BYTES: u64 = 1024 * 1024;
+const MAX_PACKAGE_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 const DSH_COMPATIBILITY_BASELINE: &str = "0.1.0-rc.5";
 const PLUGIN_DSH_ENGINE_UNSUPPORTED: &str = "PLUGIN_DSH_ENGINE_UNSUPPORTED";
 const PLUGIN_PACKAGE_ENTRY_INVALID: &str = "PLUGIN_PACKAGE_ENTRY_INVALID";
@@ -2446,7 +2447,7 @@ fn validate_candidate_package(profile: &Path, package: &str) -> Result<(), Plugi
             )
         })?;
     let entry = resolve_package_entry(&root, entry, package, PLUGIN_PACKAGE_ENTRY_INVALID)?;
-    let entry_source = read_bounded(&entry, MAX_BUNDLE_PATCH_BYTES).map_err(|error| {
+    let entry_source = read_bounded(&entry, MAX_PACKAGE_ENTRY_BYTES).map_err(|error| {
         compatibility_error(
             PLUGIN_PACKAGE_ENTRY_INVALID,
             format!("{}: {error}", entry.display()),
@@ -2635,7 +2636,7 @@ fn validate_runtime_imports(
     .expect("valid runtime import expression");
     let mut imports = BTreeSet::new();
     for entry in entries {
-        let bytes = read_bounded(entry, MAX_BUNDLE_PATCH_BYTES).map_err(|error| {
+        let bytes = read_bounded(entry, MAX_PACKAGE_ENTRY_BYTES).map_err(|error| {
             compatibility_error(
                 PLUGIN_PACKAGE_ENTRY_INVALID,
                 format!("{}: {error}", entry.display()),
