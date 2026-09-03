@@ -126,13 +126,13 @@ def repository_provenance(path: Path, expected_revision: str | None = None, expe
     revision = str(git_output(path, "rev-parse", "--verify", "HEAD")).strip()
     if expected_revision is not None and revision != expected_revision:
         raise ValueError(f"repository revision mismatch for {path}: expected {expected_revision}, received {revision}")
-    status = str(git_output(path, "status", "--porcelain=v1", "--untracked-files=no")).splitlines()
+    status = str(git_output(path, "status", "--porcelain=v1", "--untracked-files=all")).splitlines()
     if expected_diff_sha256 is None:
         if status:
-            raise ValueError(f"repository has tracked changes: {path}: {status}")
+            raise ValueError(f"repository has worktree changes: {path}: {status}")
         return {"path": str(path), "revision": revision, "clean": True}
     if any(not line.startswith(" ") for line in status):
-        raise ValueError(f"repository has staged or unsupported tracked changes: {path}: {status}")
+        raise ValueError(f"repository has staged or unsupported worktree changes: {path}: {status}")
     diff = bytes(git_output(path, "diff", "--binary", "--full-index", "--no-ext-diff", text=False))
     actual_diff_sha256 = hashlib.sha256(diff).hexdigest()
     if actual_diff_sha256 != expected_diff_sha256:

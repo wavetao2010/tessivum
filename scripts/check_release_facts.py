@@ -42,7 +42,7 @@ def main() -> int:
     require(version == "0.1.0-alpha.23", f"unexpected package version: {version}")
 
     core = load(CORE_PATH)
-    require(core.get("schema") == "tessivum.core-benchmark-paired/v1", "invalid Core evidence schema")
+    require(core.get("schema") == "tessivum.core-benchmark-paired/v2", "invalid Core evidence schema")
     require(core.get("status") == "success" and core.get("sampleCount") == 30, "Core evidence is not a successful 30-sample run")
     require(core.get("failures") == [], "Core evidence contains failures")
     require(core.get("revisions") == {
@@ -63,7 +63,7 @@ def main() -> int:
     require(rust["residue_after_dispose"]["max"] == 0 and typescript["residue_after_dispose"]["max"] == 0, "Core disposal residue is non-zero")
 
     product = load(PRODUCT_PATH)
-    require(product.get("schema") == "tessivum.product-benchmark-run/v1", "invalid product evidence schema")
+    require(product.get("schema") == "tessivum.product-benchmark-run/v2", "invalid product evidence schema")
     require(product.get("status") == "passed" and product.get("publication") is True, "product evidence is not publication-grade")
     require(product.get("failureCount") == 0 and product.get("diagnostics") == [], "product evidence contains failures")
     require(product.get("arguments", {}).get("samples") == 30, "product evidence does not declare 30 samples")

@@ -114,6 +114,7 @@ def validate_lifecycle_evidence(path: Path, entry: dict[str, Any]) -> None:
             or checks["failedInstallRollback"]["exitCode"] == 0
             or checks["failedInstallRollback"].get("manifestBeforeSha256") != checks["failedInstallRollback"].get("manifestAfterSha256")
             or checks["failedInstallRollback"].get("lockfileBeforeSha256") != checks["failedInstallRollback"].get("lockfileAfterSha256")
+            or checks["failedInstallRollback"].get("moduleAbsent") is not True
             or checks.get("gracefulResidue") != {"headless": 0, "browser": 0, "webHost": 0, "forcedCleanupRequired": False}):
         raise ValueError(f"{entry['npm']}@{entry['version']}: lifecycle checks are incomplete")
 

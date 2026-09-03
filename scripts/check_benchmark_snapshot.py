@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare benchmark medians only when the frozen measurement identity matches."""
+"""Compare benchmark medians only when the frozen measurement identity matches exactly."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def load(path: Path) -> dict[str, Any]:
 def identity(report: dict[str, Any]) -> dict[str, Any]:
     schema = report.get("schema")
     common = {"schema": schema, "environmentSha256": report.get("environmentSha256")}
-    if schema == "tessivum.core-benchmark-paired/v1":
+    if schema in {"tessivum.core-benchmark-paired/v1", "tessivum.core-benchmark-paired/v2"}:
         return {
             **common,
             "workloadSha256": report.get("workloadSha256"),
@@ -76,7 +76,7 @@ def complete(value: Any) -> bool:
 
 def metrics(report: dict[str, Any]) -> dict[str, tuple[float, bool]]:
     values: dict[str, tuple[float, bool]] = {}
-    if report["schema"] == "tessivum.core-benchmark-paired/v1":
+    if report["schema"] in {"tessivum.core-benchmark-paired/v1", "tessivum.core-benchmark-paired/v2"}:
         for runtime, result in report["runtimes"].items():
             for metric in result["benchmarks"]:
                 if isinstance(metric.get("median"), (int, float)):
@@ -101,17 +101,17 @@ def main() -> int:
 
     current_identity, fixture_identity = identity(current), identity(fixture)
     if not complete(current_identity) or not complete(fixture_identity):
-        print("SKIP: benchmark identity is incomplete; fixture is not comparable")
-        return 0
+        print("FAIL: benchmark identity is incomplete", file=sys.stderr)
+        return 1
     if current_identity != fixture_identity:
         changed = [key for key in sorted(set(current_identity) | set(fixture_identity)) if current_identity.get(key) != fixture_identity.get(key)]
-        print(f"SKIP: benchmark identity changed ({', '.join(changed)}); fixture is not comparable")
-        return 0
+        print(f"FAIL: benchmark identity changed ({', '.join(changed)})", file=sys.stderr)
+        return 1
 
     current_metrics, fixture_metrics = metrics(current), metrics(fixture)
     if current_metrics.keys() != fixture_metrics.keys():
-        print("SKIP: benchmark metric set changed; fixture is not comparable")
-        return 0
+        print("FAIL: benchmark metric set changed", file=sys.stderr)
+        return 1
 
     limit = args.max_regression_percent / 100.0
     failures = []

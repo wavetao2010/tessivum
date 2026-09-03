@@ -13,12 +13,9 @@ done
 
 rm -rf "$work_root"
 mkdir -p "$work_root/upstream" "$results_root"
-rsync -a --exclude target --exclude node_modules --exclude web/dist --exclude web/client-packages --exclude dist --exclude benchmarks/results \
-  "$source_root/tessivum/" "$work_root/tessivum/"
-rsync -a --exclude target --exclude node_modules \
-  "$source_root/tessivum-core/" "$work_root/tessivum-core/"
-rsync -a --exclude node_modules \
-  "$source_root/upstream/deepseek-harness/" "$work_root/upstream/deepseek-harness/"
+git clone --quiet --no-local "$source_root/tessivum" "$work_root/tessivum"
+git clone --quiet --no-local "$source_root/tessivum-core" "$work_root/tessivum-core"
+git clone --quiet --no-local "$source_root/upstream/deepseek-harness" "$work_root/upstream/deepseek-harness"
 
 product="$work_root/tessivum"
 core="$work_root/tessivum-core"
@@ -170,6 +167,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
   lock_after=$(sha256sum "$compat_profile/plugins/pnpm-lock.yaml" | cut -d' ' -f1)
   [[ $manifest_after == "$manifest_before" ]]
   [[ $lock_after == "$lock_before" ]]
+  [[ ! -e "$compat_profile/plugins/node_modules/$plugin" ]]
 
   jq -n \
     --arg plugin "$plugin" --arg version "$version" --arg updateVersion "$update_version" --arg failureVersion "$failure_version" \
@@ -193,7 +191,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
         browserFeature:{name:$featureName,selector:$featureSelector,visible:true},
         update:{installedVersion:$updateVersion,output:$updateOutput},
         remove:{dependencyAbsent:true,bundleAbsent:true,moduleAbsent:true,output:$removeOutput},
-        failedInstallRollback:{exitCode:$failureStatus,output:$failureOutput,manifestBeforeSha256:$manifestBeforeSha256,manifestAfterSha256:$manifestAfterSha256,lockfileBeforeSha256:$lockBeforeSha256,lockfileAfterSha256:$lockAfterSha256},
+        failedInstallRollback:{exitCode:$failureStatus,moduleAbsent:true,output:$failureOutput,manifestBeforeSha256:$manifestBeforeSha256,manifestAfterSha256:$manifestAfterSha256,lockfileBeforeSha256:$lockBeforeSha256,lockfileAfterSha256:$lockAfterSha256},
         gracefulResidue:{headless:0,browser:0,webHost:0,forcedCleanupRequired:false}
       }}' \
     > "$verification_evidence"
