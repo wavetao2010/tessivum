@@ -8,7 +8,7 @@
 
 ## 结论
 
-在冻结的 Core 工作量上，tessivum-core 相比 `@deepseek-ai/cordis` 4.0.1，**Scope 创建/销毁快 23.64×**、**Service 查找吞吐为 20.73×**、**Event 吞吐为 26.92×**，峰值进程 PSS **低 17.43×**。两种 runtime 在 root dispose 后的存活注册数都为零。
+在冻结的 Core 工作量上，tessivum-core 相比 `@deepseek-ai/cordis` 4.0.1，**Scope 创建/销毁快 23.64×**、**Service 查找吞吐为 20.73×**、**Event 吞吐为 26.92×**，1,000 个 Scope 存活时的进程 PSS **低 17.43×**。两种 runtime 在 root dispose 后的存活注册数都为零。
 
 产品矩阵通过 **30/30 Base** 与 **30/30 Compatibility** 样本。每个样本都创建全新的 Host，使用真实 Chromium 完成 Prompt/工具往返，保留十个 Session，并在销毁后留下零存活进程。Compatibility Profile 加载固定的 `dsh-better-sidebar@0.16.1` 与 `dsh-dream-skin@8.30.1`。
 
@@ -46,9 +46,9 @@
 | Service 查找 | 23.011 / 23.814 M ops/s | 1.110 / 1.181 M ops/s | **吞吐 20.73×** |
 | Event emit | 10.667 / 12.047 M ops/s | 0.396 / 0.428 M ops/s | **吞吐 26.92×** |
 | 加载 16 个 entry | 0.448 / 0.542 ms | 2.156 / 2.328 ms | **快 4.81×** |
-| 更新 16 个 entry | 19.854 / 30.167 ms | 0.536 / 0.592 ms | **慢 37.03×** |
+| 更新 16 个已加载 entry 中的 1 个 | 19.854 / 30.167 ms | 0.536 / 0.592 ms | **慢 37.03×** |
 | 销毁包含 32 个 child 的 root | 0.069 / 0.079 ms | 0.218 / 0.253 ms | **快 3.15×** |
-| 峰值进程 PSS | 4.59 / 4.59 MiB | 80.03 / 81.13 MiB | **低 17.43×** |
+| 1,000 个 Scope 存活时的进程 PSS | 4.59 / 4.59 MiB | 80.03 / 81.13 MiB | **低 17.43×** |
 | root dispose 后进程 PSS | 4.64 / 4.65 MiB | 91.20 / 92.77 MiB | **低 19.65×** |
 | dispose 后存活注册数 | 0 / 0 | 0 / 0 | 相同；无残留 |
 

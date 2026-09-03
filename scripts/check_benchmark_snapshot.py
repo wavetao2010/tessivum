@@ -74,6 +74,59 @@ def complete(value: Any) -> bool:
     return True
 
 
+def finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def successful(report: dict[str, Any]) -> bool:
+    schema = report.get("schema")
+    if schema in {"tessivum.core-benchmark-paired/v1", "tessivum.core-benchmark-paired/v2"}:
+        count = report.get("sampleCount")
+        runtimes = report.get("runtimes")
+        return (report.get("status") == "success"
+                and report.get("failures") == []
+                and isinstance(count, int) and count > 0
+                and isinstance(runtimes, dict) and bool(runtimes)
+                and all(isinstance(runtime.get("benchmarks"), list) and bool(runtime["benchmarks"])
+                        and all(finite_number(metric.get("median")) and finite_number(metric.get("p95"))
+                                and isinstance(metric.get("samples"), list) and len(metric["samples"]) == count
+                                and all(finite_number(sample) for sample in metric["samples"])
+                                for metric in runtime["benchmarks"])
+                        for runtime in runtimes.values() if isinstance(runtime, dict))
+                and all(isinstance(runtime, dict) for runtime in runtimes.values()))
+    if schema in {"tessivum.product-benchmark-run/v1", "tessivum.product-benchmark-run/v2"}:
+        arguments = report.get("arguments", {})
+        count = arguments.get("samples")
+        manifests = report.get("manifests")
+        binaries = arguments.get("binaries")
+        raw = report.get("rawSamples")
+        summaries = report.get("summaries")
+        if not (report.get("status") == "passed" and report.get("failureCount") == 0
+                and report.get("diagnostics") == [] and isinstance(count, int) and count > 0
+                and isinstance(manifests, list) and manifests and isinstance(binaries, list) and binaries
+                and isinstance(raw, list) and isinstance(summaries, list)):
+            return False
+        manifest_names = {item.get("name") for item in manifests if isinstance(item, dict)}
+        runtime_ids = {item.get("id") for item in binaries if isinstance(item, dict)}
+        if (None in manifest_names or None in runtime_ids or len(manifest_names) != len(manifests)
+                or len(runtime_ids) != len(binaries)):
+            return False
+        expected = {(manifest, runtime, repetition) for manifest in manifest_names for runtime in runtime_ids
+                    for repetition in range(1, count + 1)}
+        actual = {(sample.get("manifest"), sample.get("runtime", {}).get("id"), sample.get("repetition"))
+                  for sample in raw if isinstance(sample, dict) and isinstance(sample.get("runtime"), dict)}
+        summary_keys = {(summary.get("manifest"), summary.get("runtime"))
+                        for summary in summaries if isinstance(summary, dict)}
+        return (len(raw) == len(expected) and actual == expected and summary_keys == {(m, r) for m in manifest_names for r in runtime_ids}
+                and all(isinstance(sample, dict) and sample.get("success") is True and sample.get("failures") == [] for sample in raw)
+                and all(summary.get("successfulSamples") == count and summary.get("failedSamples") == 0
+                        and isinstance(summary.get("metrics"), dict) and bool(summary["metrics"])
+                        and all(finite_number(metric.get("median")) and finite_number(metric.get("p95"))
+                                and metric.get("successfulSamples") == count for metric in summary["metrics"].values())
+                        for summary in summaries))
+    return False
+
+
 def metrics(report: dict[str, Any]) -> dict[str, tuple[float, bool]]:
     values: dict[str, tuple[float, bool]] = {}
     if report["schema"] in {"tessivum.core-benchmark-paired/v1", "tessivum.core-benchmark-paired/v2"}:
@@ -98,6 +151,9 @@ def main() -> int:
     if not math.isfinite(args.max_regression_percent) or args.max_regression_percent < 0:
         parser.error("--max-regression-percent must be non-negative")
     current, fixture = load(args.current), load(args.fixture)
+    if not successful(current) or not successful(fixture):
+        print("FAIL: benchmark result is incomplete or unsuccessful", file=sys.stderr)
+        return 1
 
     current_identity, fixture_identity = identity(current), identity(fixture)
     if not complete(current_identity) or not complete(fixture_identity):

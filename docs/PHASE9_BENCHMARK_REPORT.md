@@ -8,7 +8,7 @@ Samples: 30 process-cold repetitions per runtime and case
 
 ## Result
 
-On the frozen Core workload, tessivum-core was **23.64× faster for scope create/dispose**, delivered **20.73× service-lookup throughput** and **26.92× event throughput**, and used **17.43× less peak process PSS** than `@deepseek-ai/cordis` 4.0.1. Both runtimes reported zero live registrations after root disposal.
+On the frozen Core workload, tessivum-core was **23.64× faster for scope create/dispose**, delivered **20.73× service-lookup throughput** and **26.92× event throughput**, and used **17.43× less process PSS while 1,000 scopes were live** than `@deepseek-ai/cordis` 4.0.1. Both runtimes reported zero live registrations after root disposal.
 
 The product matrix passed **30/30 Base** and **30/30 Compatibility** samples. Every sample started a fresh Host, exercised a real Chromium prompt/tool round trip, retained ten Sessions, and left zero live processes after disposal. The Compatibility profile loaded the pinned `dsh-better-sidebar@0.16.1` and `dsh-dream-skin@8.30.1` packages.
 
@@ -46,9 +46,9 @@ Each runtime consumes the same fingerprinted JSON workload: 1,000 child scopes, 
 | Service lookup | 23.011 / 23.814 M ops/s | 1.110 / 1.181 M ops/s | **20.73× throughput** |
 | Event emit | 10.667 / 12.047 M ops/s | 0.396 / 0.428 M ops/s | **26.92× throughput** |
 | Load 16 entries | 0.448 / 0.542 ms | 2.156 / 2.328 ms | **4.81× faster** |
-| Update 16 entries | 19.854 / 30.167 ms | 0.536 / 0.592 ms | **37.03× slower** |
+| Update 1 of 16 loaded entries | 19.854 / 30.167 ms | 0.536 / 0.592 ms | **37.03× slower** |
 | Dispose root with 32 children | 0.069 / 0.079 ms | 0.218 / 0.253 ms | **3.15× faster** |
-| Peak process PSS | 4.59 / 4.59 MiB | 80.03 / 81.13 MiB | **17.43× lower** |
+| Process PSS with 1,000 live scopes | 4.59 / 4.59 MiB | 80.03 / 81.13 MiB | **17.43× lower** |
 | Process PSS after root disposal | 4.64 / 4.65 MiB | 91.20 / 92.77 MiB | **19.65× lower** |
 | Live registrations after disposal | 0 / 0 | 0 / 0 | equal; no residue |
 

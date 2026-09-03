@@ -150,7 +150,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
   [[ $(jq -r '.version' "$compat_profile/plugins/node_modules/$plugin/package.json") == "$update_version" ]]
   remove_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin remove "$plugin" 2>&1)
   printf '%s\n' "$remove_output"
-  [[ ! -e "$compat_profile/plugins/node_modules/$plugin" ]]
+  [[ ! -e "$compat_profile/plugins/node_modules/$plugin" && ! -L "$compat_profile/plugins/node_modules/$plugin" ]]
   jq -e --arg plugin "$plugin" '.dependencies[$plugin] == null and (.dsh.profile.bundles | index($plugin) | not)' "$compat_profile/plugins/package.json" >/dev/null
 
   manifest_before=$(sha256sum "$compat_profile/plugins/package.json" | cut -d' ' -f1)
@@ -167,7 +167,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
   lock_after=$(sha256sum "$compat_profile/plugins/pnpm-lock.yaml" | cut -d' ' -f1)
   [[ $manifest_after == "$manifest_before" ]]
   [[ $lock_after == "$lock_before" ]]
-  [[ ! -e "$compat_profile/plugins/node_modules/$plugin" ]]
+  [[ ! -e "$compat_profile/plugins/node_modules/$plugin" && ! -L "$compat_profile/plugins/node_modules/$plugin" ]]
 
   jq -n \
     --arg plugin "$plugin" --arg version "$version" --arg updateVersion "$update_version" --arg failureVersion "$failure_version" \

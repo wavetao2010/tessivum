@@ -173,6 +173,12 @@ def main() -> int:
         report = path.read_text(encoding="utf-8")
         for fact in report_facts:
             require(fact in report, f"{path.name}: missing evidence-derived fact {fact}")
+    english_report = REPORTS[0].read_text(encoding="utf-8")
+    chinese_report = REPORTS[1].read_text(encoding="utf-8")
+    require("Update 1 of 16 loaded entries" in english_report and "Process PSS with 1,000 live scopes" in english_report,
+            "English report misstates a measured Core workload")
+    require("更新 16 个已加载 entry 中的 1 个" in chinese_report and "1,000 个 Scope 存活时的进程 PSS" in chinese_report,
+            "Chinese report misstates a measured Core workload")
 
     verification = load(ROOT / "plugins/market/compatibility.json")["entries"][0]
     lifecycle_path = ROOT / verification["evidence"]
@@ -186,9 +192,9 @@ def main() -> int:
     chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
     require("Principle and implementation, in concert." in english[:1000], "English product slogan drifted")
     require("道器相成" in chinese[:1000], "Chinese product slogan drifted")
-    headline = f"{scope_ratio:.2f}×"
-    require(headline in english and "30/30" in english, "English README benchmark claim drifted")
-    require(headline in chinese and "30/30" in chinese, "Chinese README benchmark claim drifted")
+    readme_facts = [f"{ratio:.2f}×" for ratio in (scope_ratio, core_ratios[1], core_ratios[2], loader_regression, peak_ratio)]
+    require(all(fact in english for fact in readme_facts) and "30/30" in english, "English README benchmark claim drifted")
+    require(all(fact in chinese for fact in readme_facts) and "30/30" in chinese, "Chinese README benchmark claim drifted")
     require("PHASE9_BENCHMARK_REPORT.md" in english, "English README lost benchmark evidence link")
     require("PHASE9_BENCHMARK_REPORT.zh-CN.md" in chinese, "Chinese README lost benchmark evidence link")
 

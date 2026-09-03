@@ -40,7 +40,7 @@ Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distri
 Alpha.18 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
 Alpha.19-A/B compatibility preflight and Legacy Host facades plus Alpha.19-C/D Rust-owned Remote Access and its built-in pairing/device surface are complete. Contracts, security boundaries, exact compatibility status, Browser evidence, and release gates are recorded in [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md).
 
-Phase 9 is complete. On the fixed 30-sample Linux Core workload, tessivum-core delivered **23.64× faster scope create/dispose** and **17.43× lower peak process PSS** than TypeScript Cordis 4.0.1; the real-Chromium product matrix passed **30/30 Base** and **30/30 Compatibility** samples with zero post-shutdown process residue. The same evidence discloses the `loader_update` regression and Compatibility overhead. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
+Phase 9 is complete. On the fixed 30-sample Linux Core workload, tessivum-core delivered **23.64× faster scope create/dispose** and **17.43× lower process PSS with 1,000 live scopes** than TypeScript Cordis 4.0.1; the real-Chromium product matrix passed **30/30 Base** and **30/30 Compatibility** samples with zero post-shutdown process residue. The same evidence discloses the `loader_update` regression and Compatibility overhead. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
 
 
 ## Architecture
@@ -305,12 +305,12 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 The pinned Ubuntu 24.04 arm64 path builds dependencies before measurement,
 alternates process-cold Core A/B samples, drives the real Web UI with Chromium,
 and records full Host-descendant PSS from Linux `smaps_rollup`. The published
-Alpha.23 result contains 30 valid samples per runtime/case: **24.02× faster
-scope create/dispose**, **21.03× service-lookup throughput**, **26.54× event
-throughput**, **17.43× lower peak Core process PSS**, and **30/30** successful
-Base plus **30/30** successful Compatibility Host/Chromium runs. It also
-reports the **39.49× slower** Core `loader_update` path and the Compatibility
-startup/memory cost.
+Alpha.23 result contains 30 valid samples per runtime/case: **23.64× faster
+scope create/dispose**, **20.73× service-lookup throughput**, **26.92× event
+throughput**, **17.43× lower process PSS with 1,000 live Core scopes**, and
+**30/30** successful Base plus **30/30** successful Compatibility
+Host/Chromium runs. It also reports the **37.03× slower** Core
+`loader_update` path and the Compatibility startup/memory cost.
 
 ```bash
 SAMPLES=30 ./benchmarks/run-linux-container.sh
