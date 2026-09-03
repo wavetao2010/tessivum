@@ -91,6 +91,7 @@
     "src",
     "client",
     "catalog.json",
+    "compatibility.json",
     "UPSTREAM.json",
     "LICENSE.upstream",
     "UPDATE-API-V1.md",

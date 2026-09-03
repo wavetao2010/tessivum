@@ -51,6 +51,10 @@ export interface RegistryPlugin {
   install?: string
   catalogSource?: 'tessivum' | 'dsh-community'
   tessivumCompatibility?: 'official' | 'verified' | 'unverified'
+  tessivumVerifiedVersion?: string
+  tessivumVerificationEvidence?: string
+  tessivumVerificationRevoked?: boolean
+  tessivumVerificationReason?: string
   /**
    * Catalog-side deprecation flags (#60): absent for every normal entry, so
    * catalogs without the fields render exactly as before.

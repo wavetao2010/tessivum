@@ -44,7 +44,7 @@ RUN bun install --frozen-lockfile \
  && rm -rf /var/lib/apt/lists/*
 
 RUN /usr/sbin/useradd --create-home --uid 10001 benchmark \
- && mkdir -p /bench /results \
+ && mkdir -p /bench /results /opt/cargo/target \
  && chown -R benchmark:benchmark /bench /results /opt/cargo /opt/rustup /opt/ms-playwright /opt/playwright
 
 COPY --chown=benchmark:benchmark benchmarks/run-linux.sh /usr/local/bin/run-tessivum-benchmarks

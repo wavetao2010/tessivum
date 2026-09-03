@@ -1,0 +1,18 @@
+{
+  "schema": "tessivum.plugin-verification/v1",
+  "entries": [
+    {
+      "npm": "dsh-better-sidebar",
+      "version": "0.16.1",
+      "repository": "https://github.com/omdsh-dev/DSH-better-sidebar",
+      "integrity": "sha512-fjFNzfrgdIbzlcC4Sd4aS1I2ZRbuA+/m3XQnOxY13jE6IKJzwz0+GjATcKTyFoLnXoDRp2QJz/U0GxhaOD70Dw==",
+      "license": "MIT",
+      "profile": "web",
+      "runtimes": ["legacy-node", "browser"],
+      "minimumTessivum": "0.1.0-alpha.23",
+      "status": "verified",
+      "verifiedAt": "2026-09-03",
+      "evidence": "docs/PLUGIN_VERIFICATION_REPORT.md"
+    }
+  ]
+}

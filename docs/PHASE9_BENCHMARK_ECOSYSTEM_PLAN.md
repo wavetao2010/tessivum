@@ -1,11 +1,11 @@
 # Tessivum Phase 9 性能证据与社区插件发布计划
 
-> 状态：已规划，尚未实施
+> 状态：Phase 9-A 测量协议与三样本固定 Linux 试运行已完成，30 样本公开性能运行待完成；Phase 9-B 已用 `dsh-better-sidebar@0.16.1` 关闭社区发布/验证闭环
 > 计划日期：2026-09-03
-> Tessivum 基线：`v0.1.0-alpha.22` / `34c8a49bead10cac1cc295622466307ff6de072e`
-> Core 基线：`tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`
+> Tessivum 测量目标：`v0.1.0-alpha.23` / `72a5f6104aaf35e19faa5d9897ec3cb845ad2ec0`
+> Core Benchmark 基线：`tessivum-core v0.1.6` / `cedbeb9e1607056845b69e09b825eb7f5be67a69`
+> 产品运行时 Core pin：`tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`
 > 上游对照基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
-> 阶段组成：Phase 9-A 可复现性能与兼容性 Benchmark；Phase 9-B 社区插件发布与 Tessivum 验证
 
 ## 1. 文档目的
 
@@ -20,16 +20,18 @@ Phase 9 不预先绑定产品版本号；只有对应门槛通过后，才随当
 
 ## 2. 当前事实
 
-### 2.1 Benchmark 证据尚不足以横向宣传
+### 2.1 Benchmark 协议已实现，公开样本门槛尚未达到
 
-`tessivum-core` 已有 `tessivum-bench`，覆盖 Service、Event、Native lifecycle、Loader、dispose、WASM 和 Legacy Node Bridge，但当前 `docs/BENCHMARK_RESULTS.json`：
+`tessivum-core` 的旧 `docs/BENCHMARK_RESULTS.json` 已明确标为 historical/non-comparative：它只有 Rust、3 个 Darwin 样本，版本为 `0.1.1`，且 `context_fiber_memory_proxy` 只是浅层 `size_of`。
 
-- 只有 Rust 结果，没有 TypeScript Cordis 对照；
-- 只有 3 个样本，p95 实际接近最大值；
-- 记录版本仍为 `tessivum-core 0.1.1`；
-- `context_fiber_memory_proxy` 只是浅层 `size_of`，排除了堆分配与 `Arc` 指向对象。
+Phase 9-A 现在新增：
 
-`tessivum` 在 `docs/DEVELOPMENT_PLAN.md` 中保存了 2026-08-17 Darwin arm64、5 次冷启动的内部回归基线，但没有 DeepSeek Harness 对照，且没有覆盖当前 Market、Legacy Node 与插件兼容路径。现有数字继续用于回归，不能直接作为首页横向结论。
+- TypeScript Cordis `4.0.1` 与 Rust Core 的共享工作量和 process-cold 配对 driver；
+- Base/Compatibility 产品 manifest、真实 Chromium 固定 Replay、1/10 个已完成相同 Replay 的 resident Session；
+- Linux `/proc/*/smaps_rollup` 完整 Host 后代进程树 PSS；
+- 固定 Ubuntu 24.04 arm64 容器、失败样本保留、原始 JSON checkpoint 和 median/p95/min/max 汇总。
+
+三样本固定 Linux 运行只验证协议和结果形状。达到每项 30 个有效 process-cold 样本前，README 与首页不得发布性能倍数。
 
 ### 2.2 内置市场已有可复用的社区目录
 
@@ -41,7 +43,7 @@ Phase 9 不预先绑定产品版本号；只有对应门槛通过后，才随当
 - 已冻结 `official | verified | unverified` 三种兼容状态；
 - 通过现有 pnpm Profile mutation、精确版本检查、恢复点和 Host-owned restart 完成安装与更新。
 
-缺口不是插件上传和包托管，而是 Tessivum 自己的公开验证申请、固定版本证据和状态升级流程。
+Phase 9-B 已补齐公开申请、固定版本 ledger、无密钥 CI、精确版本状态和撤销路径；社区目录仍是插件描述与发现的唯一真相。
 
 ## 3. 共享前置：独立品牌与双语入口
 
@@ -96,17 +98,22 @@ English | 简体中文
 
 ### 4.1 目标与主对照
 
-唯一主对照固定为：
+第一版可比较证据分成两层：
 
 ```text
-DeepSeek Harness 0.1.0-rc.5
-commit 47f943859bef60e4160492346772ded9b24f765a
+Core：DeepSeek Harness `47f943859bef60e4160492346772ded9b24f765a`
+vendored TypeScript Cordis `4.0.1`
 
 vs
 
-Tessivum 0.1.0-alpha.22
-commit 34c8a49bead10cac1cc295622466307ff6de072e
+tessivum-core 0.1.6
+commit cedbeb9e1607056845b69e09b825eb7f5be67a69
+
+Product：Tessivum 0.1.0-alpha.23
+commit 72a5f6104aaf35e19faa5d9897ec3cb845ad2ec0
 ```
+
+DeepSeek Harness `0.1.0-rc.5` 仍是产品兼容基线，但它与 Tessivum 当前没有同一离线 Replay、CLI 参数和数据根契约，因此首个试运行把上游产品数字明确标为 `unmeasured`，不拿不同任务伪装横向数据。产品层先报告 Tessivum Base/Compatibility 的绝对成本与兼容面；只有补齐同构上游产品 driver 后才能形成产品 A/B 性能结论。
 
 JCode、OMP、Claude Code 等 Terminal Coding Agent 不进入第一版主表。它们的功能面和进程模型不同，只能在未来作为明确标注的行业参考，不能替代同一兼容基线的一对一比较。
 
@@ -114,20 +121,20 @@ JCode、OMP、Claude Code 等 Terminal Coding Agent 不进入第一版主表。�
 
 #### Base
 
-两边只启用共同、冻结的基础 Host/Browser 功能面，不安装第三方插件。该组观察架构基础成本，但不能单独作为“同功能更快”的首页结论。
+Tessivum 只启用冻结的基础 Host/Browser 功能面，不安装第三方插件。该组观察架构基础成本，但不能单独作为“同功能更快”的首页结论；未来上游产品对照必须复用同一功能边界。
 
 #### Compatibility
 
-两边启用相同的固定插件与 Browser Client bundles，第一版至少包含：
+Tessivum 启用以下固定插件与 Browser Client bundles：
 
 - Market；
 - Better Sidebar；
 - Dream Skin；
 - 相同 Web Profile、Session 数据和 Browser 资源。
 
-Tessivum 必须统计完整 Bun Legacy Host 子进程。首页宣传优先使用 Compatibility 结果。
+该配置统计完整 Bun Legacy Host 子进程。只有未来上游产品对照也闭合同一插件、Session 和 Browser 工作量后，Compatibility 才能用于产品横向宣传。
 
-每组配置都必须保存机器可读 manifest，固定插件版本、Profile、环境变量、资产 digest 和预装状态。
+每组配置都保存机器可读 manifest，固定插件版本、Profile、环境变量和预装状态。当前产品试运行只执行 Tessivum；DeepSeek Harness 产品列保持 `unmeasured`。
 
 ### 4.3 产品级公开指标
 
@@ -206,6 +213,18 @@ exact lifecycle/service/event oracle traces
 - 兼容性结果与性能结果并列；
 - 旧 3/5 样本和浅层内存数字不再被误用为横向宣传；
 - README 只引用已发布、可追溯的结果。
+
+### 4.8 当前实施状态
+
+已实现并纳入 `v0.1.0-alpha.23`：
+
+- `tessivum-core/oracle/paired.ts` 与 `scripts/run_paired_benchmarks.py`；
+- `tessivum/scripts/benchmark_product.py` 与真实 Chromium worker；
+- `tessivum/benchmarks/manifests/{base,compatibility}.json`；
+- `tessivum/benchmarks/Dockerfile`、`run-linux.sh` 与容器入口；
+- Linux 三样本试运行 raw snapshot 与报告（运行完成后记录于 `benchmarks/fixtures/phase9-alpha23/` 和 `docs/PHASE9_BENCHMARK_REPORT.md`）。
+
+Phase 9-B 已关闭；Phase 9-A 的 30 样本公开门槛仍待完成。三样本试运行数据不能进入营销图表。
 
 ## 5. Phase 9-B：社区插件发布与 Tessivum 验证
 
@@ -314,6 +333,12 @@ Tessivum 不复制插件描述、stars、下载量或截图作为第二份目录
 - 没有账号系统、上传服务、签名后台或第二套 npm registry；
 - 新版本不会继承旧版本的 verified 状态；
 - 投稿、验证、撤销和风险声明均有中英文文档。
+
+### 5.8 当前实施状态
+
+`dsh-better-sidebar@0.16.1` 已完成社区目录、精确 npm/repository/integrity/license 核对、Profile preflight、pnpm 安装、Legacy Host/真实 Chromium 启动、更新、卸载与失败回滚闭环。Market 对未安装或安装版本 `0.16.1` 显示 `verified`；安装 `0.17.1` 后按 `unverified` 显示；ledger 可将原精确版本改为带原因的 `revoked`。
+
+申请入口、双语风险说明、可复现命令和原始结果分别记录于 `.github/ISSUE_TEMPLATE/plugin-verification.yml`、`docs/PLUGIN_VERIFICATION*.md`、`.github/workflows/plugin-verification.yml` 与 `docs/PLUGIN_VERIFICATION_REPORT.md`。Tessivum 没有新增账号、上传服务、签名后台或第二套 Registry。
 
 ## 6. 实施顺序与仓库边界
 

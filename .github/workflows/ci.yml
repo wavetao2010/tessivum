@@ -58,6 +58,9 @@ jobs:
       - name: Verify compatibility baseline
         run: python3 scripts/check_compat_baseline.py
 
+      - name: Verify plugin compatibility ledger
+        run: python3 scripts/check_plugin_verification.py
+
       - name: Check formatting
         run: cargo fmt --all --check
 

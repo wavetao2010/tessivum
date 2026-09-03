@@ -2788,9 +2788,18 @@ export function MarketSection(props: MarketSectionProps) {
     p.deprecated === true && p.replacement !== undefined
       ? data?.plugins.find(r => r.name === p.replacement)
       : undefined
-  const catalogBadge = (p: RegistryPlugin): string => p.catalogSource === 'tessivum'
-    ? t('catalogOfficial')
-    : p.tessivumCompatibility === 'verified' ? t('catalogVerified') : t('catalogCommunity')
+  const catalogBadge = (p: RegistryPlugin): string => {
+    if (p.catalogSource === 'tessivum') return t('catalogOfficial')
+    if (p.tessivumVerificationRevoked === true) {
+      return t('catalogRevoked').replace('{0}', p.tessivumVerifiedVersion ?? '')
+    }
+    const installedVersion = typeof p.npm === 'string' ? installed[p.npm] : undefined
+    const verified = p.tessivumCompatibility === 'verified'
+      && (installedVersion === undefined || installedVersion === p.tessivumVerifiedVersion)
+    return verified
+      ? t('catalogVerified').replace('{0}', p.tessivumVerifiedVersion ?? '')
+      : t('catalogCommunity')
+  }
 
   const pluginCard = (p: RegistryPlugin) => {
     const desc = (p.description && (p.description[lang] || p.description.en)) || ''
@@ -4263,6 +4272,7 @@ export function MarketSection(props: MarketSectionProps) {
               size, also matches the card's own reading order: name, byline,
               description, then screenshots. */}
           <CardDesc text={(confirming.description && (confirming.description[lang] || confirming.description.en)) || ''} t={t} />
+          <p className={css.warnLine}>{catalogBadge(confirming)} · {t('verificationNotAudit')}</p>
           <ScreenshotStrip plugin={confirming} onOpen={openLightbox} />
           <DisclosureRow
             icon={<IconCodeOutline16 size={16} />}

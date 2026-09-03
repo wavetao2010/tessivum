@@ -11,6 +11,7 @@ mkdir -p "$results"
 docker build --platform linux/arm64 --tag "$image" --file "$product/benchmarks/Dockerfile" "$product"
 container=$(docker create --init --platform linux/arm64 --shm-size 2g \
   --env "SAMPLES=${SAMPLES:-30}" \
+  --mount type=volume,source=tessivum-benchmark-cargo-target,target=/opt/cargo/target \
   --volume "$workspace:/source:ro" \
   "$image")
 trap 'docker rm --force "$container" >/dev/null 2>&1 || true' EXIT

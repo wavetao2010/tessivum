@@ -1,44 +1,25 @@
 {
   "updated": "2026-08-31T00:00:00.000Z",
-  "count": 2,
+  "count": 1,
   "categories": {
     "ui": {
       "en": "UI & Themes",
       "zh": "界面与主题"
-    },
-    "theme": {
-      "en": "Themes",
-      "zh": "主题"
     }
   },
   "plugins": [
     {
-      "name": "DSH-better-sidebar",
-      "owner": "omdsh-dev",
-      "url": "https://github.com/omdsh-dev/DSH-better-sidebar",
+      "name": "tessivum-market",
+      "owner": "wavetao2010",
+      "url": "https://github.com/wavetao2010/tessivum/tree/main/plugins/market",
       "category": "ui",
       "description": {
-        "en": "Full sidebar workbench with file rendering and editing, terminal, Git, and subagents; third-party plugins can register new tabs.",
-        "zh": "侧边栏完整工作台：内置文件渲染编辑、终端、Git 与子代理，支持三方插件注册新 Tab。"
+        "en": "Tessivum's built-in plugin discovery, installation, update, recovery, and compatibility surface.",
+        "zh": "Tessivum 内置的插件发现、安装、更新、恢复与兼容管理界面。"
       },
-      "npm": "dsh-better-sidebar",
-      "install": "dsh plugin --profile web add dsh-better-sidebar",
-      "added": "2026-08-14",
-      "catalogSource": "tessivum",
-      "tessivumCompatibility": "official"
-    },
-    {
-      "name": "dsh-dream-skin",
-      "owner": "RevolutionLA",
-      "url": "https://github.com/RevolutionLA/dsh-dream-skin",
-      "category": "theme",
-      "description": {
-        "en": "One-command skin plugin with eight original themes, translucent wallpaper controls, per-user accents, and shareable theme packs.",
-        "zh": "一键换肤插件：八套原创主题、壁纸透明度与模糊控制、用户强调色和可分享主题包。"
-      },
-      "npm": "dsh-dream-skin",
-      "install": "dsh plugin --profile web add dsh-dream-skin",
-      "added": "2026-08-15",
+      "npm": "tessivum-market",
+      "install": "tessivum plugin add tessivum-market",
+      "added": "2026-09-03",
       "catalogSource": "tessivum",
       "tessivumCompatibility": "official"
     }

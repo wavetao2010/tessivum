@@ -1,0 +1,42 @@
+name: Community plugin verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: tessivum
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: wavetao2010/tessivum-core
+          ref: bafb893f182d64b7b464b6cf827676f7ac368168
+          path: tessivum-core
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: upstream/deepseek-harness
+
+      - name: Verify immutable plugin identity
+        working-directory: tessivum
+        run: python3 scripts/check_plugin_verification.py --network
+
+      - name: Run no-secret Host and Chromium matrix
+        working-directory: tessivum
+        env:
+          SAMPLES: "3"
+        run: ./benchmarks/run-linux-container.sh
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: community-plugin-verification
+          path: tessivum/benchmarks/results/*.json
+          if-no-files-found: error

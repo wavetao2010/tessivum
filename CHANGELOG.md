@@ -11,8 +11,15 @@
   one/ten loaded resident-Session measurements, and strict residue reporting.
 - Add the pinned Ubuntu 24.04 container path and the paired
   TypeScript Cordis/tessivum-core benchmark protocol.
+- Add fingerprint-gated benchmark snapshot regression checks; changed
+  environments, revisions, versions, workloads, or metric sets skip explicitly.
 - Add the Simplified Chinese README and the independent Tessivum slogan
   “道器相成” / “Principle and implementation, in concert.”
+- Add the live community-catalog trust overlay, exact-release verification ledger,
+  public request form, no-secret CI workflow, revocation path, and bilingual
+  reproduction/risk documentation.
+- Verify `dsh-better-sidebar@0.16.1` through Profile preflight, exact install,
+  Legacy Host and real Chromium startup, update, removal, and failure rollback.
 
 ### Changed
 
@@ -20,6 +27,18 @@
   non-comparative. The Alpha.23 three-sample Linux run is a protocol pilot;
   public performance claims still require at least 30 valid process-cold
   samples per runtime and case.
+
+### Fixed
+
+- Accept the `sessions` and `tools` services that the Legacy Host actually
+  provides, allowing the pinned Better Sidebar compatibility profile to pass
+  preflight instead of being rejected as unavailable.
+- Separate package-entry and bundle-patch byte limits so the pinned
+  Better Sidebar client entry is accepted while bundle patches remain capped
+  at 1 MiB.
+- Restrict static runtime-import captures to package-specifier characters so
+  diagnostic strings such as `require('${spec}')` are not treated as missing
+  dependencies.
 
 ## 0.1.0-alpha.22 - 2026-09-03
 

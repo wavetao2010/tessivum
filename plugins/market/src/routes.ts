@@ -3000,7 +3000,7 @@ export function mountMarketRoutes(
               return
             }
             const url = typeof body.url === 'string' ? body.url : ''
-            const registry = await loadRegistry()
+            const registry = marketCatalog(await loadRegistry())
             const entry = registry.plugins.find(p => p.url.toLowerCase() === url.toLowerCase())
             if (entry === undefined) {
               logEvent('warn', 'install-rejected', `not in curated registry: ${url.slice(0, 120)}`)

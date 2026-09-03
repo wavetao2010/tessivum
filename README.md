@@ -40,7 +40,7 @@ Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distri
 Alpha.18 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
 Alpha.19-A/B compatibility preflight and Legacy Host facades plus Alpha.19-C/D Rust-owned Remote Access and its built-in pairing/device surface are complete. Contracts, security boundaries, exact compatibility status, Browser evidence, and release gates are recorded in [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md).
 
-Phase 9-A now has a reproducible Linux/Core/Product benchmark protocol and a three-sample pilot report; the pilot is not a publishable 30-sample performance claim. Phase 9-B community verification remains planned. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md) and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
+Phase 9-A has a reproducible Linux/Core/Product benchmark protocol and a three-sample pilot; the publication-grade 30-sample run is pending. Phase 9-B community verification is complete for `dsh-better-sidebar@0.16.1`. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
 
 
 ## Architecture
@@ -222,7 +222,7 @@ tessivum web
 
 `tessivum` and `tsv` are the same launcher and resolve the same data root. After a CLI or market mutation reports “重启后生效”, restart the Web process. `tessivum-market` reads the current Profile plus settled Loader/Fiber inventory; Tessivum does not expose a global `dsh` shim or maintain a second Node-side Loader state.
 
-The current market is first-party and supports only the fixed compatibility samples listed above. The planned `official`/`verified`/`unverified` community-status model and submission/verification flow are not implemented; package presence or a fixed sample does not establish a safety audit or market-wide verification.
+The Market consumes the live awesome-dsh-plugin community catalog and overlays Tessivum-owned exact-version evidence. Cards distinguish **Tessivum official**, **Verified on Tessivum · VERSION**, and **DSH community · unverified**; verification applies only to the named release and is compatibility evidence, not a security audit. See the [submission and verification flow](docs/PLUGIN_VERIFICATION.md) and [DSH-better-sidebar 0.16.1 evidence](docs/PLUGIN_VERIFICATION_REPORT.md).
 
 Legacy plugins and their lifecycle scripts are trusted code running with the user's permissions, not a sandbox. `web.route/v1` registrations remain Rust-owned, same-origin, prefix-restricted, size-bounded, deadline-bounded, cancellable, and generation-scoped. Packaged deployments locate the compatibility host, Cordis vendor, Host modules, and Agent Presets relative to the launcher; source checkouts use their pinned development paths.
 
@@ -298,7 +298,23 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
 - Remote requests require an explicitly trusted HTTPS authority, same-origin browser metadata, the trusted tunnel marker, and a live Rust-owned device session. Pairing issuance and other Host mutations remain loopback-only.
-- Checksums detect corruption but are not signatures. Alpha.21 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
+- Checksums detect corruption but are not signatures. Alpha.23 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
+
+## Reproducible benchmarks
+
+The pinned Ubuntu 24.04 arm64 path builds dependencies before measurement,
+alternates process-cold Core A/B samples, drives the real Web UI with Chromium,
+and records full Host-descendant PSS from Linux `smaps_rollup`:
+
+```bash
+SAMPLES=3 ./benchmarks/run-linux-container.sh   # protocol pilot
+SAMPLES=30 ./benchmarks/run-linux-container.sh  # publication threshold
+```
+
+Raw output is written under `benchmarks/results/`. The checked-in three-sample
+snapshot and [report](docs/PHASE9_BENCHMARK_REPORT.md) are validation evidence,
+not a public performance claim. The upstream DeepSeek Harness product remains
+`unmeasured` until both products can consume the identical offline workload.
 
 ## Verification
 
@@ -323,7 +339,7 @@ These gates exercise the Rust-native runtime, the pinned DeepSeek client package
 - image-bearing MCP/tool-result serialization is covered by focused adapter tests; the real Browser E2E currently exercises text tool continuation plus user image input, because no production-configured image-producing tool is exposed;
 - Agent/LLM compatibility remains partial at the wire, retry-ledger, queue/steer, and replay-consumer boundaries listed above.
 - API listeners are loopback-only; prebuilt archives are checksum-verified but are not code-signed or notarized.
-- community-plugin compatibility is verified only for `dshmarket@1.29.2`, `dsh-better-sidebar@0.16.1`, and `dsh-dream-skin@8.30.1`; other versions, other packages, and hot activation remain unsupported until separately verified.
+- **Verified on Tessivum** currently covers only `dsh-better-sidebar@0.16.1`; `dshmarket@1.29.2` and `dsh-dream-skin@8.30.1` remain fixed runtime-compatibility samples, not verified community releases. Other packages, versions, and hot activation remain unsupported until separately verified.
 
 These are product follow-ups, not work to change or deprecate the official DeepSeek Harness project.
 
@@ -338,6 +354,7 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Phase 7 first-party market and Host restart plan](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)
 - [Phase 8 Remote Access and newer Legacy Host compatibility plan](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)
 - [Phase 9 benchmark and community verification plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md) and [three-sample benchmark pilot](docs/PHASE9_BENCHMARK_REPORT.md)
+- [Community plugin submission and verification](docs/PLUGIN_VERIFICATION.md) and [DSH-better-sidebar 0.16.1 evidence](docs/PLUGIN_VERIFICATION_REPORT.md)
 - [DeepSeek Harness compatibility baseline](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E port checklist (69 upstream files)](docs/WEB_E2E_PORT_CHECKLIST.md)
 

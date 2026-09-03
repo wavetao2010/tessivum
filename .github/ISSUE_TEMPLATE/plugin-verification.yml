@@ -1,0 +1,85 @@
+name: Plugin verification request
+description: Request exact-version compatibility evidence after awesome-dsh-plugin listing
+title: "[Plugin verification]: "
+labels: ["plugin-verification"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The plugin must already be listed by awesome-dsh-plugin. Verification is compatibility evidence, not a security audit or endorsement.
+  - type: input
+    id: community
+    attributes:
+      label: Community catalog entry
+      description: Permanent awesome-dsh-plugin entry or page URL.
+    validations:
+      required: true
+  - type: input
+    id: repository
+    attributes:
+      label: Source repository
+      placeholder: https://github.com/owner/repository
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Exact release
+      description: Exact npm version, 40-character Git commit, or immutable release archive.
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: License
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Target Profile
+      options: [web, headless]
+    validations:
+      required: true
+  - type: checkboxes
+    id: runtimes
+    attributes:
+      label: Runtime surfaces
+      options:
+        - label: Native Rust
+        - label: Extism/WASM
+        - label: Legacy Node
+        - label: Browser
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Plugin contract
+      description: List dsh.bundle, dsh.client, injects, services, capabilities and build scripts.
+    validations:
+      required: true
+  - type: textarea
+    id: feature
+    attributes:
+      label: Observable feature to verify
+      description: One real feature and the exact steps/result that prove it works.
+    validations:
+      required: true
+  - type: input
+    id: minimum
+    attributes:
+      label: Minimum Tessivum version
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: I understand that a new plugin release will be unverified until separately tested.
+          required: true
+        - label: I understand that verification is not a security audit or endorsement.
+          required: true
+        - label: I permit no-secret CI to download and execute this exact third-party release with install scripts blocked by default.
+          required: true

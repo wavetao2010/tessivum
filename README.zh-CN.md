@@ -39,7 +39,7 @@ Alpha.15 的 DSH Profile 权限、市场激活、升级、回滚和分发别名�
 Alpha.18 的第一方市场所有权、打包、迁移、精确版本变更、重启和 Browser E2E 门槛记录于 [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 Alpha.19-A/B 的兼容性预检和 Legacy Host facade，以及 Alpha.19-C/D 由 Rust 拥有的远程访问及其内建配对/设备界面均已完成。契约、安全边界、精确兼容状态、Browser 证据和发布门槛记录于 [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)。
 
-Phase 9-A 已实现可复现的 Linux/Core/产品 Benchmark 协议，并产出三样本试运行报告；该试运行不是可发布的 30 样本性能声明。Phase 9-B 社区验证仍处于规划状态。见 [Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
+Phase 9-A 已实现可复现的 Linux/Core/产品 Benchmark 协议和三样本试运行，公开级 30 样本运行待完成。Phase 9-B 已用 `dsh-better-sidebar@0.16.1` 关闭社区验证闭环。见 [Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
 
 ## 架构
 
@@ -219,7 +219,7 @@ tessivum web
 
 `tessivum` 和 `tsv` 是同一启动器，并解析至同一数据根。CLI 或市场变更报告“重启后生效”后，请重启 Web 进程。`tessivum-market` 读取当前 Profile 及已稳定的 Loader/Fiber 清单；Tessivum 不会暴露全局 `dsh` shim，也不维护第二份 Node 侧 Loader 状态。
 
-当前市场为第一方市场，仅支持上文列出的固定兼容样例。计划中的 `official`/`verified`/`unverified` 社区状态模型及提交/验证流程尚未实现；包的存在或固定样例并不代表已完成安全审计或整个市场的验证。
+Market 使用 awesome-dsh-plugin 的实时社区目录，并叠加 Tessivum 自己维护的精确版本证据。卡片区分 **Tessivum 官方**、**Tessivum 已验证 · VERSION** 和 **DSH 社区 · 未验证**；验证只适用于标明的版本，是兼容证据而非安全审计。详见[投稿与验证流程](docs/PLUGIN_VERIFICATION.zh-CN.md)和 [DSH-better-sidebar 0.16.1 证据](docs/PLUGIN_VERIFICATION_REPORT.md)。
 
 Legacy 插件及其生命周期脚本是以用户权限运行的受信任代码，不是沙箱。`web.route/v1` 注册仍由 Rust 拥有，保持同源、前缀受限、大小有界、截止时间有界、可取消且按 generation 作用域隔离。打包部署相对于启动器定位 compatibility host、Cordis vendor、Host 模块和 Agent Presets；源码检出使用其固定的开发路径。
 
@@ -296,7 +296,18 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # 明确的破坏性数据删除
 - 安装器和 Homebrew formula 使用相同的四个发布归档及固定 SHA-256 值。发布装配中不存在浮动的 `latest` 包解析。
 - HTTP 监听器为 loopback-only。Legacy Node 插件和 pnpm 子进程不是沙箱；安装前请检查包，并保持生命周期脚本禁用，除非明确需要。
 - 远程请求需要明确受信任的 HTTPS authority、同源浏览器元数据、受信任的 tunnel marker 和存活的 Rust 拥有设备会话。配对签发和其他 Host 变更仍只限 loopback。
-- 校验和可检测损坏，但不是签名。Alpha.21 二进制和第一方市场工件未进行代码签名或公证；执行前请验证发布标签、校验和资源和仓库来源。
+- 校验和可检测损坏，但不是签名。Alpha.23 二进制和第一方市场工件未进行代码签名或公证；执行前请验证发布标签、校验和资源和仓库来源。
+
+## 可复现 Benchmark
+
+固定 Ubuntu 24.04 arm64 路径会先完成依赖构建，再交错执行 process-cold Core A/B 样本，以真实 Chromium 驱动 Web UI，并从 Linux `smaps_rollup` 统计 Host 全部后代进程的 PSS：
+
+```bash
+SAMPLES=3 ./benchmarks/run-linux-container.sh   # 协议试运行
+SAMPLES=30 ./benchmarks/run-linux-container.sh  # 公开结果门槛
+```
+
+原始输出写入 `benchmarks/results/`。已检入的三样本 snapshot 和[报告](docs/PHASE9_BENCHMARK_REPORT.md)只用于验证测量协议，不是公开性能承诺。DeepSeek Harness 产品层在两边能够消费完全相同的离线工作量之前保持 `unmeasured`。
 
 ## 验证
 
@@ -321,7 +332,7 @@ cd ../../web && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 
 - 含图像的 MCP/tool-result 序列化已由针对性适配器测试覆盖；真实 Browser E2E 目前仅演练文本工具续接和用户图像输入，因为没有配置生产可用的图像生成工具；
 - Agent/LLM 兼容性在上面列出的 wire、retry-ledger、queue/steer 和 replay-consumer 边界仍不完整；
 - API 监听器为 loopback-only；预构建归档经过校验和验证，但未进行代码签名或公证；
-- 社区插件兼容性仅对 `dshmarket@1.29.2`、`dsh-better-sidebar@0.16.1` 和 `dsh-dream-skin@8.30.1` 进行了验证；其他版本、其他包和热激活在单独验证前均不受支持。
+- **Tessivum 已验证** 当前只覆盖 `dsh-better-sidebar@0.16.1`；`dshmarket@1.29.2` 与 `dsh-dream-skin@8.30.1` 仍是固定运行时兼容样例，不是已验证社区发行版。其他包、其他版本和热激活在单独验证前均不受支持。
 
 这些是产品后续工作，不是改变或弃用官方 DeepSeek Harness 项目的工作。
 
@@ -336,6 +347,7 @@ cd ../../web && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 
 - [Phase 7 第一方市场和 Host 重启计划](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)
 - [Phase 8 远程访问和较新 Legacy Host 兼容性计划](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)
 - [Phase 9 Benchmark 与社区验证计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)及[三样本 Benchmark 试运行](docs/PHASE9_BENCHMARK_REPORT.md)
+- [社区插件投稿与验证](docs/PLUGIN_VERIFICATION.zh-CN.md)及 [DSH-better-sidebar 0.16.1 证据](docs/PLUGIN_VERIFICATION_REPORT.md)
 - [DeepSeek Harness 兼容性基线](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E 移植检查表（69 个上游文件）](docs/WEB_E2E_PORT_CHECKLIST.md)
 

@@ -35,6 +35,14 @@ export interface RegistryPlugin {
   catalogSource?: CatalogSource
   /** Tessivum's explicit compatibility assessment for this entry. */
   tessivumCompatibility?: TessivumCompatibility
+  /** Exact release covered by Tessivum's local verification evidence. */
+  tessivumVerifiedVersion?: string
+  /** Repository-relative evidence document for the exact release. */
+  tessivumVerificationEvidence?: string
+  /** The exact release was previously verified and has since been revoked. */
+  tessivumVerificationRevoked?: boolean
+  /** Human-readable revocation reason. */
+  tessivumVerificationReason?: string
   /**
    * Catalog-side deprecation flags (#60): supplied by awesome-dsh-plugin,
    * absent for every normal entry — the market only consumes them, so a

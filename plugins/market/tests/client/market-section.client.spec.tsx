@@ -231,6 +231,60 @@ describe('MarketSection (jsdom)', () => {
     expect(screen.getAllByRole('button', { name: en.install }).length).toBeGreaterThanOrEqual(3)
   })
 
+  it('shows verification only for the exact installed release', async () => {
+    const verified = {
+      ...REGISTRY,
+      count: 1,
+      plugins: [{
+        ...REGISTRY.plugins[0],
+        tessivumCompatibility: 'verified',
+        tessivumVerifiedVersion: '0.16.1',
+      }],
+    }
+    stubFetch({
+      '/dsh-market/registry': { source: 'live', registry: verified },
+      '/dsh-market/installed': { profile: 'web', installed: { 'dsh-loop': '0.16.1' }, live: [] },
+    })
+    render(<MarketSection {...props()} />)
+    expect(await screen.findByText(en.catalogVerified.replace('{0}', '0.16.1'))).toBeTruthy()
+  })
+
+  it('downgrades an installed newer release to community-unverified', async () => {
+    const verified = {
+      ...REGISTRY,
+      count: 1,
+      plugins: [{
+        ...REGISTRY.plugins[0],
+        tessivumCompatibility: 'verified',
+        tessivumVerifiedVersion: '0.16.1',
+      }],
+    }
+    stubFetch({
+      '/dsh-market/registry': { source: 'live', registry: verified },
+      '/dsh-market/installed': { profile: 'web', installed: { 'dsh-loop': '0.17.1' }, live: [] },
+    })
+    render(<MarketSection {...props()} />)
+    expect(await screen.findByText(en.catalogCommunity)).toBeTruthy()
+    expect(screen.queryByText(en.catalogVerified.replace('{0}', '0.16.1'))).toBeNull()
+  })
+
+  it('shows a revoked release instead of a verified badge', async () => {
+    const revoked = {
+      ...REGISTRY,
+      count: 1,
+      plugins: [{
+        ...REGISTRY.plugins[0],
+        tessivumCompatibility: 'unverified',
+        tessivumVerifiedVersion: '0.16.1',
+        tessivumVerificationRevoked: true,
+      }],
+    }
+    stubFetch({ '/dsh-market/registry': { source: 'live', registry: revoked } })
+    render(<MarketSection {...props()} />)
+    expect(await screen.findByText(en.catalogRevoked.replace('{0}', '0.16.1'))).toBeTruthy()
+    expect(screen.queryByText(en.catalogVerified.replace('{0}', '0.16.1'))).toBeNull()
+  })
+
   it('opens Discover with the host-provided plugin query', async () => {
     render(<MarketSection {...props()} preferredSubsectionId="discover:dsh-loop" />)
 

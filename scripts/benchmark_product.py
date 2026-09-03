@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import statistics
@@ -78,6 +79,11 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"manifest must be a JSON object: {path}")
     return value
+
+
+def json_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def require(value: Any, description: str) -> Any:
@@ -845,7 +851,17 @@ def document(arguments: argparse.Namespace, manifests: list[tuple[Path, dict[str
             "interleave": arguments.interleave,
         },
         "environment": RUN_ENVIRONMENT,
-        "manifests": [{"path": str(path), "name": manifest["name"], "revisions": manifest.get("revisions", {})} for path, manifest in manifests],
+        "environmentSha256": json_sha256(RUN_ENVIRONMENT),
+        "workloadSha256": json_sha256(manifests[0][1]["workload"]),
+        "manifests": [
+            {
+                "path": str(path),
+                "name": manifest["name"],
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "revisions": manifest.get("revisions", {}),
+            }
+            for path, manifest in manifests
+        ],
         "diagnostics": diagnostics,
         "rawSamples": samples,
         "summaries": summaries(samples),
@@ -873,7 +889,14 @@ def main() -> int:
     workload = json.dumps(manifests[0][1]["workload"], sort_keys=True, separators=(",", ":"))
     if any(json.dumps(manifest["workload"], sort_keys=True, separators=(",", ":")) != workload for _, manifest in manifests[1:]):
         parser().error("all manifests must declare the identical frozen workload")
-    runtimes = [{"id": label, "binary": str(Path(binary).resolve())} for label, binary in arguments.binary]
+    runtimes = [
+        {
+            "id": label,
+            "binary": str(Path(binary).resolve()),
+            "version": command_version(str(Path(binary).resolve())) or "unavailable",
+        }
+        for label, binary in arguments.binary
+    ]
     if len({runtime["id"] for runtime in runtimes}) != len(runtimes):
         parser().error("runtime labels from --binary must be unique")
 

@@ -18,7 +18,7 @@
 - [Phase 6 DSH Profile 兼容与 `tsv` 命令开发计划](PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)：已完成 `dsh.profile.bundles` 权威语义、市场状态闭环、统一插件 mutation 与发行命令别名。
 - [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)：已完成 Tessivum-owned 市场、确定性更新、新版本等待、旧市场迁移与 Host-owned 重启。
 - [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)：通用 Node Host facade、Rust-owned Remote Access、自有最小配对/设备界面及发行门槛已完成。
-- [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：已冻结“道器相成”品牌文案、双语 README、DeepSeek Harness rc.5 横向 Benchmark 与社区插件收录/固定版本验证边界，尚未实施。
+- [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：测量协议、三样本固定 Linux 试运行及 `dsh-better-sidebar@0.16.1` 社区验证闭环已完成；30 样本公开性能运行待完成。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
@@ -597,7 +597,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.23`，产品运行时仍固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`，Phase 9 的 Core Benchmark driver 位于 Core revision `15b18daec5969b8a57151a7707e278bcd800e673`。本版本冻结共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，并保留失败、超时、清理残留和非 Linux PSS unavailable 状态。三样本固定 Linux 运行只作为协议试运行；达到每项 30 个 process-cold 样本前不形成公开性能倍数。Alpha.22 的一键 Remote Access、Alpha.21 的旧 Remote Web UI profile 迁移、Rust-owned Remote Access 安全边界、第一方市场来源/校验/更新，以及 Standard/PTC、Browser 与 Legacy Node 三类运行面保持不变。
+当前实现基线为 `v0.1.0-alpha.23`，产品运行时仍固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。本版本冻结共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，并保留失败、超时、清理残留和非 Linux PSS unavailable 状态。三样本固定 Linux 运行只作为协议试运行；达到每项 30 个 process-cold 样本前不形成公开性能倍数。Alpha.22 的一键 Remote Access、Alpha.21 的旧 Remote Web UI profile 迁移、Rust-owned Remote Access 安全边界、第一方市场来源/校验/更新，以及 Standard/PTC、Browser 与 Legacy Node 三类运行面保持不变。
 
 ## 14.1 Alpha.9 发布记录
 

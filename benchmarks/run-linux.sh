@@ -24,6 +24,9 @@ product="$work_root/tessivum"
 core="$work_root/tessivum-core"
 dsh="$work_root/upstream/deepseek-harness"
 cordis="$dsh/vendor"
+cargo_target=${CARGO_TARGET_DIR:-$work_root/cargo-target}
+core_target=${CORE_CARGO_TARGET_DIR:-$cargo_target/core}
+product_target=${PRODUCT_CARGO_TARGET_DIR:-$cargo_target/product}
 
 cd "$dsh"
 pnpm install --frozen-lockfile
@@ -51,11 +54,11 @@ python3 "$product/scripts/fetch_host_modules.py" "$product/packaging/host-module
 cp -a "$product/compat/host-modules/." "$host_modules/"
 
 cd "$core"
-cargo build --locked --release -p tessivum-bench
+CARGO_TARGET_DIR="$core_target" cargo build --locked --release -p tessivum-bench
 
 cd "$product"
-CORDIS_VENDOR_ROOT="$cordis" cargo build --locked --release --bin tessivum
-binary="$product/target/release/tessivum"
+CORDIS_VENDOR_ROOT="$cordis" CARGO_TARGET_DIR="$product_target" cargo build --locked --release --bin tessivum
+binary="$product_target/release/tessivum"
 
 compat_profile="$work_root/compatibility-profile"
 compat_host="$core/node/compat-host/src/index.ts"
@@ -67,7 +70,32 @@ profile_environment=(
   TESSIVUM_MARKET_SHA256_FILE="$market_tgz.sha256"
   TESSIVUM_MARKET_SOURCE_FILE="$market_tgz.source.json"
 )
-env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add tessivum-market
+
+seed_log="$work_root/market-seed.log"
+TESSIVUM_REMOTE_ACCESS=0 TESSIVUM_WEB_ADDR=127.0.0.1:0 env "${profile_environment[@]}" \
+  "$binary" web --data-dir "$compat_profile" >"$seed_log" 2>&1 &
+seed_pid=$!
+seeded=0
+for _ in {1..1200}; do
+  if jq -e '.dependencies["tessivum-market"] | strings | startswith("file:")' \
+    "$compat_profile/plugins/package.json" >/dev/null 2>&1; then
+    seeded=1
+    break
+  fi
+  if ! kill -0 "$seed_pid" 2>/dev/null; then
+    wait "$seed_pid" || true
+    cat "$seed_log" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+kill -TERM "$seed_pid" 2>/dev/null || true
+wait "$seed_pid" || true
+if (( seeded == 0 )); then
+  cat "$seed_log" >&2
+  echo "timed out while installing the packaged market" >&2
+  exit 1
+fi
 for package in dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1; do
   env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$package"
 done
@@ -76,7 +104,7 @@ chromium=$(cd "$product/web" && bun -e "const { chromium } = require('playwright
 [[ -x "$chromium" ]] || { echo "Playwright Chromium is missing: $chromium" >&2; exit 2; }
 
 python3 "$core/scripts/run_paired_benchmarks.py" \
-  --rust-bin "$core/target/release/tessivum-bench" \
+  --rust-bin "$core_target/release/tessivum-bench" \
   --cordis-root "$cordis" \
   --workload "$core/fixtures/benchmarks/core-paired.json" \
   --samples "$samples" \

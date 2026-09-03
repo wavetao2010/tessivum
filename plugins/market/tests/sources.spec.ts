@@ -71,6 +71,8 @@ describe('installTargetFor', () => {
     expect(installTargetFor({ url: 'https://github.com/o/r', npm: 'dsh-loop', tarball })).toBe('dsh-loop')
     expect(installTargetFor({ url: 'https://github.com/o/r', npm: '@scope/pkg' })).toBe('@scope/pkg')
     expect(installTargetFor({ url: 'https://github.com/o/r', tarball })).toBe(tarball)
+    expect(installTargetFor({ url: 'https://github.com/o/r', npm: 'dsh-loop', tessivumVerifiedVersion: '1.2.3' })).toBe('dsh-loop@1.2.3')
+    expect(installTargetFor({ url: 'https://github.com/o/r', npm: 'dsh-loop', tessivumVerifiedVersion: '^1.2.3' })).toBe('dsh-loop')
     // A malformed npm name is not a way past the tarball rules: it fails the
     // name check, and the archive still has to be this repo's own.
     expect(installTargetFor({ url: 'https://github.com/o/r', npm: 'evil;rm -rf', tarball })).toBe(tarball)
