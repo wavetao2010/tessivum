@@ -15,8 +15,8 @@
       "minimumTessivum": "0.1.0-alpha.23",
       "verification": {
         "browserBootEntry": "dsh-better-sidebar",
-        "browserFeature": "sidebar-panel-host",
-        "browserFeatureSelector": "[data-dsh-panel-host]",
+        "browserFeature": "sidebar-panel",
+        "browserFeatureSelector": "[data-dsh-panel]",
         "updateVersion": "0.17.1",
         "failureVersion": "99.99.99"
       },

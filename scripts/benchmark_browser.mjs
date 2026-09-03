@@ -38,6 +38,7 @@ function parseArgs(argv) {
     throw new Error('--marker is required when --prompt is set')
   }
   if (options.sessions !== 1 && typeof options.prompt !== 'string') throw new Error('--sessions requires --prompt')
+  if (options.featureSelector !== undefined && typeof options.prompt !== 'string') throw new Error('--feature-selector requires --prompt')
   if (typeof options.prompt === 'string' && typeof options.checkpoint !== 'string') throw new Error('--checkpoint is required when --prompt is set')
   return options
 }
@@ -99,17 +100,6 @@ async function main() {
     const bootEntries = await page.evaluate(() => window.__DSH_BOOT__?.entries ?? [])
     const missingPlugins = options.expectPlugins.filter(name => !bootEntries.some(entry => entry.id === name))
     if (missingPlugins.length !== 0) throw new Error(`Browser boot graph is missing: ${missingPlugins.join(', ')}`)
-    if (options.featureSelector !== undefined) {
-      const feature = page.locator(options.featureSelector)
-      await feature.first().waitFor({ state: 'visible', timeout: options.timeoutMs })
-      const box = await feature.first().boundingBox()
-      result.browserFeature = {
-        selector: options.featureSelector,
-        count: await feature.count(),
-        visible: box !== null && box.width > 0 && box.height > 0,
-      }
-      if (!result.browserFeature.visible) throw new Error(`Browser feature is not visible: ${options.featureSelector}`)
-    }
     result.bootPlugins = bootEntries.filter(entry => options.expectPlugins.includes(entry.id))
 
     const composer = page.locator('textarea:enabled').last()
@@ -128,6 +118,17 @@ async function main() {
       result.sessionCompletionMs['1'] = result.timestamps.markerSeenMs
       await new Promise(resolve => setTimeout(resolve, options.settleMs))
       await Bun.write(`${options.checkpoint}.1`, `${JSON.stringify({ sessions: 1 })}\n`)
+      if (options.featureSelector !== undefined) {
+        const feature = page.locator(options.featureSelector)
+        await feature.first().waitFor({ state: 'visible', timeout: options.timeoutMs })
+        const box = await feature.first().boundingBox()
+        result.browserFeature = {
+          selector: options.featureSelector,
+          count: await feature.count(),
+          visible: box !== null && box.width > 0 && box.height > 0,
+        }
+        if (!result.browserFeature.visible) throw new Error(`Browser feature is not visible: ${options.featureSelector}`)
+      }
       for (let count = 2; count <= options.sessions; count += 1) {
         const completed = await page.evaluate(async ({ current, marker, prompt, timeoutMs }) => {
           let sequence = 0
