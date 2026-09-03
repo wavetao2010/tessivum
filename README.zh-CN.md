@@ -39,7 +39,7 @@ Alpha.15 的 DSH Profile 权限、市场激活、升级、回滚和分发别名�
 Alpha.18 的第一方市场所有权、打包、迁移、精确版本变更、重启和 Browser E2E 门槛记录于 [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 Alpha.19-A/B 的兼容性预检和 Legacy Host facade，以及 Alpha.19-C/D 由 Rust 拥有的远程访问及其内建配对/设备界面均已完成。契约、安全边界、精确兼容状态、Browser 证据和发布门槛记录于 [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)。
 
-Phase 9 已完成。在固定 Linux Core 工作量的 30 样本运行中，tessivum-core 相比 TypeScript Cordis 4.0.1 实现 **Scope 创建/销毁快 24.02×**、**峰值进程 PSS 低 17.43×**；真实 Chromium 产品矩阵通过 **30/30 Base** 与 **30/30 Compatibility** 样本，关闭后进程残留为零。同一份证据也披露 `loader_update` 回归和 Compatibility 成本。见[中文 Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
+Phase 9 已完成。在固定 Linux Core 工作量的 30 样本运行中，tessivum-core 相比 TypeScript Cordis 4.0.1 实现 **Scope 创建/销毁快 23.64×**、**峰值进程 PSS 低 17.43×**；真实 Chromium 产品矩阵通过 **30/30 Base** 与 **30/30 Compatibility** 样本，关闭后进程残留为零。同一份证据也披露 `loader_update` 回归和 Compatibility 成本。见[中文 Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
 
 ## 架构
 

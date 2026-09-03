@@ -8,11 +8,11 @@
 
 ## 结论
 
-在冻结的 Core 工作量上，tessivum-core 相比 `@deepseek-ai/cordis` 4.0.1，**Scope 创建/销毁快 24.02×**、**Service 查找吞吐为 21.03×**、**Event 吞吐为 26.54×**，峰值进程 PSS **低 17.43×**。两种 runtime 在 root dispose 后的存活注册数都为零。
+在冻结的 Core 工作量上，tessivum-core 相比 `@deepseek-ai/cordis` 4.0.1，**Scope 创建/销毁快 23.64×**、**Service 查找吞吐为 20.73×**、**Event 吞吐为 26.92×**，峰值进程 PSS **低 17.43×**。两种 runtime 在 root dispose 后的存活注册数都为零。
 
 产品矩阵通过 **30/30 Base** 与 **30/30 Compatibility** 样本。每个样本都创建全新的 Host，使用真实 Chromium 完成 Prompt/工具往返，保留十个 Session，并在销毁后留下零存活进程。Compatibility Profile 加载固定的 `dsh-better-sidebar@0.16.1` 与 `dsh-dream-skin@8.30.1`。
 
-一项 Core 回归不可忽略：tessivum-core 的 `loader_update` **慢 39.49×**。Compatibility 也有明确产品成本：HTTP ready **慢 20.81×**，Host 进程树空闲 PSS 比 Base **高 76.82 MiB**。这些成本没有被标题隐藏。
+一项 Core 回归不可忽略：tessivum-core 的 `loader_update` **慢 37.03×**。Compatibility 也有明确产品成本：HTTP ready **慢 18.82×**，Host 进程树空闲 PSS 比 Base **高 76.51 MiB**。这些成本没有被标题隐藏。
 
 ## 冻结环境
 
@@ -27,8 +27,8 @@
 | Bun | `1.4.0` |
 | Node.js | `v22.19.0` |
 | pnpm | `11.7.0` |
-| Tessivum | `0.1.0-alpha.23`，commit `4d2bd09573ff9f9b027cee4c0d14a4784309e164` |
-| tessivum-core | `0.1.6`，commit `cedbeb9e1607056845b69e09b825eb7f5be67a69` |
+| Tessivum | `0.1.0-alpha.23`，commit `d21f0a423076acf50334af5056943205d677ea1c` |
+| tessivum-core Benchmark 源码 | `0.1.6`，commit `4674aeda870989fede1fc79fb07afbe764d3a1eb` |
 | Tessivum runtime 的 Core 依赖 | commit `bafb893f182d64b7b464b6cf827676f7ac368168` |
 | DeepSeek Harness 源码 | commit `47f943859bef60e4160492346772ded9b24f765a` |
 | TypeScript Cordis | 固定 Harness 源码树中的 `@deepseek-ai/cordis` 4.0.1 |
@@ -42,14 +42,14 @@
 
 | 工作量 | tessivum-core 中位数 / p95 | TypeScript Cordis 中位数 / p95 | 中位数结果 |
 |---|---:|---:|---:|
-| 1,000 次 Scope 创建/销毁 | 0.834 / 0.882 ms | 20.021 / 28.363 ms | **快 24.02×** |
-| Service 查找 | 23.362 / 24.002 M ops/s | 1.111 / 1.186 M ops/s | **吞吐 21.03×** |
-| Event emit | 10.723 / 12.118 M ops/s | 0.404 / 0.432 M ops/s | **吞吐 26.54×** |
-| 加载 16 个 entry | 0.445 / 0.556 ms | 2.154 / 2.431 ms | **快 4.85×** |
-| 更新 16 个 entry | 21.085 / 33.537 ms | 0.534 / 0.590 ms | **慢 39.49×** |
-| 销毁包含 32 个 child 的 root | 0.069 / 0.081 ms | 0.217 / 0.250 ms | **快 3.15×** |
-| 峰值进程 PSS | 4.59 / 4.59 MiB | 79.98 / 80.57 MiB | **低 17.43×** |
-| root dispose 后进程 PSS | 4.64 / 4.64 MiB | 91.23 / 93.01 MiB | **低 19.66×** |
+| 1,000 次 Scope 创建/销毁 | 0.877 / 0.995 ms | 20.727 / 25.246 ms | **快 23.64×** |
+| Service 查找 | 23.011 / 23.814 M ops/s | 1.110 / 1.181 M ops/s | **吞吐 20.73×** |
+| Event emit | 10.667 / 12.047 M ops/s | 0.396 / 0.428 M ops/s | **吞吐 26.92×** |
+| 加载 16 个 entry | 0.448 / 0.542 ms | 2.156 / 2.328 ms | **快 4.81×** |
+| 更新 16 个 entry | 19.854 / 30.167 ms | 0.536 / 0.592 ms | **慢 37.03×** |
+| 销毁包含 32 个 child 的 root | 0.069 / 0.079 ms | 0.218 / 0.253 ms | **快 3.15×** |
+| 峰值进程 PSS | 4.59 / 4.59 MiB | 80.03 / 81.13 MiB | **低 17.43×** |
+| root dispose 后进程 PSS | 4.64 / 4.65 MiB | 91.20 / 92.77 MiB | **低 19.65×** |
 | dispose 后存活注册数 | 0 / 0 | 0 / 0 | 相同；无残留 |
 
 “root dispose 后进程 PSS”是逻辑 root 销毁后的进程内存，不是泄漏计数；“存活注册数”才是语义残留检查。
@@ -60,16 +60,16 @@
 
 | 指标 | Base 中位数 / p95 | Compatibility 中位数 / p95 |
 |---|---:|---:|
-| Headless replay 完成 | 41.83 / 53.71 ms | 54.87 / 76.42 ms |
-| HTTP ready | 60.96 / 89.60 ms | 1,268.77 / 1,446.11 ms |
-| Chromium Composer 可用 | 1.821 / 2.081 s | 1.865 / 1.961 s |
-| 首个 Prompt 到 marker 往返 | 59 / 64 ms | 74 / 87 ms |
-| 从首次提交到十个 Prompt/工具 Session 完成 | 1.089 / 1.161 s | 1.182 / 1.238 s |
-| Host 进程树空闲 PSS | 38.27 / 38.27 MiB | 115.09 / 116.26 MiB |
-| 单 Session 相对空闲 PSS 增量 | 4.65 / 5.30 MiB | -9.57 / -8.76 MiB |
-| 十 Session 相对空闲 PSS 增量 | 10.76 / 11.49 MiB | 12.48 / 13.49 MiB |
-| 十 Session PSS 平均增量 | 1.076 / 1.149 MiB | 1.248 / 1.349 MiB |
-| 完整进程树关闭 | 43.61 / 68.60 ms | 44.02 / 51.53 ms |
+| Headless replay 完成 | 44.75 / 54.24 ms | 65.21 / 90.46 ms |
+| HTTP ready | 71.06 / 89.97 ms | 1,337.41 / 1,686.20 ms |
+| Chromium Composer 可用 | 1.903 / 2.063 s | 1.911 / 2.016 s |
+| 首个 Prompt 到 marker 往返 | 65.5 / 81.0 ms | 76.0 / 113.0 ms |
+| 从首次提交到十个 Prompt/工具 Session 完成 | 0.788 / 0.848 s | 0.869 / 0.950 s |
+| Host 进程树空闲 PSS | 38.27 / 38.28 MiB | 114.78 / 115.56 MiB |
+| 单 Session 相对空闲 PSS 增量 | 4.65 / 5.48 MiB | -9.66 / -8.48 MiB |
+| 十 Session 相对空闲 PSS 增量 | 10.74 / 11.37 MiB | 12.55 / 13.16 MiB |
+| 十 Session PSS 平均增量 | 1.074 / 1.137 MiB | 1.255 / 1.316 MiB |
+| 完整进程树关闭 | 44.67 / 66.37 ms | 65.86 / 71.41 ms |
 | 关闭后存活进程 | 0 / 0 | 0 / 0 |
 | 成功的 Host + Chromium 样本 | 30/30 | 30/30 |
 
@@ -78,10 +78,10 @@ Compatibility 的单 Session 增量为负是采样伪影：共享 Host 页面在
 ## 稳定性与预热结论
 
 - 没有丢弃预热样本。每个测量样本都启动全新进程并使用全新数据目录。
-- 第一个 Compatibility headless 样本为 151.80 ms，是 54.87 ms 中位数的 2.77×。这暴露了新进程之外的文件系统/模块缓存预热，因此报告使用中位数与 p95，而不是最好成绩。
-- Core 的 p95/中位数在 tessivum-core 中最高为 1.59，在 TypeScript Cordis 中最高为 1.42。Rust 最大波动来自已经明确披露的 `loader_update` 回归。
-- 产品空闲及十 Session 绝对 PSS 稳定，p95/中位数最高为 1.02。HTTP ready 的 p95/中位数在 Base 中为 1.47，在 Compatibility 中为 1.14。
-- Headless 进程完成时间短于 100 ms PSS 采样周期，其峰值 PSS 的 p95/中位数达到 2.31。因此原始证据保留该指标，但公开性能结论不引用它。
+- 第一个 Compatibility headless 样本为 147.14 ms，是 65.21 ms 中位数的 2.26×。这暴露了新进程之外的文件系统/模块缓存预热，因此报告使用中位数与 p95，而不是最好成绩。
+- Core 的 p95/中位数在 tessivum-core 中最高为 1.52，在 TypeScript Cordis 中最高为 1.22。Rust 最大波动来自已经明确披露的 `loader_update` 回归。
+- 产品空闲及十 Session 绝对 PSS 稳定，p95/中位数最高为 1.01。HTTP ready 的 p95/中位数在 Base 中为 1.27，在 Compatibility 中为 1.26。
+- Headless 进程完成时间短于 100 ms PSS 采样周期，其峰值 PSS 的 p95/中位数达到 1.44。因此原始证据保留该指标，但公开性能结论不引用它。
 - 全部 60 次 Browser probe 均无 page error，提交了 replay Prompt，看到了精确工具 marker，完成全部十个 Session，并留下零 Host、Browser 或子进程残留。
 
 ## 复现
@@ -105,12 +105,14 @@ Runner 在固定镜像内构建 release 二进制，先执行 Core 配对测试�
 
 ## 证据
 
-- [Core 原始 JSON](../benchmarks/fixtures/phase9-alpha23/core-paired-30.json) — SHA-256 `325f9b16352263f17d0b04b629cc22a1c6ec73adbde0eacb6882caf51485d69c`
-- [产品原始 JSON](../benchmarks/fixtures/phase9-alpha23/product-30.json) — SHA-256 `6ae6f1b7a897ff7395e63121926a7e61378a251df3a411a37d48e202eae0cf80`
-- [Base manifest](../benchmarks/manifests/base.json) — SHA-256 `0dd1b1c72f1ed8ad7c984a7f818c4cb211b6a2101600a7a75631e59ac733ad54`
-- [Compatibility manifest](../benchmarks/manifests/compatibility.json) — SHA-256 `23c1831326d0fba09ca6aa34c8ae7cce74247f0fc6c811713fb70ffc474721d4`
-- Core workload SHA-256 `82ca294d4fd1042e4d5558b42fef82b7ed03fbdabab29efa14dd3bcac5b6f292`
-- 产品工作量 SHA-256 `e829d759cbbfca4d4adf907fb80d7e8e592a3f456636c23a513669428252e557`
+- [Core 原始 JSON](../benchmarks/fixtures/phase9-alpha23/core-paired-30.json) — SHA-256 `4ac31357ab07f5280e57ec510d970cbcd8653e9ed62e9c67daee2f2f3a5263b3`
+- [产品原始 JSON](../benchmarks/fixtures/phase9-alpha23/product-30.json) — SHA-256 `89f4bfb7169d6074e1d846643041bfc19ad8d8a0579a60a4dab86134684bf52c`
+- [Base manifest](../benchmarks/manifests/base.json) — SHA-256 `867692853beccc6735533c547b8892179bd253b17f4aca271ad0be393b5b3a90`
+- [Compatibility manifest](../benchmarks/manifests/compatibility.json) — SHA-256 `852952f6e6b206c241259ba1c57beb4e2c0e423d5d868b2e2fede4880b42b947`
+- Core 工作量 SHA-256 `82ca294d4fd1042e4d5558b42fef82b7ed03fbdabab29efa14dd3bcac5b6f292`；Core 环境 SHA-256 `c2ddb47aadef65eac05b306ec4f9f1c0c5e266d56b8e9b77a98579a89c2d5b4a`
+- 产品环境 SHA-256 `76db2dd87235a8cd334eaa0ead8b02347c83da567cb50c5bb42f9020d54ee8a0`；replay SHA-256 `c06e6e82a2e85e1c44659863429db396620a3c5f75722778a566f76cb228c789`
+- 产品 driver SHA-256 `c35c0b4f9944e53ab66b73ffb6026c1d1ef8510b6ba57a59de63bb63fa4d72fd`；Browser driver SHA-256 `59b3d0498848b7b9cec29058557945226c5619bf5c834e1df5fcc14dbfe84ae1`
+- DeepSeek Harness 兼容补丁 SHA-256 `9e914d5998ccb2ca1faf8315a9d9a7235407c7830a8939255cd5838acd149ccd`
 
 ## 结论边界
 

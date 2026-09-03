@@ -11,15 +11,15 @@
   one/ten loaded resident-Session measurements, and strict residue reporting.
 - Add the pinned Ubuntu 24.04 container path and the paired
   TypeScript Cordis/tessivum-core benchmark protocol.
-- Add fingerprint-gated benchmark snapshot regression checks; changed
-  environments, revisions, versions, workloads, or metric sets skip explicitly.
+- Add fail-closed benchmark snapshot regression checks; changed environments,
+  revisions, versions, workloads, or metric sets reject comparison explicitly.
 - Add the Simplified Chinese README and the independent Tessivum slogan
   “道器相成” / “Principle and implementation, in concert.”
 - Add the live community-catalog trust overlay, exact-release verification ledger,
   public request form, no-secret CI workflow, revocation path, and bilingual
   reproduction/risk documentation.
 - Verify `dsh-better-sidebar@0.16.1` through Profile preflight, exact install,
-  Legacy Host and real Chromium startup, update, removal, and failure rollback.
+  Legacy Host and real Chromium startup, update, full removal, rollback, and graceful process cleanup.
 - Publish the bilingual 30-sample Core/Base/Compatibility report, checked raw
   JSON, README claims, and a release-fact drift gate.
 

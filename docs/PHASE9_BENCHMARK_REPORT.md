@@ -8,11 +8,11 @@ Samples: 30 process-cold repetitions per runtime and case
 
 ## Result
 
-On the frozen Core workload, tessivum-core was **24.02× faster for scope create/dispose**, delivered **21.03× service-lookup throughput** and **26.54× event throughput**, and used **17.43× less peak process PSS** than `@deepseek-ai/cordis` 4.0.1. Both runtimes reported zero live registrations after root disposal.
+On the frozen Core workload, tessivum-core was **23.64× faster for scope create/dispose**, delivered **20.73× service-lookup throughput** and **26.92× event throughput**, and used **17.43× less peak process PSS** than `@deepseek-ai/cordis` 4.0.1. Both runtimes reported zero live registrations after root disposal.
 
 The product matrix passed **30/30 Base** and **30/30 Compatibility** samples. Every sample started a fresh Host, exercised a real Chromium prompt/tool round trip, retained ten Sessions, and left zero live processes after disposal. The Compatibility profile loaded the pinned `dsh-better-sidebar@0.16.1` and `dsh-dream-skin@8.30.1` packages.
 
-One Core regression is material: `loader_update` took **39.49× longer** in tessivum-core. Compatibility also has a visible product cost: HTTP readiness was **20.81× slower** and idle Host-tree PSS was **76.82 MiB higher** than Base. These costs are not hidden by the headline.
+One Core regression is material: `loader_update` took **37.03× longer** in tessivum-core. Compatibility also has a visible product cost: HTTP readiness was **18.82× slower** and idle Host-tree PSS was **76.51 MiB higher** than Base. These costs are not hidden by the headline.
 
 ## Frozen environment
 
@@ -27,8 +27,8 @@ One Core regression is material: `loader_update` took **39.49× longer** in tess
 | Bun | `1.4.0` |
 | Node.js | `v22.19.0` |
 | pnpm | `11.7.0` |
-| Tessivum | `0.1.0-alpha.23`, commit `4d2bd09573ff9f9b027cee4c0d14a4784309e164` |
-| tessivum-core | `0.1.6`, commit `cedbeb9e1607056845b69e09b825eb7f5be67a69` |
+| Tessivum | `0.1.0-alpha.23`, commit `d21f0a423076acf50334af5056943205d677ea1c` |
+| tessivum-core benchmark source | `0.1.6`, commit `4674aeda870989fede1fc79fb07afbe764d3a1eb` |
 | Tessivum runtime Core dependency | commit `bafb893f182d64b7b464b6cf827676f7ac368168` |
 | DeepSeek Harness source | commit `47f943859bef60e4160492346772ded9b24f765a` |
 | TypeScript Cordis | `@deepseek-ai/cordis` 4.0.1 from the pinned Harness tree |
@@ -42,14 +42,14 @@ Each runtime consumes the same fingerprinted JSON workload: 1,000 child scopes, 
 
 | Workload | tessivum-core median / p95 | TypeScript Cordis median / p95 | Median result |
 |---|---:|---:|---:|
-| 1,000 scope create/dispose cycles | 0.834 / 0.882 ms | 20.021 / 28.363 ms | **24.02× faster** |
-| Service lookup | 23.362 / 24.002 M ops/s | 1.111 / 1.186 M ops/s | **21.03× throughput** |
-| Event emit | 10.723 / 12.118 M ops/s | 0.404 / 0.432 M ops/s | **26.54× throughput** |
-| Load 16 entries | 0.445 / 0.556 ms | 2.154 / 2.431 ms | **4.85× faster** |
-| Update 16 entries | 21.085 / 33.537 ms | 0.534 / 0.590 ms | **39.49× slower** |
-| Dispose root with 32 children | 0.069 / 0.081 ms | 0.217 / 0.250 ms | **3.15× faster** |
-| Peak process PSS | 4.59 / 4.59 MiB | 79.98 / 80.57 MiB | **17.43× lower** |
-| Process PSS after root disposal | 4.64 / 4.64 MiB | 91.23 / 93.01 MiB | **19.66× lower** |
+| 1,000 scope create/dispose cycles | 0.877 / 0.995 ms | 20.727 / 25.246 ms | **23.64× faster** |
+| Service lookup | 23.011 / 23.814 M ops/s | 1.110 / 1.181 M ops/s | **20.73× throughput** |
+| Event emit | 10.667 / 12.047 M ops/s | 0.396 / 0.428 M ops/s | **26.92× throughput** |
+| Load 16 entries | 0.448 / 0.542 ms | 2.156 / 2.328 ms | **4.81× faster** |
+| Update 16 entries | 19.854 / 30.167 ms | 0.536 / 0.592 ms | **37.03× slower** |
+| Dispose root with 32 children | 0.069 / 0.079 ms | 0.218 / 0.253 ms | **3.15× faster** |
+| Peak process PSS | 4.59 / 4.59 MiB | 80.03 / 81.13 MiB | **17.43× lower** |
+| Process PSS after root disposal | 4.64 / 4.65 MiB | 91.20 / 92.77 MiB | **19.65× lower** |
 | Live registrations after disposal | 0 / 0 | 0 / 0 | equal; no residue |
 
 The post-disposal PSS row is process memory after logical root disposal, not a leak count. The registration-residue row is the semantic leak check.
@@ -60,16 +60,16 @@ Both manifests use the same offline recorded replay and no external model or API
 
 | Metric | Base median / p95 | Compatibility median / p95 |
 |---|---:|---:|
-| Headless replay completion | 41.83 / 53.71 ms | 54.87 / 76.42 ms |
-| HTTP ready | 60.96 / 89.60 ms | 1,268.77 / 1,446.11 ms |
-| Chromium composer enabled | 1.821 / 2.081 s | 1.865 / 1.961 s |
-| First prompt-to-marker round trip | 59 / 64 ms | 74 / 87 ms |
-| Ten prompt/tool Sessions from first submit | 1.089 / 1.161 s | 1.182 / 1.238 s |
-| Idle Host-tree PSS | 38.27 / 38.27 MiB | 115.09 / 116.26 MiB |
-| One-Session PSS delta from idle | 4.65 / 5.30 MiB | -9.57 / -8.76 MiB |
-| Ten-Session PSS delta from idle | 10.76 / 11.49 MiB | 12.48 / 13.49 MiB |
-| Ten-Session PSS delta per Session | 1.076 / 1.149 MiB | 1.248 / 1.349 MiB |
-| Full process-tree shutdown | 43.61 / 68.60 ms | 44.02 / 51.53 ms |
+| Headless replay completion | 44.75 / 54.24 ms | 65.21 / 90.46 ms |
+| HTTP ready | 71.06 / 89.97 ms | 1,337.41 / 1,686.20 ms |
+| Chromium composer enabled | 1.903 / 2.063 s | 1.911 / 2.016 s |
+| First prompt-to-marker round trip | 65.5 / 81.0 ms | 76.0 / 113.0 ms |
+| Ten prompt/tool Sessions from first submit | 0.788 / 0.848 s | 0.869 / 0.950 s |
+| Idle Host-tree PSS | 38.27 / 38.28 MiB | 114.78 / 115.56 MiB |
+| One-Session PSS delta from idle | 4.65 / 5.48 MiB | -9.66 / -8.48 MiB |
+| Ten-Session PSS delta from idle | 10.74 / 11.37 MiB | 12.55 / 13.16 MiB |
+| Ten-Session PSS delta per Session | 1.074 / 1.137 MiB | 1.255 / 1.316 MiB |
+| Full process-tree shutdown | 44.67 / 66.37 ms | 65.86 / 71.41 ms |
 | Live processes after shutdown | 0 / 0 | 0 / 0 |
 | Successful Host + Chromium samples | 30/30 | 30/30 |
 
@@ -78,10 +78,10 @@ The negative one-Session Compatibility delta is a sampling artifact: shared Host
 ## Stability and warm-up findings
 
 - No warm-up sample was discarded. Every measured sample launches a fresh process and uses a fresh data directory.
-- The first Compatibility headless sample was 151.80 ms, 2.77× its 54.87 ms median. This exposes filesystem/module-cache warming outside the fresh process; median and p95 are reported instead of a best run.
-- Core p95/median was at most 1.59 for tessivum-core and 1.42 for TypeScript Cordis. The largest Rust spread was `loader_update`, already reported as the principal regression.
-- Product idle and ten-Session absolute PSS were stable: p95/median was at most 1.02. HTTP-ready p95/median was 1.47 for Base and 1.14 for Compatibility.
-- Headless processes complete faster than the 100 ms PSS sampling interval. Their peak-PSS p95/median reached 2.31, so headless PSS is retained in raw evidence but excluded from performance claims.
+- The first Compatibility headless sample was 147.14 ms, 2.26× its 65.21 ms median. This exposes filesystem/module-cache warming outside the fresh process; median and p95 are reported instead of a best run.
+- Core p95/median was at most 1.52 for tessivum-core and 1.22 for TypeScript Cordis. The largest Rust spread was `loader_update`, already reported as the principal regression.
+- Product idle and ten-Session absolute PSS were stable: p95/median was at most 1.01. HTTP-ready p95/median was 1.27 for Base and 1.26 for Compatibility.
+- Headless processes complete faster than the 100 ms PSS sampling interval. Their peak-PSS p95/median reached 1.44, so headless PSS is retained in raw evidence but excluded from performance claims.
 - All 60 Browser probes reported zero page errors, submitted the replay prompt, observed the exact tool marker, completed all ten Sessions, and left zero Host, Browser or child-process residue.
 
 ## Reproduce
@@ -105,12 +105,14 @@ The runner builds release binaries inside the pinned image, executes the Core pa
 
 ## Evidence
 
-- [Core raw JSON](../benchmarks/fixtures/phase9-alpha23/core-paired-30.json) — SHA-256 `325f9b16352263f17d0b04b629cc22a1c6ec73adbde0eacb6882caf51485d69c`
-- [Product raw JSON](../benchmarks/fixtures/phase9-alpha23/product-30.json) — SHA-256 `6ae6f1b7a897ff7395e63121926a7e61378a251df3a411a37d48e202eae0cf80`
-- [Base manifest](../benchmarks/manifests/base.json) — SHA-256 `0dd1b1c72f1ed8ad7c984a7f818c4cb211b6a2101600a7a75631e59ac733ad54`
-- [Compatibility manifest](../benchmarks/manifests/compatibility.json) — SHA-256 `23c1831326d0fba09ca6aa34c8ae7cce74247f0fc6c811713fb70ffc474721d4`
-- Core workload SHA-256 `82ca294d4fd1042e4d5558b42fef82b7ed03fbdabab29efa14dd3bcac5b6f292`
-- Product workload SHA-256 `e829d759cbbfca4d4adf907fb80d7e8e592a3f456636c23a513669428252e557`
+- [Core raw JSON](../benchmarks/fixtures/phase9-alpha23/core-paired-30.json) — SHA-256 `4ac31357ab07f5280e57ec510d970cbcd8653e9ed62e9c67daee2f2f3a5263b3`
+- [Product raw JSON](../benchmarks/fixtures/phase9-alpha23/product-30.json) — SHA-256 `89f4bfb7169d6074e1d846643041bfc19ad8d8a0579a60a4dab86134684bf52c`
+- [Base manifest](../benchmarks/manifests/base.json) — SHA-256 `867692853beccc6735533c547b8892179bd253b17f4aca271ad0be393b5b3a90`
+- [Compatibility manifest](../benchmarks/manifests/compatibility.json) — SHA-256 `852952f6e6b206c241259ba1c57beb4e2c0e423d5d868b2e2fede4880b42b947`
+- Core workload SHA-256 `82ca294d4fd1042e4d5558b42fef82b7ed03fbdabab29efa14dd3bcac5b6f292`; Core environment SHA-256 `c2ddb47aadef65eac05b306ec4f9f1c0c5e266d56b8e9b77a98579a89c2d5b4a`
+- Product environment SHA-256 `76db2dd87235a8cd334eaa0ead8b02347c83da567cb50c5bb42f9020d54ee8a0`; replay SHA-256 `c06e6e82a2e85e1c44659863429db396620a3c5f75722778a566f76cb228c789`
+- Product driver SHA-256 `c35c0b4f9944e53ab66b73ffb6026c1d1ef8510b6ba57a59de63bb63fa4d72fd`; Browser driver SHA-256 `59b3d0498848b7b9cec29058557945226c5619bf5c834e1df5fcc14dbfe84ae1`
+- DeepSeek Harness compatibility patch SHA-256 `9e914d5998ccb2ca1faf8315a9d9a7235407c7830a8939255cd5838acd149ccd`
 
 ## Claim boundary
 

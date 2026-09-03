@@ -50,9 +50,9 @@ def main() -> int:
     require(core.get("status") == "success" and core.get("sampleCount") == 30, "Core evidence is not a successful 30-sample run")
     require(core.get("failures") == [], "Core evidence contains failures")
     require(core.get("revisions") == {
-        "core": "cedbeb9e1607056845b69e09b825eb7f5be67a69",
+        "core": "4674aeda870989fede1fc79fb07afbe764d3a1eb",
         "dsh": "47f943859bef60e4160492346772ded9b24f765a",
-        "product": "4d2bd09573ff9f9b027cee4c0d14a4784309e164",
+        "product": "d21f0a423076acf50334af5056943205d677ea1c",
     }, "Core evidence revisions drifted")
     for runtime in ("rust", "typescript"):
         samples = [metric.get("samples") for metric in core["runtimes"][runtime]["benchmarks"]]
@@ -63,7 +63,7 @@ def main() -> int:
     scope_ratio = typescript["scope_create_dispose"]["median"] / rust["scope_create_dispose"]["median"]
     peak_ratio = typescript["process_pss_live"]["median"] / rust["process_pss_live"]["median"]
     loader_regression = rust["loader_update"]["median"] / typescript["loader_update"]["median"]
-    require((round(scope_ratio, 2), round(peak_ratio, 2), round(loader_regression, 2)) == (24.02, 17.43, 39.49), "Core release ratios drifted")
+    require((round(scope_ratio, 2), round(peak_ratio, 2), round(loader_regression, 2)) == (23.64, 17.43, 37.03), "Core release ratios drifted")
     require(rust["residue_after_dispose"]["max"] == 0 and typescript["residue_after_dispose"]["max"] == 0, "Core disposal residue is non-zero")
 
     product = load(PRODUCT_PATH)
@@ -71,6 +71,11 @@ def main() -> int:
     require(product.get("status") == "passed" and product.get("publication") is True, "product evidence is not publication-grade")
     require(product.get("failureCount") == 0 and product.get("diagnostics") == [], "product evidence contains failures")
     require(product.get("arguments", {}).get("samples") == 30, "product evidence does not declare 30 samples")
+    repositories = product.get("provenance", {}).get("repositories", {})
+    require(repositories.get("coreBenchmark") == {"clean": True, "path": "/bench/work/tessivum-core", "revision": core["revisions"]["core"]}, "product Core provenance drifted")
+    require(repositories.get("product") == {"clean": True, "path": "/bench/work/tessivum", "revision": core["revisions"]["product"]}, "product source provenance drifted")
+    dsh = repositories.get("deepseekHarness", {})
+    require(dsh.get("revision") == core["revisions"]["dsh"] and dsh.get("trackedDiffSha256") == "9e914d5998ccb2ca1faf8315a9d9a7235407c7830a8939255cd5838acd149ccd", "DeepSeek Harness provenance drifted")
     summaries = {summary["manifest"]: summary for summary in product["summaries"]}
     require(set(summaries) == {"Base", "Compatibility"}, "product evidence manifest set drifted")
     for name, summary in summaries.items():
@@ -92,8 +97,8 @@ def main() -> int:
             require(cleanup["residueAfterForcedCleanup"] == 0, f"{stage} cleanup left process residue")
 
     expected_hashes = {
-        CORE_PATH.name: "325f9b16352263f17d0b04b629cc22a1c6ec73adbde0eacb6882caf51485d69c",
-        PRODUCT_PATH.name: "6ae6f1b7a897ff7395e63121926a7e61378a251df3a411a37d48e202eae0cf80",
+        CORE_PATH.name: "4ac31357ab07f5280e57ec510d970cbcd8653e9ed62e9c67daee2f2f3a5263b3",
+        PRODUCT_PATH.name: "89f4bfb7169d6074e1d846643041bfc19ad8d8a0579a60a4dab86134684bf52c",
     }
     for path in (CORE_PATH, PRODUCT_PATH):
         require(sha256(path) == expected_hashes[path.name], f"{path.name} digest drifted")
@@ -136,23 +141,46 @@ def main() -> int:
                      for name, scale, digits, suffix in product_specs]
     ready_cost = compatibility["web.readyElapsedNs"]["median"] / base["web.readyElapsedNs"]["median"]
     idle_cost_mib = (compatibility["web.treeIdlePssKiB"]["median"] - base["web.treeIdlePssKiB"]["median"]) / 1024
+    core_stability = [max(metric["p95"] / metric["median"] for metric in runtime.values() if metric["median"] > 0)
+                      for runtime in (rust, typescript)]
+    pss_metrics = ("web.treeIdlePssKiB", "web.treeTenSessionPssKiB")
+    pss_stability = max(summary[name]["p95"] / summary[name]["median"]
+                        for summary in (base, compatibility) for name in pss_metrics)
+    ready_stability = [summary["web.readyElapsedNs"]["p95"] / summary["web.readyElapsedNs"]["median"]
+                       for summary in (base, compatibility)]
+    headless_pss_stability = max(summary["headless.treePeakPssKiB"]["p95"] / summary["headless.treePeakPssKiB"]["median"]
+                                 for summary in (base, compatibility))
     report_facts = [
         *(f"{ratio:.2f}×" for ratio in core_ratios),
         *core_cells,
         *product_cells,
         f"{ready_cost:.2f}×",
         f"{idle_cost_mib:.2f} MiB",
+        *(f"{ratio:.2f}" for ratio in (*core_stability, pss_stability, *ready_stability, headless_pss_stability)),
         "30/30",
         *expected_hashes.values(),
         core["workloadSha256"],
         *(item["sha256"] for item in product["manifests"]),
         *core["revisions"].values(),
         product["provenance"]["productCoreDependencyRevision"],
+        core["environmentSha256"],
+        product["environmentSha256"],
+        *product["provenance"]["drivers"].values(),
+        product["provenance"]["replay"]["sha256"],
+        dsh["trackedDiffSha256"],
     ]
     for path in REPORTS:
         report = path.read_text(encoding="utf-8")
         for fact in report_facts:
             require(fact in report, f"{path.name}: missing evidence-derived fact {fact}")
+
+    verification = load(ROOT / "plugins/market/compatibility.json")["entries"][0]
+    lifecycle_path = ROOT / verification["evidence"]
+    lifecycle = load(lifecycle_path)
+    product_evidence_path = lifecycle_path.with_name(lifecycle["productEvidence"]["path"])
+    plugin_report = (ROOT / "docs/PLUGIN_VERIFICATION_REPORT.md").read_text(encoding="utf-8")
+    for digest in (sha256(lifecycle_path), sha256(product_evidence_path)):
+        require(digest in plugin_report, "plugin verification report evidence digest drifted")
 
     english = (ROOT / "README.md").read_text(encoding="utf-8")
     chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
