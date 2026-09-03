@@ -2631,7 +2631,7 @@ fn validate_runtime_imports(
     package: &str,
 ) -> Result<(), PluginManagerError> {
     let expression = Regex::new(
-        r#"(?m)(?:\b(?:import|export)\s+(?:[^'\"]*?\s+from\s+)?|\brequire\s*\()\s*['\"]([^'\"]+)['\"]"#,
+        r#"(?m)(?:\b(?:import|export)\s+(?:[^'\"]*?\s+from\s+)?|\brequire\s*\()\s*['\"]([@A-Za-z0-9._:/~-]+)['\"]"#,
     )
     .expect("valid runtime import expression");
     let mut imports = BTreeSet::new();

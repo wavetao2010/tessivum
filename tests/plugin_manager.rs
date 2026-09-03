@@ -609,7 +609,7 @@ fn candidate_dsh_engine_preflight_accepts_baseline_and_rejects_invalid_ranges_be
             "main": "./lib/index.js",
             "dsh": {"engines": {"dsh": "0.1.0-rc.5"}}
         }),
-        "export default () => {}\n",
+        "export const diagnostic = (spec) => `chunk require('${spec}') missed`;\nexport default () => {}\n",
         None,
     );
     let next = accepted.0.join("next.json");
