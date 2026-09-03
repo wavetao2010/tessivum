@@ -6699,6 +6699,28 @@ index 0a981382..ec560dd6 100644
 -
 -
  })
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index c9b6f658..26d05604 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -71,7 +71,7 @@ export const zh = {
+   'access.confirm.cancel': '取消',
+   'access.confirm.enable': '启用 Full access',
+-  'hero.headline': '探索未至之境',
++  'hero.headline': '道器相成',
+   'hero.preview': '预览版',
+   'hero.chooseWorkspace': '选择工作区',
+   'session.hierarchy': '会话层级',
+   'details.title': '详情',
+@@ -240,7 +240,7 @@ export const en = {
+   'access.confirm.cancel': 'Cancel',
+   'access.confirm.enable': 'Enable Full access',
+-  'hero.headline': 'Into the Unknown',
++  'hero.headline': 'Principle and implementation, in concert.',
+   'hero.preview': 'Preview',
+   'hero.chooseWorkspace': 'Choose workspace',
+   'session.hierarchy': 'Session hierarchy',
+   'details.title': 'Details',
 diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
 index f57caea9..8d1ae687 100644
 --- a/packages/client/ui-conversation/src/client/apply.ts
@@ -6900,6 +6922,50 @@ diff --git a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx b/pa
 index acf618fb..2e76d0f7 100644
 --- a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
 +++ b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
+@@ -261,6 +261,6 @@ describe('Hero chrome', () => {
+   it('renders the English preview badge through the hero locale seat', () => {
+     const view = render(<HeroShell t={makeTranslate(en, commonEn)} />)
+-    expect(view.getByText('Into the Unknown')).toBeTruthy()
++    expect(view.getByText('Principle and implementation, in concert.')).toBeTruthy()
+     expect(view.getByText('Preview')).toBeTruthy()
+   })
+ })
+@@ -362,7 +362,7 @@ describe('ConversationRoot resident composer', () => {
+     const header = b.view.container.querySelector('header')
+     expect(host).not.toBeNull()
+     expect(header?.getAttribute('aria-hidden')).toBe('true')
+-    expect(b.view.getByText('探索未至之境')).toBeTruthy()
++    expect(b.view.getByText('道器相成')).toBeTruthy()
+     expect(b.view.getByText('预览版')).toBeTruthy()
+     expect(b.view.queryByTestId('view-chat')).toBeNull()
+     // The same machine-backed textarea is live in the hero, and the
+@@ -386,7 +386,7 @@ describe('ConversationRoot resident composer', () => {
+     const b = mount(conversationSnapshot({ composerPhase: 'blank', blank: true, openState: 'loading' }))
+     const root = b.view.container.querySelector('[data-phase]')
+     expect(root?.getAttribute('data-phase')).toBe('settling')
+-    expect(b.view.queryByText('探索未至之境')).toBeNull()
++    expect(b.view.queryByText('道器相成')).toBeNull()
+   })
+ 
+   it('settling phase: a session the list has no row for settles conservatively', () => {
+@@ -411,7 +411,7 @@ describe('ConversationRoot resident composer', () => {
+     // blank the column for the history round-trip.
+     const root = b.view.container.querySelector('[data-phase]')
+     expect(root?.getAttribute('data-phase')).toBe('hero')
+-    expect(b.view.getByText('探索未至之境')).toBeTruthy()
++    expect(b.view.getByText('道器相成')).toBeTruthy()
+     expect(b.view.getByRole('textbox')).toBeTruthy()
+   })
+ 
+@@ -429,7 +429,7 @@ describe('ConversationRoot resident composer', () => {
+     expect(after.value).toBe('kept across flip')
+     expect(b.chat.store.getSnapshot().draft).toBe('kept across flip')
+     expect(b.view.container.querySelector('[data-conversation-scroll]')?.contains(after)).toBe(true)
+-    expect(b.view.queryByText('探索未至之境')).toBeNull()
++    expect(b.view.queryByText('道器相成')).toBeNull()
+     expect(b.view.getByTestId('view-chat')).toBeTruthy()
+   })
+ 
 @@ -483,9 +483,9 @@ describe('ConversationRoot resident composer', () => {
      const chip = b.view.getByRole('button', { name: '选择工作区' })
      expect((chip as HTMLButtonElement).disabled).toBe(false)

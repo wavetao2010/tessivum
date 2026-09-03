@@ -1,0 +1,95 @@
+{
+  "schema": "tessivum.product-benchmark-manifest/v1",
+  "name": "Base",
+  "revisions": {
+    "product": "34c8a49bead10cac1cc295622466307ff6de072e",
+    "core": "bafb893f182d64b7b464b6cf827676f7ac368168",
+    "deepseekHarness": "47f943859bef60e4160492346772ded9b24f765a"
+  },
+  "workload": {
+    "replay": "../../fixtures/headless/recorded-replay.jsonl",
+    "headless": {
+      "arguments": [
+        "--data-dir",
+        "{data_dir}",
+        "--replay",
+        "{workload}",
+        "--trusted-bash",
+        "Prove the product headless profile path with one real tool round trip."
+      ]
+    },
+    "web": {
+      "arguments": [
+        "web",
+        "--data-dir",
+        "{data_dir}"
+      ],
+      "prompt": "Prove the product headless profile path with one real tool round trip.",
+      "sessions": 10
+    }
+  },
+  "environment": {
+    "set": {
+      "TESSIVUM_REMOTE_ACCESS": "0",
+      "TESSIVUM_REPLAY_FILE": "{workload}",
+      "TESSIVUM_REPLAY_CONTEXT_WINDOW": "128000",
+      "TESSIVUM_REPLAY_PACE_MS": "0",
+      "TESSIVUM_WEB_ADDR": "127.0.0.1:{port}"
+    },
+    "unset": [
+      "DEEPSEEK_API_KEY",
+      "DEEPSEEK_BASE_URL",
+      "OPENAI_API_KEY",
+      "OPENAI_BASE_URL",
+      "ANTHROPIC_API_KEY",
+      "TESSIVUM_REPLAY",
+      "TESSIVUM_REPLAY_OVERRIDE_FILE",
+      "TESSIVUM_MARKET_TARBALL",
+      "TESSIVUM_MARKET_SHA256_FILE",
+      "TESSIVUM_MARKET_SOURCE_FILE",
+      "TESSIVUM_REMOTE_AUTO_TUNNEL",
+      "TESSIVUM_REMOTE_TRUSTED_TUNNEL",
+      "TESSIVUM_WEB_TRUSTED_AUTHORITIES",
+      "TESSIVUM_COMPAT_HOST",
+      "TESSIVUM_HOST_MODULE_ROOT",
+      "CORDIS_VENDOR_ROOT",
+      "TESSIVUM_CLIENT_PACKAGES"
+    ]
+  },
+  "timeouts": {
+    "headlessSeconds": 30,
+    "webReadySeconds": 30,
+    "browserSeconds": 60,
+    "shutdownSeconds": 15
+  },
+  "readiness": {
+    "http": {
+      "url": "http://127.0.0.1:{port}/",
+      "status": 200
+    },
+    "browser": {
+      "textarea": "textarea:enabled",
+      "welcomeDialog": "Internal Testing Notice|内测声明",
+      "credentialDialog": "Add an API Key to get started|添加一个 API Key 开始使用"
+    },
+    "pssStableMilliseconds": 250
+  },
+  "expected": {
+    "marker": "CLI tool round trip complete: CLI_TOOL_ROUND_TRIP"
+  },
+  "surface": {
+    "profile": "native-only",
+    "legacyHost": {
+      "enabled": false
+    },
+    "browser": {
+      "enabled": true,
+      "shell": "frozen-web-shell"
+    },
+    "browserPlugins": {
+      "enabled": false,
+      "plugins": []
+    }
+  }
+}
+

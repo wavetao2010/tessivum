@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.23 - 2026-09-03
+
+### Added
+
+- Add frozen Base and Compatibility benchmark manifests, a process-cold
+  product driver, real Chromium replay checks, full Host-descendant Linux PSS,
+  one/ten loaded resident-Session measurements, and strict residue reporting.
+- Add the pinned Ubuntu 24.04 container path and the paired
+  TypeScript Cordis/tessivum-core benchmark protocol.
+- Add the Simplified Chinese README and the independent Tessivum slogan
+  “道器相成” / “Principle and implementation, in concert.”
+
+### Changed
+
+- Mark the old three-sample, Rust-only Core result as historical and
+  non-comparative. The Alpha.23 three-sample Linux run is a protocol pilot;
+  public performance claims still require at least 30 valid process-cold
+  samples per runtime and case.
+
 ## 0.1.0-alpha.22 - 2026-09-03
 
 ### Changed

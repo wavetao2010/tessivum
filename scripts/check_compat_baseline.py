@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the pinned DeepSeek compatibility inventory and current migration counts."""
+"""Verify the frozen compatibility inventory and immutable README facts."""
 
 from pathlib import Path
 import json
@@ -17,10 +17,23 @@ CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
 CORE_SHA = "bafb893f182d64b7b464b6cf827676f7ac368168"
+PRODUCT_VERSION = "v0.1.0-alpha.23"
+CORE_VERSION = "v0.1.6"
+HARNESS_VERSION = "0.1.0-rc.5"
 BASELINE = PROJECT / "docs/COMPATIBILITY_BASELINE.md"
 CHECKLIST = PROJECT / "docs/WEB_E2E_PORT_CHECKLIST.md"
-README = PROJECT / "README.md"
+README_EN = PROJECT / "README.md"
+README_ZH = PROJECT / "README.zh-CN.md"
 PLAN = PROJECT / "docs/DEVELOPMENT_PLAN.md"
+
+README_COMMAND_TOKENS = (
+    "brew tap wavetao2010/tap",
+    "brew install tessivum",
+    "sh install.sh 0.1.0-alpha.23",
+    "brew upgrade tessivum",
+    "tessivum web",
+    "cargo run --release -- web",
+)
 
 EXPECTED_REMOTES = {
     "commands/list", "commands/execute",
@@ -71,7 +84,10 @@ def main() -> int:
     failures: list[str] = []
     baseline = BASELINE.read_text()
     checklist = CHECKLIST.read_text()
-    readme = README.read_text()
+    readmes = {
+        "English": README_EN.read_text(),
+        "Simplified Chinese": README_ZH.read_text(),
+    }
     plan = PLAN.read_text()
 
     check(repo_head(UPSTREAM) == HARNESS_SHA, "DeepSeek Harness checkout is not pinned", failures)
@@ -80,8 +96,13 @@ def main() -> int:
     check(HARNESS_SHA in baseline and HARNESS_SHA in checklist and HARNESS_SHA in plan,
           "DeepSeek Harness commit is not frozen consistently", failures)
     check(CORDIS_SHA in plan, "Cordis commit is not frozen in the development plan", failures)
-    check(CORE_SHA in (PROJECT / "Cargo.toml").read_text(),
+    cargo_toml = (PROJECT / "Cargo.toml").read_text()
+    check(CORE_SHA in cargo_toml,
           "tessivum-core dependency revision changed", failures)
+    check(f'version = "{PRODUCT_VERSION.removeprefix("v")}"' in cargo_toml,
+          "Tessivum package version changed", failures)
+    check(f'version = "={CORE_VERSION.removeprefix("v")}"' in cargo_toml,
+          "tessivum-core package version changed", failures)
     ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text()
     release_workflow = (PROJECT / ".github/workflows/release.yml").read_text()
     check(ci_workflow.count(f"ref: {CORE_SHA}") == 2,
@@ -89,8 +110,20 @@ def main() -> int:
     check(release_workflow.count(f"ref: {CORE_SHA}") == 1,
           "release tessivum-core checkout revision changed", failures)
     harness_package = (UPSTREAM / "package.json").read_text()
-    check('"version": "0.1.0-rc.5"' in harness_package,
+    check(f'"version": "{HARNESS_VERSION}"' in harness_package,
           "DeepSeek Harness package version changed", failures)
+
+    for language, readme in readmes.items():
+        for fact in (PRODUCT_VERSION, CORE_VERSION, CORE_SHA, HARNESS_VERSION, HARNESS_SHA):
+            check(fact in readme, f"{language} README is missing {fact}", failures)
+        for command in README_COMMAND_TOKENS:
+            check(command in readme, f"{language} README is missing `{command}`", failures)
+        for posture in ("disabled by default", "loopback-only"):
+            check(posture in readme, f"{language} README Remote Access posture is stale", failures)
+    check("English | [简体中文](README.zh-CN.md)" in readmes["English"],
+          "English README language link is stale", failures)
+    check("[English](README.md) | 简体中文" in readmes["Simplified Chinese"],
+          "Simplified Chinese README language link is stale", failures)
 
     rpc_source = (UPSTREAM / "packages/host/apiproxy/src/api/rpc-map.ts").read_text()
     upstream_rpc = set(re.findall(r"^\s*'([^']+)':", rpc_source, re.M))
@@ -108,8 +141,6 @@ def main() -> int:
     missing = upstream_rpc - current_routes
     check(implemented == upstream_rpc,
           f"current Core RPC routes differ: missing={sorted(missing)}", failures)
-    check("all 52" in readme,
-          "README Core RPC route count is stale", failures)
 
     check(fenced(baseline, "## 6. Typert Remote contributions") == EXPECTED_REMOTES,
           "Remote contribution inventory changed", failures)

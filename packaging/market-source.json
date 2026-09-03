@@ -2,7 +2,7 @@
   "format": 1,
   "package": {
     "name": "tessivum-market",
-    "version": "0.1.0-alpha.22",
+    "version": "0.1.0-alpha.23",
     "license": "MIT"
   },
   "upstream": {

@@ -1,10 +1,10 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场、Phase 8 Remote Access / 通用 Node facade、Alpha.20 Cloudflare Quick Tunnel、Alpha.21 旧 Remote Web UI profile 迁移与 Alpha.22 一键 Remote Access 已完成
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场、Phase 8 Remote Access / 通用 Node facade、Alpha.20 Cloudflare Quick Tunnel、Alpha.21 旧 Remote Web UI profile 迁移、Alpha.22 一键 Remote Access 与 Phase 9-A Benchmark 协议/三样本试运行已完成；Phase 9-B 社区插件发布/验证及 30 样本公开性能运行仍待完成
 > 计划校准日期：2026-09-03
-> Tessivum 实现基线：`v0.1.0-alpha.22`
+> Tessivum 实现基线：`v0.1.0-alpha.23`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
-> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access 与 Web 模型配置面
+> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据与社区插件验证
 
 ## 1. 文档集
 
@@ -18,6 +18,7 @@
 - [Phase 6 DSH Profile 兼容与 `tsv` 命令开发计划](PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)：已完成 `dsh.profile.bundles` 权威语义、市场状态闭环、统一插件 mutation 与发行命令别名。
 - [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)：已完成 Tessivum-owned 市场、确定性更新、新版本等待、旧市场迁移与 Host-owned 重启。
 - [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)：通用 Node Host facade、Rust-owned Remote Access、自有最小配对/设备界面及发行门槛已完成。
+- [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：已冻结“道器相成”品牌文案、双语 README、DeepSeek Harness rc.5 横向 Benchmark 与社区插件收录/固定版本验证边界，尚未实施。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
@@ -596,7 +597,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.22`，固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`。本版本让本地用户直接从 `/remote` 一键启用 Cloudflare Quick Tunnel，把选择持久化到 Host settings，并在后续 Web Host 启动时自动恢复；同一页面可停用 Remote Access，页首使用实际 Tessivum 标志。Alpha.21 的第一方市场迁移继续事务性移除不兼容且已被内置能力取代的 `@linxin666/dsh-remote-web-ui` profile dependency 与 bundle。Rust-owned Remote Access 继续保留单次配对、持久设备 session、loopback listener 与严格 authority 边界；`tessivum-market` 继续保留固定来源、许可证、checksum、旧市场事务迁移、精确版本更新和 Host-owned 重启。Standard/PTC、Browser 与 Legacy Node 三类运行面继续通过同一 Host 状态、generation、取消和审计边界协同。
+当前实现基线为 `v0.1.0-alpha.23`，产品运行时仍固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`，Phase 9 的 Core Benchmark driver 位于 Core revision `15b18daec5969b8a57151a7707e278bcd800e673`。本版本冻结共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，并保留失败、超时、清理残留和非 Linux PSS unavailable 状态。三样本固定 Linux 运行只作为协议试运行；达到每项 30 个 process-cold 样本前不形成公开性能倍数。Alpha.22 的一键 Remote Access、Alpha.21 的旧 Remote Web UI profile 迁移、Rust-owned Remote Access 安全边界、第一方市场来源/校验/更新，以及 Standard/PTC、Browser 与 Legacy Node 三类运行面保持不变。
 
 ## 14.1 Alpha.9 发布记录
 

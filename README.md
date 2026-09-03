@@ -2,13 +2,18 @@
 
 [![CI](https://github.com/wavetao2010/tessivum/actions/workflows/ci.yml/badge.svg)](https://github.com/wavetao2010/tessivum/actions/workflows/ci.yml)
 
-Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harness and Cordis. It targets two explicit compatibility planes—Legacy Node for existing npm/Cordis plugins and Browser Cordis for the upstream React UI—while moving the Host, Agent, session, tool, API, and SDK runtime to Rust.
+English | [简体中文](README.zh-CN.md)
+
+> 道器相成  
+> Principle and implementation, in concert.
+
+Tessivum is an independent, Rust-native agent harness. It targets two explicit compatibility planes—Legacy Node for existing npm/Cordis plugins and Browser Cordis for the upstream React UI—while moving the Host, Agent, session, tool, API, and SDK runtime to Rust.
 
 > Tessivum is a community project. It is not affiliated with DeepSeek, is not an official DeepSeek project, and does not aim to replace the official DeepSeek Harness repository or its publication process.
 
 ## Alpha status
 
-`v0.1.0-alpha.22` is a prerelease, not a production-stable API or data-format promise. Remote Access remains disabled by default and loopback-only, but local users can now enable its Cloudflare tunnel once from `/remote`, retain that choice across Web Host launches, and disable it from the same page.
+`v0.1.0-alpha.23` is a prerelease, not a production-stable API or data-format promise. Remote Access remains disabled by default and loopback-only, but local users can enable its Cloudflare tunnel once from `/remote`, retain that choice across Web Host launches, and disable it from the same page.
 
 Current implementation foundation:
 
@@ -21,7 +26,7 @@ Current implementation foundation:
 - Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the frozen upstream `AppWebEntry` source shell;
 - a pnpm-owned plugin profile with ordered Host Bundle authority, exact Loader/Fiber inventory, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, the first-party `tessivum-market`, verified `dshmarket@1.29.2`, `dsh-better-sidebar@0.16.1`, and `dsh-dream-skin@8.30.1` community lifecycle behavior, plus versioned Node Host facades and Rust-owned Remote Access.
 
-The frozen DeepSeek Harness `0.1.0-rc.5` baseline remains the compatibility target; the currently implemented slice is:
+The frozen DeepSeek Harness `0.1.0-rc.5` baseline at commit `47f943859bef60e4160492346772ded9b24f765a` remains the compatibility target. Tessivum `v0.1.0-alpha.23` pins `tessivum-core v0.1.6` at revision `bafb893f182d64b7b464b6cf827676f7ac368168`; the currently implemented slice is:
 
 - the source Web shell and all 38 composed client packages build from commit `47f943859bef60e4160492346772ded9b24f765a`; Tessivum applies its checked-in compatibility patch before auditing and building the source tree;
 - the Rust `/api` dispatcher implements all 52 frozen Core RPC method names and both Browser WebSocket downlinks;
@@ -34,6 +39,8 @@ Full Agent/LLM compatibility is not complete: block/chunk/source/usage wire fide
 Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distribution-alias gates are recorded in [`docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md`](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md).
 Alpha.18 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
 Alpha.19-A/B compatibility preflight and Legacy Host facades plus Alpha.19-C/D Rust-owned Remote Access and its built-in pairing/device surface are complete. Contracts, security boundaries, exact compatibility status, Browser evidence, and release gates are recorded in [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md).
+
+Phase 9-A now has a reproducible Linux/Core/Product benchmark protocol and a three-sample pilot report; the pilot is not a publishable 30-sample performance claim. Phase 9-B community verification remains planned. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md) and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
 
 
 ## Architecture
@@ -132,22 +139,22 @@ tsv --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates the `tessivum` and `tsv` launchers:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.22/install.sh
-sh install.sh 0.1.0-alpha.22
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.23/install.sh
+sh install.sh 0.1.0-alpha.23
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.22 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.22), verify the checksum, then run either packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.23 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.23), verify the checksum, then run either packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.22-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.22-$target.tar.gz"
-"./tessivum-0.1.0-alpha.22-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.22-$target/bin/tsv" --version
+sha256sum -c "tessivum-0.1.0-alpha.23-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.23-$target.tar.gz"
+"./tessivum-0.1.0-alpha.23-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.23-$target/bin/tsv" --version
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -215,6 +222,8 @@ tessivum web
 
 `tessivum` and `tsv` are the same launcher and resolve the same data root. After a CLI or market mutation reports “重启后生效”, restart the Web process. `tessivum-market` reads the current Profile plus settled Loader/Fiber inventory; Tessivum does not expose a global `dsh` shim or maintain a second Node-side Loader state.
 
+The current market is first-party and supports only the fixed compatibility samples listed above. The planned `official`/`verified`/`unverified` community-status model and submission/verification flow are not implemented; package presence or a fixed sample does not establish a safety audit or market-wide verification.
+
 Legacy plugins and their lifecycle scripts are trusted code running with the user's permissions, not a sandbox. `web.route/v1` registrations remain Rust-owned, same-origin, prefix-restricted, size-bounded, deadline-bounded, cancellable, and generation-scoped. Packaged deployments locate the compatibility host, Cordis vendor, Host modules, and Agent Presets relative to the launcher; source checkouts use their pinned development paths.
 
 ### Browser shell
@@ -228,10 +237,9 @@ cargo run --release -- web
 ```
 
 Open <http://127.0.0.1:3000>. Web can configure a relay from the published Models/Settings surface; `OPENAI_*` remains available for Headless, SDK, CI, and managed deployments.
-
 ### Remote Access
 
-Remote Access is off by default and the Rust listener remains loopback-only. Start Tessivum normally, open **Settings → Remote access** (or <http://127.0.0.1:3000/remote>), review the public-tunnel notice, and click **Enable with Cloudflare**. Tessivum remembers the choice, restarts the Web Host, and restores the tunnel on later `tessivum web` launches. The same page can disable Remote Access and revoke paired devices. No environment variables, domain, DNS change, or Cloudflare account are required.
+Remote Access is disabled by default and the Rust listener remains loopback-only. Start Tessivum normally, open **Settings → Remote access** (or <http://127.0.0.1:3000/remote>), review the public-tunnel notice, and click **Enable with Cloudflare**. Tessivum remembers the choice, restarts the Web Host, and restores the tunnel on later `tessivum web` launches. The same page can disable Remote Access and revoke paired devices. No environment variables, domain, DNS change, or Cloudflare account are required.
 
 Tessivum uses an absolute `TESSIVUM_CLOUDFLARED` override first, then `cloudflared` on `PATH`; otherwise it downloads the pinned release for supported macOS/Linux architectures, verifies its SHA-256 digest, and caches it under the selected data root's `bin` directory. It prints the temporary `https://*.trycloudflare.com/remote` URL after startup. The Rust Host owns pairing and authorization; `cloudflared` only transports traffic. If the tunnel exits, Tessivum immediately removes its old authority, restarts with bounded exponential backoff, and atomically installs the replacement authority. If a remembered tunnel cannot be started during a later launch, Tessivum disables Remote Access and keeps the local Web Host available.
 
@@ -277,6 +285,7 @@ Alpha.11 made pnpm the only plugin-profile mutation backend. Alpha.15 adds the o
 Homebrew upgrades switch the program without deleting user data. The no-sudo installer retains versioned program directories; rerunning `sh install.sh <older-version>` atomically repoints the launcher. Binary rollback does not rewrite an Alpha data or plugin profile, so restore the matching backup if the newer release changed it.
 
 ```bash
+brew upgrade tessivum                # program only; user data retained
 brew uninstall tessivum              # program only
 sh install.sh --uninstall            # program only
 rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
@@ -328,6 +337,7 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Phase 6 DSH Profile compatibility and `tsv` command plan](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)
 - [Phase 7 first-party market and Host restart plan](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)
 - [Phase 8 Remote Access and newer Legacy Host compatibility plan](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)
+- [Phase 9 benchmark and community verification plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md) and [three-sample benchmark pilot](docs/PHASE9_BENCHMARK_REPORT.md)
 - [DeepSeek Harness compatibility baseline](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E port checklist (69 upstream files)](docs/WEB_E2E_PORT_CHECKLIST.md)
 

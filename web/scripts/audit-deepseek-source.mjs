@@ -55,6 +55,21 @@ for (const [specifier, source] of graph.resolvedDsh) {
   }
 }
 
+const heroLocalePath = resolve(upstreamRoot, 'packages/client/ui-conversation/src/client/locales.ts')
+const heroLocaleSource = readFileSync(heroLocalePath, 'utf8')
+const zhHeroLocale = heroLocaleSource.slice(
+  heroLocaleSource.indexOf('export const zh = {'),
+  heroLocaleSource.indexOf('/** The conversation namespace key union. */'),
+)
+const enHeroLocale = heroLocaleSource.slice(heroLocaleSource.indexOf('export const en = {'))
+for (const [locale, source, slogan, legacy] of [
+  ['zh', zhHeroLocale, '道器相成', '探索未至之境'],
+  ['en', enHeroLocale, 'Principle and implementation, in concert.', 'Into the Unknown'],
+]) {
+  if (!source.includes(`'hero.headline': '${slogan}'`)) fail(`missing Tessivum ${locale} slogan`)
+  if (source.includes(legacy)) fail(`visible product branding remains: ${legacy}`)
+}
+
 const visibleBrandSurfaces = [
   resolve(webRoot, 'index.html'),
   resolve(webRoot, 'public/favicon.svg'),
@@ -63,6 +78,7 @@ const visibleBrandSurfaces = [
   resolve(upstreamRoot, 'packages/bundle/web-app/src/index.ts'),
   resolve(upstreamRoot, 'packages/bundle/web-app/src/startup.ts'),
   resolve(upstreamRoot, 'packages/client/ui-settings-models/src/onboarding-copy.ts'),
+  heroLocalePath,
   resolve(upstreamRoot, 'packages/client/ui-primitives/src/FishLogo.tsx'),
   resolve(upstreamRoot, 'packages/client/ui-primitives/src/BrandWordmark.tsx'),
   resolve(upstreamRoot, 'packages/client/ui-primitives/src/TessivumMark.tsx'),

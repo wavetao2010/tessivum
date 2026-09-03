@@ -445,7 +445,7 @@ Alpha.16 的 Legacy `web.route/v1` 注册只接受 `/dsh-market`、`/sidebar`、
 - `dsh-better-sidebar@0.16.1`：Host/Browser 双半插件、HTTP prefix route、WebSocket upgrade、native-backed settings 写入及重启恢复。
 - `dsh-dream-skin@8.30.1`：Host/Browser 双半插件、`/dream-skin/api` 有界状态持久化路由与浏览器主题 bundle；
 
-`tessivum-market@0.1.0-alpha.22` 是另行验证的第一方 Host + Browser 双半插件：保留 `dshmarket@1.38.1` 的固定 MIT 来源与 DSH 社区目录，增加 Tessivum 产品身份、精确版本更新、旧 `dshmarket` 事务迁移、已被内置 Remote Access 取代的不兼容 `@linxin666/dsh-remote-web-ui` profile 迁移、Host-owned 重启和发行物校验。它不扩大上述未修改社区包的固定版本矩阵；实现与证据见 [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
+`tessivum-market@0.1.0-alpha.23` 是另行验证的第一方 Host + Browser 双半插件：保留 `dshmarket@1.38.1` 的固定 MIT 来源与 DSH 社区目录，增加 Tessivum 产品身份、精确版本更新、旧 `dshmarket` 事务迁移、已被内置 Remote Access 取代的不兼容 `@linxin666/dsh-remote-web-ui` profile 迁移、Host-owned 重启和发行物校验。它不扩大上述未修改社区包的固定版本矩阵；实现与证据见 [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 
 Phase 8 的最终精确矩阵如下；“固定版本”只声明下表中的状态，不把分析样本扩大成运行时兼容承诺：
 
