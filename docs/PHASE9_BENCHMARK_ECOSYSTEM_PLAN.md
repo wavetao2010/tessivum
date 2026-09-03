@@ -222,9 +222,10 @@ exact lifecycle/service/event oracle traces
 - `tessivum/scripts/benchmark_product.py` 与真实 Chromium worker；
 - `tessivum/benchmarks/manifests/{base,compatibility}.json`；
 - `tessivum/benchmarks/Dockerfile`、`run-linux.sh` 与容器入口；
-- Linux 三样本试运行 raw snapshot 与报告（运行完成后记录于 `benchmarks/fixtures/phase9-alpha23/` 和 `docs/PHASE9_BENCHMARK_REPORT.md`）。
+- Linux 三样本协议试运行及 30 样本公开 raw snapshot，记录于 `benchmarks/fixtures/phase9-alpha23/`；
+- 中英文公开报告、README 数字和 `scripts/check_release_facts.py` 漂移门槛。
 
-Phase 9-B 已关闭；Phase 9-A 的 30 样本公开门槛仍待完成。三样本试运行数据不能进入营销图表。
+Phase 9-A 已关闭：Core 两种 runtime 各 30 个有效样本，产品 Base 与 Compatibility 各 30/30 成功，真实 Chromium 十 Session 路径和完整进程树销毁残留均通过。公开结果同时披露 `loader_update` 回归及 Compatibility 启动/内存成本。Phase 9-B 也已关闭；Phase 9 总验收完成。
 
 ## 5. Phase 9-B：社区插件发布与 Tessivum 验证
 

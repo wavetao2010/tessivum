@@ -61,6 +61,9 @@ jobs:
       - name: Verify plugin compatibility ledger
         run: python3 scripts/check_plugin_verification.py
 
+      - name: Verify release benchmark facts
+        run: python3 scripts/check_release_facts.py
+
       - name: Check formatting
         run: cargo fmt --all --check
 

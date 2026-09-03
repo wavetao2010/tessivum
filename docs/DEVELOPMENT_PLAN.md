@@ -18,7 +18,7 @@
 - [Phase 6 DSH Profile 兼容与 `tsv` 命令开发计划](PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)：已完成 `dsh.profile.bundles` 权威语义、市场状态闭环、统一插件 mutation 与发行命令别名。
 - [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)：已完成 Tessivum-owned 市场、确定性更新、新版本等待、旧市场迁移与 Host-owned 重启。
 - [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)：通用 Node Host facade、Rust-owned Remote Access、自有最小配对/设备界面及发行门槛已完成。
-- [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：测量协议、三样本固定 Linux 试运行及 `dsh-better-sidebar@0.16.1` 社区验证闭环已完成；30 样本公开性能运行待完成。
+- [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：固定 Linux 30 样本 Core/产品公开结果、中英文报告、README 可追溯数字及 `dsh-better-sidebar@0.16.1` 社区验证闭环均已完成。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。

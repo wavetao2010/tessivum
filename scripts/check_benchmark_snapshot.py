@@ -100,7 +100,8 @@ def main() -> int:
     failures = []
     for name, (actual, higher_is_better) in current_metrics.items():
         baseline = fixture_metrics[name][0]
-        regressed = actual < baseline * (1 - limit) if higher_is_better else actual > baseline * (1 + limit)
+        tolerance = abs(baseline) * limit
+        regressed = actual < baseline - tolerance if higher_is_better else actual > baseline + tolerance
         if regressed:
             failures.append(f"{name}: fixture={baseline:g}, current={actual:g}")
     if failures:

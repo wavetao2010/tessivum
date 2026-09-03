@@ -208,9 +208,17 @@ def process_tree_pids(root_pid: int) -> list[int]:
                 pending.append(child)
     return sorted(pids)
 
+def process_is_running(pid: int) -> bool:
+    try:
+        stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        fields = stat[stat.rfind(")") + 2:].split()
+        return bool(fields) and fields[0] != "Z"
+    except OSError:
+        return False
 
 def managed_pids(root_pid: int, pgid: int) -> list[int]:
-    return sorted(set(process_tree_pids(root_pid)).union(group_pids(pgid)))
+    pids = set(process_tree_pids(root_pid)).union(group_pids(pgid))
+    return sorted(pid for pid in pids if process_is_running(pid))
 
 
 def pss_snapshot(root_pid: int, pgid: int, observed: set[int], phase: str) -> dict[str, Any]:
@@ -351,7 +359,7 @@ def wait_for_stable_pss(capture: CapturedProcess, milliseconds: int, snapshots: 
 
 def terminate_group(capture: CapturedProcess, timeout_seconds: int, observed: set[int]) -> dict[str, Any]:
     started = now_ns()
-    members = sorted({*managed_pids(capture.process.pid, capture.pgid), *(pid for pid in observed if sys.platform == "linux" and (Path("/proc") / str(pid)).exists())})
+    members = sorted({*managed_pids(capture.process.pid, capture.pgid), *(pid for pid in observed if process_is_running(pid))})
     observed.update(members)
     if capture.process.poll() is None or members:
         try:
@@ -367,7 +375,8 @@ def terminate_group(capture: CapturedProcess, timeout_seconds: int, observed: se
         if sys.platform != "linux":
             return [] if capture.process.poll() is not None else [capture.process.pid]
         observed.update(managed_pids(capture.process.pid, capture.pgid))
-        return sorted(pid for pid in observed if (Path("/proc") / str(pid)).exists())
+        capture.process.poll()
+        return sorted(pid for pid in observed if process_is_running(pid))
 
     deadline = now_ns() + timeout_seconds * 1_000_000_000
     while now_ns() < deadline:
@@ -395,7 +404,7 @@ def terminate_group(capture: CapturedProcess, timeout_seconds: int, observed: se
     except subprocess.TimeoutExpired:
         pass
     capture.finish()
-    survivors = sorted({*managed_pids(capture.process.pid, capture.pgid), *(pid for pid in observed if (Path("/proc") / str(pid)).exists())}) if sys.platform == "linux" else []
+    survivors = sorted({*managed_pids(capture.process.pid, capture.pgid), *(pid for pid in observed if process_is_running(pid))}) if sys.platform == "linux" else []
     finished = now_ns()
     return {
         "startedAtNs": started,

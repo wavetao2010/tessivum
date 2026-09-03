@@ -47,7 +47,7 @@ Observed Browser boot entry:
 }
 ```
 
-The three-sample fixed-Linux Compatibility pilot recorded 3/3 successful Host/Chromium samples and zero post-dispose process residue. The 30-sample publication result is recorded separately in `PHASE9_BENCHMARK_REPORT.md`.
+The fixed-Linux publication matrix recorded 30/30 successful Compatibility Host/Chromium samples, completed ten resident Sessions in every sample, and left zero post-dispose process residue. The raw product evidence and statistics are published in [`PHASE9_BENCHMARK_REPORT.md`](PHASE9_BENCHMARK_REPORT.md).
 
 ## Trust boundary
 

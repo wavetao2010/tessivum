@@ -2,7 +2,7 @@
   "schema": "tessivum.product-benchmark-manifest/v1",
   "name": "Base",
   "revisions": {
-    "product": "72a5f6104aaf35e19faa5d9897ec3cb845ad2ec0",
+    "product": "4d2bd09573ff9f9b027cee4c0d14a4784309e164",
     "core": "bafb893f182d64b7b464b6cf827676f7ac368168",
     "deepseekHarness": "47f943859bef60e4160492346772ded9b24f765a"
   },

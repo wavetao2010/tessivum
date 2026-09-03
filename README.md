@@ -40,7 +40,7 @@ Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distri
 Alpha.18 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
 Alpha.19-A/B compatibility preflight and Legacy Host facades plus Alpha.19-C/D Rust-owned Remote Access and its built-in pairing/device surface are complete. Contracts, security boundaries, exact compatibility status, Browser evidence, and release gates are recorded in [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md).
 
-Phase 9-A has a reproducible Linux/Core/Product benchmark protocol and a three-sample pilot; the publication-grade 30-sample run is pending. Phase 9-B community verification is complete for `dsh-better-sidebar@0.16.1`. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
+Phase 9 is complete. On the fixed 30-sample Linux Core workload, tessivum-core delivered **24.02× faster scope create/dispose** and **17.43× lower peak process PSS** than TypeScript Cordis 4.0.1; the real-Chromium product matrix passed **30/30 Base** and **30/30 Compatibility** samples with zero post-shutdown process residue. The same evidence discloses the `loader_update` regression and Compatibility overhead. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
 
 
 ## Architecture
@@ -304,22 +304,31 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 
 The pinned Ubuntu 24.04 arm64 path builds dependencies before measurement,
 alternates process-cold Core A/B samples, drives the real Web UI with Chromium,
-and records full Host-descendant PSS from Linux `smaps_rollup`:
+and records full Host-descendant PSS from Linux `smaps_rollup`. The published
+Alpha.23 result contains 30 valid samples per runtime/case: **24.02× faster
+scope create/dispose**, **21.03× service-lookup throughput**, **26.54× event
+throughput**, **17.43× lower peak Core process PSS**, and **30/30** successful
+Base plus **30/30** successful Compatibility Host/Chromium runs. It also
+reports the **39.49× slower** Core `loader_update` path and the Compatibility
+startup/memory cost.
 
 ```bash
-SAMPLES=3 ./benchmarks/run-linux-container.sh   # protocol pilot
-SAMPLES=30 ./benchmarks/run-linux-container.sh  # publication threshold
+SAMPLES=30 ./benchmarks/run-linux-container.sh
+python3 scripts/check_release_facts.py
 ```
 
-Raw output is written under `benchmarks/results/`. The checked-in three-sample
-snapshot and [report](docs/PHASE9_BENCHMARK_REPORT.md) are validation evidence,
-not a public performance claim. The upstream DeepSeek Harness product remains
-`unmeasured` until both products can consume the identical offline workload.
+Raw output is written under `benchmarks/results/`. The checked-in [Core raw
+JSON](benchmarks/fixtures/phase9-alpha23/core-paired-30.json), [product raw
+JSON](benchmarks/fixtures/phase9-alpha23/product-30.json), and bilingual
+[report](docs/PHASE9_BENCHMARK_REPORT.md) are the publication evidence. The
+upstream DeepSeek Harness product remains `unmeasured` until both products can
+consume the identical offline workload.
 
 ## Verification
 
 ```bash
 python3 scripts/check_compat_baseline.py
+python3 scripts/check_release_facts.py
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
@@ -353,7 +362,7 @@ These are product follow-ups, not work to change or deprecate the official DeepS
 - [Phase 6 DSH Profile compatibility and `tsv` command plan](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)
 - [Phase 7 first-party market and Host restart plan](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)
 - [Phase 8 Remote Access and newer Legacy Host compatibility plan](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)
-- [Phase 9 benchmark and community verification plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md) and [three-sample benchmark pilot](docs/PHASE9_BENCHMARK_REPORT.md)
+- [Phase 9 benchmark and community verification plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md) and [30-sample benchmark report](docs/PHASE9_BENCHMARK_REPORT.md)
 - [Community plugin submission and verification](docs/PLUGIN_VERIFICATION.md) and [DSH-better-sidebar 0.16.1 evidence](docs/PLUGIN_VERIFICATION_REPORT.md)
 - [DeepSeek Harness compatibility baseline](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E port checklist (69 upstream files)](docs/WEB_E2E_PORT_CHECKLIST.md)

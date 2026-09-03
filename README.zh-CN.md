@@ -39,7 +39,7 @@ Alpha.15 的 DSH Profile 权限、市场激活、升级、回滚和分发别名�
 Alpha.18 的第一方市场所有权、打包、迁移、精确版本变更、重启和 Browser E2E 门槛记录于 [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 Alpha.19-A/B 的兼容性预检和 Legacy Host facade，以及 Alpha.19-C/D 由 Rust 拥有的远程访问及其内建配对/设备界面均已完成。契约、安全边界、精确兼容状态、Browser 证据和发布门槛记录于 [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)。
 
-Phase 9-A 已实现可复现的 Linux/Core/产品 Benchmark 协议和三样本试运行，公开级 30 样本运行待完成。Phase 9-B 已用 `dsh-better-sidebar@0.16.1` 关闭社区验证闭环。见 [Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
+Phase 9 已完成。在固定 Linux Core 工作量的 30 样本运行中，tessivum-core 相比 TypeScript Cordis 4.0.1 实现 **Scope 创建/销毁快 24.02×**、**峰值进程 PSS 低 17.43×**；真实 Chromium 产品矩阵通过 **30/30 Base** 与 **30/30 Compatibility** 样本，关闭后进程残留为零。同一份证据也披露 `loader_update` 回归和 Compatibility 成本。见[中文 Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
 
 ## 架构
 
@@ -300,19 +300,20 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # 明确的破坏性数据删除
 
 ## 可复现 Benchmark
 
-固定 Ubuntu 24.04 arm64 路径会先完成依赖构建，再交错执行 process-cold Core A/B 样本，以真实 Chromium 驱动 Web UI，并从 Linux `smaps_rollup` 统计 Host 全部后代进程的 PSS：
+固定 Ubuntu 24.04 arm64 路径会先完成依赖构建，再交错执行 process-cold Core A/B 样本，以真实 Chromium 驱动 Web UI，并从 Linux `smaps_rollup` 统计 Host 全部后代进程的 PSS。Alpha.23 公开结果在每个 runtime/case 中包含 30 个有效样本：**Scope 创建/销毁快 24.02×**、**Service 查找吞吐 21.03×**、**Event 吞吐 26.54×**、**Core 峰值进程 PSS 低 17.43×**，以及 **30/30 Base** 和 **30/30 Compatibility** 成功 Host/Chromium 运行。报告同时披露 Core `loader_update` **慢 39.49×** 及 Compatibility 的启动/内存成本。
 
 ```bash
-SAMPLES=3 ./benchmarks/run-linux-container.sh   # 协议试运行
-SAMPLES=30 ./benchmarks/run-linux-container.sh  # 公开结果门槛
+SAMPLES=30 ./benchmarks/run-linux-container.sh
+python3 scripts/check_release_facts.py
 ```
 
-原始输出写入 `benchmarks/results/`。已检入的三样本 snapshot 和[报告](docs/PHASE9_BENCHMARK_REPORT.md)只用于验证测量协议，不是公开性能承诺。DeepSeek Harness 产品层在两边能够消费完全相同的离线工作量之前保持 `unmeasured`。
+原始输出写入 `benchmarks/results/`。已检入的 [Core 原始 JSON](benchmarks/fixtures/phase9-alpha23/core-paired-30.json)、[产品原始 JSON](benchmarks/fixtures/phase9-alpha23/product-30.json)和[中文报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)是公开证据。DeepSeek Harness 产品层在两边能够消费完全相同的离线工作量之前保持 `unmeasured`。
 
 ## 验证
 
 ```bash
 python3 scripts/check_compat_baseline.py
+python3 scripts/check_release_facts.py
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
@@ -346,7 +347,7 @@ cd ../../web && bun test ./tests/migrated.test.ts --max-concurrency 1 --timeout 
 - [Phase 6 DSH Profile 兼容性和 `tsv` 命令计划](docs/PHASE6_DSH_PROFILE_COMPATIBILITY_PLAN.md)
 - [Phase 7 第一方市场和 Host 重启计划](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)
 - [Phase 8 远程访问和较新 Legacy Host 兼容性计划](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)
-- [Phase 9 Benchmark 与社区验证计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)及[三样本 Benchmark 试运行](docs/PHASE9_BENCHMARK_REPORT.md)
+- [Phase 9 Benchmark 与社区验证计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)及[30 样本 Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)
 - [社区插件投稿与验证](docs/PLUGIN_VERIFICATION.zh-CN.md)及 [DSH-better-sidebar 0.16.1 证据](docs/PLUGIN_VERIFICATION_REPORT.md)
 - [DeepSeek Harness 兼容性基线](docs/COMPATIBILITY_BASELINE.md)
 - [Web E2E 移植检查表（69 个上游文件）](docs/WEB_E2E_PORT_CHECKLIST.md)

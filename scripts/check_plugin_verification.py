@@ -18,6 +18,9 @@ LEDGER = ROOT / "plugins/market/compatibility.json"
 COMMUNITY = ROOT / "plugins/market/data/registry-snapshot.json"
 OFFICIAL = ROOT / "plugins/market/catalog.json"
 EXACT_VERSION = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+PACKAGE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+RUNTIMES = {"native", "wasm", "legacy-node", "browser"}
 
 
 def repository(value: Any) -> str | None:
@@ -63,8 +66,8 @@ def validate(network: bool) -> None:
         name = entry.get("npm")
         version = entry.get("version")
         status = entry.get("status")
-        if not isinstance(name, str) or name in names:
-            raise ValueError("verification package names must be nonblank and unique")
+        if not isinstance(name, str) or PACKAGE.fullmatch(name) is None or name in names:
+            raise ValueError("verification package names must be valid and unique")
         if not isinstance(version, str) or EXACT_VERSION.fullmatch(version) is None:
             raise ValueError(f"{name}: verification version must be exact semver")
         if status not in {"verified", "revoked"}:
@@ -74,11 +77,20 @@ def validate(network: bool) -> None:
         for field in ("repository", "integrity", "license", "profile", "minimumTessivum", "verifiedAt", "evidence"):
             if not isinstance(entry.get(field), str) or not entry[field]:
                 raise ValueError(f"{name}@{version}: missing {field}")
-        if not isinstance(entry.get("runtimes"), list) or not entry["runtimes"]:
-            raise ValueError(f"{name}@{version}: runtimes must be nonempty")
-        evidence = ROOT / entry["evidence"]
-        if not evidence.is_file():
-            raise ValueError(f"{name}@{version}: missing evidence file {entry['evidence']}")
+        if repository(entry["repository"]) is None or not entry["integrity"].startswith("sha512-"):
+            raise ValueError(f"{name}@{version}: repository and integrity must identify an immutable npm release")
+        if entry["profile"] not in {"web", "headless"} or EXACT_VERSION.fullmatch(entry["minimumTessivum"]) is None:
+            raise ValueError(f"{name}@{version}: invalid Profile or minimum Tessivum version")
+        if DATE.fullmatch(entry["verifiedAt"]) is None:
+            raise ValueError(f"{name}@{version}: verifiedAt must be YYYY-MM-DD")
+        runtimes = entry.get("runtimes")
+        if (not isinstance(runtimes, list) or not runtimes
+                or not all(isinstance(runtime, str) for runtime in runtimes)
+                or not set(runtimes) <= RUNTIMES):
+            raise ValueError(f"{name}@{version}: invalid runtimes")
+        evidence = (ROOT / entry["evidence"]).resolve()
+        if not evidence.is_relative_to(ROOT) or not evidence.is_file():
+            raise ValueError(f"{name}@{version}: missing repository-local evidence file {entry['evidence']}")
 
         catalog = next((plugin for plugin in community if plugin.get("npm") == name), None)
         if catalog is None or repository(catalog.get("url")) != repository(entry["repository"]):

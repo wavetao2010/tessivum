@@ -20,13 +20,15 @@
   reproduction/risk documentation.
 - Verify `dsh-better-sidebar@0.16.1` through Profile preflight, exact install,
   Legacy Host and real Chromium startup, update, removal, and failure rollback.
+- Publish the bilingual 30-sample Core/Base/Compatibility report, checked raw
+  JSON, README claims, and a release-fact drift gate.
 
 ### Changed
 
 - Mark the old three-sample, Rust-only Core result as historical and
-  non-comparative. The Alpha.23 three-sample Linux run is a protocol pilot;
-  public performance claims still require at least 30 valid process-cold
-  samples per runtime and case.
+  non-comparative. The Alpha.23 publication result uses 30 valid process-cold
+  samples per runtime and case and reports median, p95, regressions, full-tree
+  PSS, compatibility success, and measurement limits together.
 
 ### Fixed
 
@@ -39,6 +41,8 @@
 - Restrict static runtime-import captures to package-specifier characters so
   diagnostic strings such as `require('${spec}')` are not treated as missing
   dependencies.
+- Exclude terminated Linux zombie processes from shutdown residue and bound
+  optional onboarding-dialog probes, removing two benchmark timing artifacts.
 
 ## 0.1.0-alpha.22 - 2026-09-03
 

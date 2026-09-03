@@ -84,8 +84,8 @@ async function main() {
       await frame.waitFor({ timeout: options.timeoutMs })
     }
     result.timestamps.pageLoadedMs = now()
-    await dismiss(page, /Internal Testing Notice|内测声明/, /Continue|继续/, Math.min(options.timeoutMs, 10_000))
-    await dismiss(page, /Add an API Key to get started|添加一个 API Key 开始使用/i, /Configure later|稍后配置/, Math.min(options.timeoutMs, 10_000))
+    await dismiss(page, /Internal Testing Notice|内测声明/, /Continue|继续/, Math.min(options.timeoutMs, 1_000))
+    await dismiss(page, /Add an API Key to get started|添加一个 API Key 开始使用/i, /Configure later|稍后配置/, Math.min(options.timeoutMs, 1_000))
 
     const composer = page.locator('textarea:enabled').last()
     await composer.waitFor({ timeout: options.timeoutMs })
