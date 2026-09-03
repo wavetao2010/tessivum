@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.22 - 2026-09-03
+
+### Changed
+
+- Local users can enable or disable the built-in Cloudflare Remote Access flow from `/remote`; the remembered choice is applied automatically on later Web Host launches without environment variables.
+
+### Fixed
+
+- The Remote Access header now uses the shipped Tessivum mark instead of an empty decorative square.
+- A remembered Quick Tunnel that cannot start now falls back to the local Web Host and disables Remote Access instead of trapping later launches in a startup failure.
+
 ## 0.1.0-alpha.21 - 2026-09-03
 
 ### Fixed

@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.21` is a prerelease, not a production-stable API or data-format promise. It automatically retires the incompatible legacy `@linxin666/dsh-remote-web-ui` profile entry during first-party market migration so the built-in Rust-owned Remote Access implementation starts cleanly; Remote Access remains disabled by default and the listener remains loopback-only.
+`v0.1.0-alpha.22` is a prerelease, not a production-stable API or data-format promise. Remote Access remains disabled by default and loopback-only, but local users can now enable its Cloudflare tunnel once from `/remote`, retain that choice across Web Host launches, and disable it from the same page.
 
 Current implementation foundation:
 
@@ -132,22 +132,22 @@ tsv --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates the `tessivum` and `tsv` launchers:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.21/install.sh
-sh install.sh 0.1.0-alpha.21
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.22/install.sh
+sh install.sh 0.1.0-alpha.22
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.21 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.21), verify the checksum, then run either packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.22 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.22), verify the checksum, then run either packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.21-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.21-$target.tar.gz"
-"./tessivum-0.1.0-alpha.21-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.21-$target/bin/tsv" --version
+sha256sum -c "tessivum-0.1.0-alpha.22-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.22-$target.tar.gz"
+"./tessivum-0.1.0-alpha.22-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.22-$target/bin/tsv" --version
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -231,18 +231,13 @@ Open <http://127.0.0.1:3000>. Web can configure a relay from the published Model
 
 ### Remote Access
 
-Remote Access is off by default and the Rust listener remains loopback-only. For one-command remote transport, enable a Cloudflare Quick Tunnel; no domain, DNS change, or Cloudflare account is required:
+Remote Access is off by default and the Rust listener remains loopback-only. Start Tessivum normally, open **Settings → Remote access** (or <http://127.0.0.1:3000/remote>), review the public-tunnel notice, and click **Enable with Cloudflare**. Tessivum remembers the choice, restarts the Web Host, and restores the tunnel on later `tessivum web` launches. The same page can disable Remote Access and revoke paired devices. No environment variables, domain, DNS change, or Cloudflare account are required.
 
-```bash
-export TESSIVUM_REMOTE_ACCESS=1
-export TESSIVUM_REMOTE_AUTO_TUNNEL=cloudflare
-export TESSIVUM_REMOTE_SESSION_TTL_SECONDS=2592000 # optional; 30-day default
-tessivum web
-```
+Tessivum uses an absolute `TESSIVUM_CLOUDFLARED` override first, then `cloudflared` on `PATH`; otherwise it downloads the pinned release for supported macOS/Linux architectures, verifies its SHA-256 digest, and caches it under the selected data root's `bin` directory. It prints the temporary `https://*.trycloudflare.com/remote` URL after startup. The Rust Host owns pairing and authorization; `cloudflared` only transports traffic. If the tunnel exits, Tessivum immediately removes its old authority, restarts with bounded exponential backoff, and atomically installs the replacement authority. If a remembered tunnel cannot be started during a later launch, Tessivum disables Remote Access and keeps the local Web Host available.
 
-Tessivum uses an absolute `TESSIVUM_CLOUDFLARED` override first, then `cloudflared` on `PATH`; otherwise it downloads the pinned release for supported macOS/Linux architectures, verifies its SHA-256 digest, and caches it under the selected data root's `bin` directory. It prints the temporary `https://*.trycloudflare.com/remote` URL after startup. The Rust Host owns pairing and authorization; `cloudflared` only transports traffic. If the tunnel exits, Tessivum immediately removes its old authority, restarts with bounded exponential backoff, and atomically installs the replacement authority.
+For managed deployments, `TESSIVUM_REMOTE_ACCESS=0|1` explicitly overrides the remembered choice. `TESSIVUM_REMOTE_AUTO_TUNNEL=cloudflare` explicitly selects the Quick Tunnel path.
 
-For a stable operator-owned domain or named tunnel, omit `TESSIVUM_REMOTE_AUTO_TUNNEL` and configure the existing manual path instead:
+For a stable operator-owned domain or named tunnel, omit `TESSIVUM_REMOTE_AUTO_TUNNEL` and configure the manual path instead:
 
 ```bash
 export TESSIVUM_REMOTE_ACCESS=1

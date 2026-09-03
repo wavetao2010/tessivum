@@ -55,8 +55,8 @@ use crate::{
     approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, RpcReceipt},
     attachments::{AttachmentId, AttachmentLimits, AttachmentRef},
     bridge::{
-        decode_web_body, encode_web_body, is_hop_header, DomainBridge, WebRouteRequest,
-        WEB_REQUEST_BODY_LIMIT,
+        decode_web_body, encode_web_body, is_hop_header, DomainBridge, HostLifecycle,
+        WebRouteRequest, WEB_REQUEST_BODY_LIMIT,
     },
     credentials::{CredentialRef, CredentialSource},
     frontend::FrontendStatic,
@@ -77,7 +77,10 @@ use crate::{
     remote_access::{RemoteAccess, RemoteAccessError, RemoteDeviceContext},
     session::SessionRawArtifact,
     session_query::SESSION_SEARCH_QUERY_MAX_CHARS,
-    settings::{SettingsDescriptor, SettingsError, SettingsPathOp, LLM_PI_AI_NAMESPACE},
+    settings::{
+        SettingsDescriptor, SettingsError, SettingsPathOp, LLM_PI_AI_NAMESPACE,
+        REMOTE_ACCESS_NAMESPACE,
+    },
     skills::{FilesystemSkillProvider, SkillProvider},
     subagent::{
         SessionProjectionsBlock, SubagentDeleteRequest, SubagentHistoryRequest,
@@ -166,7 +169,8 @@ impl ApiServer {
         trusted_authorities: Vec<String>,
         web_routes: Option<DomainBridge>,
     ) -> io::Result<Self> {
-        Self::bind_with_remote_access(host, config, trusted_authorities, web_routes, None).await
+        Self::bind_with_remote_access(host, config, trusted_authorities, web_routes, None, None)
+            .await
     }
 
     /// Binds a loopback listener whose exact trusted authorities require Rust-owned device auth.
@@ -176,6 +180,7 @@ impl ApiServer {
         trusted_authorities: Vec<String>,
         web_routes: Option<DomainBridge>,
         remote_access: Option<RemoteAccess>,
+        remote_access_lifecycle: Option<Arc<dyn HostLifecycle>>,
     ) -> io::Result<Self> {
         if !config.bind_addr.ip().is_loopback() {
             return Err(io::Error::new(
@@ -206,6 +211,7 @@ impl ApiServer {
             Some(authority_guard.clone()),
             web_routes,
             remote_access,
+            remote_access_lifecycle,
         );
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -265,7 +271,7 @@ impl Drop for ApiServer {
 /// giving static routes any host privileges; network listeners add authority pinning.
 pub fn router(host: Arc<dyn HostApi>, frontend: Option<FrontendStatic>) -> Router {
     let (socket_shutdown, _) = broadcast::channel(1);
-    router_with_shutdown(host, frontend, socket_shutdown, None, None, None)
+    router_with_shutdown(host, frontend, socket_shutdown, None, None, None, None)
 }
 
 fn router_with_shutdown(
@@ -275,6 +281,7 @@ fn router_with_shutdown(
     authority_guard: Option<AuthorityGuard>,
     web_routes: Option<DomainBridge>,
     remote_access: Option<RemoteAccess>,
+    remote_access_lifecycle: Option<Arc<dyn HostLifecycle>>,
 ) -> Router {
     let compat = Arc::new(CompatibilityState::new(host.descriptor()));
     let state = ApiState {
@@ -284,6 +291,7 @@ fn router_with_shutdown(
         web_routes: web_routes.clone(),
         compat,
         remote_access: remote_access.clone(),
+        remote_access_lifecycle,
         authority_guard: authority_guard.clone(),
         workspace_mutation: Arc::new(AsyncMutex::new(())),
     };
@@ -381,6 +389,7 @@ struct ApiState {
     compat: Arc<CompatibilityState>,
     workspace_mutation: Arc<AsyncMutex<()>>,
     remote_access: Option<RemoteAccess>,
+    remote_access_lifecycle: Option<Arc<dyn HostLifecycle>>,
     authority_guard: Option<AuthorityGuard>,
 }
 
@@ -3470,6 +3479,7 @@ fn compat_settings_view(descriptor: SettingsDescriptor) -> Value {
 }
 fn is_exposed_settings_namespace(ns: &str) -> bool {
     ns == PERMISSION_SETTINGS_NAMESPACE
+        || ns == REMOTE_ACCESS_NAMESPACE
         || matches!(
             ns,
             "agent-loop"
@@ -6503,6 +6513,12 @@ struct RemoteDeviceMutation {
     device_id: uuid::Uuid,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteAccessConfiguration {
+    enabled: bool,
+}
+
 async fn remote_access_api(
     State(state): State<ApiState>,
     Path(method): Path<String>,
@@ -6538,6 +6554,38 @@ async fn remote_access_api(
     }
     let request_id = envelope.request_id;
     let output = match method.as_str() {
+        "configure" => {
+            if !matches!(authority, RequestAuthority::Local) {
+                Err(remote_api_error(
+                    "REMOTE_HOST_DENIED",
+                    "Remote Access can only be configured from the local Host",
+                ))
+            } else {
+                async {
+                    let args: RemoteAccessConfiguration = serde_json::from_value(envelope.args)
+                        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+                    state
+                        .host
+                        .mutate_settings(
+                            REMOTE_ACCESS_NAMESPACE.into(),
+                            HostSettingsMutation::Update {
+                                patch: json!({"enabled": args.enabled}),
+                                expected_revision: None,
+                            },
+                        )
+                        .await
+                        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+                    state
+                        .remote_access_lifecycle
+                        .as_ref()
+                        .ok_or_else(|| ApiError::unavailable("Host restart is unavailable"))?
+                        .restart()
+                        .map_err(host_error)?;
+                    Ok(json!({"enabled": args.enabled, "restarting": true}))
+                }
+                .await
+            }
+        }
         "describe" => {
             let _: EmptyArgs = match serde_json::from_value(envelope.args) {
                 Ok(value) => value,

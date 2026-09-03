@@ -30,6 +30,7 @@ pub fn settings_service_key() -> ServiceKey {
 
 pub const LLM_PI_AI_NAMESPACE: &str = "llm-pi-ai";
 pub const AGENT_DEFAULT_MODEL_NAMESPACE: &str = "agent-default-model";
+pub const REMOTE_ACCESS_NAMESPACE: &str = "remote-access";
 
 pub type SettingPath = Vec<String>;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -1,8 +1,8 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场、Phase 8 Remote Access / 通用 Node facade、Alpha.20 Cloudflare Quick Tunnel 与 Alpha.21 旧 Remote Web UI profile 迁移已完成
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场、Phase 8 Remote Access / 通用 Node facade、Alpha.20 Cloudflare Quick Tunnel、Alpha.21 旧 Remote Web UI profile 迁移与 Alpha.22 一键 Remote Access 已完成
 > 计划校准日期：2026-09-03
-> Tessivum 实现基线：`v0.1.0-alpha.21`
+> Tessivum 实现基线：`v0.1.0-alpha.22`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access 与 Web 模型配置面
 
@@ -596,7 +596,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.21`，固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`。本版本在第一方市场迁移中事务性移除与当前 Host 不兼容、且已由内置能力取代的 `@linxin666/dsh-remote-web-ui` profile dependency 与 bundle，避免 Legacy Loader 在启动阶段失败；Rust-owned Remote Access 继续提供单次配对、持久设备 session、loopback listener、`/remote` 界面与可选 Cloudflare Quick Tunnel。`tessivum-market` 继续保留固定来源、许可证、checksum、旧市场事务迁移、精确版本更新和 Host-owned 重启。Standard/PTC、Browser 与 Legacy Node 三类运行面继续通过同一 Host 状态、generation、取消和审计边界协同。
+当前实现基线为 `v0.1.0-alpha.22`，固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`。本版本让本地用户直接从 `/remote` 一键启用 Cloudflare Quick Tunnel，把选择持久化到 Host settings，并在后续 Web Host 启动时自动恢复；同一页面可停用 Remote Access，页首使用实际 Tessivum 标志。Alpha.21 的第一方市场迁移继续事务性移除不兼容且已被内置能力取代的 `@linxin666/dsh-remote-web-ui` profile dependency 与 bundle。Rust-owned Remote Access 继续保留单次配对、持久设备 session、loopback listener 与严格 authority 边界；`tessivum-market` 继续保留固定来源、许可证、checksum、旧市场事务迁移、精确版本更新和 Host-owned 重启。Standard/PTC、Browser 与 Legacy Node 三类运行面继续通过同一 Host 状态、generation、取消和审计边界协同。
 
 ## 14.1 Alpha.9 发布记录
 

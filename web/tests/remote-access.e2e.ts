@@ -1,4 +1,7 @@
 import { afterAll, expect, test } from 'bun:test'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { BrowserContext, Page } from 'playwright-core'
 import { RustWebHarness } from './support.ts'
 
@@ -39,12 +42,47 @@ async function waitForDevice(page: Page, name: string): Promise<void> {
   await page.getByText(name, { exact: true }).waitFor({ timeout: 10_000 })
 }
 
-test('Rust-owned Remote Access UI pairs and revokes a mobile browser', async () => {
-  const disabledHarness = await RustWebHarness.launch({ name: 'remote-access-disabled' })
-  const disabled = await remoteRpc(disabledHarness.baseUrl, 'describe', {})
-  expect(disabled.status).toBe(200)
-  expect(disabled.body.output?.enabled).toBe(false)
-  await disabledHarness.close()
+test('Rust-owned Remote Access UI enables, remembers, pairs, and revokes', async () => {
+  const tunnelRoot = await mkdtemp(join(tmpdir(), 'tessivum-fake-cloudflared-'))
+  const fakeCloudflared = join(tunnelRoot, 'cloudflared')
+  await writeFile(fakeCloudflared, '#!/bin/sh\nif [ -f "$0.fail" ]; then echo "tunnel unavailable" >&2; exit 1; fi\necho "https://remote-test.trycloudflare.com" >&2\ntrap "exit 0" TERM INT\nwhile :; do sleep 1; done\n')
+  await chmod(fakeCloudflared, 0o700)
+  try {
+    const disabledHarness = await RustWebHarness.launch({
+      name: 'remote-access-disabled',
+      env: { TESSIVUM_CLOUDFLARED: fakeCloudflared },
+    })
+    try {
+      const disabled = await remoteRpc(disabledHarness.baseUrl, 'describe', {})
+      expect(disabled.status).toBe(200)
+      expect(disabled.body.output?.enabled).toBe(false)
+      await disabledHarness.page.goto(`${disabledHarness.baseUrl}/remote`)
+      await disabledHarness.page.getByRole('heading', { name: 'Remote Access is off' }).waitFor()
+      const logo = disabledHarness.page.getByRole('link', { name: 'Tessivum home' }).locator('img')
+      expect(await logo.getAttribute('src')).toBe('/favicon.svg')
+      expect(await logo.evaluate(image => [image.naturalWidth, image.naturalHeight])).toEqual([32, 32])
+
+      await disabledHarness.page.getByRole('button', { name: 'Enable with Cloudflare' }).click()
+      await disabledHarness.page.getByRole('heading', { name: 'Create a pairing link' }).waitFor({ timeout: 60_000 })
+      expect((await remoteRpc(disabledHarness.baseUrl, 'describe', {})).body.output?.enabled).toBe(true)
+
+      await disabledHarness.page.getByRole('button', { name: 'Disable Remote Access' }).click()
+      await disabledHarness.page.getByRole('heading', { name: 'Remote Access is off' }).waitFor({ timeout: 60_000 })
+      expect((await remoteRpc(disabledHarness.baseUrl, 'describe', {})).body.output?.enabled).toBe(false)
+
+      await writeFile(`${fakeCloudflared}.fail`, '')
+      await disabledHarness.page.getByRole('button', { name: 'Enable with Cloudflare' }).click()
+      await disabledHarness.page.getByText('REMOTE_TUNNEL_UNAVAILABLE', { exact: true }).waitFor({ timeout: 60_000 })
+      expect((await remoteRpc(disabledHarness.baseUrl, 'describe', {})).body.output?.enabled).toBe(false)
+      const unexpectedWarnings = disabledHarness.warnings.filter(warning => !warning.includes('net::ERR_CONNECTION_REFUSED'))
+      disabledHarness.warnings.splice(0, disabledHarness.warnings.length, ...unexpectedWarnings)
+      disabledHarness.assertClean()
+    } finally {
+      await disabledHarness.close()
+    }
+  } finally {
+    await rm(tunnelRoot, { recursive: true, force: true })
+  }
 
   harness = await RustWebHarness.launch({
     name: 'remote-access',

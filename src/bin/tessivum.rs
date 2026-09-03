@@ -34,7 +34,7 @@ use tessivum::{
         mutate_plugins, plugin_profile_root, PluginMutation,
     },
     remote_access::{RemoteAccess, RemoteAccessConfig},
-    settings::Settings,
+    settings::{Settings, YamlSettingsProvider, REMOTE_ACCESS_NAMESPACE},
     SessionId, TessivumError,
 };
 use tokio::sync::Notify;
@@ -378,8 +378,35 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let auto_tunnel_enabled = match environment("TESSIVUM_REMOTE_AUTO_TUNNEL")?.as_deref() {
-        None => false,
+    let bootstrap_settings = Settings::new(Arc::new(YamlSettingsProvider::new(
+        data_dir.join("settings.yaml"),
+    )));
+    let persisted_remote_enabled = bootstrap_settings
+        .load_document()
+        .await
+        .map_err(|error| Diagnostic::runtime("SETTINGS_LOAD_FAILED", error))?
+        .get(REMOTE_ACCESS_NAMESPACE)
+        .and_then(|value| value.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let remote_override = environment("TESSIVUM_REMOTE_ACCESS")?;
+    let mut remote_enabled = match remote_override.as_deref() {
+        None => persisted_remote_enabled,
+        Some("0") => false,
+        Some("1") => true,
+        Some(_) => return Err(Diagnostic::usage("TESSIVUM_REMOTE_ACCESS must be 0 or 1")),
+    };
+    let auto_tunnel_override = environment("TESSIVUM_REMOTE_AUTO_TUNNEL")?;
+    let remembered_auto_tunnel = auto_tunnel_override.is_none()
+        && remote_override.is_none()
+        && persisted_remote_enabled
+        && manual_trusted_authorities.is_empty();
+    let auto_tunnel_enabled = match auto_tunnel_override.as_deref() {
+        None => {
+            remote_override.is_none()
+                && persisted_remote_enabled
+                && manual_trusted_authorities.is_empty()
+        }
         Some("cloudflare") => true,
         Some(_) => {
             return Err(Diagnostic::usage(
@@ -387,8 +414,8 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             ))
         }
     };
-    let remote_enabled = environment_flag("TESSIVUM_REMOTE_ACCESS")?;
-    let trusted_tunnel = environment_flag("TESSIVUM_REMOTE_TRUSTED_TUNNEL")? || auto_tunnel_enabled;
+    let mut trusted_tunnel =
+        environment_flag("TESSIVUM_REMOTE_TRUSTED_TUNNEL")? || auto_tunnel_enabled;
     let session_ttl_seconds = environment("TESSIVUM_REMOTE_SESSION_TTL_SECONDS")?
         .map(|value| {
             value
@@ -410,12 +437,12 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         && (!manual_trusted_authorities.is_empty() || trusted_tunnel || auto_tunnel_enabled)
     {
         return Err(Diagnostic::usage(
-            "trusted Web authorities and tunnel posture require TESSIVUM_REMOTE_ACCESS=1",
+            "trusted Web authorities and tunnel posture require Remote Access to be enabled",
         ));
     }
     if remote_enabled && manual_trusted_authorities.is_empty() && !auto_tunnel_enabled {
         return Err(Diagnostic::usage(
-            "TESSIVUM_REMOTE_ACCESS=1 requires TESSIVUM_WEB_TRUSTED_AUTHORITIES or TESSIVUM_REMOTE_AUTO_TUNNEL=cloudflare",
+            "Remote Access requires TESSIVUM_WEB_TRUSTED_AUTHORITIES or a Cloudflare Quick Tunnel",
         ));
     }
     if remote_enabled && !address.ip().is_loopback() {
@@ -429,15 +456,32 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         ));
     }
     let mut auto_tunnel = if auto_tunnel_enabled {
-        let executable = resolve_cloudflared(&data_dir)
-            .await
-            .map_err(|error| Diagnostic::runtime("CLOUDFLARED_SETUP_FAILED", error))?;
-        eprintln!("Starting Cloudflare Quick Tunnel...");
-        Some(
-            CloudflareQuickTunnel::start(executable, format!("http://{address}"))
-                .await
-                .map_err(|error| Diagnostic::runtime("CLOUDFLARE_TUNNEL_FAILED", error))?,
-        )
+        let tunnel = match resolve_cloudflared(&data_dir).await {
+            Ok(executable) => {
+                eprintln!("Starting Cloudflare Quick Tunnel...");
+                CloudflareQuickTunnel::start(executable, format!("http://{address}"))
+                    .await
+                    .map_err(|error| ("CLOUDFLARE_TUNNEL_FAILED", error.to_string()))
+            }
+            Err(error) => Err(("CLOUDFLARED_SETUP_FAILED", error.to_string())),
+        };
+        match tunnel {
+            Ok(tunnel) => Some(tunnel),
+            Err((code, error)) if remembered_auto_tunnel => {
+                bootstrap_settings
+                    .persist_unregistered(
+                        REMOTE_ACCESS_NAMESPACE,
+                        &serde_json::json!({"enabled": false}),
+                    )
+                    .await
+                    .map_err(|error| Diagnostic::runtime("REMOTE_ACCESS_DISABLE_FAILED", error))?;
+                remote_enabled = false;
+                trusted_tunnel = false;
+                eprintln!("{code}: {error}; Remote Access was disabled");
+                None
+            }
+            Err((code, error)) => return Err(Diagnostic::runtime(code, error)),
+        }
     } else {
         None
     };
@@ -500,6 +544,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
         trusted_authorities.clone(),
         web_routes,
         Some(remote_access),
+        Some(Arc::clone(&lifecycle) as Arc<dyn HostLifecycle>),
     )
     .await
     {

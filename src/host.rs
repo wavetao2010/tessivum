@@ -104,7 +104,7 @@ use crate::{
     settings::{
         settings_service_key, Settings, SettingsApplies, SettingsError, SettingsEvent,
         SettingsPathOp, SettingsRegistration, SettingsSnapshot, YamlSettingsProvider,
-        AGENT_DEFAULT_MODEL_NAMESPACE, LLM_PI_AI_NAMESPACE,
+        AGENT_DEFAULT_MODEL_NAMESPACE, LLM_PI_AI_NAMESPACE, REMOTE_ACCESS_NAMESPACE,
     },
     skills::{
         skill_session_scopes, AllowSkillInvocation, FilesystemSkillProvider,
@@ -2733,6 +2733,22 @@ impl HostRuntime {
             .unwrap_or_else(|| json!({}));
         settings
             .register(permission_settings_registration(permission_base))
+            .await
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        let remote_access_base = profile
+            .get(REMOTE_ACCESS_NAMESPACE)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        settings
+            .register(
+                SettingsRegistration::new(
+                    REMOTE_ACCESS_NAMESPACE,
+                    json!({"type": "object", "required": ["enabled"], "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}}}),
+                    json!({"enabled": false}),
+                    remote_access_base,
+                )
+                .with_applies(SettingsApplies::Restart),
+            )
             .await
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let onboarding_base = profile
