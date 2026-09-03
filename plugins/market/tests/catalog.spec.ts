@@ -36,6 +36,7 @@ function verification(status: VerificationEntry['status'], repository = 'https:/
     status,
     verifiedAt: '2026-09-03',
     evidence: 'docs/PLUGIN_VERIFICATION_REPORT.md',
+    sha256: '0'.repeat(64),
     ...(status === 'revoked' ? { reason: 'fixture revocation' } : {}),
   }
 }

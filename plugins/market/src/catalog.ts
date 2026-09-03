@@ -24,6 +24,7 @@ export interface VerificationEntry {
     updateVersion: string
     failureVersion: string
   }
+  sha256: string
   status: 'verified' | 'revoked'
   verifiedAt: string
   evidence: string
@@ -47,6 +48,7 @@ function validateLedger(ledger: VerificationLedger): VerificationLedger {
     const pair = `${entry.npm}@${entry.version}`
     if (!entry.npm || !entry.version || !entry.repository || !entry.integrity || !entry.license
       || !entry.profile || !entry.minimumTessivum || !entry.verifiedAt || !entry.evidence
+      || !/^[0-9a-f]{64}$/.test(entry.sha256)
       || !entry.verification || entry.verification.browserBootEntry !== entry.npm
       || !entry.verification.browserFeature || !entry.verification.browserFeatureSelector
       || !entry.verification.updateVersion || !entry.verification.failureVersion

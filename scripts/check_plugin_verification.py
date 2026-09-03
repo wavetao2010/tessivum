@@ -146,9 +146,11 @@ def validate(network: bool) -> None:
             raise ValueError(f"{name}@{version}: invalid verification status")
         if status == "revoked" and not entry.get("reason"):
             raise ValueError(f"{name}@{version}: revoked entries require a reason")
-        for field in ("repository", "integrity", "license", "profile", "minimumTessivum", "verifiedAt", "evidence"):
+        for field in ("repository", "integrity", "license", "profile", "minimumTessivum", "verifiedAt", "evidence", "sha256"):
             if not isinstance(entry.get(field), str) or not entry[field]:
                 raise ValueError(f"{name}@{version}: missing {field}")
+        if re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None:
+            raise ValueError(f"{name}@{version}: invalid evidence sha256")
         if repository(entry["repository"]) is None or not entry["integrity"].startswith("sha512-"):
             raise ValueError(f"{name}@{version}: repository and integrity must identify an immutable npm release")
         if entry["profile"] not in {"web", "headless"} or EXACT_VERSION.fullmatch(entry["minimumTessivum"]) is None:

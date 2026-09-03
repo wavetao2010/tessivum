@@ -22,7 +22,8 @@
       },
       "status": "verified",
       "verifiedAt": "2026-09-03",
-      "evidence": "docs/PLUGIN_VERIFICATION_REPORT.md"
+      "evidence": "docs/PLUGIN_VERIFICATION_REPORT.md",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   ]
 }

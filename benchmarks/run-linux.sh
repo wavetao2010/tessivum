@@ -121,6 +121,8 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
   feature_name=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.browserFeature' "$ledger")
   feature_selector=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.browserFeatureSelector' "$ledger")
   [[ $plugin != null && $version != null && $update_version != null && $failure_version != null && $boot_entry == "$plugin" && $feature_name != null && $feature_selector != null ]]
+  product_evidence="$results_root/$plugin-$version-product.json"
+  verification_evidence="$results_root/$plugin-$version.json"
 
   install_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$plugin@$version" 2>&1)
   printf '%s\n' "$install_output"
@@ -137,14 +139,14 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
     --manifest "$product/benchmarks/manifests/compatibility.json" \
     --binary "tessivum=$binary" \
     --samples 1 \
-    --raw-out "$results_root/plugin-lifecycle-product.json"
+    --raw-out "$product_evidence"
   jq -e --arg plugin "$plugin" --arg featureSelector "$feature_selector" '
     .status == "passed"
     and (.rawSamples[0].web.browser.result.browserFeature | .selector == $featureSelector and .visible == true and .count >= 1)
     and (.rawSamples[0].web.browser.result.bootPlugins | any(.id == $plugin))
     and ([.rawSamples[0].headless.cleanup, .rawSamples[0].web.browser.cleanup, .rawSamples[0].web.cleanup]
       | all(.residueAfterDispose == 0 and .forcedCleanupRequired == false and .residueAfterForcedCleanup == 0))
-  ' "$results_root/plugin-lifecycle-product.json" >/dev/null
+  ' "$product_evidence" >/dev/null
 
   update_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$plugin@$update_version" 2>&1)
   printf '%s\n' "$update_output"
@@ -180,11 +182,11 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
     --arg coreRevision "$(git -C "$core" rev-parse HEAD)" \
     --arg deepseekRevision "$(git -C "$dsh" rev-parse HEAD)" \
     --arg binarySha256 "$(sha256sum "$binary" | cut -d' ' -f1)" \
-    --arg productEvidenceSha256 "$(sha256sum "$results_root/plugin-lifecycle-product.json" | cut -d' ' -f1)" \
+    --arg productEvidencePath "${product_evidence##*/}" --arg productEvidenceSha256 "$(sha256sum "$product_evidence" | cut -d' ' -f1)" \
     '{schema:"tessivum.plugin-lifecycle-verification/v1", plugin:$plugin, verifiedVersion:$version,
       updateVersion:$updateVersion, failureVersion:$failureVersion,
       revisions:{product:$productRevision,core:$coreRevision,deepseekHarness:$deepseekRevision},
-      binarySha256:$binarySha256, productEvidence:{path:"plugin-lifecycle-product.json",sha256:$productEvidenceSha256},
+      binarySha256:$binarySha256, productEvidence:{path:$productEvidencePath,sha256:$productEvidenceSha256},
       checks:{
         exactInstall:{installedVersion:$version,output:$installOutput},
         browserBootEntry:{id:$plugin},
@@ -194,7 +196,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
         failedInstallRollback:{exitCode:$failureStatus,output:$failureOutput,manifestBeforeSha256:$manifestBeforeSha256,manifestAfterSha256:$manifestAfterSha256,lockfileBeforeSha256:$lockBeforeSha256,lockfileAfterSha256:$lockAfterSha256},
         gracefulResidue:{headless:0,browser:0,webHost:0,forcedCleanupRequired:false}
       }}' \
-    > "$results_root/plugin-verification.json"
+    > "$verification_evidence"
   exit 0
 fi
 for package in dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1; do
