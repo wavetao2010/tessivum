@@ -30,7 +30,7 @@
   },
   "environmentSha256": "76db2dd87235a8cd334eaa0ead8b02347c83da567cb50c5bb42f9020d54ee8a0",
   "failureCount": 0,
-  "finishedAt": "2026-09-03T12:57:59.316884Z",
+  "finishedAt": "2026-09-03T13:27:27.432565Z",
   "manifests": [
     {
       "name": "Compatibility",
@@ -41,7 +41,7 @@
   "provenance": {
     "drivers": {
       "browser": "59b3d0498848b7b9cec29058557945226c5619bf5c834e1df5fcc14dbfe84ae1",
-      "product": "55f1fb3e242892de3aa59149088e9765404059ae13fc4753f73477b86c73d1f3"
+      "product": "c35c0b4f9944e53ab66b73ffb6026c1d1ef8510b6ba57a59de63bb63fa4d72fd"
     },
     "hostModules": [
       {
@@ -54,7 +54,7 @@
       {
         "manifest": "Compatibility",
         "path": "/bench/work/compatibility-profile/plugins",
-        "sha256": "288c58794b540a39f646392b4feb5377bbc36b6ddf9f7cc1a48c999dc7079526"
+        "sha256": "4aca0692f113a986f2cbbe59a32769e47775691e445e767a5e9e7931cb9be820"
       }
     ],
     "replay": {
@@ -76,14 +76,14 @@
       "product": {
         "clean": true,
         "path": "/bench/work/tessivum",
-        "revision": "b35dcbc6bef844b2329702eeabd476bc402b885e"
+        "revision": "970dc5af5a734e03588b401d26904aa8ebd33295"
       }
     },
     "runtimes": [
       {
         "binary": "/bench/work/cargo-target/product/release/tessivum",
         "id": "tessivum",
-        "sha256": "bc6c64d22c5c621c085cf6f7015bdb95d00ba49c313a5527cd943478eb481b32",
+        "sha256": "250f5cc2922483a841dc735227e45f58acbc972484366508976606ca1523605b",
         "version": "tessivum 0.1.0-alpha.23"
       }
     ]
@@ -96,13 +96,13 @@
           "argv": [
             "/bench/work/cargo-target/product/release/tessivum",
             "--data-dir",
-            "/tmp/tessivum-benchmark-uiencmj1/data",
+            "/tmp/tessivum-benchmark-uwxkcnhj/data",
             "--replay",
             "/bench/work/tessivum/fixtures/headless/recorded-replay.jsonl",
             "--trusted-bash",
             "Prove the product headless profile path with one real tool round trip."
           ],
-          "cwd": "/tmp/tessivum-benchmark-uiencmj1/workspace",
+          "cwd": "/tmp/tessivum-benchmark-uwxkcnhj/workspace",
           "environment": {
             "set": {
               "CORDIS_VENDOR_ROOT": "/bench/work/upstream/deepseek-harness/vendor",
@@ -138,9 +138,9 @@
             "/bench/work/cargo-target/product/release/tessivum",
             "web",
             "--data-dir",
-            "/tmp/tessivum-benchmark-5tdhhv5c/data"
+            "/tmp/tessivum-benchmark-v75xrklz/data"
           ],
-          "cwd": "/tmp/tessivum-benchmark-5tdhhv5c/workspace",
+          "cwd": "/tmp/tessivum-benchmark-v75xrklz/workspace",
           "environment": {
             "set": {
               "CORDIS_VENDOR_ROOT": "/bench/work/upstream/deepseek-harness/vendor",
@@ -150,7 +150,7 @@
               "TESSIVUM_REPLAY_CONTEXT_WINDOW": "128000",
               "TESSIVUM_REPLAY_FILE": "/bench/work/tessivum/fixtures/headless/recorded-replay.jsonl",
               "TESSIVUM_REPLAY_PACE_MS": "0",
-              "TESSIVUM_WEB_ADDR": "127.0.0.1:48483"
+              "TESSIVUM_WEB_ADDR": "127.0.0.1:44589"
             },
             "unset": [
               "DEEPSEEK_API_KEY",
@@ -176,7 +176,7 @@
             "bun",
             "/bench/work/tessivum/scripts/benchmark_browser.mjs",
             "--url",
-            "http://127.0.0.1:48483/",
+            "http://127.0.0.1:44589/",
             "--prompt",
             "Prove the product headless profile path with one real tool round trip.",
             "--marker",
@@ -186,7 +186,7 @@
             "--settle-ms",
             "250",
             "--checkpoint",
-            "/tmp/tessivum-benchmark-5tdhhv5c/browser-session",
+            "/tmp/tessivum-benchmark-v75xrklz/browser-session",
             "--expect-plugins",
             "[\"tessivum-market\",\"dsh-better-sidebar\",\"dsh-dream-skin\"]",
             "--timeout-ms",
@@ -194,7 +194,7 @@
             "--feature-selector",
             "[data-dsh-panel-host]"
           ],
-          "cwd": "/tmp/tessivum-benchmark-5tdhhv5c/workspace",
+          "cwd": "/tmp/tessivum-benchmark-v75xrklz/workspace",
           "environment": {
             "set": {
               "BUN": "bun",
@@ -221,62 +221,62 @@
         }
       ],
       "failures": [],
-      "finishedAt": "2026-09-03T12:57:59.301075Z",
+      "finishedAt": "2026-09-03T13:27:27.418232Z",
       "headless": {
         "cleanup": {
-          "elapsedNs": 222625,
-          "finishedAtNs": 20294143584861,
+          "elapsedNs": 248166,
+          "finishedAtNs": 22061760614083,
           "forcedCleanupRequired": false,
-          "gracefulElapsedNs": 159875,
-          "gracefulFinishedAtNs": 20294143522111,
+          "gracefulElapsedNs": 182916,
+          "gracefulFinishedAtNs": 22061760548833,
           "residueAfterDispose": 0,
           "residueAfterForcedCleanup": 0,
           "residueStatus": "verified before forced cleanup",
-          "startedAtNs": 20294143362236,
+          "startedAtNs": 22061760365917,
           "survivors": [],
           "survivorsAfterForcedCleanup": []
         },
-        "completedAtNs": 20294143164111,
-        "completionElapsedNs": 177455167,
+        "completedAtNs": 22061760164500,
+        "completionElapsedNs": 197948000,
         "exitCode": 0,
-        "firstStdoutAtNs": 20294138250152,
-        "firstStdoutElapsedNs": 172541208,
+        "firstStdoutAtNs": 22061748671333,
+        "firstStdoutElapsedNs": 186454833,
         "pssSnapshots": [
           {
-            "atNs": 20293967260110,
+            "atNs": 22061563850667,
             "available": true,
             "phase": "headless-started",
             "processes": [
               {
-                "pid": 14854,
-                "pssKiB": 2511
+                "pid": 15109,
+                "pssKiB": 2073
               }
             ],
-            "totalKiB": 2511
+            "totalKiB": 2073
           },
           {
-            "atNs": 20294079517236,
+            "atNs": 22061670627667,
             "available": true,
             "phase": "headless-running",
             "processes": [
               {
-                "pid": 14854,
-                "pssKiB": 11022
+                "pid": 15109,
+                "pssKiB": 11020
               }
             ],
-            "totalKiB": 11022
+            "totalKiB": 11020
           },
           {
-            "atNs": 20294143218277,
+            "atNs": 22061760218167,
             "available": false,
             "phase": "headless-completed",
             "reason": "no live process in benchmark process tree"
           }
         ],
-        "startedAtNs": 20293965708944,
+        "startedAtNs": 22061562216500,
         "stderr": "",
         "stdout": "CLI tool round trip complete: CLI_TOOL_ROUND_TRIP\n",
-        "treePeakPssKiB": 11022
+        "treePeakPssKiB": 11020
       },
       "manifest": "Compatibility",
       "repetition": 1,
@@ -286,1400 +286,1508 @@
         "version": "tessivum 0.1.0-alpha.23"
       },
       "schema": "tessivum.product-benchmark-sample/v2",
-      "startedAt": "2026-09-03T12:57:50.388275Z",
+      "startedAt": "2026-09-03T13:27:17.996505Z",
       "success": true,
       "web": {
         "browser": {
           "cleanup": {
-            "elapsedNs": 1228083,
-            "finishedAtNs": 20300730397447,
+            "elapsedNs": 1469333,
+            "finishedAtNs": 22068820652420,
             "forcedCleanupRequired": false,
-            "gracefulElapsedNs": 859291,
-            "gracefulFinishedAtNs": 20300730028655,
+            "gracefulElapsedNs": 1108000,
+            "gracefulFinishedAtNs": 22068820291087,
             "residueAfterDispose": 0,
             "residueAfterForcedCleanup": 0,
             "residueStatus": "verified before forced cleanup",
-            "startedAtNs": 20300729169364,
+            "startedAtNs": 22068819183087,
             "survivors": [],
             "survivorsAfterForcedCleanup": []
           },
-          "completedAtNs": 20300466923280,
-          "completionElapsedNs": 3627868543,
-          "composerEnabledElapsedMs": 2396,
+          "completedAtNs": 22068554333712,
+          "completionElapsedNs": 3848550585,
+          "composerEnabledElapsedMs": 2533,
           "exitCode": 0,
-          "firstPromptCompletionElapsedMs": 76,
+          "firstPromptCompletionElapsedMs": 74,
           "pssSnapshots": [
             {
-              "atNs": 20296840695237,
+              "atNs": 22064707268835,
               "available": true,
               "phase": "browser-started",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 1916
+                  "pid": 15163,
+                  "pssKiB": 1645
                 }
               ],
-              "totalKiB": 1916
+              "totalKiB": 1645
             },
             {
-              "atNs": 20296949737154,
+              "atNs": 22064815190918,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 40341
+                  "pid": 15163,
+                  "pssKiB": 41358
                 }
               ],
-              "totalKiB": 40341
+              "totalKiB": 41358
             },
             {
-              "atNs": 20297056070987,
+              "atNs": 22064925508668,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 84168
+                  "pid": 15163,
+                  "pssKiB": 83828
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 630
+                  "pid": 15179,
+                  "pssKiB": 3836
                 }
               ],
-              "totalKiB": 84798
+              "totalKiB": 87664
             },
             {
-              "atNs": 20297159237112,
+              "atNs": 22065029705585,
+              "available": false,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 82890
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 58756
+                }
+              ],
+              "reason": "15180: [Errno 3] No such process: '/proc/15180/smaps_rollup'"
+            },
+            {
+              "atNs": 22065129997293,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 83307
+                  "pid": 15163,
+                  "pssKiB": 82897
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 50706
-                }
-              ],
-              "totalKiB": 134013
-            },
-            {
-              "atNs": 20297268275695,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 83255
+                  "pid": 15179,
+                  "pssKiB": 62623
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 54408
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 30372
-                },
-                {
-                  "pid": 14932,
+                  "pid": 15186,
                   "pssKiB": 30383
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 30377
                 }
               ],
-              "totalKiB": 198418
+              "totalKiB": 206280
             },
             {
-              "atNs": 20297370989987,
+              "atNs": 22065232637668,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 83208
+                  "pid": 15163,
+                  "pssKiB": 82818
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 59239
+                  "pid": 15179,
+                  "pssKiB": 69728
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 22325
+                  "pid": 15186,
+                  "pssKiB": 22357
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 29030
+                  "pid": 15187,
+                  "pssKiB": 29047
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 40908
+                  "pid": 15207,
+                  "pssKiB": 40910
                 }
               ],
-              "totalKiB": 234710
+              "totalKiB": 244860
             },
             {
-              "atNs": 20297475698654,
+              "atNs": 22065342699335,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 83182
+                  "pid": 15163,
+                  "pssKiB": 83067
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 68246
+                  "pid": 15179,
+                  "pssKiB": 81379
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 18497
+                  "pid": 15186,
+                  "pssKiB": 18496
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 18365
+                  "pid": 15187,
+                  "pssKiB": 18344
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 34519
+                  "pid": 15207,
+                  "pssKiB": 34615
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 32027
+                  "pid": 15228,
+                  "pssKiB": 37835
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 17191
+                  "pid": 15238,
+                  "pssKiB": 17831
                 }
               ],
-              "totalKiB": 272027
+              "totalKiB": 291567
             },
             {
-              "atNs": 20297584394571,
+              "atNs": 22065445765335,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 83638
+                  "pid": 15163,
+                  "pssKiB": 83814
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 92102
+                  "pid": 15179,
+                  "pssKiB": 107036
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 18461
+                  "pid": 15186,
+                  "pssKiB": 17924
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 18322
+                  "pid": 15187,
+                  "pssKiB": 14332
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 34412
+                  "pid": 15207,
+                  "pssKiB": 41475
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 39909
+                  "pid": 15228,
+                  "pssKiB": 36985
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 17679
+                  "pid": 15238,
+                  "pssKiB": 12226
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20622
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 21226
                 }
               ],
-              "totalKiB": 304523
+              "totalKiB": 355640
             },
             {
-              "atNs": 20297694163362,
+              "atNs": 22065553649627,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 84052
+                  "pid": 15163,
+                  "pssKiB": 85262
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 105982
+                  "pid": 15179,
+                  "pssKiB": 107531
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17848
+                  "pid": 15186,
+                  "pssKiB": 17835
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14267
+                  "pid": 15187,
+                  "pssKiB": 14250
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 41906
+                  "pid": 15207,
+                  "pssKiB": 41614
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 36817
+                  "pid": 15228,
+                  "pssKiB": 39144
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12080
+                  "pid": 15238,
+                  "pssKiB": 12328
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20857
+                  "pid": 15259,
+                  "pssKiB": 20488
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 25749
+                  "pid": 15260,
+                  "pssKiB": 56045
                 }
               ],
-              "totalKiB": 359558
+              "totalKiB": 394497
             },
             {
-              "atNs": 20297799165237,
+              "atNs": 22065655085919,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 85472
+                  "pid": 15163,
+                  "pssKiB": 86986
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 110016
+                  "pid": 15179,
+                  "pssKiB": 109422
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17808
+                  "pid": 15186,
+                  "pssKiB": 17821
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14232
+                  "pid": 15187,
+                  "pssKiB": 14237
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 41454
+                  "pid": 15207,
+                  "pssKiB": 41957
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 40810
+                  "pid": 15228,
+                  "pssKiB": 40512
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12205
+                  "pid": 15238,
+                  "pssKiB": 12275
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20326
+                  "pid": 15259,
+                  "pssKiB": 20422
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 70611
+                  "pid": 15260,
+                  "pssKiB": 77379
                 }
               ],
-              "totalKiB": 412934
+              "totalKiB": 421011
             },
             {
-              "atNs": 20297904912904,
+              "atNs": 22065767749835,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 88212
+                  "pid": 15163,
+                  "pssKiB": 87470
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 112086
+                  "pid": 15179,
+                  "pssKiB": 112025
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17795
+                  "pid": 15186,
+                  "pssKiB": 17821
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14239
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 41730
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 41384
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12158
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20298
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 92773
-                }
-              ],
-              "totalKiB": 440675
-            },
-            {
-              "atNs": 20298015365487,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 89870
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 110774
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17795
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14242
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 41664
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46858
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12287
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20250
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 122840
-                }
-              ],
-              "totalKiB": 476580
-            },
-            {
-              "atNs": 20298123377987,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 91618
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143281
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17792
-                },
-                {
-                  "pid": 14932,
+                  "pid": 15187,
                   "pssKiB": 14249
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 47457
+                  "pid": 15207,
+                  "pssKiB": 41884
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46950
+                  "pid": 15228,
+                  "pssKiB": 40724
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12398
+                  "pid": 15238,
+                  "pssKiB": 12257
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20222
+                  "pid": 15259,
+                  "pssKiB": 20405
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 172190
+                  "pid": 15260,
+                  "pssKiB": 91313
                 }
               ],
-              "totalKiB": 566157
+              "totalKiB": 438148
             },
             {
-              "atNs": 20298224741446,
+              "atNs": 22065871612210,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92248
+                  "pid": 15163,
+                  "pssKiB": 89458
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143811
+                  "pid": 15179,
+                  "pssKiB": 112094
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17816
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14251
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 81101
+                  "pid": 15207,
+                  "pssKiB": 42125
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 47069
+                  "pid": 15228,
+                  "pssKiB": 45735
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12392
+                  "pid": 15238,
+                  "pssKiB": 12380
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20210
+                  "pid": 15259,
+                  "pssKiB": 20345
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 191415
+                  "pid": 15260,
+                  "pssKiB": 120219
                 }
               ],
-              "totalKiB": 620271
+              "totalKiB": 474423
             },
             {
-              "atNs": 20298329362529,
+              "atNs": 22065979727460,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92516
+                  "pid": 15163,
+                  "pssKiB": 89866
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143820
+                  "pid": 15179,
+                  "pssKiB": 144394
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17816
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14263
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48040
+                  "pid": 15207,
+                  "pssKiB": 42032
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46497
+                  "pid": 15228,
+                  "pssKiB": 46118
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12392
+                  "pid": 15238,
+                  "pssKiB": 12378
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20205
+                  "pid": 15259,
+                  "pssKiB": 20340
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 193544
+                  "pid": 15260,
+                  "pssKiB": 145278
                 }
               ],
-              "totalKiB": 589039
+              "totalKiB": 532485
             },
             {
-              "atNs": 20298438170154,
+              "atNs": 22066084220002,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92560
+                  "pid": 15163,
+                  "pssKiB": 91686
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143840
+                  "pid": 15179,
+                  "pssKiB": 144248
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17808
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14255
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48072
+                  "pid": 15207,
+                  "pssKiB": 54737
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46509
+                  "pid": 15228,
+                  "pssKiB": 46575
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12392
+                  "pid": 15238,
+                  "pssKiB": 12490
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20205
+                  "pid": 15259,
+                  "pssKiB": 20304
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 193544
+                  "pid": 15260,
+                  "pssKiB": 197491
                 }
               ],
-              "totalKiB": 589147
+              "totalKiB": 599594
             },
             {
-              "atNs": 20298538771988,
+              "atNs": 22066185667711,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92616
+                  "pid": 15163,
+                  "pssKiB": 92172
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143840
+                  "pid": 15179,
+                  "pssKiB": 144205
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48072
+                  "pid": 15207,
+                  "pssKiB": 56477
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46509
+                  "pid": 15228,
+                  "pssKiB": 46550
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12392
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20205
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 193548
+                  "pid": 15260,
+                  "pssKiB": 210202
                 }
               ],
-              "totalKiB": 589207
+              "totalKiB": 614437
             },
             {
-              "atNs": 20298644738029,
+              "atNs": 22066293612086,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92636
+                  "pid": 15163,
+                  "pssKiB": 92416
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143840
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48072
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46509
+                  "pid": 15228,
+                  "pssKiB": 46554
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12392
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20205
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 193552
+                  "pid": 15260,
+                  "pssKiB": 211684
                 }
               ],
-              "totalKiB": 589231
+              "totalKiB": 608282
             },
             {
-              "atNs": 20298745702321,
+              "atNs": 22066404933586,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92696
+                  "pid": 15163,
+                  "pssKiB": 92408
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143840
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48072
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46509
+                  "pid": 15228,
+                  "pssKiB": 46554
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12392
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20205
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 193524
+                  "pid": 15260,
+                  "pssKiB": 211764
                 }
               ],
-              "totalKiB": 589263
+              "totalKiB": 608354
             },
             {
-              "atNs": 20298849924696,
+              "atNs": 22066505327086,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 92728
+                  "pid": 15163,
+                  "pssKiB": 92452
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 143844
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17784
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14241
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48072
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46509
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12392
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20205
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 193528
-                }
-              ],
-              "totalKiB": 589303
-            },
-            {
-              "atNs": 20298958711446,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 92892
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143844
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17784
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14241
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48072
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46509
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12392
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20205
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 193532
-                }
-              ],
-              "totalKiB": 589471
-            },
-            {
-              "atNs": 20299064109030,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 92212
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143844
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17784
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14241
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48072
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46509
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12392
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20205
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 193532
-                }
-              ],
-              "totalKiB": 588791
-            },
-            {
-              "atNs": 20299167917071,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 91680
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143848
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17784
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14241
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48072
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46509
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12392
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20205
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 193508
-                }
-              ],
-              "totalKiB": 588239
-            },
-            {
-              "atNs": 20299268049071,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 93642
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 144187
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17784
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14241
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48037
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46504
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12360
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20205
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 199639
-                }
-              ],
-              "totalKiB": 596599
-            },
-            {
-              "atNs": 20299373412655,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 94970
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143770
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17777
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14234
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48211
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46512
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12093
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20197
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 223848
-                }
-              ],
-              "totalKiB": 621612
-            },
-            {
-              "atNs": 20299483655905,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 94654
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143770
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17777
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14234
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48211
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46512
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12093
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20197
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 223848
-                }
-              ],
-              "totalKiB": 621296
-            },
-            {
-              "atNs": 20299594628696,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 94642
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 143770
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17777
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14234
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48211
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46512
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12093
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20197
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 223848
-                }
-              ],
-              "totalKiB": 621284
-            },
-            {
-              "atNs": 20299704118738,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 95682
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 145130
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17777
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14234
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48411
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46532
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12097
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20197
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 227036
-                }
-              ],
-              "totalKiB": 627096
-            },
-            {
-              "atNs": 20299812495822,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 96574
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 145130
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17777
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14234
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48357
-                },
-                {
-                  "pid": 14973,
-                  "pssKiB": 46560
-                },
-                {
-                  "pid": 14983,
-                  "pssKiB": 12101
-                },
-                {
-                  "pid": 15003,
-                  "pssKiB": 20197
-                },
-                {
-                  "pid": 15004,
-                  "pssKiB": 229074
-                }
-              ],
-              "totalKiB": 630004
-            },
-            {
-              "atNs": 20299921190613,
-              "available": true,
-              "phase": "browser-running",
-              "processes": [
-                {
-                  "pid": 14908,
-                  "pssKiB": 98670
-                },
-                {
-                  "pid": 14924,
-                  "pssKiB": 145146
-                },
-                {
-                  "pid": 14931,
-                  "pssKiB": 17777
-                },
-                {
-                  "pid": 14932,
-                  "pssKiB": 14234
-                },
-                {
-                  "pid": 14952,
-                  "pssKiB": 48393
-                },
-                {
-                  "pid": 14973,
+                  "pid": 15228,
                   "pssKiB": 46562
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12105
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20197
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 231200
+                  "pid": 15260,
+                  "pssKiB": 211856
                 }
               ],
-              "totalKiB": 634284
+              "totalKiB": 608498
             },
             {
-              "atNs": 20300021785447,
+              "atNs": 22066608746294,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 99362
+                  "pid": 15163,
+                  "pssKiB": 92480
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 145154
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17777
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14234
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48393
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46564
+                  "pid": 15228,
+                  "pssKiB": 46562
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12113
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20197
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 233246
+                  "pid": 15260,
+                  "pssKiB": 211936
                 }
               ],
-              "totalKiB": 637040
+              "totalKiB": 608606
             },
             {
-              "atNs": 20300130276238,
+              "atNs": 22066722016794,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 99894
+                  "pid": 15163,
+                  "pssKiB": 92620
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 145158
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17777
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14234
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48413
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46564
+                  "pid": 15228,
+                  "pssKiB": 46562
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12113
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20197
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 237710
+                  "pid": 15260,
+                  "pssKiB": 212092
                 }
               ],
-              "totalKiB": 642060
+              "totalKiB": 608902
             },
             {
-              "atNs": 20300234464197,
+              "atNs": 22066828198211,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 99878
+                  "pid": 15163,
+                  "pssKiB": 91976
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 145158
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17777
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14234
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48413
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46564
+                  "pid": 15228,
+                  "pssKiB": 46562
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12113
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20197
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 237846
+                  "pid": 15260,
+                  "pssKiB": 212164
                 }
               ],
-              "totalKiB": 642180
+              "totalKiB": 608330
             },
             {
-              "atNs": 20300347202072,
+              "atNs": 22066939967794,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 99878
+                  "pid": 15163,
+                  "pssKiB": 91460
                 },
                 {
-                  "pid": 14924,
-                  "pssKiB": 145158
+                  "pid": 15179,
+                  "pssKiB": 144332
                 },
                 {
-                  "pid": 14931,
-                  "pssKiB": 17777
+                  "pid": 15186,
+                  "pssKiB": 17805
                 },
                 {
-                  "pid": 14932,
-                  "pssKiB": 14234
+                  "pid": 15187,
+                  "pssKiB": 14252
                 },
                 {
-                  "pid": 14952,
-                  "pssKiB": 48413
+                  "pid": 15207,
+                  "pssKiB": 48465
                 },
                 {
-                  "pid": 14973,
-                  "pssKiB": 46564
+                  "pid": 15228,
+                  "pssKiB": 46562
                 },
                 {
-                  "pid": 14983,
-                  "pssKiB": 12113
+                  "pid": 15238,
+                  "pssKiB": 12484
                 },
                 {
-                  "pid": 15003,
-                  "pssKiB": 20197
+                  "pid": 15259,
+                  "pssKiB": 20290
                 },
                 {
-                  "pid": 15004,
-                  "pssKiB": 237906
+                  "pid": 15260,
+                  "pssKiB": 212248
                 }
               ],
-              "totalKiB": 642240
+              "totalKiB": 607898
             },
             {
-              "atNs": 20300453924947,
+              "atNs": 22067047238086,
               "available": true,
               "phase": "browser-running",
               "processes": [
                 {
-                  "pid": 14908,
-                  "pssKiB": 101123
+                  "pid": 15163,
+                  "pssKiB": 91464
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 144332
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17805
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14252
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48465
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46562
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12484
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20290
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 212252
                 }
               ],
-              "totalKiB": 101123
+              "totalKiB": 607906
+            },
+            {
+              "atNs": 22067153465628,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 91468
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 144336
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17805
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14252
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48465
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46562
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12484
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20290
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 212416
+                }
+              ],
+              "totalKiB": 608078
+            },
+            {
+              "atNs": 22067256453961,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 93130
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 144328
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17805
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14252
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48465
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46562
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12484
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20290
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 212820
+                }
+              ],
+              "totalKiB": 610136
+            },
+            {
+              "atNs": 22067366228503,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 94390
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 144307
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48435
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46570
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12186
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 235149
+                }
+              ],
+              "totalKiB": 633354
+            },
+            {
+              "atNs": 22067466663045,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 94438
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 144315
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48459
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46570
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12186
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 234925
+                }
+              ],
+              "totalKiB": 633210
+            },
+            {
+              "atNs": 22067570784253,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 94438
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 144315
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48459
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46570
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12186
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 234925
+                }
+              ],
+              "totalKiB": 633210
+            },
+            {
+              "atNs": 22067674860420,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 95630
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145663
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48459
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46580
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12190
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 234883
+                }
+              ],
+              "totalKiB": 635722
+            },
+            {
+              "atNs": 22067775641586,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 95798
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145759
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48489
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46612
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12194
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 236281
+                }
+              ],
+              "totalKiB": 637450
+            },
+            {
+              "atNs": 22067875913836,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 98658
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145779
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48565
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46614
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12194
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 240011
+                }
+              ],
+              "totalKiB": 644138
+            },
+            {
+              "atNs": 22067977561128,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 99554
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145783
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48565
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46616
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12202
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 242109
+                }
+              ],
+              "totalKiB": 647146
+            },
+            {
+              "atNs": 22068082118586,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 100898
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145787
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48593
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46618
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12206
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 242863
+                }
+              ],
+              "totalKiB": 649282
+            },
+            {
+              "atNs": 22068190154587,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 102374
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145791
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48593
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46622
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12206
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 245043
+                }
+              ],
+              "totalKiB": 652946
+            },
+            {
+              "atNs": 22068295139378,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 102386
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145791
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48593
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46622
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12206
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 245103
+                }
+              ],
+              "totalKiB": 653018
+            },
+            {
+              "atNs": 22068397099628,
+              "available": true,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 102386
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 145791
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 17798
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 14245
+                },
+                {
+                  "pid": 15207,
+                  "pssKiB": 48593
+                },
+                {
+                  "pid": 15228,
+                  "pssKiB": 46622
+                },
+                {
+                  "pid": 15238,
+                  "pssKiB": 12206
+                },
+                {
+                  "pid": 15259,
+                  "pssKiB": 20274
+                },
+                {
+                  "pid": 15260,
+                  "pssKiB": 245131
+                }
+              ],
+              "totalKiB": 653046
+            },
+            {
+              "atNs": 22068506882462,
+              "available": false,
+              "phase": "browser-running",
+              "processes": [
+                {
+                  "pid": 15163,
+                  "pssKiB": 103051
+                },
+                {
+                  "pid": 15179,
+                  "pssKiB": 183915
+                },
+                {
+                  "pid": 15186,
+                  "pssKiB": 30518
+                },
+                {
+                  "pid": 15187,
+                  "pssKiB": 30478
+                }
+              ],
+              "reason": "15207: [Errno 3] No such process: '/proc/15207/smaps_rollup'; 15238: [Errno 2] No such file or directory: '/proc/15238/smaps_rollup'"
             }
           ],
           "residentSessionSnapshots": {
             "1": {
-              "atNs": 20299640147405,
+              "atNs": 22067640817753,
               "available": true,
               "phase": "web-1-sessions",
               "processes": [
                 {
-                  "pid": 14871,
-                  "pssKiB": 45430
+                  "pid": 15126,
+                  "pssKiB": 46737
                 },
                 {
-                  "pid": 14885,
-                  "pssKiB": 61698
+                  "pid": 15140,
+                  "pssKiB": 61189
                 }
               ],
               "residentSessions": 1,
-              "totalKiB": 107128
+              "totalKiB": 107926
             },
             "10": {
-              "atNs": 20300390289447,
+              "atNs": 22068460581545,
               "available": true,
               "phase": "web-10-sessions",
               "processes": [
                 {
-                  "pid": 14871,
-                  "pssKiB": 49830
+                  "pid": 15126,
+                  "pssKiB": 50765
                 },
                 {
-                  "pid": 14885,
-                  "pssKiB": 61674
+                  "pid": 15140,
+                  "pssKiB": 61165
                 }
               ],
               "residentSessions": 10,
-              "totalKiB": 111504
+              "totalKiB": 111930
             }
           },
           "result": {
@@ -1732,992 +1840,1060 @@
             "promptSubmitted": true,
             "schema": "tessivum.product-benchmark-browser/v2",
             "sessionCompletionMs": {
-              "1": 2533,
-              "10": 3289,
-              "2": 2874,
-              "3": 2922,
-              "4": 2973,
-              "5": 3027,
-              "6": 3077,
-              "7": 3128,
-              "8": 3182,
-              "9": 3238
+              "1": 2673,
+              "10": 3496,
+              "2": 3013,
+              "3": 3069,
+              "4": 3125,
+              "5": 3189,
+              "6": 3246,
+              "7": 3311,
+              "8": 3382,
+              "9": 3435
             },
             "sessionsCompleted": 10,
             "sessionsRequested": 10,
             "timestamps": {
-              "browserLaunchedMs": 683,
-              "composerEnabledMs": 2419,
-              "finishedMs": 3614,
-              "lastMarkerSeenMs": 3289,
-              "markerSeenMs": 2533,
-              "pageLoadedMs": 1234,
-              "promptSubmittedMs": 2457,
-              "startedMs": 23
+              "browserLaunchedMs": 629,
+              "composerEnabledMs": 2555,
+              "finishedMs": 3833,
+              "lastMarkerSeenMs": 3496,
+              "markerSeenMs": 2673,
+              "pageLoadedMs": 1299,
+              "promptSubmittedMs": 2599,
+              "startedMs": 22
             },
-            "url": "http://127.0.0.1:48483/"
+            "url": "http://127.0.0.1:44589/"
           },
-          "startedAtNs": 20296839054737,
+          "startedAtNs": 22064705783127,
           "stderr": "",
-          "stdout": "{\"schema\":\"tessivum.product-benchmark-browser/v2\",\"timestamps\":{\"startedMs\":23,\"browserLaunchedMs\":683,\"pageLoadedMs\":1234,\"composerEnabledMs\":2419,\"promptSubmittedMs\":2457,\"markerSeenMs\":2533,\"lastMarkerSeenMs\":3289,\"finishedMs\":3614},\"errors\":[],\"url\":\"http://127.0.0.1:48483/\",\"marker\":\"CLI tool round trip complete: CLI_TOOL_ROUND_TRIP\",\"promptSubmitted\":true,\"sessionsRequested\":10,\"sessionsCompleted\":10,\"bootPlugins\":[{\"id\":\"dsh-better-sidebar\",\"url\":\"/plugins/dsh-better-sidebar/client.js?rev=3ae56a444a61\",\"rev\":\"3ae56a444a61\",\"inject\":[\"@deepseek-ai/dsh-client-runtime\",\"@deepseek-ai/dsh-client-locale\",\"@deepseek-ai/dsh-client-ui-slots\",\"@deepseek-ai/dsh-client-ui-conversation\",\"@deepseek-ai/dsh-client-modules\"]},{\"id\":\"dsh-dream-skin\",\"url\":\"/plugins/dsh-dream-skin/client.js?rev=ba6b4d10eb2f\",\"rev\":\"ba6b4d10eb2f\",\"inject\":[\"@deepseek-ai/dsh-client-runtime\",\"@deepseek-ai/dsh-client-locale\",\"@deepseek-ai/dsh-client-ui-theme\",\"@deepseek-ai/dsh-client-ui-settings\",\"@deepseek-ai/dsh-client-ui-settings-general\"],\"immediately\":true},{\"id\":\"tessivum-market\",\"url\":\"/plugins/tessivum-market/client.js?rev=ff7e02106530\",\"rev\":\"ff7e02106530\",\"inject\":[\"@deepseek-ai/dsh-client-connection\",\"@deepseek-ai/dsh-client-runtime\",\"@deepseek-ai/dsh-client-locale\",\"@deepseek-ai/dsh-client-ui-settings\",\"@deepseek-ai/dsh-client-ui-theme\"]}],\"sessionCompletionMs\":{\"1\":2533,\"2\":2874,\"3\":2922,\"4\":2973,\"5\":3027,\"6\":3077,\"7\":3128,\"8\":3182,\"9\":3238,\"10\":3289},\"browserFeature\":{\"selector\":\"[data-dsh-panel-host]\",\"count\":1,\"visible\":true}}\n",
-          "tenSessionCompletionElapsedMs": 832
+          "stdout": "{\"schema\":\"tessivum.product-benchmark-browser/v2\",\"timestamps\":{\"startedMs\":22,\"browserLaunchedMs\":629,\"pageLoadedMs\":1299,\"composerEnabledMs\":2555,\"promptSubmittedMs\":2599,\"markerSeenMs\":2673,\"lastMarkerSeenMs\":3496,\"finishedMs\":3833},\"errors\":[],\"url\":\"http://127.0.0.1:44589/\",\"marker\":\"CLI tool round trip complete: CLI_TOOL_ROUND_TRIP\",\"promptSubmitted\":true,\"sessionsRequested\":10,\"sessionsCompleted\":10,\"bootPlugins\":[{\"id\":\"dsh-better-sidebar\",\"url\":\"/plugins/dsh-better-sidebar/client.js?rev=3ae56a444a61\",\"rev\":\"3ae56a444a61\",\"inject\":[\"@deepseek-ai/dsh-client-runtime\",\"@deepseek-ai/dsh-client-locale\",\"@deepseek-ai/dsh-client-ui-slots\",\"@deepseek-ai/dsh-client-ui-conversation\",\"@deepseek-ai/dsh-client-modules\"]},{\"id\":\"dsh-dream-skin\",\"url\":\"/plugins/dsh-dream-skin/client.js?rev=ba6b4d10eb2f\",\"rev\":\"ba6b4d10eb2f\",\"inject\":[\"@deepseek-ai/dsh-client-runtime\",\"@deepseek-ai/dsh-client-locale\",\"@deepseek-ai/dsh-client-ui-theme\",\"@deepseek-ai/dsh-client-ui-settings\",\"@deepseek-ai/dsh-client-ui-settings-general\"],\"immediately\":true},{\"id\":\"tessivum-market\",\"url\":\"/plugins/tessivum-market/client.js?rev=ff7e02106530\",\"rev\":\"ff7e02106530\",\"inject\":[\"@deepseek-ai/dsh-client-connection\",\"@deepseek-ai/dsh-client-runtime\",\"@deepseek-ai/dsh-client-locale\",\"@deepseek-ai/dsh-client-ui-settings\",\"@deepseek-ai/dsh-client-ui-theme\"]}],\"sessionCompletionMs\":{\"1\":2673,\"2\":3013,\"3\":3069,\"4\":3125,\"5\":3189,\"6\":3246,\"7\":3311,\"8\":3382,\"9\":3435,\"10\":3496},\"browserFeature\":{\"selector\":\"[data-dsh-panel-host]\",\"count\":1,\"visible\":true}}\n",
+          "tenSessionCompletionElapsedMs": 897
         },
         "cleanup": {
-          "elapsedNs": 63969041,
-          "finishedAtNs": 20300795939530,
+          "elapsedNs": 64865417,
+          "finishedAtNs": 22068888490170,
           "forcedCleanupRequired": false,
-          "gracefulElapsedNs": 63891333,
-          "gracefulFinishedAtNs": 20300795861822,
+          "gracefulElapsedNs": 64794584,
+          "gracefulFinishedAtNs": 22068888419337,
           "residueAfterDispose": 0,
           "residueAfterForcedCleanup": 0,
           "residueStatus": "verified before forced cleanup",
-          "startedAtNs": 20300731970489,
+          "startedAtNs": 22068823624753,
           "survivors": [],
           "survivorsAfterForcedCleanup": []
         },
-        "createElapsedNs": 1414743168,
-        "disposeElapsedNs": 63891333,
-        "httpReadyAtNs": 20296573638487,
+        "createElapsedNs": 1592018501,
+        "disposeElapsedNs": 64794584,
+        "httpReadyAtNs": 22064444080710,
         "pssSnapshots": [
           {
-            "atNs": 20295159421194,
+            "atNs": 22062853553251,
             "available": true,
             "phase": "web-started",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 1259
+                "pid": 15126,
+                "pssKiB": 681
               }
             ],
-            "totalKiB": 1259
+            "totalKiB": 681
           },
           {
-            "atNs": 20295281160153,
+            "atNs": 22062972762501,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 12159
-              }
-            ],
-            "totalKiB": 12159
-          },
-          {
-            "atNs": 20295396467694,
-            "available": true,
-            "phase": "web-starting",
-            "processes": [
-              {
-                "pid": 14871,
-                "pssKiB": 17320
+                "pid": 15126,
+                "pssKiB": 17167
               },
               {
-                "pid": 14885,
-                "pssKiB": 53525
+                "pid": 15140,
+                "pssKiB": 16119
               }
             ],
-            "totalKiB": 70845
+            "totalKiB": 33286
           },
           {
-            "atNs": 20295501527903,
+            "atNs": 22063085759751,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17320
+                "pid": 15126,
+                "pssKiB": 17315
               },
               {
-                "pid": 14885,
-                "pssKiB": 52533
+                "pid": 15140,
+                "pssKiB": 52516
               }
             ],
-            "totalKiB": 69853
+            "totalKiB": 69831
           },
           {
-            "atNs": 20295624629945,
+            "atNs": 22063187153084,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17320
+                "pid": 15126,
+                "pssKiB": 17315
               },
               {
-                "pid": 14885,
-                "pssKiB": 52641
+                "pid": 15140,
+                "pssKiB": 51968
               }
             ],
-            "totalKiB": 69961
+            "totalKiB": 69283
           },
           {
-            "atNs": 20295746380570,
+            "atNs": 22063309659959,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17315
               },
               {
-                "pid": 14885,
-                "pssKiB": 52717
+                "pid": 15140,
+                "pssKiB": 52120
               }
             ],
-            "totalKiB": 70041
+            "totalKiB": 69435
           },
           {
-            "atNs": 20295856902070,
+            "atNs": 22063412235584,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 54117
+                "pid": 15140,
+                "pssKiB": 52200
               }
             ],
-            "totalKiB": 71441
+            "totalKiB": 69519
           },
           {
-            "atNs": 20295968800111,
+            "atNs": 22063521943084,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 54161
+                "pid": 15140,
+                "pssKiB": 52204
               }
             ],
-            "totalKiB": 71485
+            "totalKiB": 69523
           },
           {
-            "atNs": 20296074857445,
+            "atNs": 22063625353251,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 54277
+                "pid": 15140,
+                "pssKiB": 52216
               }
             ],
-            "totalKiB": 71601
+            "totalKiB": 69535
           },
           {
-            "atNs": 20296178514570,
+            "atNs": 22063725577626,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 54313
+                "pid": 15140,
+                "pssKiB": 53672
               }
             ],
-            "totalKiB": 71637
+            "totalKiB": 70991
           },
           {
-            "atNs": 20296288834570,
+            "atNs": 22063841909126,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 54345
+                "pid": 15140,
+                "pssKiB": 53936
               }
             ],
-            "totalKiB": 71669
+            "totalKiB": 71255
           },
           {
-            "atNs": 20296396579070,
+            "atNs": 22063949444959,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 17324
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 56501
+                "pid": 15140,
+                "pssKiB": 54008
               }
             ],
-            "totalKiB": 73825
+            "totalKiB": 71327
           },
           {
-            "atNs": 20296507513737,
+            "atNs": 22064069400793,
             "available": true,
             "phase": "web-starting",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 18004
+                "pid": 15126,
+                "pssKiB": 17319
               },
               {
-                "pid": 14885,
-                "pssKiB": 76435
+                "pid": 15140,
+                "pssKiB": 54788
               }
             ],
-            "totalKiB": 94439
+            "totalKiB": 72107
           },
           {
-            "atNs": 20296573658862,
+            "atNs": 22064179896335,
+            "available": true,
+            "phase": "web-starting",
+            "processes": [
+              {
+                "pid": 15126,
+                "pssKiB": 17319
+              },
+              {
+                "pid": 15140,
+                "pssKiB": 54912
+              }
+            ],
+            "totalKiB": 72231
+          },
+          {
+            "atNs": 22064288961793,
+            "available": true,
+            "phase": "web-starting",
+            "processes": [
+              {
+                "pid": 15126,
+                "pssKiB": 17807
+              },
+              {
+                "pid": 15140,
+                "pssKiB": 58298
+              }
+            ],
+            "totalKiB": 76105
+          },
+          {
+            "atNs": 22064399208168,
+            "available": true,
+            "phase": "web-starting",
+            "processes": [
+              {
+                "pid": 15126,
+                "pssKiB": 26514
+              },
+              {
+                "pid": 15140,
+                "pssKiB": 77297
+              }
+            ],
+            "totalKiB": 103811
+          },
+          {
+            "atNs": 22064444103293,
             "available": true,
             "phase": "web-idle-stabilizing",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 40143
+                "pid": 15126,
+                "pssKiB": 40138
               },
               {
-                "pid": 14885,
-                "pssKiB": 77518
+                "pid": 15140,
+                "pssKiB": 77017
               }
             ],
-            "totalKiB": 117661
+            "totalKiB": 117155
           },
           {
-            "atNs": 20296675930070,
+            "atNs": 22064550611710,
             "available": true,
             "phase": "web-idle-stabilizing",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 40143
+                "pid": 15126,
+                "pssKiB": 40138
               },
               {
-                "pid": 14885,
-                "pssKiB": 77446
+                "pid": 15140,
+                "pssKiB": 76905
               }
             ],
-            "totalKiB": 117589
+            "totalKiB": 117043
           },
           {
-            "atNs": 20296778749320,
+            "atNs": 22064655887877,
             "available": true,
             "phase": "web-idle-stabilizing",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 40143
+                "pid": 15126,
+                "pssKiB": 40138
               },
               {
-                "pid": 14885,
-                "pssKiB": 77478
+                "pid": 15140,
+                "pssKiB": 76905
               }
             ],
-            "totalKiB": 117621
+            "totalKiB": 117043
           },
           {
-            "atNs": 20296834348445,
+            "atNs": 22064700548252,
             "available": true,
             "phase": "web-idle",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 40143
+                "pid": 15126,
+                "pssKiB": 40138
               },
               {
-                "pid": 14885,
-                "pssKiB": 77482
+                "pid": 15140,
+                "pssKiB": 77025
               }
             ],
-            "totalKiB": 117625
+            "totalKiB": 117163
           },
           {
-            "atNs": 20296950380154,
+            "atNs": 22064815756710,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 40055
-              },
-              {
-                "pid": 14885,
-                "pssKiB": 67838
-              }
-            ],
-            "totalKiB": 107893
-          },
-          {
-            "atNs": 20297057073404,
-            "available": true,
-            "phase": "web-browser-session",
-            "processes": [
-              {
-                "pid": 14871,
+                "pid": 15126,
                 "pssKiB": 40050
               },
               {
-                "pid": 14885,
-                "pssKiB": 60564
+                "pid": 15140,
+                "pssKiB": 67285
               }
             ],
-            "totalKiB": 100614
+            "totalKiB": 107335
           },
           {
-            "atNs": 20297160441779,
+            "atNs": 22064926549418,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 39996
+                "pid": 15126,
+                "pssKiB": 40027
               },
               {
-                "pid": 14885,
-                "pssKiB": 60480
+                "pid": 15140,
+                "pssKiB": 60073
               }
             ],
-            "totalKiB": 100476
+            "totalKiB": 100100
           },
           {
-            "atNs": 20297270584779,
+            "atNs": 22065031162043,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 39874
+                "pid": 15126,
+                "pssKiB": 39974
               },
               {
-                "pid": 14885,
-                "pssKiB": 60357
+                "pid": 15140,
+                "pssKiB": 60018
               }
             ],
-            "totalKiB": 100231
+            "totalKiB": 99992
           },
           {
-            "atNs": 20297374105654,
+            "atNs": 22065132949585,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 39852
+                "pid": 15126,
+                "pssKiB": 39870
               },
               {
-                "pid": 14885,
-                "pssKiB": 60462
+                "pid": 15140,
+                "pssKiB": 59975
               }
             ],
-            "totalKiB": 100314
+            "totalKiB": 99845
           },
           {
-            "atNs": 20297479732612,
+            "atNs": 22065235865585,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 39823
+                "pid": 15126,
+                "pssKiB": 39848
               },
               {
-                "pid": 14885,
-                "pssKiB": 60489
+                "pid": 15140,
+                "pssKiB": 59788
               }
             ],
-            "totalKiB": 100312
+            "totalKiB": 99636
           },
           {
-            "atNs": 20297588537362,
+            "atNs": 22065346204668,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 39823
+                "pid": 15126,
+                "pssKiB": 39819
               },
               {
-                "pid": 14885,
-                "pssKiB": 60325
+                "pid": 15140,
+                "pssKiB": 59759
               }
             ],
-            "totalKiB": 100148
+            "totalKiB": 99578
           },
           {
-            "atNs": 20297699017571,
+            "atNs": 22065450871919,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 39806
+                "pid": 15126,
+                "pssKiB": 39801
               },
               {
-                "pid": 14885,
-                "pssKiB": 60308
+                "pid": 15140,
+                "pssKiB": 59741
               }
             ],
-            "totalKiB": 100114
+            "totalKiB": 99542
           },
           {
-            "atNs": 20297805165904,
+            "atNs": 22065564987794,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 41662
+                "pid": 15126,
+                "pssKiB": 41161
               },
               {
-                "pid": 14885,
-                "pssKiB": 60276
+                "pid": 15140,
+                "pssKiB": 59709
               }
             ],
-            "totalKiB": 101938
+            "totalKiB": 100870
           },
           {
-            "atNs": 20297909605696,
+            "atNs": 22065661915919,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 41670
+                "pid": 15126,
+                "pssKiB": 42005
               },
               {
-                "pid": 14885,
-                "pssKiB": 60244
+                "pid": 15140,
+                "pssKiB": 59709
               }
             ],
-            "totalKiB": 101914
+            "totalKiB": 101714
           },
           {
-            "atNs": 20298020348029,
+            "atNs": 22065772664002,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 43438
+                "pid": 15126,
+                "pssKiB": 42005
               },
               {
-                "pid": 14885,
-                "pssKiB": 60398
+                "pid": 15140,
+                "pssKiB": 59709
               }
             ],
-            "totalKiB": 103836
+            "totalKiB": 101714
           },
           {
-            "atNs": 20298129103987,
+            "atNs": 22065876465377,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 43990
+                "pid": 15126,
+                "pssKiB": 44421
               },
               {
-                "pid": 14885,
-                "pssKiB": 60710
+                "pid": 15140,
+                "pssKiB": 59911
               }
             ],
-            "totalKiB": 104700
+            "totalKiB": 104332
           },
           {
-            "atNs": 20298232637029,
+            "atNs": 22065988043419,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 44897
               },
               {
-                "pid": 14885,
-                "pssKiB": 61608
+                "pid": 15140,
+                "pssKiB": 60173
               }
             ],
-            "totalKiB": 106170
+            "totalKiB": 105070
           },
           {
-            "atNs": 20298335154696,
+            "atNs": 22066090596252,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45585
               },
               {
-                "pid": 14885,
-                "pssKiB": 61800
+                "pid": 15140,
+                "pssKiB": 60565
               }
             ],
-            "totalKiB": 106362
+            "totalKiB": 106150
           },
           {
-            "atNs": 20298446619654,
+            "atNs": 22066192561919,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61800
+                "pid": 15140,
+                "pssKiB": 61095
               }
             ],
-            "totalKiB": 106362
+            "totalKiB": 106736
           },
           {
-            "atNs": 20298545061738,
+            "atNs": 22066300581252,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61099
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106740
           },
           {
-            "atNs": 20298652730446,
+            "atNs": 22066410154419,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61099
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106740
           },
           {
-            "atNs": 20298754110446,
+            "atNs": 22066511114669,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61099
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106740
           },
           {
-            "atNs": 20298856150488,
+            "atNs": 22066617585627,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61107
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106748
           },
           {
-            "atNs": 20298965933738,
+            "atNs": 22066742565836,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61107
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106748
           },
           {
-            "atNs": 20299075133780,
+            "atNs": 22066846330503,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61107
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106748
           },
           {
-            "atNs": 20299180033071,
+            "atNs": 22066960368586,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61788
+                "pid": 15140,
+                "pssKiB": 61107
               }
             ],
-            "totalKiB": 106350
+            "totalKiB": 106748
           },
           {
-            "atNs": 20299275726196,
+            "atNs": 22067067372711,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 44562
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61766
+                "pid": 15140,
+                "pssKiB": 61275
               }
             ],
-            "totalKiB": 106328
+            "totalKiB": 106916
           },
           {
-            "atNs": 20299378776988,
+            "atNs": 22067173850169,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 45430
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61758
+                "pid": 15140,
+                "pssKiB": 61267
               }
             ],
-            "totalKiB": 107188
+            "totalKiB": 106908
           },
           {
-            "atNs": 20299490285780,
+            "atNs": 22067268764753,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 45430
+                "pid": 15126,
+                "pssKiB": 45641
               },
               {
-                "pid": 14885,
-                "pssKiB": 61758
+                "pid": 15140,
+                "pssKiB": 61245
               }
             ],
-            "totalKiB": 107188
+            "totalKiB": 106886
           },
           {
-            "atNs": 20299610599696,
+            "atNs": 22067372481628,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 45430
+                "pid": 15126,
+                "pssKiB": 46737
               },
               {
-                "pid": 14885,
-                "pssKiB": 61758
+                "pid": 15140,
+                "pssKiB": 61245
               }
             ],
-            "totalKiB": 107188
+            "totalKiB": 107982
           },
           {
-            "atNs": 20299640147405,
+            "atNs": 22067473510378,
+            "available": true,
+            "phase": "web-browser-session",
+            "processes": [
+              {
+                "pid": 15126,
+                "pssKiB": 46737
+              },
+              {
+                "pid": 15140,
+                "pssKiB": 61245
+              }
+            ],
+            "totalKiB": 107982
+          },
+          {
+            "atNs": 22067582871086,
+            "available": true,
+            "phase": "web-browser-session",
+            "processes": [
+              {
+                "pid": 15126,
+                "pssKiB": 46737
+              },
+              {
+                "pid": 15140,
+                "pssKiB": 61245
+              }
+            ],
+            "totalKiB": 107982
+          },
+          {
+            "atNs": 22067640817753,
             "available": true,
             "phase": "web-1-sessions",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 45430
+                "pid": 15126,
+                "pssKiB": 46737
               },
               {
-                "pid": 14885,
-                "pssKiB": 61698
+                "pid": 15140,
+                "pssKiB": 61189
               }
             ],
             "residentSessions": 1,
-            "totalKiB": 107128
+            "totalKiB": 107926
           },
           {
-            "atNs": 20299709598363,
+            "atNs": 22067681163211,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 45994
+                "pid": 15126,
+                "pssKiB": 47177
               },
               {
-                "pid": 14885,
-                "pssKiB": 61698
+                "pid": 15140,
+                "pssKiB": 61189
               }
             ],
-            "totalKiB": 107692
+            "totalKiB": 108366
           },
           {
-            "atNs": 20299817725905,
+            "atNs": 22067781238170,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 47334
+                "pid": 15126,
+                "pssKiB": 47649
               },
               {
-                "pid": 14885,
-                "pssKiB": 61666
+                "pid": 15140,
+                "pssKiB": 61189
               }
             ],
-            "totalKiB": 109000
+            "totalKiB": 108838
           },
           {
-            "atNs": 20299926444322,
+            "atNs": 22067881634961,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 48006
+                "pid": 15126,
+                "pssKiB": 48389
               },
               {
-                "pid": 14885,
-                "pssKiB": 61666
+                "pid": 15140,
+                "pssKiB": 61157
               }
             ],
-            "totalKiB": 109672
+            "totalKiB": 109546
           },
           {
-            "atNs": 20300027391155,
+            "atNs": 22067983177003,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 49198
+                "pid": 15126,
+                "pssKiB": 49225
               },
               {
-                "pid": 14885,
-                "pssKiB": 61666
+                "pid": 15140,
+                "pssKiB": 61157
               }
             ],
-            "totalKiB": 110864
+            "totalKiB": 110382
           },
           {
-            "atNs": 20300135592613,
+            "atNs": 22068087119961,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 49822
+                "pid": 15126,
+                "pssKiB": 49585
               },
               {
-                "pid": 14885,
-                "pssKiB": 61666
+                "pid": 15140,
+                "pssKiB": 61157
               }
             ],
-            "totalKiB": 111488
+            "totalKiB": 110742
           },
           {
-            "atNs": 20300241198155,
+            "atNs": 22068195226837,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 49822
+                "pid": 15126,
+                "pssKiB": 50501
               },
               {
-                "pid": 14885,
-                "pssKiB": 61666
+                "pid": 15140,
+                "pssKiB": 61157
               }
             ],
-            "totalKiB": 111488
+            "totalKiB": 111658
           },
           {
-            "atNs": 20300362721155,
+            "atNs": 22068303172212,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 49822
+                "pid": 15126,
+                "pssKiB": 50757
               },
               {
-                "pid": 14885,
-                "pssKiB": 61666
+                "pid": 15140,
+                "pssKiB": 61157
               }
             ],
-            "totalKiB": 111488
+            "totalKiB": 111914
           },
           {
-            "atNs": 20300390289447,
+            "atNs": 22068406385337,
+            "available": true,
+            "phase": "web-browser-session",
+            "processes": [
+              {
+                "pid": 15126,
+                "pssKiB": 50757
+              },
+              {
+                "pid": 15140,
+                "pssKiB": 61157
+              }
+            ],
+            "totalKiB": 111914
+          },
+          {
+            "atNs": 22068460581545,
             "available": true,
             "phase": "web-10-sessions",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 49830
+                "pid": 15126,
+                "pssKiB": 50765
               },
               {
-                "pid": 14885,
-                "pssKiB": 61674
+                "pid": 15140,
+                "pssKiB": 61165
               }
             ],
             "residentSessions": 10,
-            "totalKiB": 111504
+            "totalKiB": 111930
           },
           {
-            "atNs": 20300455662739,
+            "atNs": 22068511375295,
             "available": true,
             "phase": "web-browser-session",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 50071
+                "pid": 15126,
+                "pssKiB": 50826
               },
               {
-                "pid": 14885,
-                "pssKiB": 61742
+                "pid": 15140,
+                "pssKiB": 61197
               }
             ],
-            "totalKiB": 111813
+            "totalKiB": 112023
           },
           {
-            "atNs": 20300467305447,
+            "atNs": 22068554838378,
             "available": true,
             "phase": "web-session-stabilizing",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 50159
+                "pid": 15126,
+                "pssKiB": 51094
               },
               {
-                "pid": 14885,
-                "pssKiB": 79266
+                "pid": 15140,
+                "pssKiB": 78773
               }
             ],
-            "totalKiB": 129425
+            "totalKiB": 129867
           },
           {
-            "atNs": 20300581889155,
+            "atNs": 22068662841545,
             "available": true,
             "phase": "web-session-stabilizing",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 50159
+                "pid": 15126,
+                "pssKiB": 51094
               },
               {
-                "pid": 14885,
-                "pssKiB": 79266
+                "pid": 15140,
+                "pssKiB": 78765
               }
             ],
-            "totalKiB": 129425
+            "totalKiB": 129859
           },
           {
-            "atNs": 20300694154614,
+            "atNs": 22068771108962,
             "available": true,
             "phase": "web-session-stabilizing",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 50159
+                "pid": 15126,
+                "pssKiB": 51094
               },
               {
-                "pid": 14885,
-                "pssKiB": 79266
+                "pid": 15140,
+                "pssKiB": 78769
               }
             ],
-            "totalKiB": 129425
+            "totalKiB": 129863
           },
           {
-            "atNs": 20300724051530,
+            "atNs": 22068813577337,
             "available": true,
             "phase": "web-ten-sessions",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 50159
+                "pid": 15126,
+                "pssKiB": 51094
               },
               {
-                "pid": 14885,
-                "pssKiB": 79266
+                "pid": 15140,
+                "pssKiB": 78769
               }
             ],
-            "totalKiB": 129425
+            "totalKiB": 129863
           },
           {
-            "atNs": 20300730453030,
+            "atNs": 22068820732295,
             "available": true,
             "phase": "web-before-dispose",
             "processes": [
               {
-                "pid": 14871,
-                "pssKiB": 50159
+                "pid": 15126,
+                "pssKiB": 51094
               },
               {
-                "pid": 14885,
-                "pssKiB": 79266
+                "pid": 15140,
+                "pssKiB": 78769
               }
             ],
-            "totalKiB": 129425
+            "totalKiB": 129863
           }
         ],
-        "readyElapsedNs": 1414743168,
+        "readyElapsedNs": 1592018501,
         "residueAfterDispose": 0,
-        "startedAtNs": 20295158895319,
-        "stderr": "Legacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.load\",\"1\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.load\",\"1\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.load\",\"3\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.load\",\"3\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.load\",\"5\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.load\",\"5\"]}\nTessivum web listening at http://127.0.0.1:48483\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.dispose\",\"23\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.dispose\",\"23\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.dispose\",\"25\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.dispose\",\"25\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.dispose\",\"27\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.dispose\",\"27\"]}\n",
+        "startedAtNs": 22062852062209,
+        "stderr": "Legacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.load\",\"1\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.load\",\"1\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.load\",\"3\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.load\",\"3\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.load\",\"5\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.load\",\"5\"]}\nTessivum web listening at http://127.0.0.1:44589\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.dispose\",\"23\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.dispose\",\"23\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.dispose\",\"25\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.dispose\",\"25\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:operation-done\",\"plugin.dispose\",\"27\"]}\nLegacy Node: {\"level\":\"debug\",\"message\":[\"dispatch:response-written\",\"plugin.dispose\",\"27\"]}\n",
         "stdout": "",
-        "treeIdlePssKiB": 117625,
-        "treeOneSessionDeltaFromIdleKiB": -10497,
-        "treeOneSessionPssKiB": 107128,
-        "treeTenSessionDeltaFromIdleKiB": 11800,
-        "treeTenSessionPerSessionKiB": 1180.0,
-        "treeTenSessionPssKiB": 129425
+        "treeIdlePssKiB": 117163,
+        "treeOneSessionDeltaFromIdleKiB": -9237,
+        "treeOneSessionPssKiB": 107926,
+        "treeTenSessionDeltaFromIdleKiB": 12700,
+        "treeTenSessionPerSessionKiB": 1270.0,
+        "treeTenSessionPssKiB": 129863
       }
     }
   ],
   "schema": "tessivum.product-benchmark-run/v2",
-  "startedAt": "2026-09-03T12:57:50.388144Z",
+  "startedAt": "2026-09-03T13:27:17.996365Z",
   "status": "passed",
   "summaries": [
     {
@@ -2725,66 +2901,66 @@
       "manifest": "Compatibility",
       "metrics": {
         "headless.completionElapsedNs": {
-          "max": 177455167,
-          "median": 177455167,
-          "min": 177455167,
-          "p95": 177455167,
+          "max": 197948000,
+          "median": 197948000,
+          "min": 197948000,
+          "p95": 197948000,
           "successfulSamples": 1
         },
         "headless.firstStdoutElapsedNs": {
-          "max": 172541208,
-          "median": 172541208,
-          "min": 172541208,
-          "p95": 172541208,
+          "max": 186454833,
+          "median": 186454833,
+          "min": 186454833,
+          "p95": 186454833,
           "successfulSamples": 1
         },
         "headless.treePeakPssKiB": {
-          "max": 11022,
-          "median": 11022,
-          "min": 11022,
-          "p95": 11022,
+          "max": 11020,
+          "median": 11020,
+          "min": 11020,
+          "p95": 11020,
           "successfulSamples": 1
         },
         "web.browser.composerEnabledElapsedMs": {
-          "max": 2396,
-          "median": 2396,
-          "min": 2396,
-          "p95": 2396,
+          "max": 2533,
+          "median": 2533,
+          "min": 2533,
+          "p95": 2533,
           "successfulSamples": 1
         },
         "web.browser.firstPromptCompletionElapsedMs": {
-          "max": 76,
-          "median": 76,
-          "min": 76,
-          "p95": 76,
+          "max": 74,
+          "median": 74,
+          "min": 74,
+          "p95": 74,
           "successfulSamples": 1
         },
         "web.browser.tenSessionCompletionElapsedMs": {
-          "max": 832,
-          "median": 832,
-          "min": 832,
-          "p95": 832,
+          "max": 897,
+          "median": 897,
+          "min": 897,
+          "p95": 897,
           "successfulSamples": 1
         },
         "web.createElapsedNs": {
-          "max": 1414743168,
-          "median": 1414743168,
-          "min": 1414743168,
-          "p95": 1414743168,
+          "max": 1592018501,
+          "median": 1592018501,
+          "min": 1592018501,
+          "p95": 1592018501,
           "successfulSamples": 1
         },
         "web.disposeElapsedNs": {
-          "max": 63891333,
-          "median": 63891333,
-          "min": 63891333,
-          "p95": 63891333,
+          "max": 64794584,
+          "median": 64794584,
+          "min": 64794584,
+          "p95": 64794584,
           "successfulSamples": 1
         },
         "web.readyElapsedNs": {
-          "max": 1414743168,
-          "median": 1414743168,
-          "min": 1414743168,
-          "p95": 1414743168,
+          "max": 1592018501,
+          "median": 1592018501,
+          "min": 1592018501,
+          "p95": 1592018501,
           "successfulSamples": 1
         },
         "web.residueAfterDispose": {
@@ -2795,45 +2971,45 @@
           "successfulSamples": 1
         },
         "web.treeIdlePssKiB": {
-          "max": 117625,
-          "median": 117625,
-          "min": 117625,
-          "p95": 117625,
+          "max": 117163,
+          "median": 117163,
+          "min": 117163,
+          "p95": 117163,
           "successfulSamples": 1
         },
         "web.treeOneSessionDeltaFromIdleKiB": {
-          "max": -10497,
-          "median": -10497,
-          "min": -10497,
-          "p95": -10497,
+          "max": -9237,
+          "median": -9237,
+          "min": -9237,
+          "p95": -9237,
           "successfulSamples": 1
         },
         "web.treeOneSessionPssKiB": {
-          "max": 107128,
-          "median": 107128,
-          "min": 107128,
-          "p95": 107128,
+          "max": 107926,
+          "median": 107926,
+          "min": 107926,
+          "p95": 107926,
           "successfulSamples": 1
         },
         "web.treeTenSessionDeltaFromIdleKiB": {
-          "max": 11800,
-          "median": 11800,
-          "min": 11800,
-          "p95": 11800,
+          "max": 12700,
+          "median": 12700,
+          "min": 12700,
+          "p95": 12700,
           "successfulSamples": 1
         },
         "web.treeTenSessionPerSessionKiB": {
-          "max": 1180.0,
-          "median": 1180.0,
-          "min": 1180.0,
-          "p95": 1180.0,
+          "max": 1270.0,
+          "median": 1270.0,
+          "min": 1270.0,
+          "p95": 1270.0,
           "successfulSamples": 1
         },
         "web.treeTenSessionPssKiB": {
-          "max": 129425,
-          "median": 129425,
-          "min": 129425,
-          "p95": 129425,
+          "max": 129863,
+          "median": 129863,
+          "min": 129863,
+          "p95": 129863,
           "successfulSamples": 1
         }
       },

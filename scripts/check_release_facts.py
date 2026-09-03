@@ -36,6 +36,10 @@ def metrics(report: dict[str, Any], runtime: str) -> dict[str, dict[str, Any]]:
     return {metric["name"]: metric for metric in report["runtimes"][runtime]["benchmarks"]}
 
 
+def pair(metric: dict[str, Any], scale: float, digits: int, suffix: str) -> str:
+    return f"{metric['median'] / scale:,.{digits}f} / {metric['p95'] / scale:,.{digits}f} {suffix}"
+
+
 def main() -> int:
     manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8").splitlines()
     version = next(line.split('"', 2)[1] for line in manifest if line.startswith("version = "))
@@ -57,7 +61,7 @@ def main() -> int:
     rust = metrics(core, "rust")
     typescript = metrics(core, "typescript")
     scope_ratio = typescript["scope_create_dispose"]["median"] / rust["scope_create_dispose"]["median"]
-    peak_ratio = typescript["process_pss_peak"]["median"] / rust["process_pss_peak"]["median"]
+    peak_ratio = typescript["process_pss_live"]["median"] / rust["process_pss_live"]["median"]
     loader_regression = rust["loader_update"]["median"] / typescript["loader_update"]["median"]
     require((round(scope_ratio, 2), round(peak_ratio, 2), round(loader_regression, 2)) == (24.02, 17.43, 39.49), "Core release ratios drifted")
     require(rust["residue_after_dispose"]["max"] == 0 and typescript["residue_after_dispose"]["max"] == 0, "Core disposal residue is non-zero")
@@ -94,17 +98,69 @@ def main() -> int:
     for path in (CORE_PATH, PRODUCT_PATH):
         require(sha256(path) == expected_hashes[path.name], f"{path.name} digest drifted")
 
+    base = summaries["Base"]["metrics"]
+    compatibility = summaries["Compatibility"]["metrics"]
+    core_cells = [
+        f"{pair(rust['scope_create_dispose'], 1_000_000, 3, 'ms')} | {pair(typescript['scope_create_dispose'], 1_000_000, 3, 'ms')}",
+        f"{pair(rust['service_lookup'], 1_000_000, 3, 'M ops/s')} | {pair(typescript['service_lookup'], 1_000_000, 3, 'M ops/s')}",
+        f"{pair(rust['event_emit'], 1_000_000, 3, 'M ops/s')} | {pair(typescript['event_emit'], 1_000_000, 3, 'M ops/s')}",
+        f"{pair(rust['loader_load'], 1_000_000, 3, 'ms')} | {pair(typescript['loader_load'], 1_000_000, 3, 'ms')}",
+        f"{pair(rust['loader_update'], 1_000_000, 3, 'ms')} | {pair(typescript['loader_update'], 1_000_000, 3, 'ms')}",
+        f"{pair(rust['root_dispose'], 1_000_000, 3, 'ms')} | {pair(typescript['root_dispose'], 1_000_000, 3, 'ms')}",
+        f"{pair(rust['process_pss_live'], 1024, 2, 'MiB')} | {pair(typescript['process_pss_live'], 1024, 2, 'MiB')}",
+        f"{pair(rust['process_pss_residue'], 1024, 2, 'MiB')} | {pair(typescript['process_pss_residue'], 1024, 2, 'MiB')}",
+    ]
+    core_ratios = [
+        typescript["scope_create_dispose"]["median"] / rust["scope_create_dispose"]["median"],
+        rust["service_lookup"]["median"] / typescript["service_lookup"]["median"],
+        rust["event_emit"]["median"] / typescript["event_emit"]["median"],
+        typescript["loader_load"]["median"] / rust["loader_load"]["median"],
+        rust["loader_update"]["median"] / typescript["loader_update"]["median"],
+        typescript["root_dispose"]["median"] / rust["root_dispose"]["median"],
+        typescript["process_pss_live"]["median"] / rust["process_pss_live"]["median"],
+        typescript["process_pss_residue"]["median"] / rust["process_pss_residue"]["median"],
+    ]
+    product_specs = [
+        ("headless.completionElapsedNs", 1_000_000, 2, "ms"),
+        ("web.readyElapsedNs", 1_000_000, 2, "ms"),
+        ("web.browser.composerEnabledElapsedMs", 1000, 3, "s"),
+        ("web.browser.firstPromptCompletionElapsedMs", 1, 1, "ms"),
+        ("web.browser.tenSessionCompletionElapsedMs", 1000, 3, "s"),
+        ("web.treeIdlePssKiB", 1024, 2, "MiB"),
+        ("web.treeOneSessionDeltaFromIdleKiB", 1024, 2, "MiB"),
+        ("web.treeTenSessionDeltaFromIdleKiB", 1024, 2, "MiB"),
+        ("web.treeTenSessionPerSessionKiB", 1024, 3, "MiB"),
+        ("web.disposeElapsedNs", 1_000_000, 2, "ms"),
+    ]
+    product_cells = [f"{pair(base[name], scale, digits, suffix)} | {pair(compatibility[name], scale, digits, suffix)}"
+                     for name, scale, digits, suffix in product_specs]
+    ready_cost = compatibility["web.readyElapsedNs"]["median"] / base["web.readyElapsedNs"]["median"]
+    idle_cost_mib = (compatibility["web.treeIdlePssKiB"]["median"] - base["web.treeIdlePssKiB"]["median"]) / 1024
+    report_facts = [
+        *(f"{ratio:.2f}×" for ratio in core_ratios),
+        *core_cells,
+        *product_cells,
+        f"{ready_cost:.2f}×",
+        f"{idle_cost_mib:.2f} MiB",
+        "30/30",
+        *expected_hashes.values(),
+        core["workloadSha256"],
+        *(item["sha256"] for item in product["manifests"]),
+        *core["revisions"].values(),
+        product["provenance"]["productCoreDependencyRevision"],
+    ]
     for path in REPORTS:
         report = path.read_text(encoding="utf-8")
-        for fact in ("24.02×", "17.43×", "39.49×", "30/30", *expected_hashes.values()):
-            require(fact in report, f"{path.name}: missing release fact {fact}")
+        for fact in report_facts:
+            require(fact in report, f"{path.name}: missing evidence-derived fact {fact}")
 
     english = (ROOT / "README.md").read_text(encoding="utf-8")
     chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
     require("Principle and implementation, in concert." in english[:1000], "English product slogan drifted")
     require("道器相成" in chinese[:1000], "Chinese product slogan drifted")
-    require("24.02×" in english and "30/30" in english, "English README benchmark claim drifted")
-    require("24.02×" in chinese and "30/30" in chinese, "Chinese README benchmark claim drifted")
+    headline = f"{scope_ratio:.2f}×"
+    require(headline in english and "30/30" in english, "English README benchmark claim drifted")
+    require(headline in chinese and "30/30" in chinese, "Chinese README benchmark claim drifted")
     require("PHASE9_BENCHMARK_REPORT.md" in english, "English README lost benchmark evidence link")
     require("PHASE9_BENCHMARK_REPORT.zh-CN.md" in chinese, "Chinese README lost benchmark evidence link")
 

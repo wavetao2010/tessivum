@@ -5,19 +5,19 @@
   "updateVersion": "0.17.1",
   "failureVersion": "99.99.99",
   "revisions": {
-    "product": "b35dcbc6bef844b2329702eeabd476bc402b885e",
+    "product": "970dc5af5a734e03588b401d26904aa8ebd33295",
     "core": "4674aeda870989fede1fc79fb07afbe764d3a1eb",
     "deepseekHarness": "47f943859bef60e4160492346772ded9b24f765a"
   },
-  "binarySha256": "bc6c64d22c5c621c085cf6f7015bdb95d00ba49c313a5527cd943478eb481b32",
+  "binarySha256": "250f5cc2922483a841dc735227e45f58acbc972484366508976606ca1523605b",
   "productEvidence": {
     "path": "dsh-better-sidebar-0.16.1-product.json",
-    "sha256": "b477d3246b1d180ffa823f6c62b66bcfd4eb56367012edecea8498f89a04797c"
+    "sha256": "900d5bea5520d5da9789c5bc7bb1202caf265fbd6d57ed50808d28ee3e035b44"
   },
   "checks": {
     "exactInstall": {
       "installedVersion": "0.16.1",
-      "output": "✓ Lockfile passes supply-chain policies (verified 634ms ago)\nProgress: resolved 0, reused 1, downloaded 0, added 0\nProgress: resolved 23, reused 3, downloaded 0, added 0\nProgress: resolved 71, reused 21, downloaded 31, added 0\nProgress: resolved 78, reused 21, downloaded 49, added 0\nProgress: resolved 78, reused 21, downloaded 54, added 0\nProgress: resolved 165, reused 102, downloaded 60, added 0\nProgress: resolved 184, reused 106, downloaded 74, added 0\nProgress: resolved 207, reused 123, downloaded 82, added 0\nProgress: resolved 207, reused 123, downloaded 83, added 0\nProgress: resolved 250, reused 161, downloaded 88, added 0\nProgress: resolved 311, reused 196, downloaded 111, added 0\nProgress: resolved 320, reused 197, downloaded 116, added 0\nProgress: resolved 336, reused 197, downloaded 135, added 0\nProgress: resolved 345, reused 198, downloaded 144, added 0\nPackages: +345 -1\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-\nProgress: resolved 345, reused 198, downloaded 147, added 345, done\n\ndependencies:\n+ dsh-better-sidebar 0.16.1 (0.18.0 is available)\n\nDone in 14s using pnpm v11.7.0"
+      "output": "✓ Lockfile passes supply-chain policies (verified 738ms ago)\nProgress: resolved 0, reused 1, downloaded 0, added 0\nProgress: resolved 1, reused 1, downloaded 0, added 0\nProgress: resolved 7, reused 3, downloaded 0, added 0\nProgress: resolved 31, reused 3, downloaded 23, added 0\nProgress: resolved 72, reused 21, downloaded 36, added 0\n[WARN] Tarball download average speed 31 KiB/s (size 32 KiB) is below 50 KiB/s: https://registry.npmjs.org/@lezer/go/-/go-1.0.1.tgz (GET)\nProgress: resolved 153, reused 91, downloaded 52, added 0\n[WARN] Tarball download average speed 40 KiB/s (size 54 KiB) is below 50 KiB/s: https://registry.npmjs.org/@iconify/utils/-/utils-3.1.4.tgz (GET)\nProgress: resolved 177, reused 104, downloaded 64, added 0\nProgress: resolved 205, reused 123, downloaded 77, added 0\nProgress: resolved 207, reused 123, downloaded 83, added 0\nProgress: resolved 287, reused 196, downloaded 89, added 0\nProgress: resolved 313, reused 197, downloaded 111, added 0\nProgress: resolved 324, reused 197, downloaded 124, added 0\nProgress: resolved 341, reused 198, downloaded 138, added 0\nProgress: resolved 345, reused 198, downloaded 144, added 0\nPackages: +345 -1\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-\nProgress: resolved 345, reused 198, downloaded 147, added 345, done\n\ndependencies:\n+ dsh-better-sidebar 0.16.1 (0.18.0 is available)\n\nDone in 14.3s using pnpm v11.7.0"
     },
     "browserBootEntry": {
       "id": "dsh-better-sidebar"
@@ -29,21 +29,22 @@
     },
     "update": {
       "installedVersion": "0.17.1",
-      "output": "✓ Lockfile passes supply-chain policies (verified 12s ago)\nProgress: resolved 1, reused 0, downloaded 0, added 0\nProgress: resolved 346, reused 345, downloaded 0, added 0\nProgress: resolved 346, reused 345, downloaded 1, added 0\nPackages: +1 -1\n+-\nProgress: resolved 346, reused 345, downloaded 1, added 1, done\n\ndependencies:\n- dsh-better-sidebar 0.16.1\n+ dsh-better-sidebar 0.17.1 (0.18.0 is available)\n\nDone in 2.8s using pnpm v11.7.0"
+      "output": "✓ Lockfile passes supply-chain policies (verified 12s ago)\nProgress: resolved 1, reused 0, downloaded 0, added 0\nProgress: resolved 346, reused 345, downloaded 0, added 0\nPackages: +1 -1\n+-\nProgress: resolved 346, reused 345, downloaded 1, added 0\nProgress: resolved 346, reused 345, downloaded 1, added 1, done\n\ndependencies:\n- dsh-better-sidebar 0.16.1\n+ dsh-better-sidebar 0.17.1 (0.18.0 is available)\n\nDone in 2.8s using pnpm v11.7.0"
     },
     "remove": {
       "dependencyAbsent": true,
       "bundleAbsent": true,
       "moduleAbsent": true,
-      "output": "✓ Lockfile passes supply-chain policies (verified 283ms ago)\nProgress: resolved 1, reused 0, downloaded 0, added 0\nProgress: resolved 75, reused 75, downloaded 0, added 0\nPackages: -271\n--------------------------------------------------------------------------------\nProgress: resolved 75, reused 75, downloaded 0, added 0, done\n\ndependencies:\n- dsh-better-sidebar 0.17.1\n\nDone in 1.5s using pnpm v11.7.0"
+      "output": "✓ Lockfile passes supply-chain policies (verified 289ms ago)\nProgress: resolved 1, reused 0, downloaded 0, added 0\nProgress: resolved 75, reused 75, downloaded 0, added 0\nPackages: -271\n--------------------------------------------------------------------------------\nProgress: resolved 75, reused 75, downloaded 0, added 0, done\n\ndependencies:\n- dsh-better-sidebar 0.17.1\n\nDone in 1.6s using pnpm v11.7.0"
     },
     "failedInstallRollback": {
       "exitCode": 1,
-      "output": "✓ Lockfile passes supply-chain policies (verified 269ms ago)\nProgress: resolved 1, reused 0, downloaded 0, added 0\n[ERR_PNPM_NO_MATCHING_VERSION] No matching version found for dsh-better-sidebar@99.99.99 while fetching it from https://registry.npmjs.org/\n\nThis error happened while installing a direct dependency of /bench/work/compatibility-profile/plugins\n\nThe latest release of dsh-better-sidebar is \"0.18.0\". Published at 9/3/2026 11:40:52 AM\n\nOther releases are:\n  * beta: 0.12.0-beta.1 published at 8/14/2026\n  * alpha: 0.18.0-alpha.0 published at 8/30/2026\n\nIf you need the full list of all 20 published versions run \"pnpm view dsh-better-sidebar versions\".\nAlready up to date\nDone in 220ms using pnpm v11.7.0\nPLUGIN_MANAGEMENT_FAILED: plugin mutation failed: plugin profile is invalid: pnpm exited with code 1; profile restored; partial state: package.json=valid; pnpm-lock.yaml=valid; target package entry=dsh-better-sidebar=absent",
+      "moduleAbsent": true,
+      "output": "✓ Lockfile passes supply-chain policies (verified 285ms ago)\nProgress: resolved 1, reused 0, downloaded 0, added 0\n[ERR_PNPM_NO_MATCHING_VERSION] No matching version found for dsh-better-sidebar@99.99.99 while fetching it from https://registry.npmjs.org/\n\nThis error happened while installing a direct dependency of /bench/work/compatibility-profile/plugins\n\nThe latest release of dsh-better-sidebar is \"0.18.0\". Published at 9/3/2026 11:40:52 AM\n\nOther releases are:\n  * beta: 0.12.0-beta.1 published at 8/14/2026\n  * alpha: 0.18.0-alpha.0 published at 8/30/2026\n\nIf you need the full list of all 20 published versions run \"pnpm view dsh-better-sidebar versions\".\nAlready up to date\nDone in 255ms using pnpm v11.7.0\nPLUGIN_MANAGEMENT_FAILED: plugin mutation failed: plugin profile is invalid: pnpm exited with code 1; profile restored; partial state: package.json=valid; pnpm-lock.yaml=valid; target package entry=dsh-better-sidebar=absent",
       "manifestBeforeSha256": "457bdfe6c796309ae185fedf37fc0c320cb3f2d21a6cf1d6edca3804b7451fa0",
       "manifestAfterSha256": "457bdfe6c796309ae185fedf37fc0c320cb3f2d21a6cf1d6edca3804b7451fa0",
-      "lockfileBeforeSha256": "c6f81880daa08e75a619cc75691a51a21901c6e6883db15a3248f09c258d1e06",
-      "lockfileAfterSha256": "c6f81880daa08e75a619cc75691a51a21901c6e6883db15a3248f09c258d1e06"
+      "lockfileBeforeSha256": "b6845aba7a00a30d358ac8691e141e609989d2411c023f4934b6267a2799b156",
+      "lockfileAfterSha256": "b6845aba7a00a30d358ac8691e141e609989d2411c023f4934b6267a2799b156"
     },
     "gracefulResidue": {
       "headless": 0,
