@@ -24,7 +24,7 @@ Tessivum 是独立的 Rust 原生智能体框架。它面向两个明确的兼�
 - HTTP 全表单 RPC、持久 SSE 和 Browser WebSocket 下行链路；
 - 原生/WASM/Browser 路由，以及通过有界 `cordis.node/v1` 桥和 DomainBridge 服务实现的真实 Legacy Node compat-host；
 - Extism 服务权限、设置/凭据、多工作区权限、附件、OpenAI Responses 适配器，以及冻结的上游 `AppWebEntry` 源码 shell；
-- 由 pnpm 管理的插件配置，具有有序的 Host Bundle 权限、精确的 Loader/Fiber 清单、有界 HTTP/WebSocket 插件路由、打包的 Host 兼容模块、第一方 `tessivum-market`、经验证的 `dshmarket@1.29.2`、`dsh-better-sidebar@0.16.1` 和 `dsh-dream-skin@8.30.1` 社区生命周期行为，以及版本化 Node Host facade 和由 Rust 拥有的远程访问。
+- 由 pnpm 管理的插件配置，具有有序的 Host Bundle 权限、精确的 Loader/Fiber 清单、有界 HTTP/WebSocket 插件路由、打包的 Host 兼容模块、第一方 `tessivum-market`、经验证的 `dsh-better-sidebar@0.16.1`、固定的 `dshmarket@1.29.2` 与 `dsh-dream-skin@8.30.1` 兼容样例，以及版本化 Node Host facade 和由 Rust 拥有的远程访问。
 
 冻结的 DeepSeek Harness `0.1.0-rc.5` 基线（提交 `47f943859bef60e4160492346772ded9b24f765a`）仍是兼容性目标。Tessivum `v0.1.0-alpha.23` 固定 `tessivum-core v0.1.6` 的修订版 `bafb893f182d64b7b464b6cf827676f7ac368168`；当前已实现的切片为：
 

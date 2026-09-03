@@ -19,6 +19,8 @@ export interface VerificationEntry {
   minimumTessivum: string
   verification: {
     browserBootEntry: string
+    browserFeature: string
+    browserFeatureSelector: string
     updateVersion: string
     failureVersion: string
   }
@@ -46,6 +48,7 @@ function validateLedger(ledger: VerificationLedger): VerificationLedger {
     if (!entry.npm || !entry.version || !entry.repository || !entry.integrity || !entry.license
       || !entry.profile || !entry.minimumTessivum || !entry.verifiedAt || !entry.evidence
       || !entry.verification || entry.verification.browserBootEntry !== entry.npm
+      || !entry.verification.browserFeature || !entry.verification.browserFeatureSelector
       || !entry.verification.updateVersion || !entry.verification.failureVersion
       || !Array.isArray(entry.runtimes) || entry.runtimes.length === 0
       || !['verified', 'revoked'].includes(entry.status) || pairs.has(pair)

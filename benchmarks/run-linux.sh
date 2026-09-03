@@ -28,6 +28,15 @@ cargo_target=${CARGO_TARGET_DIR:-$work_root/cargo-target}
 core_target=${CORE_CARGO_TARGET_DIR:-$cargo_target/core}
 product_target=${PRODUCT_CARGO_TARGET_DIR:-$cargo_target/product}
 
+patch="$product/web/patches/deepseek-harness.patch"
+expected_dsh_diff=$(jq -r '.source.deepseekHarness.trackedDiffSha256' "$product/benchmarks/manifests/base.json")
+actual_dsh_diff=$(git -C "$dsh" diff --binary --no-ext-diff | sha256sum | cut -d' ' -f1)
+if [[ $actual_dsh_diff == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]]; then
+  git -C "$dsh" apply "$patch"
+  actual_dsh_diff=$(git -C "$dsh" diff --binary --no-ext-diff | sha256sum | cut -d' ' -f1)
+fi
+[[ $actual_dsh_diff == "$expected_dsh_diff" ]] || { echo "DeepSeek Harness tracked diff does not match $patch" >&2; exit 2; }
+
 cd "$dsh"
 pnpm install --frozen-lockfile
 pnpm run build:lib:host
@@ -108,7 +117,9 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
   update_version=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.updateVersion' "$ledger")
   failure_version=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.failureVersion' "$ledger")
   boot_entry=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.browserBootEntry' "$ledger")
-  [[ $plugin != null && $version != null && $update_version != null && $failure_version != null && $boot_entry == "$plugin" ]]
+  feature_name=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.browserFeature' "$ledger")
+  feature_selector=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.browserFeatureSelector' "$ledger")
+  [[ $plugin != null && $version != null && $update_version != null && $failure_version != null && $boot_entry == "$plugin" && $feature_name != null && $feature_selector != null ]]
 
   install_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$plugin@$version" 2>&1)
   printf '%s\n' "$install_output"
@@ -119,14 +130,16 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
   TESSIVUM_BENCH_COMPAT_HOST="$compat_host" \
   TESSIVUM_BENCH_HOST_MODULE_ROOT="$host_modules" \
   TESSIVUM_BENCH_CORDIS_VENDOR_ROOT="$cordis" \
+  TESSIVUM_BENCH_FEATURE_SELECTOR="$feature_selector" \
   TESSIVUM_CHROMIUM="$chromium" \
   python3 "$product/scripts/benchmark_product.py" \
     --manifest "$product/benchmarks/manifests/compatibility.json" \
     --binary "tessivum=$binary" \
     --samples 1 \
     --raw-out "$results_root/plugin-lifecycle-product.json"
-  jq -e --arg plugin "$plugin" '
+  jq -e --arg plugin "$plugin" --arg featureSelector "$feature_selector" '
     .status == "passed"
+    and (.rawSamples[0].web.browser.result.browserFeature | .selector == $featureSelector and .visible == true and .count >= 1)
     and (.rawSamples[0].web.browser.result.bootPlugins | any(.id == $plugin))
     and ([.rawSamples[0].headless.cleanup, .rawSamples[0].web.browser.cleanup, .rawSamples[0].web.cleanup]
       | all(.residueAfterDispose == 0 and .forcedCleanupRequired == false and .residueAfterForcedCleanup == 0))
@@ -157,6 +170,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
 
   jq -n \
     --arg plugin "$plugin" --arg version "$version" --arg updateVersion "$update_version" --arg failureVersion "$failure_version" \
+    --arg featureName "$feature_name" --arg featureSelector "$feature_selector" \
     --arg installOutput "$install_output" --arg updateOutput "$update_output" --arg removeOutput "$remove_output" \
     --arg failureOutput "$failure_output" --argjson failureStatus "$failure_status" \
     --arg manifestBeforeSha256 "$manifest_before" --arg manifestAfterSha256 "$manifest_after" \
@@ -173,6 +187,7 @@ if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
       checks:{
         exactInstall:{installedVersion:$version,output:$installOutput},
         browserBootEntry:{id:$plugin},
+        browserFeature:{name:$featureName,selector:$featureSelector,visible:true},
         update:{installedVersion:$updateVersion,output:$updateOutput},
         remove:{dependencyAbsent:true,bundleAbsent:true,moduleAbsent:true,output:$removeOutput},
         failedInstallRollback:{exitCode:$failureStatus,output:$failureOutput,manifestBeforeSha256:$manifestBeforeSha256,manifestAfterSha256:$manifestAfterSha256,lockfileBeforeSha256:$lockBeforeSha256,lockfileAfterSha256:$lockAfterSha256},

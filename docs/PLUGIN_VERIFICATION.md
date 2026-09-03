@@ -34,7 +34,7 @@ A newer release never inherits an older release's verification. The Market insta
 
 ```bash
 python3 scripts/check_plugin_verification.py --network
-SAMPLES=3 ./benchmarks/run-linux-container.sh
+VERIFY_PLUGIN=1 SAMPLES=1 ./benchmarks/run-linux-container.sh
 ```
 
-The first command validates the ledger against the community snapshot, npm metadata, repository, license, and downloaded tarball integrity. The second runs the no-key Linux Host/Chromium compatibility path. Raw release evidence is retained under `benchmarks/fixtures/`; the current exact-plugin result is in [the verification report](PLUGIN_VERIFICATION_REPORT.md).
+The first command validates the ledger against the community snapshot, npm metadata, repository, license, downloaded tarball integrity, and checked lifecycle artifacts. The second runs the no-key Linux exact-install/Host/Chromium/update/remove/failure-rollback path. The committed raw result is under `plugins/market/evidence/`; the human-readable result is in [the verification report](PLUGIN_VERIFICATION_REPORT.md).

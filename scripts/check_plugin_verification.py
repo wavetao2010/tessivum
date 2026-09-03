@@ -91,9 +91,12 @@ def validate_lifecycle_evidence(path: Path, entry: dict[str, Any]) -> None:
     sample = samples[0]
     browser = sample.get("web", {}).get("browser", {})
     boot = browser.get("result", {}).get("bootPlugins", [])
+    feature = browser.get("result", {}).get("browserFeature", {})
     cleanups = [sample.get("headless", {}).get("cleanup"), browser.get("cleanup"), sample.get("web", {}).get("cleanup")]
     if (not sample.get("success") or sample.get("failures") != []
             or not any(isinstance(plugin, dict) and plugin.get("id") == verification["browserBootEntry"] for plugin in boot)
+            or feature.get("selector") != verification["browserFeatureSelector"]
+            or not isinstance(feature.get("count"), int) or feature["count"] < 1 or feature.get("visible") is not True
             or any(not isinstance(cleanup, dict) or cleanup.get("residueAfterDispose") != 0
                    or cleanup.get("forcedCleanupRequired") is not False
                    or cleanup.get("residueAfterForcedCleanup") != 0 for cleanup in cleanups)):
@@ -101,6 +104,8 @@ def validate_lifecycle_evidence(path: Path, entry: dict[str, Any]) -> None:
     checks = evidence.get("checks", {})
     if (checks.get("exactInstall", {}).get("installedVersion") != entry["version"]
             or checks.get("browserBootEntry", {}).get("id") != verification["browserBootEntry"]
+            or checks.get("browserFeature") != {
+                "name": verification["browserFeature"], "selector": verification["browserFeatureSelector"], "visible": True}
             or checks.get("update", {}).get("installedVersion") != verification["updateVersion"]
             or checks.get("remove", {}).get("dependencyAbsent") is not True
             or checks.get("remove", {}).get("bundleAbsent") is not True
@@ -157,6 +162,8 @@ def validate(network: bool) -> None:
             raise ValueError(f"{name}@{version}: invalid runtimes")
         verification = entry.get("verification")
         if (not isinstance(verification, dict)
+                or not isinstance(verification.get("browserFeature"), str) or not verification["browserFeature"]
+                or not isinstance(verification.get("browserFeatureSelector"), str) or not verification["browserFeatureSelector"]
                 or verification.get("browserBootEntry") != name
                 or not isinstance(verification.get("updateVersion"), str)
                 or EXACT_VERSION.fullmatch(verification["updateVersion"]) is None

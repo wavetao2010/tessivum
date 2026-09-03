@@ -28,6 +28,8 @@ function verification(status: VerificationEntry['status'], repository = 'https:/
     minimumTessivum: '0.1.0-alpha.23',
     verification: {
       browserBootEntry: 'dsh-better-sidebar',
+      browserFeature: 'sidebar-panel-host',
+      browserFeatureSelector: '[data-dsh-panel-host]',
       updateVersion: '0.17.1',
       failureVersion: '99.99.99',
     },

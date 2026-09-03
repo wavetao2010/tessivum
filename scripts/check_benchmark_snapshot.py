@@ -55,9 +55,9 @@ def identity(report: dict[str, Any]) -> dict[str, Any]:
                 for name, value in repositories.items()
             },
             "productCoreDependencyRevision": provenance.get("productCoreDependencyRevision"),
-            "artifacts": {name: value.get("sha256") for name, value in provenance.get("artifacts", {}).items()},
+            "drivers": provenance.get("drivers"),
             "replaySha256": provenance.get("replay", {}).get("sha256"),
-            "profileSha256": {name: value.get("sha256") for name, value in provenance.get("profiles", {}).items()},
+            "profileSha256": sorted((item.get("manifest"), item.get("sha256")) for item in provenance.get("profiles", [])),
             "hostModuleSha256": sorted(value.get("sha256") for value in provenance.get("hostModules", [])),
             "runtimes": [{key: runtime.get(key) for key in ("id", "version", "sha256")} for runtime in provenance.get("runtimes", [])],
         }

@@ -34,7 +34,7 @@ Tessivum 不托管插件代码，也不维护第二套 Registry。插件发现�
 
 ```bash
 python3 scripts/check_plugin_verification.py --network
-SAMPLES=3 ./benchmarks/run-linux-container.sh
+VERIFY_PLUGIN=1 SAMPLES=1 ./benchmarks/run-linux-container.sh
 ```
 
-第一条命令把 ledger 与社区 snapshot、npm metadata、repository、license 和下载 tarball 的完整性逐项核对。第二条命令运行无密钥 Linux Host/Chromium 兼容链路。发行 raw evidence 保存在 `benchmarks/fixtures/`；当前精确插件结果见[验证报告](PLUGIN_VERIFICATION_REPORT.md)。
+第一条命令把 ledger 与社区 snapshot、npm metadata、repository、license、下载 tarball 完整性及已提交的生命周期工件逐项核对。第二条命令运行无密钥 Linux 精确安装、Host/Chromium、更新、卸载与失败回滚链路。已提交的 raw result 位于 `plugins/market/evidence/`；可读结果见[验证报告](PLUGIN_VERIFICATION_REPORT.md)。

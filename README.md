@@ -24,7 +24,7 @@ Current implementation foundation:
 - HTTP full-form RPC, durable SSE, and Browser WebSocket downlinks;
 - Native/WASM/Browser routing plus a real Legacy Node compat-host over the bounded `cordis.node/v1` bridge and DomainBridge services;
 - Extism service permissions, settings/credentials, multi-workspace authority, attachments, an OpenAI Responses adapter, and the frozen upstream `AppWebEntry` source shell;
-- a pnpm-owned plugin profile with ordered Host Bundle authority, exact Loader/Fiber inventory, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, the first-party `tessivum-market`, verified `dshmarket@1.29.2`, `dsh-better-sidebar@0.16.1`, and `dsh-dream-skin@8.30.1` community lifecycle behavior, plus versioned Node Host facades and Rust-owned Remote Access.
+- a pnpm-owned plugin profile with ordered Host Bundle authority, exact Loader/Fiber inventory, bounded HTTP/WebSocket plugin routes, packaged Host compatibility modules, the first-party `tessivum-market`, verified `dsh-better-sidebar@0.16.1`, fixed `dshmarket@1.29.2` and `dsh-dream-skin@8.30.1` compatibility samples, plus versioned Node Host facades and Rust-owned Remote Access.
 
 The frozen DeepSeek Harness `0.1.0-rc.5` baseline at commit `47f943859bef60e4160492346772ded9b24f765a` remains the compatibility target. Tessivum `v0.1.0-alpha.23` pins `tessivum-core v0.1.6` at revision `bafb893f182d64b7b464b6cf827676f7ac368168`; the currently implemented slice is:
 

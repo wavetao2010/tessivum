@@ -755,6 +755,9 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
                 "--expect-plugins", json.dumps(expected_plugins, separators=(",", ":")),
                 "--timeout-ms", str(manifest["timeouts"]["browserSeconds"] * 1000),
             ]
+            feature_selector = os.environ.get("TESSIVUM_BENCH_FEATURE_SELECTOR")
+            if feature_selector:
+                browser_command.extend(["--feature-selector", feature_selector])
             browser_environment = os.environ.copy()
             for key in manifest["environment"]["unset"]:
                 browser_environment.pop(key, None)

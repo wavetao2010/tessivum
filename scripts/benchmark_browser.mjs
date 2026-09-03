@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url'
 const now = () => Math.round(performance.now())
 
 function parseArgs(argv) {
-  const options = { timeoutMs: 60_000, sessions: 1, settleMs: 250, expectPlugins: [] }
+  const options = { timeoutMs: 60_000, sessions: 1, settleMs: 250, expectPlugins: [], featureSelector: undefined }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
-    if (!['--url', '--prompt', '--marker', '--timeout-ms', '--sessions', '--settle-ms', '--checkpoint', '--expect-plugins'].includes(flag)) {
+    if (!['--url', '--prompt', '--marker', '--timeout-ms', '--sessions', '--settle-ms', '--checkpoint', '--expect-plugins', '--feature-selector'].includes(flag)) {
       throw new Error(`unknown option: ${flag}`)
     }
     const value = argv[++index]
@@ -18,6 +18,7 @@ function parseArgs(argv) {
     else if (flag === '--prompt') options.prompt = value
     else if (flag === '--marker') options.marker = value
     else if (flag === '--checkpoint') options.checkpoint = value
+    else if (flag === '--feature-selector') options.featureSelector = value
     else if (flag === '--expect-plugins') {
       options.expectPlugins = JSON.parse(value)
       if (!Array.isArray(options.expectPlugins) || !options.expectPlugins.every(name => typeof name === 'string' && name !== '')) {
@@ -98,6 +99,17 @@ async function main() {
     const bootEntries = await page.evaluate(() => window.__DSH_BOOT__?.entries ?? [])
     const missingPlugins = options.expectPlugins.filter(name => !bootEntries.some(entry => entry.id === name))
     if (missingPlugins.length !== 0) throw new Error(`Browser boot graph is missing: ${missingPlugins.join(', ')}`)
+    if (options.featureSelector !== undefined) {
+      const feature = page.locator(options.featureSelector)
+      await feature.first().waitFor({ state: 'visible', timeout: options.timeoutMs })
+      const box = await feature.first().boundingBox()
+      result.browserFeature = {
+        selector: options.featureSelector,
+        count: await feature.count(),
+        visible: box !== null && box.width > 0 && box.height > 0,
+      }
+      if (!result.browserFeature.visible) throw new Error(`Browser feature is not visible: ${options.featureSelector}`)
+    }
     result.bootPlugins = bootEntries.filter(entry => options.expectPlugins.includes(entry.id))
 
     const composer = page.locator('textarea:enabled').last()
