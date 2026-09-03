@@ -22,7 +22,7 @@ let sessionId = ''
 test('goal command shows its bare input and result without a model turn', async () => {
   harness = await RustWebHarness.launch({ name: 'goal-command-presentation', locale: 'en-US' })
   try {
-    await waitUntil(() => harness.page.getByText('Into the Unknown', { exact: false }).count(), count => count === 1, 15_000)
+    await waitUntil(() => harness.page.getByText('Principle and implementation, in concert.', { exact: false }).count(), count => count === 1, 15_000)
     const input = harness.page.locator('textarea').first()
     await input.fill('/goal')
     await input.press('Enter')
@@ -54,7 +54,7 @@ test('goal command shows its bare input and result without a model turn', async 
     await waitUntil(() => resultRow.count(), count => count === 1, 10_000)
     expect(await resultRow.getByText('goal', { exact: true }).count()).toBe(1)
     await waitUntil(() => harness.page.locator('[data-phase="active"]').count(), count => count === 1, 10_000)
-    expect(await harness.page.getByText('Into the Unknown', { exact: false }).count()).toBe(0)
+    expect(await harness.page.getByText('Principle and implementation, in concert.', { exact: false }).count()).toBe(0)
 
     const sessions = await harness.sessions()
     expect(sessions).toHaveLength(1)

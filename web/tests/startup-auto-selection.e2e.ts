@@ -13,7 +13,7 @@ test('startup materializes and auto-selects blank workspaces without replacing t
     await composer.waitFor({ timeout: 15_000 })
     await page.locator(`${ROOT}[data-phase="hero"]`).waitFor({ timeout: 15_000 })
     expect(await composer.isVisible()).toBe(true)
-    expect(await page.getByText('Into the Unknown', { exact: false }).count()).toBeGreaterThan(0)
+    expect(await page.getByText('Principle and implementation, in concert.', { exact: false }).count()).toBeGreaterThan(0)
     expect((await harness.sessions()).some(session => session.cwd === harness.workspace && session.blank)).toBe(true)
 
     await page.evaluate(() => {
@@ -85,7 +85,7 @@ test('startup materializes and auto-selects blank workspaces without replacing t
       await waitUntil(() => Promise.resolve(held), Boolean, 15_000)
       await page.locator(ROOT).waitFor({ timeout: 15_000 })
       expect(await page.locator(ROOT).first().getAttribute('data-phase')).toBe('hero')
-      expect(await page.getByText('Into the Unknown', { exact: false }).isVisible()).toBe(true)
+      expect(await page.getByText('Principle and implementation, in concert.', { exact: false }).isVisible()).toBe(true)
       expect(await page.locator('textarea').first().isVisible()).toBe(true)
 
       release()

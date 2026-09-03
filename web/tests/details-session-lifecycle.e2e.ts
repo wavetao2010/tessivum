@@ -98,7 +98,7 @@ test('details panel starts and reloads closed across Session ownership changes',
     expect(await harness.page.getByText('Details', { exact: true }).isVisible()).toBe(false)
 
     await harness.page.getByRole('button', { name: /^(?:New session|新.*会话)$/ }).last().click()
-    await harness.page.getByText('Into the Unknown', { exact: false }).waitFor({ timeout: 15_000 })
+    await harness.page.getByText('Principle and implementation, in concert.', { exact: false }).waitFor({ timeout: 15_000 })
     await waitUntil(() => detailsTrack(harness), track => track === 0, 5_000)
     expect(await harness.page.getByText('Details', { exact: true }).isVisible()).toBe(false)
 

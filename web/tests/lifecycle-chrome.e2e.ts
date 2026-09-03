@@ -120,7 +120,7 @@ describe('lifecycle chrome over RustWebHarness', () => {
 
   test('sends the first prompt from the empty-state hero', async () => {
     expect(await fixtureUserPrompts()).toEqual([PROMPT])
-    await waitUntil(() => harness.page.getByText('Into the Unknown', { exact: false }).count(), count => count === 1, 15_000)
+    await waitUntil(() => harness.page.getByText('Principle and implementation, in concert.', { exact: false }).count(), count => count === 1, 15_000)
     const input = harness.page.locator('textarea').first()
     await input.waitFor({ timeout: 10_000 })
     await assertGolden(harness, '[class*="frame"]', 'hero.expected.md')

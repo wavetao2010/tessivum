@@ -93,8 +93,8 @@ test('hot-reloads a real client source edit without refreshing the page', async 
   const bundlePath = join(packageRoot, 'lib/client.js')
   const originalSource = await readFile(sourcePath, 'utf8')
   const originalBundle = await readFile(bundlePath)
-  const oldText = 'Into the Unknown'
-  const sourceNeedle = "'hero.headline': 'Into the Unknown'"
+  const oldText = 'Principle and implementation, in concert.'
+  const sourceNeedle = "'hero.headline': 'Principle and implementation, in concert.'"
   const newText = `HMR UPDATED ${'x'.repeat(80)}`
   const updatedSource = originalSource.replace(sourceNeedle, `'hero.headline': '${newText}'`)
   if (updatedSource === originalSource) throw new Error(`HMR source lacks ${JSON.stringify(sourceNeedle)}`)
