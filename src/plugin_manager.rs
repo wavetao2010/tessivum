@@ -2775,6 +2775,8 @@ const AVAILABLE_LEGACY_SERVICES: &[&str] = &[
     "loader",
     "models",
     "settings",
+    "sessions",
+    "tools",
     "webListener",
     "webRuntime",
     "webServer",
