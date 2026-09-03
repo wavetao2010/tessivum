@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url'
 const now = () => Math.round(performance.now())
 
 function parseArgs(argv) {
-  const options = { timeoutMs: 60_000, sessions: 1, settleMs: 250 }
+  const options = { timeoutMs: 60_000, sessions: 1, settleMs: 250, expectPlugins: [] }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
-    if (!['--url', '--prompt', '--marker', '--timeout-ms', '--sessions', '--settle-ms', '--checkpoint'].includes(flag)) {
+    if (!['--url', '--prompt', '--marker', '--timeout-ms', '--sessions', '--settle-ms', '--checkpoint', '--expect-plugins'].includes(flag)) {
       throw new Error(`unknown option: ${flag}`)
     }
     const value = argv[++index]
@@ -18,6 +18,12 @@ function parseArgs(argv) {
     else if (flag === '--prompt') options.prompt = value
     else if (flag === '--marker') options.marker = value
     else if (flag === '--checkpoint') options.checkpoint = value
+    else if (flag === '--expect-plugins') {
+      options.expectPlugins = JSON.parse(value)
+      if (!Array.isArray(options.expectPlugins) || !options.expectPlugins.every(name => typeof name === 'string' && name !== '')) {
+        throw new Error('--expect-plugins must be a JSON string array')
+      }
+    }
     else {
       const parsed = Number(value)
       if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${flag} must be a positive integer`)
@@ -31,7 +37,7 @@ function parseArgs(argv) {
     throw new Error('--marker is required when --prompt is set')
   }
   if (options.sessions !== 1 && typeof options.prompt !== 'string') throw new Error('--sessions requires --prompt')
-  if (typeof options.checkpoint !== 'string') throw new Error('--checkpoint is required')
+  if (typeof options.prompt === 'string' && typeof options.checkpoint !== 'string') throw new Error('--checkpoint is required when --prompt is set')
   return options
 }
 
@@ -50,7 +56,7 @@ async function dismiss(page, name, button, timeoutMs) {
 
 async function main() {
   const result = {
-    schema: 'tessivum.product-benchmark-browser/v1',
+    schema: 'tessivum.product-benchmark-browser/v2',
     timestamps: { startedMs: now() },
     errors: [],
   }
@@ -75,6 +81,8 @@ async function main() {
     const page = await browser.newPage({ locale: 'en-US', viewport: { width: 1680, height: 1000 } })
     page.on('dialog', dialog => void dialog.dismiss())
     page.on('pageerror', error => result.errors.push(`pageerror: ${error.message}`))
+    page.on('console', message => { if (message.type() === 'error') result.errors.push(`console: ${message.text()}`) })
+    page.on('requestfailed', request => result.errors.push(`request: ${request.url()} (${request.failure()?.errorText ?? 'failed'})`))
     await page.goto(options.url, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs })
     const frame = page.locator('[class*="frame"]')
     try {
@@ -87,9 +95,15 @@ async function main() {
     await dismiss(page, /Internal Testing Notice|内测声明/, /Continue|继续/, Math.min(options.timeoutMs, 1_000))
     await dismiss(page, /Add an API Key to get started|添加一个 API Key 开始使用/i, /Configure later|稍后配置/, Math.min(options.timeoutMs, 1_000))
 
+    const bootEntries = await page.evaluate(() => window.__DSH_BOOT__?.entries ?? [])
+    const missingPlugins = options.expectPlugins.filter(name => !bootEntries.some(entry => entry.id === name))
+    if (missingPlugins.length !== 0) throw new Error(`Browser boot graph is missing: ${missingPlugins.join(', ')}`)
+    result.bootPlugins = bootEntries.filter(entry => options.expectPlugins.includes(entry.id))
+
     const composer = page.locator('textarea:enabled').last()
     await composer.waitFor({ timeout: options.timeoutMs })
     result.timestamps.composerEnabledMs = now()
+    result.sessionCompletionMs = {}
     if (options.prompt !== undefined) {
       await composer.fill(options.prompt)
       await composer.press('Enter')
@@ -99,6 +113,7 @@ async function main() {
       result.sessionsCompleted = 1
       result.timestamps.markerSeenMs = now()
       result.timestamps.lastMarkerSeenMs = result.timestamps.markerSeenMs
+      result.sessionCompletionMs['1'] = result.timestamps.markerSeenMs
       await new Promise(resolve => setTimeout(resolve, options.settleMs))
       await Bun.write(`${options.checkpoint}.1`, `${JSON.stringify({ sessions: 1 })}\n`)
       for (let count = 2; count <= options.sessions; count += 1) {
@@ -128,6 +143,8 @@ async function main() {
         }, { current: count, marker: options.marker, prompt: options.prompt, timeoutMs: options.timeoutMs })
         if (typeof completed?.sessionId !== 'string') throw new Error(`resident session ${count} failed: ${JSON.stringify(completed?.error)}`)
         result.sessionsCompleted = count
+        result.timestamps.lastMarkerSeenMs = now()
+        result.sessionCompletionMs[String(count)] = result.timestamps.lastMarkerSeenMs
       }
       await new Promise(resolve => setTimeout(resolve, options.settleMs))
       await Bun.write(`${options.checkpoint}.${result.sessionsCompleted}`, `${JSON.stringify({ sessions: result.sessionsCompleted })}\n`)

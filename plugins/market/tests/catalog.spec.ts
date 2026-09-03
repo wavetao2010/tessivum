@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { marketCatalog, type VerificationEntry } from '../src/catalog.ts'
+import { marketCatalog, type VerificationEntry, type VerificationLedger } from '../src/catalog.ts'
 import type { Registry, RegistryPlugin } from '../src/registry.ts'
 
 function plugin(name: string, npm: string | null, tessivumCompatibility?: RegistryPlugin['tessivumCompatibility'], url = `https://example.test/${name}`): RegistryPlugin {
@@ -26,11 +26,20 @@ function verification(status: VerificationEntry['status'], repository = 'https:/
     profile: 'web',
     runtimes: ['legacy-node', 'browser'],
     minimumTessivum: '0.1.0-alpha.23',
+    verification: {
+      browserBootEntry: 'dsh-better-sidebar',
+      updateVersion: '0.17.1',
+      failureVersion: '99.99.99',
+    },
     status,
     verifiedAt: '2026-09-03',
     evidence: 'docs/PLUGIN_VERIFICATION_REPORT.md',
     ...(status === 'revoked' ? { reason: 'fixture revocation' } : {}),
   }
+}
+
+function ledger(entries: VerificationEntry[], current: Record<string, string> = {}): VerificationLedger {
+  return { schema: 'tessivum.plugin-verification/v2', current, entries }
 }
 
 describe('first-party catalog overlay', () => {
@@ -76,14 +85,32 @@ describe('first-party catalog overlay', () => {
       plugins: [plugin('dsh-better-sidebar', 'dsh-better-sidebar', undefined, 'https://github.com/omdsh-dev/DSH-better-sidebar')],
     }
 
-    const mismatched = marketCatalog(community, [verification('verified', 'https://github.com/other/repo')]).plugins.at(-1)!
+    const mismatched = marketCatalog(community, ledger([verification('verified', 'https://github.com/other/repo')], { 'dsh-better-sidebar': '0.16.1' })).plugins.at(-1)!
     expect(mismatched.tessivumCompatibility).toBe('unverified')
     expect(mismatched.tessivumVerifiedVersion).toBeUndefined()
 
-    const revoked = marketCatalog(community, [verification('revoked')]).plugins.at(-1)!
+    const revoked = marketCatalog(community, ledger([verification('revoked')])).plugins.at(-1)!
     expect(revoked.tessivumCompatibility).toBe('unverified')
     expect(revoked.tessivumVerifiedVersion).toBe('0.16.1')
     expect(revoked.tessivumVerificationRevoked).toBe(true)
     expect(revoked.tessivumVerificationReason).toBe('fixture revocation')
+    expect(revoked.install).toBe('dsh plugin --profile web add dsh-better-sidebar')
+  })
+
+  it('selects one current release while retaining exact-version history', () => {
+    const community: Registry = {
+      updated: 'live',
+      count: 1,
+      categories: { tool: { en: 'Tools' } },
+      plugins: [plugin('dsh-better-sidebar', 'dsh-better-sidebar', undefined, 'https://github.com/omdsh-dev/DSH-better-sidebar')],
+    }
+    const old = verification('revoked')
+    const current = { ...verification('verified'), version: '0.17.1' }
+    const selected = marketCatalog(community, ledger([old, current], { 'dsh-better-sidebar': '0.17.1' })).plugins.at(-1)!
+    expect(selected.tessivumVerifiedVersion).toBe('0.17.1')
+    expect(selected.tessivumVerificationRevoked).toBeUndefined()
+    expect(selected.install).toBe('dsh plugin --profile web add dsh-better-sidebar@0.17.1')
+    expect(() => marketCatalog(community, ledger([old, current], { 'dsh-better-sidebar': '0.16.1' }))).toThrow(/current plugin verification selection/)
+    expect(() => marketCatalog(community, ledger([current, current], { 'dsh-better-sidebar': '0.17.1' }))).toThrow(/ledger entry/)
   })
 })

@@ -12,12 +12,14 @@ import os
 import platform
 import shutil
 import signal
+import stat
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
@@ -26,8 +28,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 MANIFEST_SCHEMA = "tessivum.product-benchmark-manifest/v1"
-RUN_SCHEMA = "tessivum.product-benchmark-run/v1"
-BROWSER_SCHEMA = "tessivum.product-benchmark-browser/v1"
+RUN_SCHEMA = "tessivum.product-benchmark-run/v2"
+BROWSER_SCHEMA = "tessivum.product-benchmark-browser/v2"
 PSS_INTERVAL_NS = 100_000_000
 HTTP = build_opener(ProxyHandler({}))
 RUN_ENVIRONMENT: dict[str, Any] = {}
@@ -86,6 +88,110 @@ def json_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def tree_sha256(root: Path) -> str:
+    if not root.is_dir():
+        raise ValueError(f"provenance directory is missing: {root}")
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode()
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        if path.is_symlink():
+            payload = b"L" + os.readlink(path).encode()
+        elif path.is_file():
+            payload = b"F" + path.read_bytes()
+        elif path.is_dir():
+            payload = b"D"
+        else:
+            raise ValueError(f"unsupported provenance input: {path}")
+        digest.update(relative + b"\0" + str(mode).encode() + b"\0" + payload + b"\0")
+    return digest.hexdigest()
+
+
+def git_output(path: Path, *arguments: str, text: bool = True) -> str | bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(path), *arguments], capture_output=True, check=False,
+        text=text, timeout=30,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr if text else completed.stderr.decode("utf-8", "replace")
+        raise ValueError(f"git {' '.join(arguments)} failed for {path}: {stderr.strip()}")
+    return completed.stdout
+
+
+def repository_provenance(path: Path, expected_revision: str | None = None, expected_diff_sha256: str | None = None) -> dict[str, Any]:
+    revision = str(git_output(path, "rev-parse", "--verify", "HEAD")).strip()
+    if expected_revision is not None and revision != expected_revision:
+        raise ValueError(f"repository revision mismatch for {path}: expected {expected_revision}, received {revision}")
+    status = str(git_output(path, "status", "--porcelain=v1", "--untracked-files=no")).splitlines()
+    if expected_diff_sha256 is None:
+        if status:
+            raise ValueError(f"repository has tracked changes: {path}: {status}")
+        return {"path": str(path), "revision": revision, "clean": True}
+    if any(not line.startswith(" ") for line in status):
+        raise ValueError(f"repository has staged or unsupported tracked changes: {path}: {status}")
+    diff = bytes(git_output(path, "diff", "--binary", "--no-ext-diff", text=False))
+    actual_diff_sha256 = hashlib.sha256(diff).hexdigest()
+    if actual_diff_sha256 != expected_diff_sha256:
+        raise ValueError(f"repository patch mismatch for {path}: expected {expected_diff_sha256}, received {actual_diff_sha256}")
+    return {"path": str(path), "revision": revision, "clean": False, "trackedDiffSha256": actual_diff_sha256}
+
+
+def product_core_revision(product_root: Path) -> str:
+    packages = tomllib.loads((product_root / "Cargo.lock").read_text(encoding="utf-8"))["package"]
+    revisions = {
+        package["source"].rsplit("#", 1)[-1]
+        for package in packages
+        if package.get("name") in {"tessivum-core", "tessivum-extism", "tessivum-node-bridge"}
+        and isinstance(package.get("source"), str)
+    }
+    if len(revisions) != 1 or not all(len(revision) == 40 for revision in revisions):
+        raise ValueError(f"product Cargo.lock does not resolve one exact tessivum-core revision: {sorted(revisions)}")
+    return revisions.pop()
+
+
+def collect_provenance(manifests: list[tuple[Path, dict[str, Any]]], runtimes: list[dict[str, str]]) -> dict[str, Any]:
+    product_root = Path(__file__).resolve().parents[1]
+    workspace = product_root.parent
+    deepseek = workspace / "upstream" / "deepseek-harness"
+    source = manifests[0][1]["source"]["deepseekHarness"]
+    replays = {resolve_path(manifest["workload"]["replay"], path, {}) for path, manifest in manifests}
+    if len(replays) != 1:
+        raise ValueError("all manifests must resolve to the same replay file")
+    replay = replays.pop()
+    if not replay.is_file():
+        raise ValueError(f"recorded replay is missing: {replay}")
+    profiles = []
+    host_modules: dict[str, str] = {}
+    for path, manifest in manifests:
+        seed = manifest["surface"].get("profileSeed")
+        if isinstance(seed, str):
+            resolved = resolve_path(seed, path, {})
+            profiles.append({"manifest": manifest["name"], "path": str(resolved), "sha256": tree_sha256(resolved)})
+        modules = manifest["surface"].get("legacyHost", {}).get("hostModules")
+        if isinstance(modules, str):
+            resolved = resolve_path(modules, path, {})
+            host_modules[str(resolved)] = tree_sha256(resolved)
+    return {
+        "repositories": {
+            "product": repository_provenance(product_root),
+            "coreBenchmark": repository_provenance(workspace / "tessivum-core"),
+            "deepseekHarness": repository_provenance(deepseek, source["revision"], source["trackedDiffSha256"]),
+        },
+        "productCoreDependencyRevision": product_core_revision(product_root),
+        "replay": {"path": str(replay), "sha256": file_sha256(replay)},
+        "drivers": {
+            "product": file_sha256(Path(__file__).resolve()),
+            "browser": file_sha256(Path(__file__).with_name("benchmark_browser.mjs")),
+        },
+        "profiles": profiles,
+        "hostModules": [{"path": path, "sha256": digest} for path, digest in sorted(host_modules.items())],
+        "runtimes": [{**runtime, "sha256": file_sha256(Path(runtime["binary"]))} for runtime in runtimes],
+    }
+
 def require(value: Any, description: str) -> Any:
     if value is None:
         raise ValueError(f"manifest is missing {description}")
@@ -98,6 +204,12 @@ def validate_manifest(path: Path) -> dict[str, Any]:
         raise ValueError(f"unsupported manifest schema in {path}: {manifest.get('schema')!r}")
     if not isinstance(manifest.get("name"), str) or not manifest["name"].strip():
         raise ValueError(f"manifest name must be a non-empty string: {path}")
+    source = require(manifest.get("source"), "source")
+    deepseek = source.get("deepseekHarness") if isinstance(source, dict) else None
+    if (not isinstance(deepseek, dict)
+            or not isinstance(deepseek.get("revision"), str) or len(deepseek["revision"]) != 40
+            or not isinstance(deepseek.get("trackedDiffSha256"), str) or len(deepseek["trackedDiffSha256"]) != 64):
+        raise ValueError(f"manifest source.deepseekHarness must pin a revision and tracked diff: {path}")
     workload = require(manifest.get("workload"), "workload")
     if not isinstance(workload, dict) or not isinstance(workload.get("replay"), str):
         raise ValueError(f"manifest workload.replay must be a path: {path}")
@@ -359,18 +471,13 @@ def wait_for_stable_pss(capture: CapturedProcess, milliseconds: int, snapshots: 
 
 def terminate_group(capture: CapturedProcess, timeout_seconds: int, observed: set[int]) -> dict[str, Any]:
     started = now_ns()
-    members = sorted({*managed_pids(capture.process.pid, capture.pgid), *(pid for pid in observed if process_is_running(pid))})
-    observed.update(members)
-    if capture.process.poll() is None or members:
+    observed.update(managed_pids(capture.process.pid, capture.pgid))
+    if capture.process.poll() is None:
         try:
-            os.killpg(capture.pgid, signal.SIGTERM)
+            capture.process.terminate()
         except ProcessLookupError:
             pass
-    for pid in members:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+
     def active_processes() -> list[int]:
         if sys.platform != "linux":
             return [] if capture.process.poll() is not None else [capture.process.pid]
@@ -383,13 +490,14 @@ def terminate_group(capture: CapturedProcess, timeout_seconds: int, observed: se
         if not active_processes():
             break
         time.sleep(0.02)
-    remaining = active_processes()
-    if remaining:
+    graceful_survivors = active_processes()
+    graceful_finished = now_ns()
+    if graceful_survivors:
         try:
             os.killpg(capture.pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        for pid in remaining:
+        for pid in graceful_survivors:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -404,15 +512,20 @@ def terminate_group(capture: CapturedProcess, timeout_seconds: int, observed: se
     except subprocess.TimeoutExpired:
         pass
     capture.finish()
-    survivors = sorted({*managed_pids(capture.process.pid, capture.pgid), *(pid for pid in observed if process_is_running(pid))}) if sys.platform == "linux" else []
+    forced_survivors = active_processes()
     finished = now_ns()
     return {
         "startedAtNs": started,
+        "gracefulFinishedAtNs": graceful_finished,
         "finishedAtNs": finished,
+        "gracefulElapsedNs": graceful_finished - started,
         "elapsedNs": finished - started,
-        "residueAfterDispose": len(survivors) if sys.platform == "linux" else None,
-        "residueStatus": "verified" if sys.platform == "linux" else "unavailable outside Linux",
-        "survivors": survivors,
+        "residueAfterDispose": len(graceful_survivors) if sys.platform == "linux" else None,
+        "residueStatus": "verified before forced cleanup" if sys.platform == "linux" else "unavailable outside Linux",
+        "survivors": graceful_survivors,
+        "forcedCleanupRequired": bool(graceful_survivors),
+        "residueAfterForcedCleanup": len(forced_survivors) if sys.platform == "linux" else None,
+        "survivorsAfterForcedCleanup": forced_survivors,
     }
 
 
@@ -631,6 +744,7 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
             browser_script = Path(__file__).with_name("benchmark_browser.mjs")
             checkpoint = root / "browser-session"
             resident_sessions = manifest["workload"]["web"]["sessions"]
+            expected_plugins = [plugin["name"] for plugin in surface["browserPlugins"]["plugins"]]
             browser_command = [
                 os.environ.get("BUN", "bun"), str(browser_script), "--url", ready_url,
                 "--prompt", manifest["workload"]["web"]["prompt"],
@@ -638,6 +752,7 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
                 "--sessions", str(resident_sessions),
                 "--settle-ms", str(manifest["readiness"]["pssStableMilliseconds"]),
                 "--checkpoint", str(checkpoint),
+                "--expect-plugins", json.dumps(expected_plugins, separators=(",", ":")),
                 "--timeout-ms", str(manifest["timeouts"]["browserSeconds"] * 1000),
             ]
             browser_environment = os.environ.copy()
@@ -669,19 +784,26 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
                 probe = parse_browser_output(browser_result["stdout"])
                 browser_result["result"] = probe
                 times = probe["timestamps"]
+                completions = probe.get("sessionCompletionMs")
                 if not isinstance(times.get("startedMs"), int) or not isinstance(times.get("composerEnabledMs"), int):
                     raise ValueError("browser driver omitted enabled-composer timestamps")
                 browser_result["composerEnabledElapsedMs"] = times["composerEnabledMs"] - times["startedMs"]
-                if "markerSeenMs" in times:
-                    browser_result["markerCompletionElapsedMs"] = times["markerSeenMs"] - times["startedMs"]
+                prompt_submitted = times.get("promptSubmittedMs")
+                first_completed = completions.get("1") if isinstance(completions, dict) else None
+                last_completed = completions.get(str(resident_sessions)) if isinstance(completions, dict) else None
+                if not all(isinstance(value, int) for value in (prompt_submitted, first_completed, last_completed)):
+                    raise ValueError("browser driver omitted resident-session completion timestamps")
+                browser_result["firstPromptCompletionElapsedMs"] = first_completed - prompt_submitted
+                browser_result["tenSessionCompletionElapsedMs"] = last_completed - prompt_submitted
                 if probe["errors"]:
                     append_failure(sample, "browser", f"browser driver errors: {probe['errors']}")
                 if probe.get("promptSubmitted") is not True:
                     append_failure(sample, "browser", "browser driver did not submit the replay prompt")
-                if "markerSeenMs" not in times:
-                    append_failure(sample, "browser", "browser driver did not observe the replay marker")
                 if probe.get("sessionsCompleted") != resident_sessions:
                     append_failure(sample, "browser", f"browser completed {probe.get('sessionsCompleted')} of {resident_sessions} resident sessions")
+                observed_plugins = {entry.get("id") for entry in probe.get("bootPlugins", []) if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
+                if observed_plugins != set(expected_plugins):
+                    append_failure(sample, "browser", f"Browser boot graph plugins differ: {sorted(observed_plugins)}")
                 if 1 not in resident_snapshots or resident_sessions not in resident_snapshots:
                     append_failure(sample, "browser", "browser did not expose one- and ten-session PSS checkpoints")
             except ValueError as error:
@@ -721,7 +843,7 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
             result["pssSnapshots"].append(pss_snapshot(host.process.pid, host.pgid, host_observed, "web-before-dispose"))
             cleanup = terminate_group(host, manifest["timeouts"]["shutdownSeconds"], host_observed)
             result["cleanup"] = cleanup
-            result["disposeElapsedNs"] = cleanup["elapsedNs"]
+            result["disposeElapsedNs"] = cleanup["gracefulElapsedNs"]
             result["residueAfterDispose"] = cleanup["residueAfterDispose"]
             if cleanup["residueAfterDispose"]:
                 append_failure(sample, "web-cleanup", f"surviving descendants: {cleanup['survivors']}")
@@ -733,7 +855,7 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
 
 def run_sample(manifest: dict[str, Any], manifest_path: Path, runtime: dict[str, str], repetition: int) -> dict[str, Any]:
     sample: dict[str, Any] = {
-        "schema": "tessivum.product-benchmark-sample/v1",
+        "schema": "tessivum.product-benchmark-sample/v2",
         "manifest": manifest["name"],
         "runtime": runtime,
         "repetition": repetition,
@@ -766,7 +888,8 @@ def summaries(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "headless.completionElapsedNs": ("headless", "completionElapsedNs"),
         "web.readyElapsedNs": ("web", "readyElapsedNs"),
         "web.browser.composerEnabledElapsedMs": ("web", "browser", "composerEnabledElapsedMs"),
-        "web.browser.markerCompletionElapsedMs": ("web", "browser", "markerCompletionElapsedMs"),
+        "web.browser.firstPromptCompletionElapsedMs": ("web", "browser", "firstPromptCompletionElapsedMs"),
+        "web.browser.tenSessionCompletionElapsedMs": ("web", "browser", "tenSessionCompletionElapsedMs"),
         "web.treeIdlePssKiB": ("web", "treeIdlePssKiB"),
         "web.treeOneSessionPssKiB": ("web", "treeOneSessionPssKiB"),
         "web.treeOneSessionDeltaFromIdleKiB": ("web", "treeOneSessionDeltaFromIdleKiB"),
@@ -842,7 +965,7 @@ def parser() -> argparse.ArgumentParser:
     return command
 
 
-def document(arguments: argparse.Namespace, manifests: list[tuple[Path, dict[str, Any]]], runtimes: list[dict[str, str]], samples: list[dict[str, Any]], started: str, finished: str | None = None) -> dict[str, Any]:
+def document(arguments: argparse.Namespace, manifests: list[tuple[Path, dict[str, Any]]], runtimes: list[dict[str, str]], provenance: dict[str, Any], samples: list[dict[str, Any]], started: str, finished: str | None = None) -> dict[str, Any]:
     failures = [sample for sample in samples if not sample["success"]]
     diagnostics: list[dict[str, str]] = []
     if sys.platform != "linux":
@@ -861,14 +984,9 @@ def document(arguments: argparse.Namespace, manifests: list[tuple[Path, dict[str
         },
         "environment": RUN_ENVIRONMENT,
         "environmentSha256": json_sha256(RUN_ENVIRONMENT),
-        "workloadSha256": json_sha256(manifests[0][1]["workload"]),
+        "provenance": provenance,
         "manifests": [
-            {
-                "path": str(path),
-                "name": manifest["name"],
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "revisions": manifest.get("revisions", {}),
-            }
+            {"path": str(path), "name": manifest["name"], "sha256": file_sha256(path)}
             for path, manifest in manifests
         ],
         "diagnostics": diagnostics,
@@ -898,6 +1016,9 @@ def main() -> int:
     workload = json.dumps(manifests[0][1]["workload"], sort_keys=True, separators=(",", ":"))
     if any(json.dumps(manifest["workload"], sort_keys=True, separators=(",", ":")) != workload for _, manifest in manifests[1:]):
         parser().error("all manifests must declare the identical frozen workload")
+    source = json.dumps(manifests[0][1]["source"], sort_keys=True, separators=(",", ":"))
+    if any(json.dumps(manifest["source"], sort_keys=True, separators=(",", ":")) != source for _, manifest in manifests[1:]):
+        parser().error("all manifests must declare identical source pins")
     runtimes = [
         {
             "id": label,
@@ -908,6 +1029,10 @@ def main() -> int:
     ]
     if len({runtime["id"] for runtime in runtimes}) != len(runtimes):
         parser().error("runtime labels from --binary must be unique")
+    try:
+        provenance = collect_provenance(manifests, runtimes)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser().error(str(error))
 
     global RUN_ENVIRONMENT
     RUN_ENVIRONMENT = system_environment()
@@ -916,7 +1041,7 @@ def main() -> int:
 
     def checkpoint() -> None:
         if arguments.raw_out is not None:
-            write_raw(arguments.raw_out, document(arguments, manifests, runtimes, samples, started))
+            write_raw(arguments.raw_out, document(arguments, manifests, runtimes, provenance, samples, started))
 
     try:
         if arguments.interleave:
@@ -935,13 +1060,13 @@ def main() -> int:
                         samples.append(run_sample(manifest, path, runtime, repetition))
                         checkpoint()
     except KeyboardInterrupt:
-        final = document(arguments, manifests, runtimes, samples, started, timestamp())
+        final = document(arguments, manifests, runtimes, provenance, samples, started, timestamp())
         if arguments.raw_out is not None:
             write_raw(arguments.raw_out, final)
         print(json.dumps(final, sort_keys=True))
         return 130
 
-    final = document(arguments, manifests, runtimes, samples, started, timestamp())
+    final = document(arguments, manifests, runtimes, provenance, samples, started, timestamp())
     if arguments.raw_out is not None:
         write_raw(arguments.raw_out, final)
     print(json.dumps(final, sort_keys=True))

@@ -96,12 +96,95 @@ if (( seeded == 0 )); then
   echo "timed out while installing the packaged market" >&2
   exit 1
 fi
+
+chromium=$(cd "$product/web" && bun -e "const { chromium } = require('playwright-core'); console.log(chromium.executablePath())")
+[[ -x "$chromium" ]] || { echo "Playwright Chromium is missing: $chromium" >&2; exit 2; }
+
+if [[ ${VERIFY_PLUGIN:-0} == 1 ]]; then
+  ledger="$product/plugins/market/compatibility.json"
+  [[ $(jq '.current | length' "$ledger") == 1 ]] || { echo "plugin verifier requires exactly one current release" >&2; exit 2; }
+  plugin=$(jq -r '.current | keys[0]' "$ledger")
+  version=$(jq -r --arg plugin "$plugin" '.current[$plugin]' "$ledger")
+  update_version=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.updateVersion' "$ledger")
+  failure_version=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.failureVersion' "$ledger")
+  boot_entry=$(jq -r --arg plugin "$plugin" --arg version "$version" '.entries[] | select(.npm == $plugin and .version == $version) | .verification.browserBootEntry' "$ledger")
+  [[ $plugin != null && $version != null && $update_version != null && $failure_version != null && $boot_entry == "$plugin" ]]
+
+  install_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$plugin@$version" 2>&1)
+  printf '%s\n' "$install_output"
+  env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add dsh-dream-skin@8.30.1
+  [[ $(jq -r '.version' "$compat_profile/plugins/node_modules/$plugin/package.json") == "$version" ]]
+
+  TESSIVUM_BENCH_COMPAT_PROFILE="$compat_profile/plugins" \
+  TESSIVUM_BENCH_COMPAT_HOST="$compat_host" \
+  TESSIVUM_BENCH_HOST_MODULE_ROOT="$host_modules" \
+  TESSIVUM_BENCH_CORDIS_VENDOR_ROOT="$cordis" \
+  TESSIVUM_CHROMIUM="$chromium" \
+  python3 "$product/scripts/benchmark_product.py" \
+    --manifest "$product/benchmarks/manifests/compatibility.json" \
+    --binary "tessivum=$binary" \
+    --samples 1 \
+    --raw-out "$results_root/plugin-lifecycle-product.json"
+  jq -e --arg plugin "$plugin" '
+    .status == "passed"
+    and (.rawSamples[0].web.browser.result.bootPlugins | any(.id == $plugin))
+    and ([.rawSamples[0].headless.cleanup, .rawSamples[0].web.browser.cleanup, .rawSamples[0].web.cleanup]
+      | all(.residueAfterDispose == 0 and .forcedCleanupRequired == false and .residueAfterForcedCleanup == 0))
+  ' "$results_root/plugin-lifecycle-product.json" >/dev/null
+
+  update_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$plugin@$update_version" 2>&1)
+  printf '%s\n' "$update_output"
+  [[ $(jq -r '.version' "$compat_profile/plugins/node_modules/$plugin/package.json") == "$update_version" ]]
+  remove_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin remove "$plugin" 2>&1)
+  printf '%s\n' "$remove_output"
+  [[ ! -e "$compat_profile/plugins/node_modules/$plugin" ]]
+  jq -e --arg plugin "$plugin" '.dependencies[$plugin] == null and (.dsh.profile.bundles | index($plugin) | not)' "$compat_profile/plugins/package.json" >/dev/null
+
+  manifest_before=$(sha256sum "$compat_profile/plugins/package.json" | cut -d' ' -f1)
+  lock_before=$(sha256sum "$compat_profile/plugins/pnpm-lock.yaml" | cut -d' ' -f1)
+  if failure_output=$(env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$plugin@$failure_version" 2>&1); then
+    printf '%s\n' "$failure_output"
+    echo "expected unavailable plugin release to fail" >&2
+    exit 1
+  else
+    failure_status=$?
+    printf '%s\n' "$failure_output" >&2
+  fi
+  manifest_after=$(sha256sum "$compat_profile/plugins/package.json" | cut -d' ' -f1)
+  lock_after=$(sha256sum "$compat_profile/plugins/pnpm-lock.yaml" | cut -d' ' -f1)
+  [[ $manifest_after == "$manifest_before" ]]
+  [[ $lock_after == "$lock_before" ]]
+
+  jq -n \
+    --arg plugin "$plugin" --arg version "$version" --arg updateVersion "$update_version" --arg failureVersion "$failure_version" \
+    --arg installOutput "$install_output" --arg updateOutput "$update_output" --arg removeOutput "$remove_output" \
+    --arg failureOutput "$failure_output" --argjson failureStatus "$failure_status" \
+    --arg manifestBeforeSha256 "$manifest_before" --arg manifestAfterSha256 "$manifest_after" \
+    --arg lockBeforeSha256 "$lock_before" --arg lockAfterSha256 "$lock_after" \
+    --arg productRevision "$(git -C "$product" rev-parse HEAD)" \
+    --arg coreRevision "$(git -C "$core" rev-parse HEAD)" \
+    --arg deepseekRevision "$(git -C "$dsh" rev-parse HEAD)" \
+    --arg binarySha256 "$(sha256sum "$binary" | cut -d' ' -f1)" \
+    --arg productEvidenceSha256 "$(sha256sum "$results_root/plugin-lifecycle-product.json" | cut -d' ' -f1)" \
+    '{schema:"tessivum.plugin-lifecycle-verification/v1", plugin:$plugin, verifiedVersion:$version,
+      updateVersion:$updateVersion, failureVersion:$failureVersion,
+      revisions:{product:$productRevision,core:$coreRevision,deepseekHarness:$deepseekRevision},
+      binarySha256:$binarySha256, productEvidence:{path:"plugin-lifecycle-product.json",sha256:$productEvidenceSha256},
+      checks:{
+        exactInstall:{installedVersion:$version,output:$installOutput},
+        browserBootEntry:{id:$plugin},
+        update:{installedVersion:$updateVersion,output:$updateOutput},
+        remove:{dependencyAbsent:true,bundleAbsent:true,moduleAbsent:true,output:$removeOutput},
+        failedInstallRollback:{exitCode:$failureStatus,output:$failureOutput,manifestBeforeSha256:$manifestBeforeSha256,manifestAfterSha256:$manifestAfterSha256,lockfileBeforeSha256:$lockBeforeSha256,lockfileAfterSha256:$lockAfterSha256},
+        gracefulResidue:{headless:0,browser:0,webHost:0,forcedCleanupRequired:false}
+      }}' \
+    > "$results_root/plugin-verification.json"
+  exit 0
+fi
 for package in dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1; do
   env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$package"
 done
 
-chromium=$(cd "$product/web" && bun -e "const { chromium } = require('playwright-core'); console.log(chromium.executablePath())")
-[[ -x "$chromium" ]] || { echo "Playwright Chromium is missing: $chromium" >&2; exit 2; }
 
 python3 "$core/scripts/run_paired_benchmarks.py" \
   --rust-bin "$core_target/release/tessivum-bench" \

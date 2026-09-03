@@ -14,25 +14,29 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: tessivum
+          persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: bafb893f182d64b7b464b6cf827676f7ac368168
+          ref: 4674aeda870989fede1fc79fb07afbe764d3a1eb
           path: tessivum-core
+          persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: deepseek-ai/deepseek-harness
           ref: 47f943859bef60e4160492346772ded9b24f765a
           path: upstream/deepseek-harness
+          persist-credentials: false
 
       - name: Verify immutable plugin identity
         working-directory: tessivum
         run: python3 scripts/check_plugin_verification.py --network
 
-      - name: Run no-secret Host and Chromium matrix
+      - name: Run no-secret plugin lifecycle matrix
         working-directory: tessivum
         env:
-          SAMPLES: "3"
+          SAMPLES: "1"
+          VERIFY_PLUGIN: "1"
         run: ./benchmarks/run-linux-container.sh
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

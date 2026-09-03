@@ -4273,6 +4273,9 @@ export function MarketSection(props: MarketSectionProps) {
               description, then screenshots. */}
           <CardDesc text={(confirming.description && (confirming.description[lang] || confirming.description.en)) || ''} t={t} />
           <p className={css.warnLine}>{catalogBadge(confirming)} · {t('verificationNotAudit')}</p>
+          {confirming.tessivumVerificationRevoked === true && confirming.tessivumVerificationReason && (
+            <p className={css.warnLine}>{confirming.tessivumVerificationReason}</p>
+          )}
           <ScreenshotStrip plugin={confirming} onOpen={openLightbox} />
           <DisclosureRow
             icon={<IconCodeOutline16 size={16} />}

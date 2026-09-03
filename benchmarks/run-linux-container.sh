@@ -11,6 +11,7 @@ mkdir -p "$results"
 docker build --platform linux/arm64 --tag "$image" --file "$product/benchmarks/Dockerfile" "$product"
 container=$(docker create --init --platform linux/arm64 --shm-size 2g \
   --env "SAMPLES=${SAMPLES:-30}" \
+  --env "VERIFY_PLUGIN=${VERIFY_PLUGIN:-0}" \
   --mount type=volume,source=tessivum-benchmark-cargo-target,target=/opt/cargo/target \
   --volume "$workspace:/source:ro" \
   "$image")

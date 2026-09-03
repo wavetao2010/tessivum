@@ -1,5 +1,8 @@
 {
-  "schema": "tessivum.plugin-verification/v1",
+  "schema": "tessivum.plugin-verification/v2",
+  "current": {
+    "dsh-better-sidebar": "0.16.1"
+  },
   "entries": [
     {
       "npm": "dsh-better-sidebar",
@@ -10,6 +13,11 @@
       "profile": "web",
       "runtimes": ["legacy-node", "browser"],
       "minimumTessivum": "0.1.0-alpha.23",
+      "verification": {
+        "browserBootEntry": "dsh-better-sidebar",
+        "updateVersion": "0.17.1",
+        "failureVersion": "99.99.99"
+      },
       "status": "verified",
       "verifiedAt": "2026-09-03",
       "evidence": "docs/PLUGIN_VERIFICATION_REPORT.md"

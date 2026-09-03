@@ -19,21 +19,20 @@ def load(path: Path) -> dict[str, Any]:
 
 
 def identity(report: dict[str, Any]) -> dict[str, Any]:
-    common = {
-        "schema": report.get("schema"),
-        "environmentSha256": report.get("environmentSha256"),
-        "workloadSha256": report.get("workloadSha256"),
-    }
-    if report.get("schema") == "tessivum.core-benchmark-paired/v1":
+    schema = report.get("schema")
+    common = {"schema": schema, "environmentSha256": report.get("environmentSha256")}
+    if schema == "tessivum.core-benchmark-paired/v1":
         return {
             **common,
+            "workloadSha256": report.get("workloadSha256"),
             "sampleCount": report.get("sampleCount"),
             "revisions": report.get("revisions"),
             "runtimes": {name: value.get("runtime") for name, value in report.get("runtimes", {}).items()},
         }
-    if report.get("schema") == "tessivum.product-benchmark-run/v1":
+    if schema == "tessivum.product-benchmark-run/v1":
         return {
             **common,
+            "workloadSha256": report.get("workloadSha256"),
             "sampleCount": report.get("arguments", {}).get("samples"),
             "manifests": [
                 {"name": manifest.get("name"), "sha256": manifest.get("sha256"), "revisions": manifest.get("revisions")}
@@ -44,7 +43,25 @@ def identity(report: dict[str, Any]) -> dict[str, Any]:
                 for runtime in report.get("arguments", {}).get("binaries", [])
             ],
         }
-    raise ValueError(f"unsupported benchmark schema: {report.get('schema')!r}")
+    if schema == "tessivum.product-benchmark-run/v2":
+        provenance = report.get("provenance", {})
+        repositories = provenance.get("repositories", {})
+        return {
+            **common,
+            "sampleCount": report.get("arguments", {}).get("samples"),
+            "manifests": [{"name": item.get("name"), "sha256": item.get("sha256")} for item in report.get("manifests", [])],
+            "repositories": {
+                name: {key: value.get(key) for key in ("revision", "clean", "trackedDiffSha256") if key in value}
+                for name, value in repositories.items()
+            },
+            "productCoreDependencyRevision": provenance.get("productCoreDependencyRevision"),
+            "artifacts": {name: value.get("sha256") for name, value in provenance.get("artifacts", {}).items()},
+            "replaySha256": provenance.get("replay", {}).get("sha256"),
+            "profileSha256": {name: value.get("sha256") for name, value in provenance.get("profiles", {}).items()},
+            "hostModuleSha256": sorted(value.get("sha256") for value in provenance.get("hostModules", [])),
+            "runtimes": [{key: runtime.get(key) for key in ("id", "version", "sha256")} for runtime in provenance.get("runtimes", [])],
+        }
+    raise ValueError(f"unsupported benchmark schema: {schema!r}")
 
 
 def complete(value: Any) -> bool:

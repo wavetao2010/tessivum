@@ -284,11 +284,11 @@ export function codeloadAllowBuildsKey(name: string, spec: string, sha: string):
  * full-repo downloads and local build scripts.
  * @returns the target spec, or null when the source url is unsupported.
  */
-export function installTargetFor(entry: { url: string; npm?: unknown; tarball?: unknown; tessivumVerifiedVersion?: unknown }): string | null {
+export function installTargetFor(entry: { url: string; npm?: unknown; tarball?: unknown; tessivumVerifiedVersion?: unknown; tessivumVerificationRevoked?: unknown }): string | null {
   const source = parseSourceUrl(entry.url)
   if (source === null) return null
   if (typeof entry.npm === 'string' && NPM_NAME_RE.test(entry.npm)) {
-    const version = entry.tessivumVerifiedVersion
+    const version = entry.tessivumVerificationRevoked === true ? undefined : entry.tessivumVerifiedVersion
     return typeof version === 'string' && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)
       ? `${entry.npm}@${version}`
       : entry.npm

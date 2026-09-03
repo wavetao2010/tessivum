@@ -1,10 +1,11 @@
 {
   "schema": "tessivum.product-benchmark-manifest/v1",
   "name": "Base",
-  "revisions": {
-    "product": "4d2bd09573ff9f9b027cee4c0d14a4784309e164",
-    "core": "bafb893f182d64b7b464b6cf827676f7ac368168",
-    "deepseekHarness": "47f943859bef60e4160492346772ded9b24f765a"
+  "source": {
+    "deepseekHarness": {
+      "revision": "47f943859bef60e4160492346772ded9b24f765a",
+      "trackedDiffSha256": "3f01934381e346a941ae198f37e90f1262b654131dae5f442f5a634c46e1fc69"
+    }
   },
   "workload": {
     "replay": "../../fixtures/headless/recorded-replay.jsonl",
