@@ -1,7 +1,7 @@
 {
   "name": "tessivum-web",
   "private": true,
-  "version": "0.1.0-alpha.20",
+  "version": "0.1.0-alpha.21",
   "type": "module",
   "scripts": {
     "audit:source": "bun run scripts/audit-deepseek-source.mjs",

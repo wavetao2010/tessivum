@@ -445,14 +445,14 @@ Alpha.16 的 Legacy `web.route/v1` 注册只接受 `/dsh-market`、`/sidebar`、
 - `dsh-better-sidebar@0.16.1`：Host/Browser 双半插件、HTTP prefix route、WebSocket upgrade、native-backed settings 写入及重启恢复。
 - `dsh-dream-skin@8.30.1`：Host/Browser 双半插件、`/dream-skin/api` 有界状态持久化路由与浏览器主题 bundle；
 
-`tessivum-market@0.1.0-alpha.20` 是另行验证的第一方 Host + Browser 双半插件：保留 `dshmarket@1.38.1` 的固定 MIT 来源与 DSH 社区目录，增加 Tessivum 产品身份、精确版本更新、旧 `dshmarket` 事务迁移、Host-owned 重启和发行物校验。它不扩大上述未修改社区包的固定版本矩阵；实现与证据见 [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
+`tessivum-market@0.1.0-alpha.21` 是另行验证的第一方 Host + Browser 双半插件：保留 `dshmarket@1.38.1` 的固定 MIT 来源与 DSH 社区目录，增加 Tessivum 产品身份、精确版本更新、旧 `dshmarket` 事务迁移、已被内置 Remote Access 取代的不兼容 `@linxin666/dsh-remote-web-ui` profile 迁移、Host-owned 重启和发行物校验。它不扩大上述未修改社区包的固定版本矩阵；实现与证据见 [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 
 Phase 8 的最终精确矩阵如下；“固定版本”只声明下表中的状态，不把分析样本扩大成运行时兼容承诺：
 
 | 产品面 / package | 精确版本 | 状态 | 边界 |
 |---|---:|---|---|
-| Tessivum built-in Remote Access | `0.1.0-alpha.20` | 支持 | Rust-owned 配对、设备 session、authority、`/remote` 单文件界面与可选 Cloudflare Quick Tunnel；无额外 npm runtime package |
-| `@linxin666/dsh-remote-web-ui` | `0.3.6` | 不支持安装；分析样本 | 仅保留 provenance、依赖与接口审计；不安装其 Node gate、loopback proxy、Tunnel、更新或 telemetry authority |
+| Tessivum built-in Remote Access | `0.1.0-alpha.21` | 支持 | Rust-owned 配对、设备 session、authority、`/remote` 单文件界面与可选 Cloudflare Quick Tunnel；无额外 npm runtime package |
+| `@linxin666/dsh-remote-web-ui` | `0.3.6` | 不支持安装；升级时自动移除；分析样本 | 仅保留 provenance、依赖与接口审计；Alpha.21 从既有 profile 事务性移除该包及 bundle，不加载其 Node gate、loopback proxy、Tunnel、更新或 telemetry authority |
 
 具体实现边界与发行证据见 [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)。
 

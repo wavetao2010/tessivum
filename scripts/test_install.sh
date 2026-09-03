@@ -195,8 +195,8 @@ fi
 assert_no_partial "$prefix/lib/tessivum"
 
 prefix="$work/upgrade"
-old_version=0.1.0-alpha.19
-new_version=0.1.0-alpha.20
+old_version=0.1.0-alpha.20
+new_version=0.1.0-alpha.21
 blocked_version=1.0.0-blocked
 old_fixture=$(fixture_archive "$old_version" "$target" old)
 new_fixture=$(fixture_archive "$new_version" "$target" new)

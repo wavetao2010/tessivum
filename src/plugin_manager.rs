@@ -43,6 +43,7 @@ const FIRST_PARTY_MARKET_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIRST_PARTY_MARKET_TARBALL: &str =
     concat!("tessivum-market-", env!("CARGO_PKG_VERSION"), ".tgz");
 const MAX_FIRST_PARTY_MARKET_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
+const RETIRED_REMOTE_WEB_UI_NAME: &str = "@linxin666/dsh-remote-web-ui";
 
 #[derive(Debug, Error)]
 pub enum PluginManagerError {
@@ -619,7 +620,7 @@ pub fn install_first_party_market(
     let _lock = ProfileLock::acquire(&profile)?;
     let snapshot = FirstPartyMarketSnapshot::capture(&profile)?;
     let mut pnpm_started = false;
-    let mut legacy_market = None;
+    let mut migrated_dependencies = Vec::new();
     let mut previous_bundles = None;
 
     let result = {
@@ -627,7 +628,7 @@ pub fn install_first_party_market(
             ensure_profile(&profile)?;
             let document = read_profile_document(&profile)?;
             let migration = FirstPartyMarketMigration::discover(&profile, &document)?;
-            legacy_market = migration.legacy.clone();
+            migrated_dependencies = migration.migrated_dependencies().cloned().collect();
             previous_bundles = Some(migration.bundles.clone());
             if first_party_market_is_current(&profile, &document, &artifact, &migration)? {
                 return Ok(());
@@ -641,16 +642,16 @@ pub fn install_first_party_market(
             write_first_party_market_manifest(&profile, &artifact, &migration, false)?;
             validate_first_party_market_installation(&profile)?;
 
-            if let Some(legacy) = &migration.legacy {
+            for dependency in migration.migrated_dependencies() {
                 run_first_party_market_pnpm(
                     &profile,
-                    FirstPartyMarketPnpm::Remove(&legacy.name),
+                    FirstPartyMarketPnpm::Remove(&dependency.name),
                     Some(&mut pnpm_started),
                 )?;
             }
             write_first_party_market_manifest(&profile, &artifact, &migration, true)?;
-            if let Some(legacy) = &migration.legacy {
-                validate_market_package_removed(&profile, &legacy.name)?;
+            for dependency in migration.migrated_dependencies() {
+                validate_market_package_removed(&profile, &dependency.name)?;
             }
             validate_first_party_market_installation(&profile)
         };
@@ -663,7 +664,7 @@ pub fn install_first_party_market(
             &profile,
             &snapshot,
             pnpm_started,
-            legacy_market.as_ref(),
+            &migrated_dependencies,
             previous_bundles.as_deref(),
         ) {
             Ok(()) => Err(PluginManagerError::Mutation {
@@ -1009,6 +1010,7 @@ struct FirstPartyMarketDependency {
 
 struct FirstPartyMarketMigration {
     legacy: Option<FirstPartyMarketDependency>,
+    retired_remote_web_ui: Option<FirstPartyMarketDependency>,
     bundles: Vec<String>,
     explicit_bundles: bool,
 }
@@ -1075,13 +1077,39 @@ impl FirstPartyMarketMigration {
             ));
         }
         let legacy = legacy.into_iter().next();
+        let retired_remote_web_ui = dependencies
+            .get(RETIRED_REMOTE_WEB_UI_NAME)
+            .map(|source| {
+                source.as_str().map_or_else(
+                    || {
+                        Err(PluginManagerError::Invalid(format!(
+                            "retired dependency {RETIRED_REMOTE_WEB_UI_NAME:?} must have a string source"
+                        )))
+                    },
+                    |source| {
+                        Ok(FirstPartyMarketDependency {
+                            name: RETIRED_REMOTE_WEB_UI_NAME.into(),
+                            source: source.into(),
+                        })
+                    },
+                )
+            })
+            .transpose()?;
         let explicit_bundles = document.bundles.is_some();
         let bundles = match &document.bundles {
             Some(bundles) => bundles.clone(),
-            None => derive_profile_bundles(profile, &document.dependencies)?
-                .into_iter()
-                .map(|bundle| bundle.name)
-                .collect(),
+            None => {
+                let dependencies: Vec<_> = document
+                    .dependencies
+                    .iter()
+                    .filter(|name| name.as_str() != RETIRED_REMOTE_WEB_UI_NAME)
+                    .cloned()
+                    .collect();
+                derive_profile_bundles(profile, &dependencies)?
+                    .into_iter()
+                    .map(|bundle| bundle.name)
+                    .collect()
+            }
         };
         let legacy_bundles: BTreeSet<_> = bundles
             .iter()
@@ -1101,11 +1129,16 @@ impl FirstPartyMarketMigration {
         }
         let migration = Self {
             legacy,
+            retired_remote_web_ui,
             bundles,
             explicit_bundles,
         };
         migration.market_bundles()?;
         Ok(migration)
+    }
+
+    fn migrated_dependencies(&self) -> impl Iterator<Item = &FirstPartyMarketDependency> {
+        self.legacy.iter().chain(self.retired_remote_web_ui.iter())
     }
 
     fn market_bundles(&self) -> Result<Vec<String>, PluginManagerError> {
@@ -1117,6 +1150,7 @@ impl FirstPartyMarketMigration {
                 }
             }
         }
+        bundles.retain(|bundle| bundle != RETIRED_REMOTE_WEB_UI_NAME);
         if !self.explicit_bundles
             && !bundles
                 .iter()
@@ -1749,7 +1783,7 @@ fn write_first_party_market_manifest(
     profile: &Path,
     artifact: &Path,
     migration: &FirstPartyMarketMigration,
-    remove_legacy: bool,
+    remove_migrated: bool,
 ) -> Result<(), PluginManagerError> {
     let mut document = read_profile_document(profile)?;
     {
@@ -1766,9 +1800,9 @@ fn write_first_party_market_manifest(
             FIRST_PARTY_MARKET_NAME.into(),
             Value::String(first_party_market_file_spec(artifact)?),
         );
-        if remove_legacy {
-            if let Some(legacy) = &migration.legacy {
-                dependencies.remove(&legacy.name);
+        if remove_migrated {
+            for dependency in migration.migrated_dependencies() {
+                dependencies.remove(&dependency.name);
             }
         }
     }
@@ -1782,7 +1816,9 @@ fn first_party_market_is_current(
     artifact: &Path,
     migration: &FirstPartyMarketMigration,
 ) -> Result<bool, PluginManagerError> {
-    if migration.legacy.is_some() || document.bundles.as_ref() != Some(&migration.market_bundles()?)
+    if migration.legacy.is_some()
+        || migration.retired_remote_web_ui.is_some()
+        || document.bundles.as_ref() != Some(&migration.market_bundles()?)
     {
         return Ok(false);
     }
@@ -1905,7 +1941,7 @@ fn rollback_first_party_market(
     profile: &Path,
     snapshot: &FirstPartyMarketSnapshot,
     pnpm_started: bool,
-    legacy: Option<&FirstPartyMarketDependency>,
+    migrated_dependencies: &[FirstPartyMarketDependency],
     previous_bundles: Option<&[String]>,
 ) -> Result<(), PluginManagerError> {
     snapshot.restore(profile)?;
@@ -1925,19 +1961,26 @@ fn rollback_first_party_market(
             build_bundle_entries(&state)?;
         }
     }
-    if let Some(legacy) = legacy {
+    for dependency in migrated_dependencies {
         let document = read_profile_document(profile)?;
         let source = document
             .manifest
-            .pointer(&format!("/dependencies/{}", legacy.name))
+            .pointer(&format!("/dependencies/{}", dependency.name))
             .and_then(Value::as_str);
-        if source != Some(legacy.source.as_str()) {
+        if source != Some(dependency.source.as_str()) {
             return Err(PluginManagerError::Invalid(format!(
-                "legacy market dependency {:?} was not restored to its exact source",
-                legacy.name
+                "migrated dependency {:?} was not restored to its exact source",
+                dependency.name
             )));
         }
-        validate_market_package_entry(profile, &legacy.name)?;
+        let root = installed_package_root(profile, &dependency.name)?;
+        let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+        if manifest.get("name").and_then(Value::as_str) != Some(dependency.name.as_str()) {
+            return Err(PluginManagerError::Invalid(format!(
+                "restored package {:?} does not declare its exact package name",
+                dependency.name
+            )));
+        }
     }
     Ok(())
 }

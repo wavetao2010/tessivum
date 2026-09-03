@@ -381,6 +381,57 @@ fn first_party_market_installs_fresh_at_the_stable_artifact_path_and_is_idempote
 
 #[cfg(unix)]
 #[test]
+fn first_party_market_retires_the_incompatible_remote_web_ui_plugin() {
+    const REMOTE_WEB_UI: &str = "@linxin666/dsh-remote-web-ui";
+
+    let temp = TempDir::new();
+    let (tarball, checksum, package) = market_release(&temp, valid_market_patch());
+    let log = temp.0.join("pnpm.log");
+    let _pnpm = FakePnpm::new(&temp, &package, false, &log);
+    install_first_party_market(&temp.0, &tarball, &checksum).unwrap();
+
+    let profile = temp.0.join("plugins");
+    let mut manifest = read_json_file(&profile.join("package.json"));
+    manifest["dependencies"][REMOTE_WEB_UI] = json!("^0.3.6");
+    manifest["dsh"]["profile"]["bundles"] = json!(["tessivum-market", REMOTE_WEB_UI]);
+    write_json(&profile.join("package.json"), manifest);
+    write_package(
+        &profile,
+        REMOTE_WEB_UI,
+        json!({
+            "dsh": {
+                "engines": {"dsh": ">=0.1.1-rc.1"},
+                "bundle": {"patch": "./cordis.patch.yml"}
+            }
+        }),
+    );
+    fs::write(
+        profile
+            .join("node_modules")
+            .join(REMOTE_WEB_UI)
+            .join("cordis.patch.yml"),
+        "[]\n",
+    )
+    .unwrap();
+    fs::write(&log, "").unwrap();
+
+    install_first_party_market(&temp.0, &tarball, &checksum).unwrap();
+
+    let manifest = read_json_file(&profile.join("package.json"));
+    assert!(manifest
+        .pointer("/dependencies/@linxin666~1dsh-remote-web-ui")
+        .is_none());
+    assert_eq!(
+        manifest.pointer("/dsh/profile/bundles"),
+        Some(&json!(["tessivum-market"]))
+    );
+    assert!(!profile.join("node_modules").join(REMOTE_WEB_UI).exists());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "add\nremove\n");
+    load_plugin_entries(&profile).unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn first_party_market_replaces_the_legacy_bundle_in_place_and_preserves_state_groups_and_disabled()
 {
     let temp = TempDir::new();
@@ -1110,7 +1161,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
         &package.join("package.json"),
         json!({
             "name": "tessivum-market",
-            "version": "0.1.0-alpha.20",
+            "version": "0.1.0-alpha.21",
             "type": "module",
             "main": "./lib/index.js",
             "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
@@ -1123,7 +1174,7 @@ fn market_release(temp: &TempDir, patch: &str) -> (PathBuf, String, PathBuf) {
 
 #[cfg(unix)]
 fn stable_market_artifact(data_dir: &Path) -> PathBuf {
-    data_dir.join("artifacts/market/0.1.0-alpha.20/tessivum-market-0.1.0-alpha.20.tgz")
+    data_dir.join("artifacts/market/0.1.0-alpha.21/tessivum-market-0.1.0-alpha.21.tgz")
 }
 
 #[cfg(unix)]

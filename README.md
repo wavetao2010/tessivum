@@ -8,7 +8,7 @@ Tessivum is an independent, Rust-native agent harness inspired by DeepSeek Harne
 
 ## Alpha status
 
-`v0.1.0-alpha.20` is a prerelease, not a production-stable API or data-format promise. It adds account-free, Rust-supervised Cloudflare Quick Tunnels to Rust-owned Remote Access; Remote Access remains disabled by default and the listener remains loopback-only.
+`v0.1.0-alpha.21` is a prerelease, not a production-stable API or data-format promise. It automatically retires the incompatible legacy `@linxin666/dsh-remote-web-ui` profile entry during first-party market migration so the built-in Rust-owned Remote Access implementation starts cleanly; Remote Access remains disabled by default and the listener remains loopback-only.
 
 Current implementation foundation:
 
@@ -132,22 +132,22 @@ tsv --version
 Download the installer before running it; it installs versioned releases under `~/.local/lib/tessivum` and atomically updates the `tessivum` and `tsv` launchers:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.20/install.sh
-sh install.sh 0.1.0-alpha.20
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.21/install.sh
+sh install.sh 0.1.0-alpha.21
 ```
 
 The script verifies the adjacent SHA-256 file, rejects unsafe archive paths, does not use `sudo`, and does not modify shell startup files.
 
 ### Prebuilt archives
 
-Download the archive and adjacent `.sha256` file for your platform from the [Alpha.20 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.20), verify the checksum, then run either packaged launcher:
+Download the archive and adjacent `.sha256` file for your platform from the [Alpha.21 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.21), verify the checksum, then run either packaged launcher:
 
 ```bash
 target=x86_64-unknown-linux-gnu  # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
-sha256sum -c "tessivum-0.1.0-alpha.20-$target.tar.gz.sha256"
-tar -xzf "tessivum-0.1.0-alpha.20-$target.tar.gz"
-"./tessivum-0.1.0-alpha.20-$target/bin/tessivum" --version
-"./tessivum-0.1.0-alpha.20-$target/bin/tsv" --version
+sha256sum -c "tessivum-0.1.0-alpha.21-$target.tar.gz.sha256"
+tar -xzf "tessivum-0.1.0-alpha.21-$target.tar.gz"
+"./tessivum-0.1.0-alpha.21-$target/bin/tessivum" --version
+"./tessivum-0.1.0-alpha.21-$target/bin/tsv" --version
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`. Archives are checksum-verified but are not code-signed or notarized.
@@ -294,7 +294,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 - The installer and Homebrew formula consume the same four release archives and fixed SHA-256 values. There is no floating `latest` package resolution in release assembly.
 - HTTP listeners are loopback-only. Legacy Node plugins and pnpm subprocesses are not sandboxed; inspect packages before installation and keep lifecycle scripts disabled unless explicitly required.
 - Remote requests require an explicitly trusted HTTPS authority, same-origin browser metadata, the trusted tunnel marker, and a live Rust-owned device session. Pairing issuance and other Host mutations remain loopback-only.
-- Checksums detect corruption but are not signatures. Alpha.20 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
+- Checksums detect corruption but are not signatures. Alpha.21 binaries and the first-party market artifact are not code-signed or notarized; verify the release tag, checksum assets, and repository origin before execution.
 
 ## Verification
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.21 - 2026-09-03
+
+### Fixed
+
+- First-party market migration now removes the incompatible `@linxin666/dsh-remote-web-ui` package and bundle before Legacy Node activation, leaving the built-in Rust-owned Remote Access implementation as the sole owner.
+
 ## 0.1.0-alpha.20 - 2026-09-02
 
 ### Added
