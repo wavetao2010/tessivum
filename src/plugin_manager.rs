@@ -3122,7 +3122,10 @@ fn legacy_host_config(
     }
     Ok(LegacyHostConfig {
         command,
-        client: ClientConfig::default(),
+        client: ClientConfig {
+            request_timeout: Duration::from_secs(30),
+            ..ClientConfig::default()
+        },
     })
 }
 
