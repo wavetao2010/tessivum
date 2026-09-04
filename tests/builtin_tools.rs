@@ -762,6 +762,49 @@ async fn bash_registration_executes_windows_powershell() {
     assert_eq!(output.meta["signal"], Value::Null);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn persistent_powershell_keeps_state_and_cwd() {
+    let directory = TempDir::new();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: directory.path().to_path_buf(),
+            resolver: None,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    shells.enable(SessionId::from("builtin-tools"));
+    let root = ContextHandle::root();
+    let first = runtime
+        .execute(
+            context(&root, "persistent-start"),
+            "bash",
+            json!({"command": "$tessivumState = 'kept'; function Get-TessivumState { $tessivumState }; Set-Location nested"}),
+        )
+        .await;
+    assert!(!first.is_error, "{}", text(&first));
+    let second = runtime
+        .execute(
+            context(&root, "persistent-next"),
+            "bash",
+            json!({"command": "[IO.File]::WriteAllText('persistent.txt', (Get-TessivumState)); [Console]::Out.Write((Get-TessivumState))"}),
+        )
+        .await;
+    assert!(!second.is_error, "{}", text(&second));
+    assert_eq!(text(&second), "kept");
+    assert_eq!(
+        fs::read_to_string(directory.path().join("nested/persistent.txt")).unwrap(),
+        "kept"
+    );
+    shells.shutdown().await;
+}
+
 #[cfg(not(any(unix, windows)))]
 #[test]
 fn bash_registration_is_explicitly_unsupported_off_supported_platforms() {

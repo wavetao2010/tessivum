@@ -478,8 +478,8 @@ async fn product_resolver_routes_npm_defaults_to_legacy_and_confines_location() 
         .await
         .expect("legacy package resolves");
     let canonical_root = fs::canonicalize(&root).expect("canonical fixture root");
-    assert!(Path::new(&resolved.location).is_absolute());
-    assert!(Path::new(&resolved.location).starts_with(&canonical_root));
+    let canonical_location = fs::canonicalize(&resolved.location).expect("canonical plugin entry");
+    assert!(canonical_location.starts_with(&canonical_root));
 
     let outside = fixture_root();
     fs::write(outside.join("index.js"), "export default () => {}\n").expect("outside entry");
