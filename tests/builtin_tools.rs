@@ -6,7 +6,7 @@ use std::{
 use std::{process::Command, sync::Arc, time::Duration};
 
 use serde_json::json;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use serde_json::Value;
 #[cfg(unix)]
 use tessivum::workspace::{SessionResourceResolver, WorkspaceRegistry};
@@ -734,9 +734,37 @@ async fn stale_workspace_retires_the_enabled_bash_shell() {
     shells.shutdown().await;
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[tokio::test]
+async fn bash_registration_executes_windows_powershell() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: directory.path().to_path_buf(),
+            resolver: None,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .expect("PowerShell registers on Windows");
+    let root = ContextHandle::root();
+    let output = runtime
+        .execute(
+            context(&root, "windows-powershell"),
+            "bash",
+            json!({"command": "[Console]::Out.Write('WINDOWS_SHELL_OK')"}),
+        )
+        .await;
+    assert!(!output.is_error);
+    assert_eq!(text(&output), "WINDOWS_SHELL_OK");
+    assert_eq!(output.meta["signal"], Value::Null);
+}
+
+#[cfg(not(any(unix, windows)))]
 #[test]
-fn bash_registration_is_explicitly_unsupported_off_unix() {
+fn bash_registration_is_explicitly_unsupported_off_supported_platforms() {
     let error = BuiltinTools::new(
         &ToolRuntime::new(),
         BuiltinToolsConfig {
@@ -744,6 +772,6 @@ fn bash_registration_is_explicitly_unsupported_off_unix() {
             ..BuiltinToolsConfig::default()
         },
     )
-    .expect_err("bash is unavailable off Unix");
+    .expect_err("bash is unavailable off Unix and Windows");
     assert_eq!(error.code, "UNSUPPORTED_BUILTIN_BASH");
 }

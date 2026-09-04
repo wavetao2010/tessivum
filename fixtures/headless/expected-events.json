@@ -58,7 +58,7 @@
           "index": 0,
           "id": "cli-smoke-call",
           "name": "bash",
-          "argumentsDelta": "{\"command\":\"printf CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
+          "argumentsDelta": "{\"command\":\"echo CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
         }
       }
     },
@@ -76,7 +76,7 @@
             "type": "tool-call",
             "id": "cli-smoke-call",
             "name": "bash",
-            "arguments": "{\"command\":\"printf CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
+            "arguments": "{\"command\":\"echo CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
           }
         }
       }
@@ -119,7 +119,7 @@
               "type": "tool-call",
               "id": "cli-smoke-call",
               "name": "bash",
-              "arguments": "{\"command\":\"printf CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
+              "arguments": "{\"command\":\"echo CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
             }
           ],
           "source": { "kind": "model", "provider": "cli-mock", "model": "cli-mock" }
@@ -138,7 +138,7 @@
         "step": 1,
         "callId": "cli-smoke-call",
         "name": "bash",
-        "arguments": "{\"command\":\"printf CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
+        "arguments": "{\"command\":\"echo CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"
       }
     },
     {
@@ -155,7 +155,7 @@
             {
               "type": "tool-result",
               "toolCallId": "cli-smoke-call",
-              "content": [ { "type": "text", "text": "CLI_TOOL_ROUND_TRIP" } ],
+              "content": [ { "type": "text", "text": "CLI_TOOL_ROUND_TRIP\n" } ],
               "isError": false
             }
           ],
