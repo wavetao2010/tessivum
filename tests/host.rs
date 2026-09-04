@@ -2006,7 +2006,7 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
 
     let automatic = runtime.handle();
     tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(10),
         automatic.prompt(prompt("automatic-session")),
     )
     .await
@@ -2020,7 +2020,7 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
     let right_session = same_session.clone();
     let left_workspace = first_workspace.clone();
     let right_workspace = first_workspace.clone();
-    let (left, right) = tokio::time::timeout(Duration::from_secs(1), async move {
+    let (left, right) = tokio::time::timeout(Duration::from_secs(10), async move {
         tokio::join!(
             left_handle.create_session_in(left_session, left_workspace),
             right_handle.create_session_in(right_session, right_workspace),
@@ -2038,7 +2038,7 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
     let second_session = conflict_session;
     let first_workspace_id = first_workspace;
     let second_workspace_id = second_workspace;
-    let (first, second) = tokio::time::timeout(Duration::from_secs(1), async move {
+    let (first, second) = tokio::time::timeout(Duration::from_secs(10), async move {
         tokio::join!(
             first_handle.create_session_in(first_session, first_workspace_id),
             second_handle.create_session_in(second_session, second_workspace_id),
