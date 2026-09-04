@@ -2,30 +2,33 @@
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, Weak,
-    },
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
+#[cfg(unix)]
+use tessivum_core::CancellationToken;
+use tessivum_core::{ContextHandle, CoreError, ServiceHandle, ServiceKey};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{Mutex as AsyncMutex, Notify},
+    process::{Child, ChildStderr, ChildStdout, Command},
+    sync::Notify,
     time,
 };
+#[cfg(unix)]
+use tokio::{process::ChildStdin, sync::Mutex as AsyncMutex};
 
 use crate::TessivumError;
 
@@ -362,7 +365,7 @@ impl Subprocess {
             }
         }
         if self.done().is_none() {
-            let _ = signal_tree(pid, libc::SIGKILL);
+            force_terminate_tree(pid);
         }
     }
 
@@ -1828,10 +1831,13 @@ fn signal_tree(pid: u32, signal: i32) -> std::io::Result<()> {
     Err(group_error)
 }
 
-#[cfg(not(unix))]
-fn signal_tree(_: u32, _: i32) -> std::io::Result<()> {
-    Ok(())
+#[cfg(unix)]
+fn force_terminate_tree(pid: u32) {
+    let _ = signal_tree(pid, libc::SIGKILL);
 }
+
+#[cfg(not(unix))]
+fn force_terminate_tree(_: u32) {}
 
 fn exit_facts(status: std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
     #[cfg(unix)]

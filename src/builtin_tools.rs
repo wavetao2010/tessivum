@@ -7,7 +7,7 @@ mod model_tools;
 
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -16,6 +16,8 @@ use std::{
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+#[cfg(unix)]
+use std::path::Path;
 
 #[cfg(unix)]
 use crate::subprocess::{
@@ -24,16 +26,23 @@ use crate::subprocess::{
 };
 use crate::{
     attachments::AttachmentStore,
-    jobs::{JobOwner, JobStart},
-    sandbox::{Sandbox, SandboxApproval, SandboxMode, SandboxReadPolicy, SandboxRequest},
+    jobs::JobOwner,
+    sandbox::Sandbox,
     session::SessionStore,
     tools::{
         ToolApproval, ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
     },
     web::WebRuntime,
-    workspace::{SessionResourceResolver, WorkspaceError, WorkspaceLease},
-    ContentBlock, SessionId, TessivumError, ToolSchema,
+    workspace::{SessionResourceResolver, WorkspaceError},
+    ContentBlock, SessionId, TessivumError,
+};
+#[cfg(unix)]
+use crate::{
+    jobs::JobStart,
+    sandbox::{SandboxApproval, SandboxMode, SandboxReadPolicy, SandboxRequest},
+    workspace::WorkspaceLease,
+    ToolSchema,
 };
 
 /// Default upper bound for combined `bash` stdout and stderr.
@@ -333,6 +342,7 @@ impl BuiltinTools {
                 },
             ))?);
         }
+        #[cfg(unix)]
         if config.enable_bash {
             let (sessions, sandbox, approval, job_owners) = services
                 .map(|services| {
@@ -415,6 +425,7 @@ fn invalid_arguments(message: &str, details: Value) -> TessivumError {
     TessivumError::new("INVALID_TOOL_ARGUMENTS", message, "tools", details)
 }
 
+#[cfg(unix)]
 fn bounded_job_label(value: &str) -> String {
     let mut end = value.len().min(256);
     while !value.is_char_boundary(end) {
@@ -441,6 +452,7 @@ fn read_schema() -> Value {
     })
 }
 
+#[cfg(unix)]
 fn bash_schema() -> Value {
     json!({
         "type": "object",
@@ -1083,12 +1095,10 @@ fn bash_error(message: &str, error: std::io::Error) -> TessivumError {
     )
 }
 
-#[cfg(unix)]
 fn workspace_error(context: &ToolRunContext, error: WorkspaceError) -> TessivumError {
     workspace_error_for_session(&context.session, error)
 }
 
-#[cfg(unix)]
 fn workspace_error_for_session(session: &SessionId, error: WorkspaceError) -> TessivumError {
     TessivumError::new(
         error.code(),

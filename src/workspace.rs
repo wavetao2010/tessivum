@@ -4,6 +4,8 @@
 //! connection to Host or the browser protocol: callers must resolve a private
 //! [`WorkspaceLease`] before using a workspace root.
 
+#[cfg(unix)]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -14,7 +16,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
