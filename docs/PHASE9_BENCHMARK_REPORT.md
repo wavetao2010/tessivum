@@ -54,11 +54,11 @@ Each runtime consumes the same fingerprinted JSON workload: 1,000 child scopes, 
 
 The post-disposal PSS row is process memory after logical root disposal, not a leak count. The registration-residue row is the semantic leak check.
 
-## Product benchmark
+## Tessivum Base vs. Compatibility profile cost
 
-Both manifests use the same offline recorded replay and no external model or API key. Base runs the Rust product alone. Compatibility additionally boots the pinned Legacy Node Host and the two fixed Browser plugins. Browser timings include a bounded probe for optional onboarding dialogs; the prompt-to-marker rows isolate the actual local replay round trip after submission.
+This section is not a Tessivum-vs.-DeepSeek Harness product comparison: both columns run the same Tessivum `0.1.0-alpha.23`. Both manifests use the same offline recorded replay and no external model or API key. Base runs the Rust product alone. Compatibility additionally boots the pinned Legacy Node Host and loads the first-party `tessivum-market` plus the pinned `dsh-better-sidebar@0.16.1` and `dsh-dream-skin@8.30.1` Browser plugins. Browser timings include a bounded probe for optional onboarding dialogs; the prompt-to-marker rows isolate the actual local replay round trip after submission.
 
-| Metric | Base median / p95 | Compatibility median / p95 |
+| Metric | Tessivum Base median / p95 | Tessivum Compatibility median / p95 |
 |---|---:|---:|
 | Headless replay completion | 44.75 / 54.24 ms | 65.21 / 90.46 ms |
 | HTTP ready | 71.06 / 89.97 ms | 1,337.41 / 1,686.20 ms |

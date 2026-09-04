@@ -54,11 +54,11 @@
 
 “root dispose 后进程 PSS”是逻辑 root 销毁后的进程内存，不是泄漏计数；“存活注册数”才是语义残留检查。
 
-## 产品 Benchmark
+## Tessivum Base 与 Compatibility Profile 成本对比
 
-两个 manifest 使用同一个离线录制 replay，不调用外部模型，也不需要 API Key。Base 只运行 Rust 产品；Compatibility 额外启动固定版本的 Legacy Node Host 和两个 Browser 插件。Browser 总时间包含对可选首次启动对话框的有界探测；Prompt 到 marker 行单独给出提交后的真实本地 replay 往返时间。
+本节不是 Tessivum 与 DeepSeek Harness 的产品对比；两列均运行同一个 Tessivum `0.1.0-alpha.23`。两个 manifest 使用同一个离线录制 replay，不调用外部模型，也不需要 API Key。Base 只运行 Rust 产品；Compatibility 额外启动固定版本的 Legacy Node Host，并加载第一方 `tessivum-market` 以及固定版本的 `dsh-better-sidebar@0.16.1`、`dsh-dream-skin@8.30.1` Browser 插件。Browser 总时间包含对可选首次启动对话框的有界探测；Prompt 到 marker 行单独给出提交后的真实本地 replay 往返时间。
 
-| 指标 | Base 中位数 / p95 | Compatibility 中位数 / p95 |
+| 指标 | Tessivum Base 中位数 / p95 | Tessivum Compatibility 中位数 / p95 |
 |---|---:|---:|
 | Headless replay 完成 | 44.75 / 54.24 ms | 65.21 / 90.46 ms |
 | HTTP ready | 71.06 / 89.97 ms | 1,337.41 / 1,686.20 ms |
