@@ -272,7 +272,7 @@ pub struct WorkspaceLease {
     workspace_id: WorkspaceId,
     generation: u64,
     canonical_root: PathBuf,
-    directory: File,
+    _directory: File,
     identity: FileIdentity,
 }
 
@@ -296,7 +296,7 @@ impl WorkspaceLease {
     #[cfg(unix)]
     pub(crate) fn directory_fd(&self) -> Result<RawFd, WorkspaceError> {
         self.validate_current()?;
-        Ok(self.directory.as_raw_fd())
+        Ok(self._directory.as_raw_fd())
     }
 
     /// Verifies registration, generation, and the current pathname identity.
@@ -855,7 +855,7 @@ impl WorkspaceRegistry {
             workspace_id: id,
             generation,
             canonical_root,
-            directory,
+            _directory: directory,
             identity,
         })
     }
@@ -1013,11 +1013,6 @@ fn file_identity(file: &File) -> io::Result<FileIdentity> {
     })
 }
 
-#[cfg(not(unix))]
-fn file_identity(_file: &File) -> io::Result<FileIdentity> {
-    Ok(FileIdentity)
-}
-
 #[cfg(unix)]
 fn open_no_follow(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<File> {
     use std::ffi::CString;
@@ -1046,6 +1041,7 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)
         .map_err(|error| io_error("open workspace lock", error))?;
     #[cfg(unix)]

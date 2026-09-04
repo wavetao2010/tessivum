@@ -1,16 +1,18 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
-    time::Duration,
 };
+#[cfg(unix)]
+use std::{process::Command, sync::Arc, time::Duration};
 
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(unix)]
+use serde_json::Value;
+#[cfg(unix)]
+use tessivum::workspace::{SessionResourceResolver, WorkspaceRegistry};
 use tessivum::{
     builtin_tools::{BuiltinTools, BuiltinToolsConfig, DEFAULT_MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES},
     tools::{ToolRunContext, ToolRuntime},
-    workspace::{SessionResourceResolver, WorkspaceRegistry},
     ContentBlock, SessionId, ToolCallId,
 };
 use tessivum_core::ContextHandle;
@@ -44,6 +46,7 @@ fn context(root: &ContextHandle, call: &str) -> ToolRunContext {
     }
 }
 
+#[cfg(unix)]
 fn context_for(root: &ContextHandle, session: &str, call: &str) -> ToolRunContext {
     ToolRunContext {
         session: SessionId::from(session),
@@ -74,12 +77,14 @@ fn text(output: &tessivum::tools::ToolOutput) -> &str {
     }
 }
 
+#[cfg(unix)]
 fn code(output: &tessivum::tools::ToolOutput) -> &str {
     output.meta["code"]
         .as_str()
         .expect("error output has a stable code")
 }
 
+#[cfg(unix)]
 fn bash_config(cwd: &Path) -> BuiltinToolsConfig {
     BuiltinToolsConfig {
         enable_bash: true,
@@ -117,6 +122,7 @@ async fn echo_is_model_visible_and_returns_the_exact_text() {
     assert!(runtime.schemas().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_is_absent_by_default_and_opt_in_executes_the_fixture_once() {
     let runtime = ToolRuntime::new();
@@ -151,6 +157,7 @@ async fn bash_is_absent_by_default_and_opt_in_executes_the_fixture_once() {
     assert!(runtime.schemas().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_uses_configured_cwd_and_captures_stdout_stderr_and_nonzero_status() {
     let directory = TempDir::new();
@@ -203,6 +210,7 @@ async fn bash_reports_self_termination_as_a_signal() {
     assert_eq!(output.meta["exitCode"], Value::Null);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_bounds_combined_output_and_marks_truncation() {
     let directory = TempDir::new();
@@ -232,6 +240,7 @@ async fn bash_bounds_combined_output_and_marks_truncation() {
     assert!(text(&output).len() <= 8);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_cancellation_kills_and_reaps_the_child() {
     let directory = TempDir::new();
@@ -302,22 +311,25 @@ async fn invalid_configuration_and_arguments_fail_explicitly() {
         assert_eq!(error.code, "INVALID_BUILTIN_TOOLS_CONFIG");
     }
 
-    let runtime = ToolRuntime::new();
-    let _builtins =
-        BuiltinTools::new(&runtime, bash_config(directory.path())).expect("bash registers");
-    let root = ContextHandle::root();
-    for (name, arguments) in [
-        ("echo", json!({})),
-        ("echo", json!({"text": 1})),
-        ("bash", json!({"command": "   "})),
-        ("bash", json!({"command": "printf ok", "description": 1})),
-    ] {
-        let output = runtime
-            .execute(context(&root, "invalid"), name, arguments)
-            .await;
+    #[cfg(unix)]
+    {
+        let runtime = ToolRuntime::new();
+        let _builtins =
+            BuiltinTools::new(&runtime, bash_config(directory.path())).expect("bash registers");
+        let root = ContextHandle::root();
+        for (name, arguments) in [
+            ("echo", json!({})),
+            ("echo", json!({"text": 1})),
+            ("bash", json!({"command": "   "})),
+            ("bash", json!({"command": "printf ok", "description": 1})),
+        ] {
+            let output = runtime
+                .execute(context(&root, "invalid"), name, arguments)
+                .await;
 
-        assert!(output.is_error);
-        assert_eq!(code(&output), "INVALID_TOOL_ARGUMENTS");
+            assert!(output.is_error);
+            assert_eq!(code(&output), "INVALID_TOOL_ARGUMENTS");
+        }
     }
 }
 #[cfg(unix)]

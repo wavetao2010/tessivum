@@ -220,8 +220,10 @@ fn persistent_bash_error(code: &str, message: &str, details: Value) -> TessivumE
 
 pub(crate) struct HostToolServices {
     sessions: SessionStore,
+    #[cfg(unix)]
     sandbox: Sandbox,
     approval: Arc<dyn ToolApproval>,
+    #[cfg(unix)]
     job_owners: BashJobOwners,
     persistent_shells: PersistentShellSessions,
 
@@ -240,10 +242,14 @@ impl HostToolServices {
         attachments: Arc<AttachmentStore>,
         web: WebRuntime,
     ) -> Self {
+        #[cfg(not(unix))]
+        let _ = (sandbox, job_owners);
         Self {
             sessions,
+            #[cfg(unix)]
             sandbox,
             approval,
+            #[cfg(unix)]
             job_owners,
             attachments,
             web,

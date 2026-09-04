@@ -14,12 +14,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use tessivum::plugin_manager::install_first_party_market;
+#[cfg(unix)]
+use tessivum::plugin_manager::{mutate_plugins, PluginMutation};
 use tessivum::{
     cli::{parse_cli, resolve_data_root, CliCommand},
-    plugin_manager::{
-        enabled_client_plugin_names, load_plugin_entries, mutate_plugins, plugin_profile_root,
-        PluginMutation,
-    },
+    plugin_manager::{enabled_client_plugin_names, load_plugin_entries, plugin_profile_root},
 };
 use tessivum_core::RuntimeKind;
 

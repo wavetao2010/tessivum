@@ -14,12 +14,20 @@ use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
 use serde_json::{json, Value};
+#[cfg(unix)]
 use tessivum::{
     agent::AgentRegistry,
-    agent_mode::AgentModeTrust,
-    api::{ApiServer, ApiServerConfig, MAX_FRAME_BYTES},
-    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
+    api::ApiServerConfig,
     bridge::{BridgeServices, DomainBridge},
+    llm::LlmRuntime,
+    session::{MemorySessionPersistence, SessionStore},
+    system_prompt::SystemPrompt,
+    tools::ToolRuntime,
+};
+use tessivum::{
+    agent_mode::AgentModeTrust,
+    api::{ApiServer, MAX_FRAME_BYTES},
+    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     host::{
         HostApi, HostConfig, HostLlmAdapterFactory, HostModelGroup, HostModelInfo,
         HostModelReasoning, HostModelReasoningEffort, HostNotification, HostPathOpener,
@@ -28,7 +36,7 @@ use tessivum::{
         HostSessionSearchHit, HostSessionSearchResult, SessionQueueAction,
         SessionUpdateQueueParams, SessionUpdateQueueResult,
     },
-    llm::{LlmAdapter, LlmRuntime, LlmStream},
+    llm::{LlmAdapter, LlmStream},
     openai_responses::{ResponsesModel, ResponsesRoute},
     protocol::{
         AgentCancelCause, ContentBlock, FinishReason, GenerateRequest, InitializeParams,
@@ -36,15 +44,12 @@ use tessivum::{
         SessionId, SessionModelSelection, SessionPromptParams, SessionPromptResult, SessionStatus,
         StreamChunk,
     },
-    session::{MemorySessionPersistence, SessionStore},
     settings::{MemorySettingsProvider, Settings, SettingsRegistration},
     subagent::{
         SessionProjectionsBlock, SubagentDeleteRequest, SubagentDeleteResult,
         SubagentHistoryRequest, SubagentHistoryResult, SubagentInterruptRequest,
         SubagentInterruptResult, SubagentMode, SubagentPromptRequest, SubagentPromptResult,
     },
-    system_prompt::SystemPrompt,
-    tools::ToolRuntime,
     TessivumError,
 };
 use tokio::{
