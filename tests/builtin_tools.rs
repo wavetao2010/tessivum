@@ -793,7 +793,7 @@ async fn persistent_powershell_keeps_state_and_cwd() {
         .execute(
             context(&root, "persistent-next"),
             "bash",
-            json!({"command": "[IO.File]::WriteAllText('persistent.txt', (Get-TessivumState)); [Console]::Out.Write((Get-TessivumState))"}),
+            json!({"command": "Set-Content -LiteralPath persistent.txt -Value (Get-TessivumState) -NoNewline; [Console]::Out.Write((Get-TessivumState))"}),
         )
         .await;
     assert!(!second.is_error, "{}", text(&second));
