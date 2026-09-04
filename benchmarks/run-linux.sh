@@ -220,7 +220,7 @@ for package in dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1; do
 done
 dsh_compat_seed="$work_root/deepseek-harness-compatibility-home"
 for profile in headless web; do
-  DSH_HOME="$dsh_compat_seed" node "$dsh_bin" plugin --profile "$profile" add \
+  DSH_HOME="$dsh_compat_seed" node "$dsh_bin" plugin --profile "$profile" add --ignore-scripts \
     "$market_tgz" dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1
 done
 
