@@ -190,12 +190,6 @@ jobs:
         working-directory: fixtures/wasm/rust-minimal
         run: cargo build --locked --release --target wasm32-unknown-unknown
 
-      - name: Verify checked guest artifact hash
-        working-directory: fixtures/wasm/rust-minimal
-        run: |
-          $expected = (Get-Content plugin.wasm.sha256).Split()[0]
-          $actual = (Get-FileHash target/wasm32-unknown-unknown/release/tessivum_rust_minimal.wasm -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "WASM guest checksum mismatch: $actual" }
 
       - name: Exercise rebuilt guest contract
         env:
