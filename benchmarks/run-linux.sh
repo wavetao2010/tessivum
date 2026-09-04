@@ -50,6 +50,7 @@ dsh_replay_plugin="$dsh_upstream/packages/test-support/llm-replay/lib/index.js"
 dsh_replay_children=$dsh_replay
 for _ in {2..9}; do dsh_replay_children+=":$dsh_replay"; done
 export TESSIVUM_BENCH_DSH_UPSTREAM_ROOT="$dsh_upstream"
+export TESSIVUM_BENCH_DSH_BIN="$dsh_bin"
 dsh_patch="$work_root/deepseek-harness-benchmark.patch.yml"
 sed "s|@DSH_REPLAY_PLUGIN@|file://$dsh_replay_plugin|" "$product/benchmarks/deepseek-harness.patch.yml" > "$dsh_patch"
 export TESSIVUM_BENCH_DSH_PATCH="$dsh_patch"

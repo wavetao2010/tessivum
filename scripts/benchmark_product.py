@@ -195,11 +195,12 @@ def collect_provenance(
     runtime_inputs: list[dict[str, str]] = []
     for name in ("TESSIVUM_BENCH_DSH_BIN", "TESSIVUM_BENCH_DSH_PATCH", "TESSIVUM_BENCH_DSH_REPLAY", "TESSIVUM_BENCH_DSH_REPLAY_PLUGIN"):
         value = os.environ.get(name)
-        if value is not None:
-            path = Path(value).resolve()
-            if not path.is_file():
-                raise ValueError(f"runtime input is missing: {path}")
-            runtime_inputs.append({"name": name, "path": str(path), "sha256": file_sha256(path)})
+        if value is None:
+            raise ValueError(f"missing required benchmark environment variable: {name}")
+        path = Path(value).resolve()
+        if not path.is_file():
+            raise ValueError(f"runtime input is missing: {path}")
+        runtime_inputs.append({"name": name, "path": str(path), "sha256": file_sha256(path)})
     return {
         "repositories": repositories,
         "productCoreDependencyRevision": product_core_revision(product_root),
