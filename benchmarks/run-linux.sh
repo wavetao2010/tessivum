@@ -16,11 +16,13 @@ mkdir -p "$work_root/upstream" "$results_root"
 git clone --quiet --no-local "$source_root/tessivum" "$work_root/tessivum"
 git clone --quiet --no-local "$source_root/tessivum-core" "$work_root/tessivum-core"
 git clone --quiet --no-local "$source_root/upstream/deepseek-harness" "$work_root/upstream/deepseek-harness"
+git clone --quiet --no-local "$source_root/upstream/deepseek-harness" "$work_root/upstream/deepseek-harness-upstream"
 
 product="$work_root/tessivum"
 core="$work_root/tessivum-core"
 dsh="$work_root/upstream/deepseek-harness"
 cordis="$dsh/vendor"
+dsh_upstream="$work_root/upstream/deepseek-harness-upstream"
 cargo_target=${CARGO_TARGET_DIR:-$work_root/cargo-target}
 core_target=${CORE_CARGO_TARGET_DIR:-$cargo_target/core}
 product_target=${PRODUCT_CARGO_TARGET_DIR:-$cargo_target/product}
@@ -38,6 +40,22 @@ fi
 cd "$dsh"
 pnpm install --frozen-lockfile
 pnpm run build:lib:host
+cd "$dsh_upstream"
+pnpm install --frozen-lockfile
+pnpm run build
+dsh_bin="$dsh_upstream/apps/cli/lib/bin.js"
+dsh_replay="$dsh_upstream/examples/headless-agent/tests/snapshots/headless-profile/session.expected.jsonl"
+dsh_replay_plugin="$dsh_upstream/packages/test-support/llm-replay/lib/index.js"
+[[ -f "$dsh_bin" && -f "$dsh_replay" && -f "$dsh_replay_plugin" ]]
+dsh_replay_children=$dsh_replay
+for _ in {2..9}; do dsh_replay_children+=":$dsh_replay"; done
+export TESSIVUM_BENCH_DSH_UPSTREAM_ROOT="$dsh_upstream"
+dsh_patch="$work_root/deepseek-harness-benchmark.patch.yml"
+sed "s|@DSH_REPLAY_PLUGIN@|file://$dsh_replay_plugin|" "$product/benchmarks/deepseek-harness.patch.yml" > "$dsh_patch"
+export TESSIVUM_BENCH_DSH_PATCH="$dsh_patch"
+export TESSIVUM_BENCH_DSH_REPLAY="$dsh_replay"
+export TESSIVUM_BENCH_DSH_REPLAY_PLUGIN="$dsh_replay_plugin"
+export TESSIVUM_BENCH_DSH_REPLAY_CHILD_FILES="$dsh_replay_children"
 
 cd "$product/web"
 bun install --frozen-lockfile
@@ -200,6 +218,11 @@ fi
 for package in dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1; do
   env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$package"
 done
+dsh_compat_seed="$work_root/deepseek-harness-compatibility-home"
+for profile in headless web; do
+  DSH_HOME="$dsh_compat_seed" node "$dsh_bin" plugin --profile "$profile" add \
+    "$market_tgz" dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1
+done
 
 
 python3 "$core/scripts/run_paired_benchmarks.py" \
@@ -220,7 +243,9 @@ python3 "$product/scripts/benchmark_product.py" \
   --manifest "$product/benchmarks/manifests/base.json" \
   --manifest "$product/benchmarks/manifests/compatibility.json" \
   --binary "tessivum=$binary" \
+  --binary "deepseek-harness=$product/scripts/benchmark_deepseek_harness.sh" \
+  --data-seed "Compatibility:deepseek-harness=$dsh_compat_seed" \
   --samples "$samples" \
   --interleave \
   "${publication[@]}" \
-  --raw-out "$results_root/product.json"
+  --raw-out "$results_root/product-comparison.json"

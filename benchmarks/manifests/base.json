@@ -5,6 +5,9 @@
     "deepseekHarness": {
       "revision": "47f943859bef60e4160492346772ded9b24f765a",
       "trackedDiffSha256": "9e914d5998ccb2ca1faf8315a9d9a7235407c7830a8939255cd5838acd149ccd"
+    },
+    "deepseekHarnessUpstream": {
+      "revision": "47f943859bef60e4160492346772ded9b24f765a"
     }
   },
   "workload": {
