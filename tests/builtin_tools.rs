@@ -1,16 +1,18 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
-    time::Duration,
 };
+#[cfg(unix)]
+use std::{process::Command, sync::Arc, time::Duration};
 
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(any(unix, windows))]
+use serde_json::Value;
+#[cfg(unix)]
+use tessivum::workspace::{SessionResourceResolver, WorkspaceRegistry};
 use tessivum::{
     builtin_tools::{BuiltinTools, BuiltinToolsConfig, DEFAULT_MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES},
     tools::{ToolRunContext, ToolRuntime},
-    workspace::{SessionResourceResolver, WorkspaceRegistry},
     ContentBlock, SessionId, ToolCallId,
 };
 use tessivum_core::ContextHandle;
@@ -44,6 +46,7 @@ fn context(root: &ContextHandle, call: &str) -> ToolRunContext {
     }
 }
 
+#[cfg(unix)]
 fn context_for(root: &ContextHandle, session: &str, call: &str) -> ToolRunContext {
     ToolRunContext {
         session: SessionId::from(session),
@@ -74,12 +77,14 @@ fn text(output: &tessivum::tools::ToolOutput) -> &str {
     }
 }
 
+#[cfg(unix)]
 fn code(output: &tessivum::tools::ToolOutput) -> &str {
     output.meta["code"]
         .as_str()
         .expect("error output has a stable code")
 }
 
+#[cfg(unix)]
 fn bash_config(cwd: &Path) -> BuiltinToolsConfig {
     BuiltinToolsConfig {
         enable_bash: true,
@@ -117,6 +122,7 @@ async fn echo_is_model_visible_and_returns_the_exact_text() {
     assert!(runtime.schemas().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_is_absent_by_default_and_opt_in_executes_the_fixture_once() {
     let runtime = ToolRuntime::new();
@@ -151,6 +157,7 @@ async fn bash_is_absent_by_default_and_opt_in_executes_the_fixture_once() {
     assert!(runtime.schemas().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_uses_configured_cwd_and_captures_stdout_stderr_and_nonzero_status() {
     let directory = TempDir::new();
@@ -203,6 +210,7 @@ async fn bash_reports_self_termination_as_a_signal() {
     assert_eq!(output.meta["exitCode"], Value::Null);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_bounds_combined_output_and_marks_truncation() {
     let directory = TempDir::new();
@@ -232,6 +240,7 @@ async fn bash_bounds_combined_output_and_marks_truncation() {
     assert!(text(&output).len() <= 8);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_cancellation_kills_and_reaps_the_child() {
     let directory = TempDir::new();
@@ -302,22 +311,25 @@ async fn invalid_configuration_and_arguments_fail_explicitly() {
         assert_eq!(error.code, "INVALID_BUILTIN_TOOLS_CONFIG");
     }
 
-    let runtime = ToolRuntime::new();
-    let _builtins =
-        BuiltinTools::new(&runtime, bash_config(directory.path())).expect("bash registers");
-    let root = ContextHandle::root();
-    for (name, arguments) in [
-        ("echo", json!({})),
-        ("echo", json!({"text": 1})),
-        ("bash", json!({"command": "   "})),
-        ("bash", json!({"command": "printf ok", "description": 1})),
-    ] {
-        let output = runtime
-            .execute(context(&root, "invalid"), name, arguments)
-            .await;
+    #[cfg(unix)]
+    {
+        let runtime = ToolRuntime::new();
+        let _builtins =
+            BuiltinTools::new(&runtime, bash_config(directory.path())).expect("bash registers");
+        let root = ContextHandle::root();
+        for (name, arguments) in [
+            ("echo", json!({})),
+            ("echo", json!({"text": 1})),
+            ("bash", json!({"command": "   "})),
+            ("bash", json!({"command": "printf ok", "description": 1})),
+        ] {
+            let output = runtime
+                .execute(context(&root, "invalid"), name, arguments)
+                .await;
 
-        assert!(output.is_error);
-        assert_eq!(code(&output), "INVALID_TOOL_ARGUMENTS");
+            assert!(output.is_error);
+            assert_eq!(code(&output), "INVALID_TOOL_ARGUMENTS");
+        }
     }
 }
 #[cfg(unix)]
@@ -722,9 +734,80 @@ async fn stale_workspace_retires_the_enabled_bash_shell() {
     shells.shutdown().await;
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[tokio::test]
+async fn bash_registration_executes_windows_powershell() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: directory.path().to_path_buf(),
+            resolver: None,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .expect("PowerShell registers on Windows");
+    let root = ContextHandle::root();
+    let output = runtime
+        .execute(
+            context(&root, "windows-powershell"),
+            "bash",
+            json!({"command": "[Console]::Out.Write('WINDOWS_SHELL_OK')"}),
+        )
+        .await;
+    assert!(!output.is_error);
+    assert_eq!(text(&output), "WINDOWS_SHELL_OK");
+    assert_eq!(output.meta["signal"], Value::Null);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn persistent_powershell_keeps_state_and_cwd() {
+    let directory = TempDir::new();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: directory.path().to_path_buf(),
+            resolver: None,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    shells.enable(SessionId::from("builtin-tools"));
+    let root = ContextHandle::root();
+    let first = runtime
+        .execute(
+            context(&root, "persistent-start"),
+            "bash",
+            json!({"command": "$tessivumState = 'kept'; function Get-TessivumState { $tessivumState }; Set-Location nested"}),
+        )
+        .await;
+    assert!(!first.is_error, "{}", text(&first));
+    let second = runtime
+        .execute(
+            context(&root, "persistent-next"),
+            "bash",
+            json!({"command": "Set-Content -LiteralPath persistent.txt -Value (Get-TessivumState) -NoNewline; [Console]::Out.Write((Get-TessivumState))"}),
+        )
+        .await;
+    assert!(!second.is_error, "{}", text(&second));
+    assert_eq!(text(&second), "kept");
+    assert_eq!(
+        fs::read_to_string(directory.path().join("nested/persistent.txt")).unwrap(),
+        "kept"
+    );
+    shells.shutdown().await;
+}
+
+#[cfg(not(any(unix, windows)))]
 #[test]
-fn bash_registration_is_explicitly_unsupported_off_unix() {
+fn bash_registration_is_explicitly_unsupported_off_supported_platforms() {
     let error = BuiltinTools::new(
         &ToolRuntime::new(),
         BuiltinToolsConfig {
@@ -732,6 +815,6 @@ fn bash_registration_is_explicitly_unsupported_off_unix() {
             ..BuiltinToolsConfig::default()
         },
     )
-    .expect_err("bash is unavailable off Unix");
+    .expect_err("bash is unavailable off Unix and Windows");
     assert_eq!(error.code, "UNSUPPORTED_BUILTIN_BASH");
 }

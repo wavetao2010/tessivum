@@ -65,3 +65,24 @@ pub use openai_responses::{
     ResponsesRouteResolver, RESPONSES_IMAGE_MODALITY, RESPONSES_TEXT_MODALITY,
 };
 pub use protocol::*;
+
+pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(Into::into)
+}
+
+pub(crate) fn process_path(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy();
+        if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{path}").into();
+        }
+        if let Some(path) = path.strip_prefix(r"\\?\") {
+            return path.into();
+        }
+    }
+    path.to_path_buf()
+}

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- Pair the full product benchmark against a clean DeepSeek Harness `0.1.0-rc.5`
+  build under the same Base and Compatibility Browser contracts, with 30-sample
+  Linux evidence and bilingual comparison tables.
+- Add frozen Windows Server 2025 CI gates for the product and Core, covering
+  MSVC compile/Clippy/tests, Web and plugin dependencies, Extism, and a real
+  Legacy Node lifecycle.
+
+### Changed
+
+- Pin `tessivum-core v0.1.6` to revision
+  `640e9ea41810861eebd5bbf300052072e989259c` for Windows executable resolution,
+  platform-correct supervision, isolated Bun transpilation, retained host stderr diagnostics, required Windows `SystemRoot`, and cold host readiness.
+
+### Fixed
+
+- Give cold Legacy Node plugin activation the Web readiness deadline instead of
+  failing after five seconds under process-cold Compatibility runs.
+
 ## 0.1.0-alpha.23 - 2026-09-03
 
 ### Added

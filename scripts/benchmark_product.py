@@ -153,11 +153,16 @@ def product_core_revision(product_root: Path) -> str:
     return revisions.pop()
 
 
-def collect_provenance(manifests: list[tuple[Path, dict[str, Any]]], runtimes: list[dict[str, str]]) -> dict[str, Any]:
+def collect_provenance(
+    manifests: list[tuple[Path, dict[str, Any]]],
+    runtimes: list[dict[str, str]],
+    data_seeds: dict[tuple[str, str], Path],
+) -> dict[str, Any]:
     product_root = Path(__file__).resolve().parents[1]
     workspace = product_root.parent
     deepseek = workspace / "upstream" / "deepseek-harness"
-    source = manifests[0][1]["source"]["deepseekHarness"]
+    source = manifests[0][1]["source"]
+    patched_source = source["deepseekHarness"]
     replays = {resolve_path(manifest["workload"]["replay"], path, {}) for path, manifest in manifests}
     if len(replays) != 1:
         raise ValueError("all manifests must resolve to the same replay file")
@@ -175,19 +180,41 @@ def collect_provenance(manifests: list[tuple[Path, dict[str, Any]]], runtimes: l
         if isinstance(modules, str):
             resolved = resolve_path(modules, path, {})
             host_modules[str(resolved)] = tree_sha256(resolved)
+    repositories = {
+        "product": repository_provenance(product_root),
+        "coreBenchmark": repository_provenance(workspace / "tessivum-core"),
+        "deepseekHarness": repository_provenance(deepseek, patched_source["revision"], patched_source["trackedDiffSha256"]),
+    }
+    upstream_source = source.get("deepseekHarnessUpstream")
+    if isinstance(upstream_source, dict):
+        upstream_root_value = os.environ.get("TESSIVUM_BENCH_DSH_UPSTREAM_ROOT")
+        if upstream_root_value is None:
+            raise ValueError("missing required benchmark environment variable: TESSIVUM_BENCH_DSH_UPSTREAM_ROOT")
+        upstream_root = Path(upstream_root_value).resolve()
+        repositories["deepseekHarnessUpstream"] = repository_provenance(upstream_root, upstream_source["revision"])
+    runtime_inputs: list[dict[str, str]] = []
+    for name in ("TESSIVUM_BENCH_DSH_BIN", "TESSIVUM_BENCH_DSH_PATCH", "TESSIVUM_BENCH_DSH_REPLAY", "TESSIVUM_BENCH_DSH_REPLAY_PLUGIN"):
+        value = os.environ.get(name)
+        if value is None:
+            raise ValueError(f"missing required benchmark environment variable: {name}")
+        path = Path(value).resolve()
+        if not path.is_file():
+            raise ValueError(f"runtime input is missing: {path}")
+        runtime_inputs.append({"name": name, "path": str(path), "sha256": file_sha256(path)})
     return {
-        "repositories": {
-            "product": repository_provenance(product_root),
-            "coreBenchmark": repository_provenance(workspace / "tessivum-core"),
-            "deepseekHarness": repository_provenance(deepseek, source["revision"], source["trackedDiffSha256"]),
-        },
+        "repositories": repositories,
         "productCoreDependencyRevision": product_core_revision(product_root),
         "replay": {"path": str(replay), "sha256": file_sha256(replay)},
+        "runtimeInputs": runtime_inputs,
         "drivers": {
             "product": file_sha256(Path(__file__).resolve()),
             "browser": file_sha256(Path(__file__).with_name("benchmark_browser.mjs")),
         },
         "profiles": profiles,
+        "dataSeeds": [
+            {"manifest": manifest, "runtime": runtime, "path": str(path), "sha256": tree_sha256(path)}
+            for (manifest, runtime), path in sorted(data_seeds.items())
+        ],
         "hostModules": [{"path": path, "sha256": digest} for path, digest in sorted(host_modules.items())],
         "runtimes": [{**runtime, "sha256": file_sha256(Path(runtime["binary"]))} for runtime in runtimes],
     }
@@ -210,6 +237,10 @@ def validate_manifest(path: Path) -> dict[str, Any]:
             or not isinstance(deepseek.get("revision"), str) or len(deepseek["revision"]) != 40
             or not isinstance(deepseek.get("trackedDiffSha256"), str) or len(deepseek["trackedDiffSha256"]) != 64):
         raise ValueError(f"manifest source.deepseekHarness must pin a revision and tracked diff: {path}")
+    upstream = source.get("deepseekHarnessUpstream")
+    if (not isinstance(upstream, dict)
+            or not isinstance(upstream.get("revision"), str) or len(upstream["revision"]) != 40):
+        raise ValueError(f"manifest source.deepseekHarnessUpstream must pin a revision: {path}")
     workload = require(manifest.get("workload"), "workload")
     if not isinstance(workload, dict) or not isinstance(workload.get("replay"), str):
         raise ValueError(f"manifest workload.replay must be a path: {path}")
@@ -567,13 +598,20 @@ def validate_profile(manifest: dict[str, Any], source: Path) -> None:
 
 
 
-def fresh_root(manifest: dict[str, Any], manifest_path: Path, profile: bool) -> tuple[Path, Path, Path]:
+def fresh_root(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    profile: bool,
+    data_seed: Path | None,
+) -> tuple[Path, Path, Path]:
     root = Path(tempfile.mkdtemp(prefix="tessivum-benchmark-"))
     try:
         workspace = root / "workspace"
         data_dir = root / "data"
         workspace.mkdir()
         data_dir.mkdir()
+        if data_seed is not None:
+            shutil.copytree(data_seed, data_dir, dirs_exist_ok=True, symlinks=True)
         if profile and isinstance(manifest["surface"].get("profileSeed"), str):
             source = resolve_path(manifest["surface"]["profileSeed"], manifest_path, {})
             if not source.is_dir():
@@ -597,14 +635,20 @@ def command_record(kind: str, command: list[str], cwd: Path, environment: dict[s
     return {"kind": kind, "argv": command, "cwd": str(cwd), "environment": environment}
 
 
-def measure_headless(sample: dict[str, Any], manifest: dict[str, Any], manifest_path: Path, binary: Path) -> None:
+def measure_headless(
+    sample: dict[str, Any],
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    binary: Path,
+    data_seed: Path | None,
+) -> None:
     result: dict[str, Any] = {"pssSnapshots": []}
     sample["headless"] = result
     root: Path | None = None
     capture: CapturedProcess | None = None
     observed: set[int] = set()
     try:
-        root, workspace, data_dir = fresh_root(manifest, manifest_path, profile=True)
+        root, workspace, data_dir = fresh_root(manifest, manifest_path, profile=True, data_seed=data_seed)
         workload = resolve_path(manifest["workload"]["replay"], manifest_path, {})
         if not workload.is_file():
             raise ValueError(f"recorded workload is missing: {workload}")
@@ -703,7 +747,13 @@ def monitor_browser(
     return True, resident
 
 
-def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path: Path, binary: Path) -> None:
+def measure_web(
+    sample: dict[str, Any],
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    binary: Path,
+    data_seed: Path | None,
+) -> None:
     result: dict[str, Any] = {"pssSnapshots": []}
     sample["web"] = result
     root: Path | None = None
@@ -712,7 +762,7 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
     host_observed: set[int] = set()
     browser_observed: set[int] = set()
     try:
-        root, workspace, data_dir = fresh_root(manifest, manifest_path, profile=True)
+        root, workspace, data_dir = fresh_root(manifest, manifest_path, profile=True, data_seed=data_seed)
         workload = resolve_path(manifest["workload"]["replay"], manifest_path, {})
         if not workload.is_file():
             raise ValueError(f"recorded workload is missing: {workload}")
@@ -856,7 +906,13 @@ def measure_web(sample: dict[str, Any], manifest: dict[str, Any], manifest_path:
             cleanup_root(root, sample, "web-root-cleanup")
 
 
-def run_sample(manifest: dict[str, Any], manifest_path: Path, runtime: dict[str, str], repetition: int) -> dict[str, Any]:
+def run_sample(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    runtime: dict[str, str],
+    repetition: int,
+    data_seed: Path | None,
+) -> dict[str, Any]:
     sample: dict[str, Any] = {
         "schema": "tessivum.product-benchmark-sample/v2",
         "manifest": manifest["name"],
@@ -871,8 +927,8 @@ def run_sample(manifest: dict[str, Any], manifest_path: Path, runtime: dict[str,
         append_failure(sample, "binary", f"not an executable file: {binary}")
     else:
         try:
-            measure_headless(sample, manifest, manifest_path, binary)
-            measure_web(sample, manifest, manifest_path, binary)
+            measure_headless(sample, manifest, manifest_path, binary, data_seed)
+            measure_web(sample, manifest, manifest_path, binary, data_seed)
         except Exception as error:
             append_failure(sample, "driver", f"unexpected driver error: {error}")
     sample["finishedAt"] = timestamp()
@@ -955,12 +1011,21 @@ def parse_binary(value: str) -> tuple[str, str]:
     if not label or not path:
         raise argparse.ArgumentTypeError("--binary must be PATH or NAME=PATH")
     return label, path
+def parse_data_seed(value: str) -> tuple[str, str, str]:
+    target, separator, path = value.partition("=")
+    manifest, target_separator, runtime = target.partition(":")
+    if not separator or not target_separator or not manifest or not runtime or not path:
+        raise argparse.ArgumentTypeError("--data-seed must be MANIFEST:RUNTIME=PATH")
+    return manifest, runtime, path
+
+
 
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description="Run frozen product benchmark manifests without building or installing.")
     command.add_argument("--manifest", action="append", required=True, type=Path, help="frozen benchmark manifest (repeatable)")
     command.add_argument("--binary", action="append", required=True, type=parse_binary, help="runtime binary as PATH or NAME=PATH (repeatable)")
+    command.add_argument("--data-seed", action="append", default=[], type=parse_data_seed, help="prebuilt data root as MANIFEST:RUNTIME=PATH (repeatable)")
     command.add_argument("--samples", type=int, default=30, help="process-cold repetitions per manifest/runtime (default: 30)")
     command.add_argument("--interleave", action="store_true", help="alternate runtime launch order for each repetition")
     command.add_argument("--raw-out", type=Path, help="atomically checkpoint retained raw samples to this JSON path")
@@ -982,6 +1047,7 @@ def document(arguments: argparse.Namespace, manifests: list[tuple[Path, dict[str
         "arguments": {
             "manifests": [str(path) for path, _ in manifests],
             "binaries": runtimes,
+            "dataSeeds": provenance["dataSeeds"],
             "samples": arguments.samples,
             "interleave": arguments.interleave,
         },
@@ -1032,8 +1098,20 @@ def main() -> int:
     ]
     if len({runtime["id"] for runtime in runtimes}) != len(runtimes):
         parser().error("runtime labels from --binary must be unique")
+    data_seeds: dict[tuple[str, str], Path] = {}
+    runtime_ids = {runtime["id"] for runtime in runtimes}
+    for manifest_name, runtime_id, requested in arguments.data_seed:
+        key = (manifest_name, runtime_id)
+        path = Path(requested).resolve()
+        if manifest_name not in names or runtime_id not in runtime_ids:
+            parser().error(f"--data-seed target does not match a manifest/runtime pair: {manifest_name}:{runtime_id}")
+        if key in data_seeds:
+            parser().error(f"duplicate --data-seed target: {manifest_name}:{runtime_id}")
+        if not path.is_dir():
+            parser().error(f"--data-seed is not a directory: {path}")
+        data_seeds[key] = path
     try:
-        provenance = collect_provenance(manifests, runtimes)
+        provenance = collect_provenance(manifests, runtimes, data_seeds)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         parser().error(str(error))
 
@@ -1053,14 +1131,14 @@ def main() -> int:
                     offset = (repetition - 1 + manifest_index) % len(runtimes)
                     for runtime in runtimes[offset:] + runtimes[:offset]:
                         diagnostic(f"{manifest['name']} {runtime['id']} sample {repetition}/{arguments.samples}")
-                        samples.append(run_sample(manifest, path, runtime, repetition))
+                        samples.append(run_sample(manifest, path, runtime, repetition, data_seeds.get((manifest["name"], runtime["id"]))))
                         checkpoint()
         else:
             for path, manifest in manifests:
                 for runtime in runtimes:
                     for repetition in range(1, arguments.samples + 1):
                         diagnostic(f"{manifest['name']} {runtime['id']} sample {repetition}/{arguments.samples}")
-                        samples.append(run_sample(manifest, path, runtime, repetition))
+                        samples.append(run_sample(manifest, path, runtime, repetition, data_seeds.get((manifest["name"], runtime["id"]))))
                         checkpoint()
     except KeyboardInterrupt:
         final = document(arguments, manifests, runtimes, provenance, samples, started, timestamp())

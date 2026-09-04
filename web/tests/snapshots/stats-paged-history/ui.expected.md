@@ -346,8 +346,6 @@
 - button "Branch into a new conversation":
   - img
 - text: 7/25 {{clock}} Ran for {{duration}}
-- button "Back to bottom":
-  - img
 - textbox "Message the agent"
 - button "Commands":
   - img

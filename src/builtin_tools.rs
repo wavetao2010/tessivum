@@ -7,7 +7,7 @@ mod model_tools;
 
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -16,24 +16,35 @@ use std::{
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+#[cfg(any(unix, windows))]
+use std::path::Path;
 
-#[cfg(unix)]
+#[cfg(windows)]
+use crate::subprocess::WindowsJob;
+#[cfg(any(unix, windows))]
 use crate::subprocess::{
     PersistentShell, PersistentShellCommand, PersistentShellConfig, PersistentShellLeaseValidator,
     PersistentShellResult,
 };
 use crate::{
     attachments::AttachmentStore,
-    jobs::{JobOwner, JobStart},
-    sandbox::{Sandbox, SandboxApproval, SandboxMode, SandboxReadPolicy, SandboxRequest},
+    jobs::JobOwner,
+    sandbox::Sandbox,
     session::SessionStore,
     tools::{
         ToolApproval, ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
     },
     web::WebRuntime,
-    workspace::{SessionResourceResolver, WorkspaceError, WorkspaceLease},
-    ContentBlock, SessionId, TessivumError, ToolSchema,
+    workspace::{SessionResourceResolver, WorkspaceError},
+    ContentBlock, SessionId, TessivumError,
+};
+#[cfg(any(unix, windows))]
+use crate::{
+    jobs::JobStart,
+    sandbox::{SandboxApproval, SandboxMode, SandboxReadPolicy, SandboxRequest},
+    workspace::WorkspaceLease,
+    ToolSchema,
 };
 
 /// Default upper bound for combined `bash` stdout and stderr.
@@ -80,7 +91,7 @@ impl PersistentShellSessions {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn retire(&self, session: &SessionId) {
         let entry = lock(&self.inner).get(session).cloned();
         if let Some(entry) = entry {
@@ -97,14 +108,14 @@ impl PersistentShellSessions {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn enabled(&self, session: &SessionId) -> bool {
         lock(&self.inner)
             .get(session)
             .is_some_and(|entry| entry.enabled.load(Ordering::Acquire))
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn run<F>(
         &self,
         session: &SessionId,
@@ -168,7 +179,7 @@ impl PersistentShellSessions {
 
 struct PersistentShellSession {
     enabled: AtomicBool,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     shell: tokio::sync::Mutex<Option<PersistentShellState>>,
 }
 
@@ -176,35 +187,35 @@ impl PersistentShellSession {
     fn new() -> Self {
         Self {
             enabled: AtomicBool::new(true),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             shell: tokio::sync::Mutex::new(None),
         }
     }
 
     async fn dispose(&self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let shell = self.shell.lock().await.take();
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(shell) = shell {
             shell.shell.dispose().await;
         }
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct PersistentShellState {
     mode: SandboxMode,
     shell: PersistentShell,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct PersistentBashPlan {
     mode: SandboxMode,
     config: PersistentShellConfig,
     validator: PersistentShellLeaseValidator,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_bash_error(code: &str, message: &str, details: Value) -> TessivumError {
     TessivumError::new(code, message, "tools", details)
 }
@@ -213,6 +224,7 @@ pub(crate) struct HostToolServices {
     sessions: SessionStore,
     sandbox: Sandbox,
     approval: Arc<dyn ToolApproval>,
+    #[cfg(any(unix, windows))]
     job_owners: BashJobOwners,
     persistent_shells: PersistentShellSessions,
 
@@ -231,10 +243,13 @@ impl HostToolServices {
         attachments: Arc<AttachmentStore>,
         web: WebRuntime,
     ) -> Self {
+        #[cfg(not(any(unix, windows)))]
+        let _ = job_owners;
         Self {
             sessions,
             sandbox,
             approval,
+            #[cfg(any(unix, windows))]
             job_owners,
             attachments,
             web,
@@ -301,10 +316,10 @@ impl BuiltinTools {
         services: Option<HostToolServices>,
     ) -> Result<Self, TessivumError> {
         let config = canonical_config(config)?;
-        if config.enable_bash && !cfg!(unix) {
+        if config.enable_bash && !cfg!(any(unix, windows)) {
             return Err(config_error(
                 "UNSUPPORTED_BUILTIN_BASH",
-                "builtin bash is supported only on Unix",
+                "builtin bash is supported only on Unix and Windows",
                 Value::Null,
             ));
         }
@@ -333,6 +348,7 @@ impl BuiltinTools {
                 },
             ))?);
         }
+        #[cfg(unix)]
         if config.enable_bash {
             let (sessions, sandbox, approval, job_owners) = services
                 .map(|services| {
@@ -350,6 +366,34 @@ impl BuiltinTools {
                 "Runs a shell command under the session's native sandbox policy.",
                 bash_schema(),
                 Bash {
+                    cwd: config.cwd.clone(),
+                    resolver: config.resolver.clone(),
+                    sessions,
+                    sandbox,
+                    approval,
+                    max_output_bytes: config.max_output_bytes,
+                    job_owners,
+                    persistent_shells: persistent_shells.clone(),
+                },
+            ))?);
+        }
+        #[cfg(windows)]
+        if config.enable_bash {
+            let (sessions, sandbox, approval, job_owners) = services
+                .map(|services| {
+                    (
+                        Some(services.sessions),
+                        Some(services.sandbox),
+                        Some(services.approval),
+                        Some(services.job_owners),
+                    )
+                })
+                .unwrap_or_default();
+            registrations.push(runtime.register(ToolDefinition::new(
+                "bash",
+                "Runs a PowerShell command under the session's native sandbox policy.",
+                bash_schema(),
+                WindowsPowerShell {
                     cwd: config.cwd.clone(),
                     resolver: config.resolver.clone(),
                     sessions,
@@ -415,6 +459,7 @@ fn invalid_arguments(message: &str, details: Value) -> TessivumError {
     TessivumError::new("INVALID_TOOL_ARGUMENTS", message, "tools", details)
 }
 
+#[cfg(any(unix, windows))]
 fn bounded_job_label(value: &str) -> String {
     let mut end = value.len().min(256);
     while !value.is_char_boundary(end) {
@@ -441,6 +486,7 @@ fn read_schema() -> Value {
     })
 }
 
+#[cfg(any(unix, windows))]
 fn bash_schema() -> Value {
     json!({
         "type": "object",
@@ -791,6 +837,409 @@ impl ToolHandler for Bash {
     }
 }
 
+#[cfg(windows)]
+struct WindowsPowerShell {
+    cwd: PathBuf,
+    resolver: Option<Arc<SessionResourceResolver>>,
+    sessions: Option<SessionStore>,
+    sandbox: Option<Sandbox>,
+    approval: Option<Arc<dyn ToolApproval>>,
+    max_output_bytes: usize,
+    job_owners: Option<BashJobOwners>,
+    persistent_shells: PersistentShellSessions,
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl ToolHandler for WindowsPowerShell {
+    async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
+        let command = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                invalid_arguments("command must be a string", json!({"path": "$.command"}))
+            })?;
+        if command.trim().is_empty() {
+            return Err(invalid_arguments(
+                "command must not be blank",
+                json!({"path": "$.command"}),
+            ));
+        }
+        let background = match arguments.get("run_in_background") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(invalid_arguments(
+                    "run_in_background must be a boolean",
+                    json!({"path": "$.run_in_background"}),
+                ))
+            }
+        };
+        if background && self.persistent_shells.enabled(&context.session) {
+            return Err(persistent_bash_error(
+                "PERSISTENT_SHELL_BACKGROUND_UNSUPPORTED",
+                "persistent shell sessions do not support background PowerShell execution",
+                json!({"sessionId": context.session}),
+            ));
+        }
+        let persistent = self.persistent_shells.enabled(&context.session);
+        let lease = match self
+            .resolver
+            .as_ref()
+            .map(|resolver| resolver.resolve(&context.session))
+            .transpose()
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                if persistent {
+                    self.persistent_shells.retire(&context.session).await;
+                }
+                return Err(workspace_error(&context, error));
+            }
+        };
+        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session);
+        let requested = arguments
+            .get("sandbox_permissions")
+            .map(|value| serde_json::from_value::<SandboxMode>(value.clone()))
+            .transpose()
+            .map_err(|_| {
+                invalid_arguments(
+                    "sandbox_permissions is invalid",
+                    json!({"path": "$.sandbox_permissions"}),
+                )
+            })?;
+        let mode = requested.unwrap_or(current);
+        if mode > current {
+            let approved = match &self.approval {
+                Some(approval) => approval
+                    .approve(
+                        &context,
+                        &ToolSchema {
+                            name: "bash".into(),
+                            description: "Runs a PowerShell command under the selected sandbox."
+                                .into(),
+                            parameters: bash_schema(),
+                        },
+                        &arguments,
+                    )
+                    .await?
+                    .unwrap_or(false),
+                None => false,
+            };
+            if !approved {
+                return Err(TessivumError::new(
+                    "TOOL_APPROVAL_DENIED",
+                    "sandbox escalation was not approved",
+                    "tools",
+                    json!({"name": "bash"}),
+                ));
+            }
+        }
+        if background {
+            let owners = self.job_owners.as_ref().ok_or_else(|| {
+                TessivumError::new(
+                    "BACKGROUND_JOBS_UNAVAILABLE",
+                    "background jobs are unavailable in this composition",
+                    "tools",
+                    Value::Null,
+                )
+            })?;
+            let owner = owners
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .get(&context.session)
+                .cloned()
+                .ok_or_else(|| {
+                    TessivumError::new(
+                        "BACKGROUND_JOB_OWNER_NOT_FOUND",
+                        "the session has no live background-job owner",
+                        "tools",
+                        json!({"sessionId": context.session}),
+                    )
+                })?;
+            let cwd = self.cwd.clone();
+            let resolver = self.resolver.clone();
+            let sandbox = self.sandbox.clone();
+            let session = context.session.clone();
+            let call = context.call.clone();
+            let command = command.to_owned();
+            let label = bounded_job_label(&command);
+            let max_output_bytes = self.max_output_bytes;
+            let job = owner
+                .start(
+                    JobStart::new("bash", label, max_output_bytes, move |control| {
+                        let cwd = cwd.clone();
+                        let resolver = resolver.clone();
+                        let sandbox = sandbox.clone();
+                        let session = session.clone();
+                        let call = call.clone();
+                        let command = command.clone();
+                        async move {
+                            let job_context = ToolRunContext {
+                                session,
+                                call,
+                                cancellation: control.cancellation(),
+                            };
+                            let lease = resolver
+                                .as_ref()
+                                .map(|resolver| resolver.resolve(&job_context.session))
+                                .transpose()
+                                .map_err(|error| error.to_string())?;
+                            let output = run_windows_powershell(
+                                &cwd,
+                                lease.as_ref(),
+                                sandbox.as_ref(),
+                                mode,
+                                max_output_bytes,
+                                &job_context,
+                                &command,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                            for block in &output.content {
+                                if let ContentBlock::Text { text } = block {
+                                    control.write_text(text);
+                                }
+                            }
+                            if output.is_error {
+                                Err("PowerShell exited unsuccessfully".into())
+                            } else {
+                                Ok(output.meta)
+                            }
+                        }
+                    })
+                    .with_cancel_detail("process tree terminated"),
+                )
+                .map_err(|error| {
+                    TessivumError::new(
+                        "BACKGROUND_JOB_START_FAILED",
+                        error.to_string(),
+                        "tools",
+                        Value::Null,
+                    )
+                })?;
+            return Ok(ToolOutput::new(
+                vec![ContentBlock::Text {
+                    text: format!("Started background job {}.", job.id),
+                }],
+                false,
+                json!({"jobId": job.id}),
+            ));
+        }
+        if persistent {
+            let cwd = self.cwd.clone();
+            let resolver = self.resolver.clone();
+            let sandbox = self.sandbox.clone();
+            let session = context.session.clone();
+            let result = self
+                .persistent_shells
+                .run(
+                    &context.session,
+                    mode,
+                    PersistentShellCommand::new(command).cancelled_by(context.cancellation.clone()),
+                    move || {
+                        persistent_bash_plan(
+                            &cwd,
+                            lease,
+                            resolver,
+                            sandbox.as_ref(),
+                            mode,
+                            self.max_output_bytes,
+                            session,
+                        )
+                    },
+                )
+                .await?;
+            return Ok(persistent_bash_output(result, self.max_output_bytes));
+        }
+
+        run_windows_powershell(
+            &self.cwd,
+            lease.as_ref(),
+            self.sandbox.as_ref(),
+            mode,
+            self.max_output_bytes,
+            &context,
+            command,
+        )
+        .await
+    }
+}
+
+#[cfg(windows)]
+async fn run_windows_powershell(
+    cwd: &Path,
+    lease: Option<&WorkspaceLease>,
+    sandbox: Option<&Sandbox>,
+    mode: SandboxMode,
+    max_output_bytes: usize,
+    context: &ToolRunContext,
+    command: &str,
+) -> ToolHandlerResult {
+    use std::io;
+    use tokio::process::Command;
+
+    let script = format!(
+        "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+         $global:LASTEXITCODE = $null; try {{ & {{ {command} }}; $ok = $?; $code = $LASTEXITCODE }} \
+         catch {{ [Console]::Error.WriteLine($_); exit 1 }}; \
+         if ($null -ne $code) {{ exit $code }}; if (-not $ok) {{ exit 1 }}"
+    );
+    let workspace = match lease {
+        Some(lease) => lease
+            .validate_current()
+            .map_err(|error| workspace_error(context, error))?,
+        None => cwd.to_path_buf(),
+    };
+    let mut last_not_found = None;
+    let mut child = None;
+    for program in ["pwsh.exe", "powershell.exe"] {
+        let raw_argv = vec![
+            program.into(),
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            script.clone(),
+        ];
+        let argv = prepare_windows_shell_argv(raw_argv, lease, sandbox, mode, &context.session)?;
+        let mut shell = Command::new(&argv[0]);
+        shell
+            .args(&argv[1..])
+            .current_dir(&workspace)
+            .env("NO_COLOR", "1")
+            .env("PAGER", "cat")
+            .env("GIT_PAGER", "cat")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        match shell.spawn() {
+            Ok(started) => {
+                child = Some(started);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => last_not_found = Some(error),
+            Err(error) => return Err(bash_error("could not start PowerShell", error)),
+        }
+    }
+    let mut child = child.ok_or_else(|| {
+        bash_error(
+            "could not find PowerShell 7 or Windows PowerShell",
+            last_not_found.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound)),
+        )
+    })?;
+    let job = match WindowsJob::assign(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(bash_error(
+                "could not assign PowerShell to a Windows Job Object",
+                error,
+            ));
+        }
+    };
+    let stdout = child.stdout.take().expect("piped stdout is available");
+    let stderr = child.stderr.take().expect("piped stderr is available");
+    let output = Arc::new(Mutex::new(CapturedOutput::default()));
+    let stdout_task = tokio::spawn(copy_bounded(
+        stdout,
+        Arc::clone(&output),
+        Stream::Stdout,
+        max_output_bytes,
+    ));
+    let stderr_task = tokio::spawn(copy_bounded(
+        stderr,
+        Arc::clone(&output),
+        Stream::Stderr,
+        max_output_bytes,
+    ));
+    let status = tokio::select! {
+        status = child.wait() => status.map_err(|error| bash_error("could not wait for PowerShell", error))?,
+        _ = context.cancellation.cancelled() => {
+            job.terminate();
+            let killed = child.kill().await;
+            let waited = child.wait().await;
+            finish_copy(stdout_task).await?;
+            finish_copy(stderr_task).await?;
+            if let Err(error) = waited {
+                return Err(bash_error("could not reap cancelled PowerShell", error));
+            }
+            if let Err(error) = killed {
+                if error.kind() != io::ErrorKind::InvalidInput {
+                    return Err(bash_error("could not kill cancelled PowerShell", error));
+                }
+            }
+            return Err(TessivumError::new("CANCELLED", "tool call was cancelled", "tools", Value::Null));
+        }
+    };
+    job.terminate();
+    finish_copy(stdout_task).await?;
+    finish_copy(stderr_task).await?;
+    let mut output =
+        std::mem::take(&mut *output.lock().unwrap_or_else(|poison| poison.into_inner()));
+    let output_bytes = output.bytes;
+    let truncated = output.truncated;
+    normalize_windows_newlines(&mut output.stdout);
+    normalize_windows_newlines(&mut output.stderr);
+    let exit_code = status.code();
+    let text = output.text(exit_code);
+    Ok(ToolOutput::new(
+        vec![ContentBlock::Text { text }],
+        !status.success(),
+        json!({
+            "exitCode": exit_code,
+            "signal": Value::Null,
+            "outputBytes": output_bytes,
+            "truncated": truncated,
+        }),
+    ))
+}
+#[cfg(windows)]
+fn normalize_windows_newlines(bytes: &mut Vec<u8>) {
+    let mut write = 0;
+    for read in 0..bytes.len() {
+        if bytes[read] == b'\r' && bytes.get(read + 1) == Some(&b'\n') {
+            continue;
+        }
+        bytes[write] = bytes[read];
+        write += 1;
+    }
+    bytes.truncate(write);
+}
+
+#[cfg(windows)]
+fn prepare_windows_shell_argv(
+    argv: Vec<String>,
+    lease: Option<&WorkspaceLease>,
+    sandbox: Option<&Sandbox>,
+    mode: SandboxMode,
+    session: &SessionId,
+) -> Result<Vec<String>, TessivumError> {
+    if let (Some(sandbox), Some(lease)) = (sandbox, lease) {
+        let workspace = lease
+            .validate_current()
+            .map_err(|error| workspace_error_for_session(session, error))?;
+        return Ok(sandbox
+            .prepare(
+                &SandboxRequest {
+                    mode,
+                    workspace: workspace.clone(),
+                    read_policy: SandboxReadPolicy::Deny,
+                    read_roots: Vec::new(),
+                    write_roots: vec![workspace],
+                    approval: (mode == SandboxMode::WorkspaceWrite).then_some(SandboxApproval {
+                        mode: Some(SandboxMode::WorkspaceWrite),
+                        read_policy: None,
+                    }),
+                },
+                &argv,
+            )?
+            .argv);
+    }
+    Ok(argv)
+}
+
 #[cfg(unix)]
 fn prepare_bash_argv(
     argv: Vec<String>,
@@ -884,11 +1333,105 @@ fn persistent_bash_plan(
     })
 }
 
+#[cfg(windows)]
+fn persistent_bash_plan(
+    cwd: &Path,
+    lease: Option<WorkspaceLease>,
+    resolver: Option<Arc<SessionResourceResolver>>,
+    sandbox: Option<&Sandbox>,
+    mode: SandboxMode,
+    max_output_bytes: usize,
+    session: SessionId,
+) -> Result<PersistentBashPlan, TessivumError> {
+    let raw_argv = vec![
+        windows_powershell_program(),
+        "-NoLogo".into(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-Command".into(),
+        "-".into(),
+    ];
+    let (workspace, argv, validator) = if let Some(lease) = lease {
+        let workspace = lease
+            .validate_current()
+            .map_err(|error| workspace_error_for_session(&session, error))?;
+        let argv = prepare_windows_shell_argv(raw_argv, Some(&lease), sandbox, mode, &session)?;
+        let expected_workspace = lease.workspace_id().clone();
+        let lease = Arc::new(lease);
+        let validator: PersistentShellLeaseValidator = Arc::new(move || {
+            lease
+                .validate_current()
+                .map_err(|error| workspace_error_for_session(&session, error))?;
+            if let Some(resolver) = &resolver {
+                let current = resolver
+                    .resolve(&session)
+                    .map_err(|error| workspace_error_for_session(&session, error))?;
+                if current.workspace_id() != &expected_workspace {
+                    return Err(TessivumError::new(
+                        "STALE_WORKSPACE_LEASE",
+                        "workspace lease is stale",
+                        "tools",
+                        json!({"sessionId": session}),
+                    ));
+                }
+            }
+            Ok(())
+        });
+        (workspace, argv, validator)
+    } else {
+        (
+            cwd.to_path_buf(),
+            raw_argv,
+            Arc::new(|| Ok(())) as PersistentShellLeaseValidator,
+        )
+    };
+    let mut config = PersistentShellConfig::new(workspace);
+    config.argv = argv;
+    config.env.insert("NO_COLOR".into(), Some("1".into()));
+    config.env.insert("PAGER".into(), Some("cat".into()));
+    config.env.insert("GIT_PAGER".into(), Some("cat".into()));
+    config.max_output_bytes = max_output_bytes;
+    Ok(PersistentBashPlan {
+        mode,
+        config,
+        validator,
+    })
+}
+
+#[cfg(windows)]
+fn windows_powershell_program() -> String {
+    let installed = std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .map(|root| root.join("PowerShell").join("7").join("pwsh.exe"))
+        .filter(|path| path.is_file());
+    installed
+        .or_else(|| {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|path| path.join("pwsh.exe"))
+                    .find(|path| path.is_file())
+            })
+        })
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "powershell.exe".into())
+}
+
 #[cfg(unix)]
+fn normalize_persistent_shell_newlines(bytes: Vec<u8>) -> Vec<u8> {
+    bytes
+}
+
+#[cfg(windows)]
+fn normalize_persistent_shell_newlines(mut bytes: Vec<u8>) -> Vec<u8> {
+    normalize_windows_newlines(&mut bytes);
+    bytes
+}
+
+#[cfg(any(unix, windows))]
 fn persistent_bash_output(result: PersistentShellResult, max_output_bytes: usize) -> ToolOutput {
     let mut output = CapturedOutput::default();
-    let stdout = result.stdout.tail;
-    let stderr = result.stderr.tail;
+    let stdout = normalize_persistent_shell_newlines(result.stdout.tail);
+    let stderr = normalize_persistent_shell_newlines(result.stderr.tail);
     let total_bytes = result
         .stdout
         .total_bytes
@@ -1055,7 +1598,7 @@ fn bash_signal_name(signal: i32) -> std::borrow::Cow<'static, str> {
     .into()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn session_sandbox_mode(
     sessions: Option<&SessionStore>,
     session_id: &crate::SessionId,
@@ -1073,7 +1616,7 @@ fn session_sandbox_mode(
         .unwrap_or(SandboxMode::WorkspaceWrite)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn bash_error(message: &str, error: std::io::Error) -> TessivumError {
     TessivumError::new(
         "BASH_EXECUTION_FAILED",
@@ -1083,12 +1626,10 @@ fn bash_error(message: &str, error: std::io::Error) -> TessivumError {
     )
 }
 
-#[cfg(unix)]
 fn workspace_error(context: &ToolRunContext, error: WorkspaceError) -> TessivumError {
     workspace_error_for_session(&context.session, error)
 }
 
-#[cfg(unix)]
 fn workspace_error_for_session(session: &SessionId, error: WorkspaceError) -> TessivumError {
     TessivumError::new(
         error.code(),
@@ -1098,7 +1639,7 @@ fn workspace_error_for_session(session: &SessionId, error: WorkspaceError) -> Te
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn finish_copy(
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 ) -> Result<(), TessivumError> {
@@ -1114,7 +1655,7 @@ async fn finish_copy(
         .map_err(|error| bash_error("could not read shell output", error))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Default)]
 struct CapturedOutput {
     stdout: Vec<u8>,
@@ -1123,7 +1664,7 @@ struct CapturedOutput {
     truncated: bool,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl CapturedOutput {
     fn append(&mut self, stream: Stream, chunk: &[u8], max_output_bytes: usize) {
         let copied = chunk.len().min(max_output_bytes.saturating_sub(self.bytes));
@@ -1159,14 +1700,14 @@ impl CapturedOutput {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy)]
 enum Stream {
     Stdout,
     Stderr,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn copy_bounded<R>(
     mut reader: R,
     output: std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
