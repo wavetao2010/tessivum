@@ -356,6 +356,7 @@ impl Subprocess {
         if !first {
             return;
         }
+        #[cfg(unix)]
         let _ = signal_tree(pid, libc::SIGTERM);
         let notified = self.inner.done.notified();
         if self.done().is_none() {
