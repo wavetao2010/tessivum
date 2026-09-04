@@ -5826,7 +5826,10 @@ mod alpha11_tests {
         let request = PnpmRunRequest {
             operation_id: "missing".into(),
             args: vec!["install".into()],
-            invoking_dir: "/tmp/profile".into(),
+            invoking_dir: std::env::temp_dir()
+                .join("profile")
+                .to_string_lossy()
+                .into_owned(),
         };
         assert_eq!(
             remote_code(
