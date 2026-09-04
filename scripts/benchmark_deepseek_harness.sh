@@ -20,7 +20,10 @@ if [ "${1-}" = "web" ]; then
   shift 2
   : "${TESSIVUM_BENCH_DSH_REPLAY_CHILD_FILES:?}"
   export DSH_SNAPSHOT_CHILD_FILES="$TESSIVUM_BENCH_DSH_REPLAY_CHILD_FILES"
-  exec node "$TESSIVUM_BENCH_DSH_BIN" web --patch "$TESSIVUM_BENCH_DSH_PATCH" "$@"
+  : "${TESSIVUM_WEB_ADDR:?}"
+  host=${TESSIVUM_WEB_ADDR%:*}
+  port=${TESSIVUM_WEB_ADDR##*:}
+  exec node "$TESSIVUM_BENCH_DSH_BIN" web --patch "$TESSIVUM_BENCH_DSH_PATCH" --host "$host" --port "$port" "$@"
 fi
 
 [ "${1-}" = "--data-dir" ] || { echo "expected --data-dir" >&2; exit 2; }

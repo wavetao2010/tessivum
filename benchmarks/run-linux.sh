@@ -220,10 +220,8 @@ for package in dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1; do
   env "${profile_environment[@]}" "$binary" --data-dir "$compat_profile" plugin add "$package"
 done
 dsh_compat_seed="$work_root/deepseek-harness-compatibility-home"
-for profile in headless web; do
-  DSH_HOME="$dsh_compat_seed" node "$dsh_bin" plugin --profile "$profile" add --ignore-scripts \
-    "$market_tgz" dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1
-done
+DSH_HOME="$dsh_compat_seed" node "$dsh_bin" plugin --profile web add --ignore-scripts \
+  "$market_tgz" dsh-better-sidebar@0.16.1 dsh-dream-skin@8.30.1
 
 
 python3 "$core/scripts/run_paired_benchmarks.py" \
