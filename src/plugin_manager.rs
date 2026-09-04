@@ -3105,21 +3105,24 @@ fn legacy_host_config(
     let host = fs::canonicalize(&host).map_err(|error| io_error(&host, error))?;
     let vendor = fs::canonicalize(&vendor).map_err(|error| io_error(&vendor, error))?;
     let profile = fs::canonicalize(profile).map_err(|error| io_error(profile, error))?;
+    let process_host = crate::process_path(&host);
+    let process_vendor = crate::process_path(&vendor);
+    let process_profile = crate::process_path(&profile);
     install_vendor_aliases(&profile, &vendor)?;
     let mut command = HostCommand::new("bun")
         .arg("run")
-        .arg(&host)
+        .arg(&process_host)
         .current_dir(&profile)
-        .env("CORDIS_VENDOR_ROOT", vendor)
+        .env("CORDIS_VENDOR_ROOT", process_vendor)
         .env("TESSIVUM_BRIDGE_MAX_FRAME_SIZE", "12582912")
         .env("TESSIVUM_PROFILE_NAME", profile_name)
-        .env("TESSIVUM_PROFILE_DIR", &profile)
+        .env("TESSIVUM_PROFILE_DIR", &process_profile)
         .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0");
     if let Some(root) = env::var_os("TESSIVUM_HOST_MODULE_ROOT") {
         let root = PathBuf::from(root);
         let root = fs::canonicalize(&root).map_err(|error| io_error(&root, error))?;
         install_host_module_aliases(&profile, &root)?;
-        command = command.env("TESSIVUM_HOST_MODULE_ROOT", root);
+        command = command.env("TESSIVUM_HOST_MODULE_ROOT", crate::process_path(&root));
     }
     Ok(LegacyHostConfig {
         command,

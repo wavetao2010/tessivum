@@ -819,7 +819,9 @@ impl ProductPackageResolver {
         }
         Ok(ResolvedPackage {
             specifier: specifier.into(),
-            location: location.to_string_lossy().into_owned(),
+            location: crate::process_path(&location)
+                .to_string_lossy()
+                .into_owned(),
         })
     }
 }
