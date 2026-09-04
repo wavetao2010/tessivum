@@ -25,6 +25,7 @@ static PROCESS_STATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 struct ProcessState {
     cwd: PathBuf,
     home: Option<OsString>,
+    user_profile: Option<OsString>,
     tessivum_home: Option<OsString>,
 }
 
@@ -33,6 +34,7 @@ impl ProcessState {
         Self {
             cwd: env::current_dir().expect("current directory is available"),
             home: env::var_os("HOME"),
+            user_profile: env::var_os("USERPROFILE"),
             tessivum_home: env::var_os("TESSIVUM_HOME"),
         }
     }
@@ -42,6 +44,7 @@ impl Drop for ProcessState {
     fn drop(&mut self) {
         let _ = env::set_current_dir(&self.cwd);
         restore_variable("HOME", self.home.take());
+        restore_variable("USERPROFILE", self.user_profile.take());
         restore_variable("TESSIVUM_HOME", self.tessivum_home.take());
     }
 }
@@ -57,7 +60,7 @@ fn restore_variable(name: &str, value: Option<OsString>) {
 fn with_process_state(test: impl FnOnce()) {
     let _lock = PROCESS_STATE
         .lock()
-        .expect("process state lock is available");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _state = ProcessState::capture();
     test();
 }
@@ -275,13 +278,14 @@ fn data_root_rejects_invalid_environment_and_home() {
         assert!(resolve_data_root(None)
             .expect_err("relative HOME must fail")
             .to_string()
-            .contains("HOME must be an absolute"));
+            .contains("HOME/USERPROFILE must be an absolute"));
 
         env::remove_var("HOME");
+        env::remove_var("USERPROFILE");
         assert!(resolve_data_root(None)
-            .expect_err("missing HOME must fail")
+            .expect_err("missing HOME/USERPROFILE must fail")
             .to_string()
-            .contains("HOME is not set"));
+            .contains("HOME/USERPROFILE is not set"));
     });
 
     fs::remove_dir_all(root).expect("temporary directory removes");
