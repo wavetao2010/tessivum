@@ -234,7 +234,7 @@ fn relaunch_web_process() -> Result<(), Diagnostic> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
+    match Box::pin(run()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(diagnostic) => {
             eprintln!("{}: {}", diagnostic.code, diagnostic.message);
