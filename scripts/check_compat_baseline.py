@@ -74,21 +74,21 @@ def check(condition: bool, message: str, failures: list[str]) -> None:
         failures.append(message)
 
 def repo_head(repo: Path) -> str:
-    head = (repo / ".git/HEAD").read_text().strip()
+    head = (repo / ".git/HEAD").read_text(encoding="utf-8").strip()
     if head.startswith("ref: "):
-        return (repo / ".git" / head.removeprefix("ref: ")).read_text().strip()
+        return (repo / ".git" / head.removeprefix("ref: ")).read_text(encoding="utf-8").strip()
     return head
 
 
 def main() -> int:
     failures: list[str] = []
-    baseline = BASELINE.read_text()
-    checklist = CHECKLIST.read_text()
+    baseline = BASELINE.read_text(encoding="utf-8")
+    checklist = CHECKLIST.read_text(encoding="utf-8")
     readmes = {
-        "English": README_EN.read_text(),
-        "Simplified Chinese": README_ZH.read_text(),
+        "English": README_EN.read_text(encoding="utf-8"),
+        "Simplified Chinese": README_ZH.read_text(encoding="utf-8"),
     }
-    plan = PLAN.read_text()
+    plan = PLAN.read_text(encoding="utf-8")
 
     check(repo_head(UPSTREAM) == HARNESS_SHA, "DeepSeek Harness checkout is not pinned", failures)
     check(repo_head(CORDIS) == CORDIS_SHA, "Cordis checkout is not pinned", failures)
@@ -96,20 +96,20 @@ def main() -> int:
     check(HARNESS_SHA in baseline and HARNESS_SHA in checklist and HARNESS_SHA in plan,
           "DeepSeek Harness commit is not frozen consistently", failures)
     check(CORDIS_SHA in plan, "Cordis commit is not frozen in the development plan", failures)
-    cargo_toml = (PROJECT / "Cargo.toml").read_text()
+    cargo_toml = (PROJECT / "Cargo.toml").read_text(encoding="utf-8")
     check(CORE_SHA in cargo_toml,
           "tessivum-core dependency revision changed", failures)
     check(f'version = "{PRODUCT_VERSION.removeprefix("v")}"' in cargo_toml,
           "Tessivum package version changed", failures)
     check(f'version = "={CORE_VERSION.removeprefix("v")}"' in cargo_toml,
           "tessivum-core package version changed", failures)
-    ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text()
-    release_workflow = (PROJECT / ".github/workflows/release.yml").read_text()
+    ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release_workflow = (PROJECT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     check(ci_workflow.count(f"ref: {CORE_SHA}") == 3,
           "CI tessivum-core checkout revision changed", failures)
     check(release_workflow.count(f"ref: {CORE_SHA}") == 1,
           "release tessivum-core checkout revision changed", failures)
-    harness_package = (UPSTREAM / "package.json").read_text()
+    harness_package = (UPSTREAM / "package.json").read_text(encoding="utf-8")
     check(f'"version": "{HARNESS_VERSION}"' in harness_package,
           "DeepSeek Harness package version changed", failures)
 
@@ -125,13 +125,13 @@ def main() -> int:
     check("[English](README.md) | 简体中文" in readmes["Simplified Chinese"],
           "Simplified Chinese README language link is stale", failures)
 
-    rpc_source = (UPSTREAM / "packages/host/apiproxy/src/api/rpc-map.ts").read_text()
+    rpc_source = (UPSTREAM / "packages/host/apiproxy/src/api/rpc-map.ts").read_text(encoding="utf-8")
     upstream_rpc = set(re.findall(r"^\s*'([^']+)':", rpc_source, re.M))
     documented_rpc = fenced(baseline, "## 5. Core RPC 面")
     check(len(upstream_rpc) == 52, f"upstream RPC count changed: {len(upstream_rpc)}", failures)
     check(documented_rpc == upstream_rpc, "Core RPC inventory differs from upstream rpc-map.ts", failures)
 
-    current_api = (PROJECT / "src/api.rs").read_text()
+    current_api = (PROJECT / "src/api.rs").read_text(encoding="utf-8")
     current_routes = set(re.findall(
         r'^\s*"([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+)"\s*=>',
         current_api,
@@ -147,7 +147,7 @@ def main() -> int:
     check(fenced(baseline, "## 7. 转发 Host 事件") == EXPECTED_HOST_EVENTS,
           "forwarded Host event inventory changed", failures)
 
-    protocol = (CORE / "crates/tessivum-node-bridge/src/protocol.rs").read_text()
+    protocol = (CORE / "crates/tessivum-node-bridge/src/protocol.rs").read_text(encoding="utf-8")
     enum_body = re.search(r"pub enum FrameKind \{(.*?)\n\}", protocol, re.S)
     node_kinds = set(re.findall(r'#\[serde\(rename = "([^"]+)"\)\]', enum_body.group(1))) if enum_body else set()
     check(node_kinds == EXPECTED_NODE_KINDS, "cordis.node/v1 FrameKind inventory changed", failures)
@@ -162,12 +162,12 @@ def main() -> int:
     check("entries 数组的发布顺序不承载激活语义" in boot,
           "boot graph activation-order rule missing", failures)
 
-    profile = (UPSTREAM / "packages/bundle/web-app/cordis.patch.yml").read_text()
+    profile = (UPSTREAM / "packages/bundle/web-app/cordis.patch.yml").read_text(encoding="utf-8")
     roster_section = profile.split("browser plugin roster", 1)[1].split("the agent plane", 1)[0]
     profile_roster = set(re.findall(r"name: '([^']+)'", roster_section))
-    web_package = json.loads((PROJECT / "web/package.json").read_text())
-    vite_config = (PROJECT / "web/vite.config.ts").read_text()
-    source_audit = (PROJECT / "web/scripts/audit-deepseek-source.mjs").read_text()
+    web_package = json.loads((PROJECT / "web/package.json").read_text(encoding="utf-8"))
+    vite_config = (PROJECT / "web/vite.config.ts").read_text(encoding="utf-8")
+    source_audit = (PROJECT / "web/scripts/audit-deepseek-source.mjs").read_text(encoding="utf-8")
     registry_dsh_dependencies = [
         name for name in web_package["dependencies"] if name.startswith("@deepseek-ai/dsh-")
     ]
@@ -180,10 +180,10 @@ def main() -> int:
           "Browser shell still aliases registry theme styles", failures)
     check("auditSourceGraph" in source_audit and "published DSH dependencies remain" in source_audit,
           "Browser source audit no longer checks resolver and registry exclusion", failures)
-    bundle_builder = (PROJECT / "web/scripts/build-deepseek-client-bundles.mjs").read_text()
-    web_lock = (PROJECT / "web/bun.lock").read_text()
-    binary = (PROJECT / "src/bin/tessivum.rs").read_text()
-    asset_builder = (PROJECT / "build.rs").read_text()
+    bundle_builder = (PROJECT / "web/scripts/build-deepseek-client-bundles.mjs").read_text(encoding="utf-8")
+    web_lock = (PROJECT / "web/bun.lock").read_text(encoding="utf-8")
+    binary = (PROJECT / "src/bin/tessivum.rs").read_text(encoding="utf-8")
+    asset_builder = (PROJECT / "build.rs").read_text(encoding="utf-8")
     check("selected.size !== 38" in bundle_builder and "build:lib" in bundle_builder
           and "applyDeepSeekPatch" in bundle_builder,
           "pinned source contract build, compatibility patch, or 38-package gate is missing", failures)
@@ -194,10 +194,10 @@ def main() -> int:
           "Rust Web command does not embed built static and client assets", failures)
     check(not re.search(r'"@deepseek-ai/dsh-[^"]+": \["@deepseek-ai/dsh-', web_lock),
           "bun.lock retains published DSH artifacts", failures)
-    frontend_source = (PROJECT / "src/frontend.rs").read_text()
+    frontend_source = (PROJECT / "src/frontend.rs").read_text(encoding="utf-8")
     check("Sha1::digest" in frontend_source and "/plugins/{id}/client.js?rev={rev}" in frontend_source,
           "Rust boot graph hash or bundle URL differs from the frozen source wire", failures)
-    check((PROJECT / "web/src/main.ts").read_text() == (UPSTREAM / "apps/web/src/main.ts").read_text(),
+    check((PROJECT / "web/src/main.ts").read_text(encoding="utf-8") == (UPSTREAM / "apps/web/src/main.ts").read_text(encoding="utf-8"),
           "Tessivum Web entry differs from pinned upstream source", failures)
 
     for token in (

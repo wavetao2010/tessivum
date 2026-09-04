@@ -119,7 +119,7 @@ def validate_lifecycle_evidence(path: Path, entry: dict[str, Any]) -> None:
         raise ValueError(f"{entry['npm']}@{entry['version']}: lifecycle checks are incomplete")
 
 def validate(network: bool) -> None:
-    ledger = json.loads(LEDGER.read_text())
+    ledger = json.loads(LEDGER.read_text(encoding="utf-8"))
     current = ledger.get("current")
     if (ledger.get("schema") != "tessivum.plugin-verification/v2"
             or not isinstance(current, dict)
@@ -127,8 +127,8 @@ def validate(network: bool) -> None:
             or not isinstance(ledger.get("entries"), list)):
         raise ValueError("invalid plugin verification ledger")
 
-    community = json.loads(COMMUNITY.read_text()).get("plugins", [])
-    official = json.loads(OFFICIAL.read_text()).get("plugins", [])
+    community = json.loads(COMMUNITY.read_text(encoding="utf-8")).get("plugins", [])
+    official = json.loads(OFFICIAL.read_text(encoding="utf-8")).get("plugins", [])
     pairs: set[tuple[str, str]] = set()
     entries: dict[tuple[str, str], dict[str, Any]] = {}
     verified_packages: set[str] = set()
