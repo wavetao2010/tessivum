@@ -1408,8 +1408,11 @@ $__tessivum_status = 1
 if ($__tessivum_status -lt 0 -or $__tessivum_status -gt 255) {{ $__tessivum_status = 1 }}
 $__tessivum_marker = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:O:' + $__tessivum_status + [char]0x1f + "`n"
 [Console]::Out.Write($__tessivum_marker)
+[Console]::Out.Flush()
 $__tessivum_marker = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:E:' + $__tessivum_status + [char]0x1f + "`n"
 [Console]::Error.Write($__tessivum_marker)
+[Console]::Error.Flush()
+
 "#
     )
 }
