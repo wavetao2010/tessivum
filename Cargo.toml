@@ -11,9 +11,9 @@ default-run = "tessivum"
 build = "build.rs"
 
 [dependencies]
-tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "2a7f39006f7bde5b680405b2827f32d85ab20c26", version = "=0.1.6" }
-tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "2a7f39006f7bde5b680405b2827f32d85ab20c26", version = "=0.1.6" }
-tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "2a7f39006f7bde5b680405b2827f32d85ab20c26", version = "=0.1.6" }
+tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "640e9ea41810861eebd5bbf300052072e989259c", version = "=0.1.6" }
+tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "640e9ea41810861eebd5bbf300052072e989259c", version = "=0.1.6" }
+tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "640e9ea41810861eebd5bbf300052072e989259c", version = "=0.1.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
