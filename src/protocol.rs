@@ -214,7 +214,7 @@ pub(crate) fn migrate_legacy_agent_preset(
 fn legacy_mode_path(legacy_preset: &str) -> PathBuf {
     let root = env::var_os("TESSIVUM_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".tessivum")))
+        .or_else(|| crate::home_dir().map(|home| home.join(".tessivum")))
         .unwrap_or_else(|| PathBuf::from(".tessivum"));
     PathBuf::from(format!(
         "{}/modes/{legacy_preset}/mode.toml",

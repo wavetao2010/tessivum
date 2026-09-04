@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 zstd = "0.13"
 libc = "0.2"
+chrono-tz = "0.10"
 regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde_yaml = "0.9"

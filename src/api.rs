@@ -2641,15 +2641,10 @@ fn canonical_client_time_zone(value: &str) -> Option<String> {
     {
         return None;
     }
-    let root = fs::canonicalize("/usr/share/zoneinfo").ok()?;
-    let zone = fs::canonicalize(root.join(value)).ok()?;
-    zone.strip_prefix(root)
-        .ok()?
-        .to_str()
-        .filter(|zone| {
-            zone.contains('/') && !zone.starts_with("posix/") && !zone.starts_with("right/")
-        })
-        .map(str::to_owned)
+    value
+        .parse::<chrono_tz::Tz>()
+        .ok()
+        .map(|zone| zone.name().to_owned())
 }
 
 fn compat_response_limit(state: &ApiState, method: &str) -> usize {
@@ -3727,10 +3722,9 @@ fn compat_directory_error(message: &'static str) -> CompatError {
 }
 
 fn compat_list_directory(args: CompatListDirectory) -> Result<Value, CompatError> {
-    let home = std::env::var_os("HOME")
+    let home = crate::home_dir()
+        .and_then(|home| fs::canonicalize(home).ok())
         .ok_or_else(|| compat_directory_error("home directory is unavailable"))?;
-    let home = fs::canonicalize(home)
-        .map_err(|_| compat_directory_error("home directory is unavailable"))?;
     let requested = args
         .path
         .unwrap_or_else(|| home.to_string_lossy().into_owned());

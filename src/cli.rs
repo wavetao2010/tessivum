@@ -156,6 +156,8 @@ pub fn resolve_data_root(data_dir: Option<PathBuf>) -> Result<DataRoot, DataRoot
     }
 
     let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
         .map(PathBuf::from)
         .ok_or(DataRootError::MissingHome)?;
     if !home.is_absolute() {
