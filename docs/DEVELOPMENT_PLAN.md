@@ -1,10 +1,10 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Alpha.16 社区插件兼容、Phase 7 第一方市场、Phase 8 Remote Access / 通用 Node facade、Alpha.20 Cloudflare Quick Tunnel、Alpha.21 旧 Remote Web UI profile 迁移、Alpha.22 一键 Remote Access 与 Phase 9-A Benchmark 协议/三样本试运行已完成；Phase 9-B 社区插件发布/验证及 30 样本公开性能运行仍待完成
-> 计划校准日期：2026-09-03
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 Windows 原生运行时、安全沙箱、安装与发行待实施
+> 计划校准日期：2026-09-04
 > Tessivum 实现基线：`v0.1.0-alpha.23`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
-> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据与社区插件验证
+> 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
 
 ## 1. 文档集
 
@@ -19,6 +19,7 @@
 - [Phase 7 第一方插件市场与 Host 重启开发计划](PHASE7_FIRST_PARTY_MARKET_PLAN.md)：已完成 Tessivum-owned 市场、确定性更新、新版本等待、旧市场迁移与 Host-owned 重启。
 - [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)：通用 Node Host facade、Rust-owned Remote Access、自有最小配对/设备界面及发行门槛已完成。
 - [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：固定 Linux 30 样本 Core/产品公开结果、中英文报告、README 可追溯数字及 `dsh-better-sidebar@0.16.1` 社区验证闭环均已完成。
+- [Phase 10 Windows 原生发行开发计划](PHASE10_WINDOWS_NATIVE_RELEASE_PLAN.md)：Windows x86-64 MSVC、PowerShell、ACL sandbox、Job Object、ZIP、`install.ps1` 和真实 Browser/插件发行门槛。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
