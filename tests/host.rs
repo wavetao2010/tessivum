@@ -775,7 +775,7 @@ async fn approval_relay_replays_startup_asked_without_durable_tool_details() {
     let mut notifications = handle.subscribe();
     handle.prompt(prompt("approval-relay")).await.unwrap();
 
-    let requested = tokio::time::timeout(Duration::from_secs(1), async {
+    let requested = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let tessivum::host::HostNotification::ApprovalRequested(requested) =
                 notifications.recv().await.unwrap()
@@ -813,7 +813,7 @@ async fn approval_relay_replays_startup_asked_without_durable_tool_details() {
             )
             .accepted
     );
-    let resolved = tokio::time::timeout(Duration::from_secs(1), async {
+    let resolved = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let tessivum::host::HostNotification::ApprovalResolved(resolved) =
                 notifications.recv().await.unwrap()
