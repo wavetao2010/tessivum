@@ -3,7 +3,7 @@
 > 状态：实施中（Milestone 10-A Windows CI gate）
 > 计划日期：2026-09-04
 > Tessivum 起点：`v0.1.0-alpha.23` / `4674aeda870989fede1fc79fb07afbe764d3a1eb`
-> 产品 Core pin：`tessivum-core v0.1.6` / `81a1803d5f376615ccce80a247fc9cd3ab4fe96e`
+> 产品 Core pin：`tessivum-core v0.1.6` / `3fe3391ccd35f3e6820dbd874b1eb0c5bc329eaf`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 首个正式目标：Windows 11 x86-64 / `x86_64-pc-windows-msvc`
 
