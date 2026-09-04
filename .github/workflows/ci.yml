@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 3fe3391ccd35f3e6820dbd874b1eb0c5bc329eaf
+          ref: 2a7f39006f7bde5b680405b2827f32d85ab20c26
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 3fe3391ccd35f3e6820dbd874b1eb0c5bc329eaf
+          ref: 2a7f39006f7bde5b680405b2827f32d85ab20c26
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
@@ -228,7 +228,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: 3fe3391ccd35f3e6820dbd874b1eb0c5bc329eaf
+          ref: 2a7f39006f7bde5b680405b2827f32d85ab20c26
           path: .ci/tessivum-core
 
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
