@@ -14,7 +14,7 @@
 ### Changed
 
 - Pin `tessivum-core v0.1.6` to revision
-  `510d92c4d69816c0416d93532389616ed869adff` for Windows executable resolution
+  `4a287c7caab9e715725c93ad4416660f51b77840` for Windows executable resolution
   and platform-correct supervisor coverage.
 
 ### Fixed
