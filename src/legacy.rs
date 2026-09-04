@@ -425,9 +425,9 @@ fn resolve_program(program: &Path) -> Result<PathBuf, LegacyProfileError> {
         ));
     };
     std::env::split_paths(&path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| executable(candidate))
+        .filter_map(|directory| executable_candidate(&directory.join(program)))
         .map(|candidate| canonical_executable(&candidate))
+        .next()
         .transpose()?
         .ok_or_else(|| {
             LegacyProfileError::InvalidConfiguration(format!(
@@ -437,16 +437,28 @@ fn resolve_program(program: &Path) -> Result<PathBuf, LegacyProfileError> {
 }
 
 fn canonical_executable(path: &Path) -> Result<PathBuf, LegacyProfileError> {
-    if !executable(path) {
-        return Err(LegacyProfileError::InvalidConfiguration(format!(
-            "host program {path:?} is not executable"
-        )));
-    }
-    std::fs::canonicalize(path).map_err(|error| {
+    let candidate = executable_candidate(path).ok_or_else(|| {
+        LegacyProfileError::InvalidConfiguration(format!("host program {path:?} is not executable"))
+    })?;
+    std::fs::canonicalize(&candidate).map_err(|error| {
         LegacyProfileError::InvalidConfiguration(format!(
-            "could not canonicalize host program {path:?}: {error}"
+            "could not canonicalize host program {candidate:?}: {error}"
         ))
     })
+}
+
+fn executable_candidate(path: &Path) -> Option<PathBuf> {
+    if executable(path) {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let candidate = path.with_extension("exe");
+        if executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(unix)]
