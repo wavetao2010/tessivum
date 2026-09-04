@@ -16,7 +16,7 @@ CORDIS = Path(os.environ.get("TESSIVUM_CORDIS_SOURCE", WORKSPACE / "upstream/cor
 CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
-CORE_SHA = "bafb893f182d64b7b464b6cf827676f7ac368168"
+CORE_SHA = "510d92c4d69816c0416d93532389616ed869adff"
 PRODUCT_VERSION = "v0.1.0-alpha.23"
 CORE_VERSION = "v0.1.6"
 HARNESS_VERSION = "0.1.0-rc.5"
@@ -105,7 +105,7 @@ def main() -> int:
           "tessivum-core package version changed", failures)
     ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text()
     release_workflow = (PROJECT / ".github/workflows/release.yml").read_text()
-    check(ci_workflow.count(f"ref: {CORE_SHA}") == 2,
+    check(ci_workflow.count(f"ref: {CORE_SHA}") == 3,
           "CI tessivum-core checkout revision changed", failures)
     check(release_workflow.count(f"ref: {CORE_SHA}") == 1,
           "release tessivum-core checkout revision changed", failures)

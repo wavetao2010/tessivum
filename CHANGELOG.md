@@ -7,6 +7,15 @@
 - Pair the full product benchmark against a clean DeepSeek Harness `0.1.0-rc.5`
   build under the same Base and Compatibility Browser contracts, with 30-sample
   Linux evidence and bilingual comparison tables.
+- Add frozen Windows Server 2025 CI gates for the product and Core, covering
+  MSVC compile/Clippy/tests, Web and plugin dependencies, Extism, and a real
+  Legacy Node lifecycle.
+
+### Changed
+
+- Pin `tessivum-core v0.1.6` to revision
+  `510d92c4d69816c0416d93532389616ed869adff` for Windows executable resolution
+  and platform-correct supervisor coverage.
 
 ### Fixed
 

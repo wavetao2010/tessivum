@@ -13,7 +13,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 ## 当前状态
 
-`v0.1.0-alpha.23` 是预发布版本。它使用 `tessivum-core v0.1.6` 修订版 `bafb893f182d64b7b464b6cf827676f7ac368168`，兼容目标为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
+`v0.1.0-alpha.23` 是预发布版本。它使用 `tessivum-core v0.1.6` 修订版 `510d92c4d69816c0416d93532389616ed869adff`，兼容目标为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
 
 当前已有：
 

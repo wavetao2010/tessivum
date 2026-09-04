@@ -13,7 +13,7 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 ## Status
 
-`v0.1.0-alpha.23` is a prerelease. It uses `tessivum-core v0.1.6` at revision `bafb893f182d64b7b464b6cf827676f7ac368168` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
+`v0.1.0-alpha.23` is a prerelease. It uses `tessivum-core v0.1.6` at revision `510d92c4d69816c0416d93532389616ed869adff` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
 
 Available today:
 

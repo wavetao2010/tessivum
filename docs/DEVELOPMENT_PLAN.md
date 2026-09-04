@@ -598,7 +598,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.23`，产品运行时仍固定 `tessivum-core v0.1.6` / `bafb893f182d64b7b464b6cf827676f7ac368168`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。本版本冻结共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，并保留失败、超时、清理残留和非 Linux PSS unavailable 状态。三样本固定 Linux 运行只作为协议试运行；达到每项 30 个 process-cold 样本前不形成公开性能倍数。Alpha.22 的一键 Remote Access、Alpha.21 的旧 Remote Web UI profile 迁移、Rust-owned Remote Access 安全边界、第一方市场来源/校验/更新，以及 Standard/PTC、Browser 与 Legacy Node 三类运行面保持不变。
+当前实现基线为 `v0.1.0-alpha.23`，产品运行时固定 `tessivum-core v0.1.6` / `510d92c4d69816c0416d93532389616ed869adff`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。本版本冻结共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，并保留失败、超时、清理残留和非 Linux PSS unavailable 状态。三样本固定 Linux 运行只作为协议试运行；达到每项 30 个 process-cold 样本前不形成公开性能倍数。Alpha.22 的一键 Remote Access、Alpha.21 的旧 Remote Web UI profile 迁移、Rust-owned Remote Access 安全边界、第一方市场来源/校验/更新，以及 Standard/PTC、Browser 与 Legacy Node 三类运行面保持不变。
 
 ## 14.1 Alpha.9 发布记录
 
