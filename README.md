@@ -40,7 +40,7 @@ Alpha.15 DSH Profile authority, market activation, upgrade, rollback, and distri
 Alpha.18 first-party market ownership, packaging, migration, exact-version mutation, restart, and Browser E2E gates are recorded in [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md).
 Alpha.19-A/B compatibility preflight and Legacy Host facades plus Alpha.19-C/D Rust-owned Remote Access and its built-in pairing/device surface are complete. Contracts, security boundaries, exact compatibility status, Browser evidence, and release gates are recorded in [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md).
 
-Phase 9 is complete. On the fixed 30-sample Linux Core workload, tessivum-core delivered **23.64× faster scope create/dispose** and **17.43× lower process PSS with 1,000 live scopes** than TypeScript Cordis 4.0.1; the real-Chromium product matrix passed **30/30 Base** and **30/30 Compatibility** samples with zero post-shutdown process residue. The same evidence discloses the `loader_update` regression and Compatibility overhead. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
+Phase 9 is complete. The fixed 30-sample Linux run now pairs both the Core and full product paths. tessivum-core delivered **24.05× faster scope create/dispose** and **17.15× lower process PSS with 1,000 live scopes** than TypeScript Cordis 4.0.1. All four real-Chromium product cells passed **30/30** with zero post-shutdown process residue. Against DeepSeek Harness `0.1.0-rc.5`, Tessivum Base reached HTTP readiness **5.83× faster** and used **4.52× less idle Host-tree PSS**; Compatibility used **1.63× less idle PSS** but reached HTTP readiness **9.31× slower** because of the Legacy Node plugin bridge. See the [benchmark report](docs/PHASE9_BENCHMARK_REPORT.md), [plugin evidence](docs/PLUGIN_VERIFICATION_REPORT.md), and [Phase 9 plan](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md).
 
 
 ## Architecture
@@ -303,14 +303,15 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # explicit, destructive data removal
 ## Reproducible benchmarks
 
 The pinned Ubuntu 24.04 arm64 path builds dependencies before measurement,
-alternates process-cold Core A/B samples, drives the real Web UI with Chromium,
-and records full Host-descendant PSS from Linux `smaps_rollup`. The published
-Alpha.23 result contains 30 valid samples per runtime/case: **23.64× faster
-scope create/dispose**, **20.73× service-lookup throughput**, **26.92× event
-throughput**, **17.43× lower process PSS with 1,000 live Core scopes**, and
-**30/30** successful Base plus **30/30** successful Compatibility
-Host/Chromium runs. It also reports the **37.03× slower** Core
-`loader_update` path and the Compatibility startup/memory cost.
+alternates process-cold Core A/B samples, interleaves Tessivum and DeepSeek
+Harness product samples, drives the real Web UI with Chromium, and records full
+Host-descendant PSS from Linux `smaps_rollup`. The published Alpha.23 result has
+30 valid samples in every runtime/manifest cell: **24.05× faster scope
+create/dispose**, **20.53× service-lookup throughput**, **25.42× event
+throughput**, **17.15× lower process PSS with 1,000 live Core scopes**, and
+**30/30** successful samples in all four product cells. The report also exposes
+the **40.05× slower** Core `loader_update` path and Tessivum Compatibility's
+**9.31× slower** HTTP readiness.
 
 ```bash
 SAMPLES=30 ./benchmarks/run-linux-container.sh
@@ -318,11 +319,11 @@ python3 scripts/check_release_facts.py
 ```
 
 Raw output is written under `benchmarks/results/`. The checked-in [Core raw
-JSON](benchmarks/fixtures/phase9-alpha23/core-paired-30.json), [product raw
-JSON](benchmarks/fixtures/phase9-alpha23/product-30.json), and bilingual
+JSON](benchmarks/fixtures/phase9-alpha23/core-paired-30.json), [paired product
+raw JSON](benchmarks/fixtures/phase9-alpha23/product-30.json), and bilingual
 [report](docs/PHASE9_BENCHMARK_REPORT.md) are the publication evidence. The
-upstream DeepSeek Harness product remains `unmeasured` until both products can
-consume the identical offline workload.
+product comparison uses the same visible offline prompt/tool contract and plugin
+boot graph; native replay adapters and internal code paths intentionally differ.
 
 ## Verification
 

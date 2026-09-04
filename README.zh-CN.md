@@ -39,7 +39,7 @@ Alpha.15 的 DSH Profile 权限、市场激活、升级、回滚和分发别名�
 Alpha.18 的第一方市场所有权、打包、迁移、精确版本变更、重启和 Browser E2E 门槛记录于 [`docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md`](docs/PHASE7_FIRST_PARTY_MARKET_PLAN.md)。
 Alpha.19-A/B 的兼容性预检和 Legacy Host facade，以及 Alpha.19-C/D 由 Rust 拥有的远程访问及其内建配对/设备界面均已完成。契约、安全边界、精确兼容状态、Browser 证据和发布门槛记录于 [`docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md`](docs/PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)。
 
-Phase 9 已完成。在固定 Linux Core 工作量的 30 样本运行中，tessivum-core 相比 TypeScript Cordis 4.0.1 实现 **Scope 创建/销毁快 23.64×**、**1,000 个 Scope 存活时的进程 PSS 低 17.43×**；真实 Chromium 产品矩阵通过 **30/30 Base** 与 **30/30 Compatibility** 样本，关闭后进程残留为零。同一份证据也披露 `loader_update` 回归和 Compatibility 成本。见[中文 Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
+Phase 9 已完成。固定 Linux 30 样本运行现在同时配对 Core 和完整产品路径。tessivum-core 相比 TypeScript Cordis 4.0.1 实现 **Scope 创建/销毁快 24.05×**、**1,000 个 Scope 存活时的进程 PSS 低 17.15×**。四个真实 Chromium 产品单元均通过 **30/30**，关闭后进程残留为零。与 DeepSeek Harness `0.1.0-rc.5` 相比，Tessivum Base 的 HTTP ready **快 5.83×**、空闲 Host 进程树 PSS **低 4.52×**；Compatibility 的空闲 PSS **低 1.63×**，但 Legacy Node 插件桥使 HTTP ready **慢 9.31×**。见[中文 Benchmark 报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)、[插件证据](docs/PLUGIN_VERIFICATION_REPORT.md)与 [Phase 9 计划](docs/PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)。
 
 ## 架构
 
@@ -300,14 +300,14 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"  # 明确的破坏性数据删除
 
 ## 可复现 Benchmark
 
-固定 Ubuntu 24.04 arm64 路径会先完成依赖构建，再交错执行 process-cold Core A/B 样本，以真实 Chromium 驱动 Web UI，并从 Linux `smaps_rollup` 统计 Host 全部后代进程的 PSS。Alpha.23 公开结果在每个 runtime/case 中包含 30 个有效样本：**Scope 创建/销毁快 23.64×**、**Service 查找吞吐 20.73×**、**Event 吞吐 26.92×**、**1,000 个 Core Scope 存活时的进程 PSS 低 17.43×**，以及 **30/30 Base** 和 **30/30 Compatibility** 成功 Host/Chromium 运行。报告同时披露 Core `loader_update` **慢 37.03×** 及 Compatibility 的启动/内存成本。
+固定 Ubuntu 24.04 arm64 路径会在测量前构建依赖，交错执行 process-cold Core A/B 和 Tessivum/DeepSeek Harness 产品样本，以真实 Chromium 驱动 Web UI，并从 Linux `smaps_rollup` 统计 Host 全部后代进程的 PSS。Alpha.23 公开结果在每个 runtime/manifest 单元中包含 30 个有效样本：**Scope 创建/销毁快 24.05×**、**Service 查找吞吐 20.53×**、**Event 吞吐 25.42×**、**1,000 个 Core Scope 存活时的进程 PSS 低 17.15×**，以及四个产品单元全部 **30/30** 成功。报告同时披露 Core `loader_update` **慢 40.05×** 及 Tessivum Compatibility 的 HTTP ready **慢 9.31×**。
 
 ```bash
 SAMPLES=30 ./benchmarks/run-linux-container.sh
 python3 scripts/check_release_facts.py
 ```
 
-原始输出写入 `benchmarks/results/`。已检入的 [Core 原始 JSON](benchmarks/fixtures/phase9-alpha23/core-paired-30.json)、[产品原始 JSON](benchmarks/fixtures/phase9-alpha23/product-30.json)和[中文报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)是公开证据。DeepSeek Harness 产品层在两边能够消费完全相同的离线工作量之前保持 `unmeasured`。
+原始输出写入 `benchmarks/results/`。已检入的 [Core 原始 JSON](benchmarks/fixtures/phase9-alpha23/core-paired-30.json)、[配对产品原始 JSON](benchmarks/fixtures/phase9-alpha23/product-30.json)和[中文报告](docs/PHASE9_BENCHMARK_REPORT.zh-CN.md)是公开证据。产品对比使用相同的可见离线 Prompt/工具契约和插件启动图；两边的原生 replay 适配器与内部代码路径有意不同。
 
 ## 验证
 

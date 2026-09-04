@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Pair the full product benchmark against a clean DeepSeek Harness `0.1.0-rc.5`
+  build under the same Base and Compatibility Browser contracts, with 30-sample
+  Linux evidence and bilingual comparison tables.
+
+### Fixed
+
+- Give cold Legacy Node plugin activation the Web readiness deadline instead of
+  failing after five seconds under process-cold Compatibility runs.
+
 ## 0.1.0-alpha.23 - 2026-09-03
 
 ### Added
