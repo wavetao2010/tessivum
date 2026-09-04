@@ -3113,7 +3113,8 @@ fn legacy_host_config(
         .env("CORDIS_VENDOR_ROOT", vendor)
         .env("TESSIVUM_BRIDGE_MAX_FRAME_SIZE", "12582912")
         .env("TESSIVUM_PROFILE_NAME", profile_name)
-        .env("TESSIVUM_PROFILE_DIR", &profile);
+        .env("TESSIVUM_PROFILE_DIR", &profile)
+        .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0");
     if let Some(root) = env::var_os("TESSIVUM_HOST_MODULE_ROOT") {
         let root = PathBuf::from(root);
         let root = fs::canonicalize(&root).map_err(|error| io_error(&root, error))?;
