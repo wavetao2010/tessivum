@@ -184,6 +184,14 @@ def main() -> int:
     lifecycle_path = ROOT / verification["evidence"]
     lifecycle = load(lifecycle_path)
     product_evidence_path = lifecycle_path.with_name(lifecycle["productEvidence"]["path"])
+    plugin_product = load(product_evidence_path)
+    require(lifecycle["revisions"] == {
+        "product": "7d23d9ec0d1b62b878762970a5c1787eee8373dc",
+        "core": "4674aeda870989fede1fc79fb07afbe764d3a1eb",
+        "deepseekHarness": "47f943859bef60e4160492346772ded9b24f765a",
+    }, "plugin lifecycle source revisions drifted")
+    require(plugin_product["provenance"]["repositories"]["product"]["revision"] == lifecycle["revisions"]["product"],
+            "plugin lifecycle product provenance drifted")
     plugin_report = (ROOT / "docs/PLUGIN_VERIFICATION_REPORT.md").read_text(encoding="utf-8")
     for digest in (sha256(lifecycle_path), sha256(product_evidence_path)):
         require(digest in plugin_report, "plugin verification report evidence digest drifted")

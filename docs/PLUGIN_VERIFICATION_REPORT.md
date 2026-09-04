@@ -18,8 +18,8 @@ Runtime: Legacy Node Host + Browser Cordis
 
 Published evidence:
 
-- [Lifecycle summary JSON](../plugins/market/evidence/dsh-better-sidebar-0.16.1.json) — SHA-256 `f6499cd8e343cce409cb69c8dbffae2bc76ef334148179be6af87a82a8b53620`
-- [Product/Chromium raw JSON](../plugins/market/evidence/dsh-better-sidebar-0.16.1-product.json) — SHA-256 `900d5bea5520d5da9789c5bc7bb1202caf265fbd6d57ed50808d28ee3e035b44`
+- [Lifecycle summary JSON](../plugins/market/evidence/dsh-better-sidebar-0.16.1.json) — SHA-256 `d2463510003afb887f193b8197901b9a61bbd5c0ee1c43ba084c4d851e2cad66`
+- [Product/Chromium raw JSON](../plugins/market/evidence/dsh-better-sidebar-0.16.1-product.json) — SHA-256 `bcaf8127b1b27b01c2fafcb9d46d915023f8064bebc5f2874cbc968a63a2125e`
 
 ## Matrix result
 
