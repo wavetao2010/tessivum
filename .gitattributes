@@ -1,1 +1,2 @@
 benchmarks/fixtures/phase9-alpha23/*.json text eol=lf
+plugins/market/evidence/*.json text eol=lf
