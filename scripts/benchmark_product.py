@@ -192,6 +192,7 @@ def collect_provenance(
             raise ValueError("missing required benchmark environment variable: TESSIVUM_BENCH_DSH_UPSTREAM_ROOT")
         upstream_root = Path(upstream_root_value).resolve()
         repositories["deepseekHarnessUpstream"] = repository_provenance(upstream_root, upstream_source["revision"])
+    runtime_inputs: list[dict[str, str]] = []
     for name in ("TESSIVUM_BENCH_DSH_BIN", "TESSIVUM_BENCH_DSH_PATCH", "TESSIVUM_BENCH_DSH_REPLAY", "TESSIVUM_BENCH_DSH_REPLAY_PLUGIN"):
         value = os.environ.get(name)
         if value is not None:
