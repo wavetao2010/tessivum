@@ -14,7 +14,7 @@
 ### Changed
 
 - Pin `tessivum-core v0.1.6` to revision
-  `640e9ea41810861eebd5bbf300052072e989259c` for Windows executable resolution,
+  `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694` for Windows executable resolution,
   platform-correct supervision, isolated Bun transpilation, retained host stderr diagnostics, required Windows `SystemRoot`, and cold host readiness.
 
 ### Fixed
