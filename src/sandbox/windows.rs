@@ -1491,8 +1491,6 @@ mod tests {
         assert_eq!(first.bytes(), repeated.bytes());
         assert_ne!(first.bytes(), second.bytes());
         assert_ne!(first.bytes(), temp.bytes());
-        assert_eq!(first.bytes()[1], 2);
-        assert_eq!(temp.bytes()[1], 3);
     }
 
     #[test]

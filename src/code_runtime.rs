@@ -1216,7 +1216,7 @@ except Exception as e:emit({'type':'done','error':{'kind':'exception','message':
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
-    async fn wait_for_child_pid(path: &PathBuf) -> u32 {
+    async fn wait_for_child_pid(path: &std::path::Path) -> u32 {
         let deadline = Instant::now() + Duration::from_secs(9);
         loop {
             if let Ok(pid) = std::fs::read_to_string(path).and_then(|value| {

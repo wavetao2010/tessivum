@@ -23,13 +23,14 @@ use windows_sys::Win32::{
     Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW},
     System::Threading::{
         GetExitCodeProcess, OpenProcess, TerminateProcess, WaitForSingleObject,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZE,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     },
 };
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const STILL_ACTIVE: u32 = 259;
+const SYNCHRONIZE: u32 = 0x0010_0000;
 
 struct TempWorkspace {
     path: PathBuf,
