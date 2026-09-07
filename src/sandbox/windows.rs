@@ -33,7 +33,7 @@ use windows_sys::Win32::{
         },
         CopySid, CreateRestrictedToken, CreateWellKnownSid, EqualSid, GetAce, GetLengthSid,
         GetTokenInformation, IsValidSid, SetTokenInformation, TokenDefaultDacl, TokenGroups,
-        TokenUser, WinWorldSid, ACCESS_ALLOWED_ACE, ACL, CONTAINER_INHERIT_ACE,
+        TokenOwner, TokenUser, WinWorldSid, ACCESS_ALLOWED_ACE, ACL, CONTAINER_INHERIT_ACE,
         DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, LUA_TOKEN, OBJECT_INHERIT_ACE,
         OWNER_SECURITY_INFORMATION, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT,
         TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_QUERY, WRITE_RESTRICTED,
@@ -592,12 +592,24 @@ impl PinnedDirectory {
             return Err(invalid("directory handle does not match canonical path"));
         }
         let (owner, _, descriptor) = security(handle.0)?;
-        let owner_matches = !owner.is_null() && unsafe { EqualSid(owner, user_sid.ptr()) } != 0;
+        let owner_matches = (|| -> io::Result<bool> {
+            if owner.is_null() {
+                return Ok(false);
+            }
+            if unsafe { EqualSid(owner, user_sid.ptr()) } != 0 {
+                return Ok(true);
+            }
+            // Elevated Windows tokens may create directories owned by their default
+            // owner group rather than TokenUser. Do not accept arbitrary group owners.
+            let token = open_current_token()?;
+            let default_owner = token_sid(token.0, TokenOwner, false)?;
+            Ok(unsafe { EqualSid(owner, default_owner.ptr()) } != 0)
+        })();
         drop_descriptor(descriptor)?;
-        if !owner_matches {
+        if !owner_matches? {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "sandbox directory is not owned by the current user",
+                "sandbox directory is not owned by the current user or token owner",
             ));
         }
         Ok(Self {
@@ -804,6 +816,13 @@ fn token_sid(token: HANDLE, class: i32, logon: bool) -> io::Result<Sid> {
             .find(|entry| entry.Attributes & SE_GROUP_LOGON_ID as u32 == SE_GROUP_LOGON_ID as u32)
             .map(|entry| entry.Sid)
             .ok_or_else(|| io::Error::other("current token has no logon SID"))?
+    } else if class == TokenOwner {
+        unsafe {
+            (*(buffer
+                .as_ptr()
+                .cast::<windows_sys::Win32::Security::TOKEN_OWNER>()))
+            .Owner
+        }
     } else {
         unsafe {
             (*(buffer

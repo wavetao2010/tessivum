@@ -429,6 +429,10 @@ impl ProcessCodeRuntime {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        #[cfg(windows)]
         let (mut child, job) = match WindowsJob::spawn(&mut command) {
             Ok(owned) => owned,
             Err(error) => {
@@ -1284,14 +1288,14 @@ mod windows_tests {
         config.timeout = Duration::from_secs(10);
         let runtime = ProcessCodeRuntime::new(config).unwrap();
 
-        let (result, (pid, process)) = tokio::join!(
-            runtime.run(CodeRunRequest::new(program, Vec::new())),
-            async {
-                let pid = wait_for_child_pid(&ready).await;
-                (pid, open_live_process(pid))
-            }
-        );
-        let result = result.unwrap();
+        let run = runtime.run(CodeRunRequest::new(program, Vec::new()));
+        tokio::pin!(run);
+        let pid = tokio::select! {
+            result = &mut run => panic!("worker ended before descendant readiness: {result:?}"),
+            pid = wait_for_child_pid(&ready) => pid,
+        };
+        let process = open_live_process(pid);
+        let result = run.await.unwrap();
         assert_eq!(result.error.unwrap().kind, CodeRunFailureKind::Timeout);
         assert_process_exited(process, pid);
         let _ = std::fs::remove_dir_all(root);
