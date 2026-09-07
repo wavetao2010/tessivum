@@ -1243,6 +1243,7 @@ async fn stale_workspace_retires_persistent_powershell() {
         .unwrap()
         .workspace
         .workspace_id;
+    registry.delete(&workspace_id, None).unwrap();
     registry
         .attach_session(&replacement_id, &session, None)
         .unwrap();

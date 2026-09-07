@@ -1282,6 +1282,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 fn child_environment(temp: &Path) -> Vec<u16> {
+    let temp = crate::process_path(temp);
     let mut entries: Vec<OsString> = std::env::vars_os()
         .filter(|(name, _)| {
             let name = name.to_string_lossy();
