@@ -139,7 +139,7 @@ fn write_matrix_private_temp_isolated_and_stale_cleanup_is_safe() {
         SandboxMode::WorkspaceWrite,
         &first,
         format!(
-            "Set-Content -LiteralPath {} -Value $env:TEMP; Set-Content -LiteralPath (Join-Path $env:TEMP 'own.txt') -Value ok; Set-Content -LiteralPath {} -Value ok; Start-Sleep -Seconds 60",
+            "$note = {}; Set-Content -LiteralPath ($note + '.tmp') -Value $env:TEMP; Move-Item -LiteralPath ($note + '.tmp') -Destination $note; Set-Content -LiteralPath (Join-Path $env:TEMP 'own.txt') -Value ok; Set-Content -LiteralPath {} -Value ok; Start-Sleep -Seconds 60",
             ps(&temp_note),
             ps(&first.join("allowed.txt")),
         ),
@@ -444,7 +444,7 @@ fn runner_job_kills_started_descendant_after_parent_exits() {
     let release = root.0.join("release-parent");
     let temp_file = root.0.join("descendant.temp");
     let descendant = format!(
-        "$ErrorActionPreference='Stop'; $held = [IO.File]::Open((Join-Path $env:TEMP 'held.txt'), [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); Set-Content -LiteralPath {} -Value $env:TEMP -NoNewline; Set-Content -LiteralPath {} -Value $PID -NoNewline; Start-Sleep -Seconds 300",
+        "$ErrorActionPreference='Stop'; $held = [IO.File]::Open((Join-Path $env:TEMP 'held.txt'), [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); Set-Content -LiteralPath {} -Value $env:TEMP -NoNewline; $note = {}; Set-Content -LiteralPath ($note + '.tmp') -Value $PID -NoNewline; Move-Item -LiteralPath ($note + '.tmp') -Destination $note; Start-Sleep -Seconds 300",
         ps(&temp_file),
         ps(&pid_file),
     );

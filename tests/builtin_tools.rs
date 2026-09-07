@@ -1012,7 +1012,7 @@ async fn powershell_cancellation_reaps_its_descendant_tree() {
                 .execute(
                     call,
                     "bash",
-                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; Set-Content -LiteralPath 'child.pid' -Value $child.Id -NoNewline; Wait-Process -Id $child.Id"}),
+                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; Set-Content -LiteralPath 'child.pid.tmp' -Value $child.Id -NoNewline; Move-Item -LiteralPath 'child.pid.tmp' -Destination 'child.pid'; Wait-Process -Id $child.Id"}),
                 )
                 .await
         }
@@ -1114,7 +1114,7 @@ async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() 
                 .execute(
                     call,
                     "bash",
-                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; Set-Content -LiteralPath 'persistent-child.pid' -Value $child.Id -NoNewline; Wait-Process -Id $child.Id"}),
+                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; Set-Content -LiteralPath 'persistent-child.pid.tmp' -Value $child.Id -NoNewline; Move-Item -LiteralPath 'persistent-child.pid.tmp' -Destination 'persistent-child.pid'; Wait-Process -Id $child.Id"}),
                 )
                 .await
         }
@@ -1145,7 +1145,7 @@ async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() 
                 .execute(
                     disabled_call,
                     "bash",
-                    json!({"command": "Set-Content -LiteralPath 'disabled.pid' -Value $PID -NoNewline; Start-Sleep -Seconds 30"}),
+                    json!({"command": "Set-Content -LiteralPath 'disabled.pid.tmp' -Value $PID -NoNewline; Move-Item -LiteralPath 'disabled.pid.tmp' -Destination 'disabled.pid'; Start-Sleep -Seconds 30"}),
                 )
                 .await
         }
@@ -1177,7 +1177,7 @@ async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() 
                 .execute(
                     shutdown_call,
                     "bash",
-                    json!({"command": "Set-Content -LiteralPath 'shutdown.pid' -Value $PID -NoNewline; Start-Sleep -Seconds 30"}),
+                    json!({"command": "Set-Content -LiteralPath 'shutdown.pid.tmp' -Value $PID -NoNewline; Move-Item -LiteralPath 'shutdown.pid.tmp' -Destination 'shutdown.pid'; Start-Sleep -Seconds 30"}),
                 )
                 .await
         }
