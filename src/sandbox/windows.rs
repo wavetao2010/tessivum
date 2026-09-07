@@ -1366,10 +1366,10 @@ fn last_error(operation: &str) -> io::Error {
 }
 
 fn win32_error(operation: &str, code: u32) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Other,
-        format!("{operation}: {}", io::Error::from_raw_os_error(code as i32)),
-    )
+    io::Error::other(format!(
+        "{operation}: {}",
+        io::Error::from_raw_os_error(code as i32)
+    ))
 }
 
 #[cfg(test)]

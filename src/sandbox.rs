@@ -166,10 +166,10 @@ impl Sandbox {
     pub fn local() -> Self {
         #[cfg(windows)]
         {
-            return Self {
+            Self {
                 provider: windows::WindowsAclProvider::detect()
                     .map(|provider| Arc::new(provider) as Arc<dyn SandboxProvider>),
-            };
+            }
         }
         #[cfg(not(windows))]
         Self {
@@ -370,11 +370,13 @@ fn canonical_roots(roots: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Tessi
     Ok(canonical)
 }
 
+#[cfg(not(windows))]
 #[derive(Clone, Debug)]
 struct LocalSandboxProvider {
     _runner: String,
 }
 
+#[cfg(not(windows))]
 impl LocalSandboxProvider {
     fn detect() -> Option<Self> {
         #[cfg(target_os = "macos")]
@@ -393,6 +395,7 @@ impl LocalSandboxProvider {
     }
 }
 
+#[cfg(not(windows))]
 impl SandboxProvider for LocalSandboxProvider {
     fn confine(
         &self,
