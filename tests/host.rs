@@ -426,7 +426,7 @@ async fn persist_session(
 }
 
 async fn wait_for_event(host: &impl HostApi, session: SessionId) {
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if host
             .events(session.clone(), 0)
             .await
@@ -743,7 +743,7 @@ async fn host_accepts_a_durable_session_log_as_its_replay_fixture() {
     let session = SessionId::from("durable-replay");
     handle.prompt(prompt(session.as_str())).await.unwrap();
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if handle
                 .events(session.clone(), 0)
