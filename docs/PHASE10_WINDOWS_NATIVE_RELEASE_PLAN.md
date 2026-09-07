@@ -215,7 +215,7 @@ Windows 没有可靠通用 SIGTERM 等价物。首版直接终止 Job，不伪�
 
 按照已固定 DeepSeek Harness `dsh-sandbox-windows-acl` 的语义，在 Rust 侧实现最小必要 Win32 后端；不采用“只改 cwd”或 PowerShell ExecutionPolicy 冒充 sandbox：
 
-- `read-only`：创建 write-restricted token，不授予 workspace/temp 写 capability；
+- `read-only`：创建 write-restricted token，不授予 workspace 写 capability；仅授予本次 Session/命令独占 private temp 的写 capability，以支持 PowerShell 正常初始化和临时文件操作；
 - `workspace-write`：以每个 canonical 批准 write root 派生稳定 SID（整个 workspace 获批时即 workspace SID），只携带当前批准 roots 的 capability，避免旧 ACE 扩大后续较窄请求的权限；
 - 每个 Session/命令使用独立 private temp SID 和 temp root，兄弟 Session 不能互写；
 - `danger-full-access`：只在现有显式权限/approval 路径通过后执行原 argv；
@@ -237,7 +237,8 @@ Windows 没有可靠通用 SIGTERM 等价物。首版直接终止 Job，不伪�
 | workspace-write 写 Session private temp | 成功 |
 | workspace-write 写 sibling workspace/temp | 拒绝 |
 | workspace-write 写 `%USERPROFILE%` 任意普通位置 | 拒绝 |
-| read-only 写 workspace/temp | 拒绝 |
+| read-only 写 workspace、sibling workspace/temp、用户普通目录 | 拒绝 |
+| read-only 写本次独占 private temp | 成功，正常退出和 Host shutdown 后清理 |
 | danger-full-access 未批准 | 在 spawn 前拒绝 |
 | danger-full-access 已批准 | 按用户选择执行 |
 | 中文 stdout/stderr | UTF-8 无乱码 |

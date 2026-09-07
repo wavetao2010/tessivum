@@ -16,8 +16,8 @@
   capabilities, private temporary directories, and explicit danger-mode approval.
   Everyone/logon ambient grants and NTFS hard-link aliases remain limitations;
   reads, networking, and process visibility are not isolated. No Windows release is published.
-  Strict read-only TEMP currently triggers PowerShell constrained-language restrictions;
-  full Windows acceptance remains pending an explicit TEMP policy decision.
+  Read-only mode permits writes only to its private TEMP in addition to existing ambient
+  grants, enabling PowerShell initialization without granting workspace write capabilities.
 
 ### Changed
 

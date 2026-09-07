@@ -278,7 +278,6 @@ fn execute(
         return Err(invalid("private temp and writable roots intersect"));
     }
 
-    let mut temp_granted = false;
     if input.mode == SandboxMode::WorkspaceWrite {
         for (root, sid) in input.write_roots.iter().zip(&root_sids) {
             let directory = pinned
@@ -287,41 +286,19 @@ fn execute(
                 .expect("every validated write root is pinned");
             grant(directory, sid)?;
         }
-        grant(&temp.directory, &temp_sid)?;
-        temp_granted = true;
     }
+    grant(&temp.directory, &temp_sid)?;
 
     let restricted = (|| {
         let logon_sid = token_sid(current_token.0, TokenGroups, true)?;
         let world_sid = well_known_sid(WinWorldSid)?;
-        let write_sids: Vec<&Sid> = if input.mode == SandboxMode::WorkspaceWrite {
-            root_sids.iter().chain(std::iter::once(&temp_sid)).collect()
-        } else {
-            Vec::new()
-        };
-        let token = restricted_token(
-            current_token.0,
-            &logon_sid,
-            &world_sid,
-            &write_sids,
-            input.mode,
-        )?;
-        set_default_dacl(
-            token.0,
-            if input.mode == SandboxMode::ReadOnly {
-                &world_sid
-            } else {
-                &temp_sid
-            },
-        )?;
+        let write_sids: Vec<&Sid> = root_sids.iter().chain(std::iter::once(&temp_sid)).collect();
+        let token = restricted_token(current_token.0, &logon_sid, &world_sid, &write_sids)?;
+        set_default_dacl(token.0, &temp_sid)?;
         spawn_wait(token.0, &input.argv, workspace, &temp.path)
     })();
 
-    let revoke = if temp_granted {
-        revoke(&temp.directory, &temp_sid)
-    } else {
-        Ok(())
-    };
+    let revoke = revoke(&temp.directory, &temp_sid);
     match (restricted, revoke) {
         (Ok(code), Ok(())) => Ok(code),
         (Err(error), _) => Err(error),
@@ -895,7 +872,6 @@ fn restricted_token(
     logon: &Sid,
     world: &Sid,
     write_sids: &[&Sid],
-    mode: SandboxMode,
 ) -> io::Result<OwnedHandle> {
     let mut restricting = vec![
         SID_AND_ATTRIBUTES {
@@ -907,12 +883,10 @@ fn restricted_token(
             Attributes: 0,
         },
     ];
-    if mode == SandboxMode::WorkspaceWrite {
-        restricting.extend(write_sids.iter().map(|sid| SID_AND_ATTRIBUTES {
-            Sid: sid.ptr(),
-            Attributes: 0,
-        }));
-    }
+    restricting.extend(write_sids.iter().map(|sid| SID_AND_ATTRIBUTES {
+        Sid: sid.ptr(),
+        Attributes: 0,
+    }));
     let mut token = null_mut();
     if unsafe {
         CreateRestrictedToken(

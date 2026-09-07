@@ -181,6 +181,30 @@ fn write_matrix_private_temp_isolated_and_stale_cleanup_is_safe() {
     assert!(!user_probe.join("ordinary.txt").exists());
     assert!(private_temp.exists(), "a live run was collected as stale");
 
+    let readonly_probe = format!(
+        "{}{}{}{}Set-Content -LiteralPath (Join-Path $env:TEMP 'own.txt') -Value ok; Write-Output readonly-ok",
+        denied(&first.join("sibling-workspace.txt")),
+        denied(&private_temp.join("sibling-temp.txt")),
+        denied(&user_probe.join("ordinary.txt")),
+        denied(&second.join("allowed.txt")),
+    );
+    let readonly = output(SandboxMode::ReadOnly, &second, readonly_probe);
+    assert!(
+        readonly.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readonly.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(readonly.stdout).unwrap().trim(),
+        "readonly-ok"
+    );
+    assert_eq!(
+        fs::read_to_string(second.join("allowed.txt"))
+            .unwrap()
+            .trim(),
+        "ok"
+    );
+
     live.kill().unwrap();
     live.wait().unwrap();
     wait_for(&private_temp);
@@ -202,11 +226,27 @@ fn write_matrix_private_temp_isolated_and_stale_cleanup_is_safe() {
 }
 
 #[test]
-fn read_only_denies_workspace_and_private_temp_writes() {
+fn read_only_preserves_workspace_and_allows_only_private_temp_writes() {
     let root = TestRoot::new("readonly");
+    let protected = root.0.join("protected.txt");
+    let seeded = output(
+        SandboxMode::WorkspaceWrite,
+        &root.0,
+        format!(
+            "Set-Content -LiteralPath {} -Value original -NoNewline",
+            ps(&protected)
+        ),
+    );
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
     let script = format!(
-        "try {{ Set-Content -LiteralPath {} -Value denied; exit 51 }} catch {{}}; try {{ Set-Content -LiteralPath (Join-Path $env:TEMP 'denied.txt') -Value denied; exit 52 }} catch {{}}; Write-Output readonly-ok",
+        "if ((Get-Content -LiteralPath {} -Raw) -ne 'original') {{ exit 50 }}; try {{ Set-Content -LiteralPath {} -Value denied; exit 51 }} catch {{}}; try {{ Set-Content -LiteralPath {} -Value changed; exit 52 }} catch {{}}; if ($env:TEMP -ne $env:TMP) {{ exit 53 }}; $nested = New-Item -ItemType Directory -Path (Join-Path $env:TEMP 'nested'); $probe = Join-Path $nested.FullName 'own.txt'; [IO.File]::WriteAllText($probe, '中文临时文件'); [Console]::Out.WriteLine([IO.File]::ReadAllText($probe)); [Console]::Out.Write($env:TEMP); [Console]::Error.Write('中文错误')",
+        ps(&protected),
         ps(&root.0.join("denied.txt")),
+        ps(&protected),
     );
     let result = output(SandboxMode::ReadOnly, &root.0, script);
     assert!(
@@ -214,10 +254,16 @@ fn read_only_denies_workspace_and_private_temp_writes() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(
-        String::from_utf8(result.stdout).unwrap().trim(),
-        "readonly-ok"
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("中文临时文件"));
+    let private_temp = lines.next().expect("PowerShell reports its private TEMP");
+    assert!(
+        !Path::new(private_temp).exists(),
+        "private TEMP survives normal exit"
     );
+    assert_eq!(String::from_utf8(result.stderr).unwrap(), "中文错误");
+    assert_eq!(fs::read_to_string(protected).unwrap(), "original");
     assert!(!root.0.join("denied.txt").exists());
 }
 

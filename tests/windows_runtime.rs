@@ -418,3 +418,92 @@ async fn host_shutdown_cancels_minimal_persistent_powershell_process_tree() {
     assert_terminated(pids[1], "persistent PowerShell descendant").await;
     workspace.disarm();
 }
+
+#[tokio::test]
+async fn readonly_powershell_uses_private_temp_without_unlocking_workspace() {
+    for persistent in [false, true] {
+        let workspace = TempWorkspace::new();
+        let setup = concat!(
+            "$ErrorActionPreference='Stop'; ",
+            "try { Set-Content -LiteralPath 'must-not-write.txt' -Value bad; exit 51 } catch {}; ",
+            "$readonlyValue='中文状态'; function ReadOnlyRemembered { '函数可用' }; ",
+            "$readonlyPath=Join-Path $env:TEMP 'probe.txt'; ",
+            "[IO.File]::WriteAllText($readonlyPath, '中文临时文件'); ",
+            "[Console]::Out.Write($env:TEMP)"
+        );
+        let observe = concat!(
+            "if ($readonlyValue -ne '中文状态' -or (ReadOnlyRemembered) -ne '函数可用') { throw 'persistent state was lost' }; ",
+            "if ([IO.File]::ReadAllText($readonlyPath) -ne '中文临时文件') { throw 'private temp was lost' }; ",
+            "[Console]::Out.Write('持久只读成功'); [Console]::Error.Write('中文错误')"
+        );
+        let mut calls = vec![(setup, false)];
+        if persistent {
+            calls.push((observe, false));
+        }
+        let mut config = host_config(&workspace, recorded_bash(&calls));
+        if persistent {
+            config = config.with_default_agent_mode(AgentModeId::minimal());
+        }
+        let runtime = HostRuntime::boot(config).await.unwrap();
+        let host = runtime.handle();
+        let session = SessionId::from("windows-readonly-temp");
+        host.create_session(session.clone()).await.unwrap();
+        let permission = host
+            .command_execute(session.clone(), "/permission read-only".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(permission.result).unwrap()["kind"],
+            "success"
+        );
+        host.prompt(prompt(session.clone())).await.unwrap();
+        let events = tokio::time::timeout(EVENT_TIMEOUT, async {
+            loop {
+                let events = host.events(session.clone(), 0).await.unwrap();
+                if events.iter().any(|event| event.event_type == "turn/end") {
+                    break events;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("read-only PowerShell turn completes");
+        let results: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == "tool/result")
+            .collect();
+        assert_eq!(results.len(), calls.len(), "{events:?}");
+        for result in &results {
+            assert_eq!(
+                result.data["message"]["content"][0]["isError"], false,
+                "{result:?}"
+            );
+        }
+        let temp = PathBuf::from(
+            results[0].data["message"]["content"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(!workspace.path().join("must-not-write.txt").exists());
+        if persistent {
+            assert_eq!(
+                results[1].data["message"]["content"][0]["content"][0]["text"],
+                "持久只读成功\n[stderr]\n中文错误"
+            );
+            assert_eq!(
+                fs::read_to_string(temp.join("probe.txt")).unwrap(),
+                "中文临时文件"
+            );
+        }
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, runtime.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !temp.exists(),
+            "private TEMP survives Host shutdown: {}",
+            temp.display()
+        );
+    }
+}
