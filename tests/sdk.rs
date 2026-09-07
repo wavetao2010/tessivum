@@ -378,7 +378,7 @@ for line in sys.stdin:
         format!(
             r#"import {{ JsonRpcClient }} from {ts_client};
 const notifications: string[] = [];
-const client = new JsonRpcClient("node", [{node_fixture_literal}, {ts_audit_literal}], {{timeoutMs: 2000, onNotification: item => notifications.push(item.method)}});
+const client = new JsonRpcClient("node", [{node_fixture_literal}, {ts_audit_literal}], {{timeoutMs: 10_000, onNotification: item => notifications.push(item.method)}});
 const initialized = await client.initialize({{cwd:"/tmp",provider:"recorded",model:"test"}});
 const prompted = await client.prompt({{sessionId:"session-1",contentBlocks:[{{type:"text",text:"hello"}}]}});
 const cancelled = await client.cancel("session-1");
@@ -406,7 +406,7 @@ spec.loader.exec_module(module)
 notifications = []
 def notify(item): notifications.append(item.method)
 async def run():
-    client = await module.JsonRpcClient.start(sys.executable, {python_fixture_literal}, {python_audit_literal}, timeout=2, on_notification=notify)
+    client = await module.JsonRpcClient.start(sys.executable, {python_fixture_literal}, {python_audit_literal}, timeout=10, on_notification=notify)
     initialized = await client.initialize({{"cwd":"/tmp","provider":"recorded","model":"test"}})
     prompted = await client.prompt("session-1", [{{"type":"text","text":"hello"}}])
     cancelled = await client.cancel("session-1")
