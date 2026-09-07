@@ -238,7 +238,7 @@ Windows 没有可靠通用 SIGTERM 等价物。首版直接终止 Job，不伪�
 | workspace-write 写 sibling workspace/temp | 拒绝 |
 | workspace-write 写 `%USERPROFILE%` 任意普通位置 | 拒绝 |
 | read-only 写 workspace、sibling workspace/temp、用户普通目录 | 拒绝 |
-| read-only 写本次独占 private temp | 成功，正常退出和 Host shutdown 后清理 |
+| read-only 写本次独占 private temp | 成功；正常退出时清理，强制终止 runner 后由下次启动恢复清理 |
 | danger-full-access 未批准 | 在 spawn 前拒绝 |
 | danger-full-access 已批准 | 按用户选择执行 |
 | 中文 stdout/stderr | UTF-8 无乱码 |

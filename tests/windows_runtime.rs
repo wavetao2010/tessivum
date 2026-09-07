@@ -421,7 +421,8 @@ async fn host_shutdown_cancels_minimal_persistent_powershell_process_tree() {
 
 #[tokio::test]
 async fn readonly_powershell_uses_private_temp_without_unlocking_workspace() {
-    for persistent in [false, true] {
+    let mut retired_temp: Option<PathBuf> = None;
+    for persistent in [true, false] {
         let workspace = TempWorkspace::new();
         let setup = concat!(
             "$ErrorActionPreference='Stop'; ",
@@ -486,6 +487,12 @@ async fn readonly_powershell_uses_private_temp_without_unlocking_workspace() {
                 .unwrap(),
         );
         assert!(!workspace.path().join("must-not-write.txt").exists());
+        if let Some(retired) = &retired_temp {
+            assert!(
+                !retired.exists(),
+                "next launch did not collect retired private TEMP"
+            );
+        }
         if persistent {
             assert_eq!(
                 results[1].data["message"]["content"][0]["content"][0]["text"],
@@ -500,10 +507,15 @@ async fn readonly_powershell_uses_private_temp_without_unlocking_workspace() {
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            !temp.exists(),
-            "private TEMP survives Host shutdown: {}",
-            temp.display()
-        );
+        if persistent {
+            // Job termination kills the runner too; the next launch performs stale recovery.
+            retired_temp = Some(temp);
+        } else {
+            assert!(
+                !temp.exists(),
+                "private TEMP survives normal exit: {}",
+                temp.display()
+            );
+        }
     }
 }
