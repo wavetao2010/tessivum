@@ -5,14 +5,18 @@ use std::{
     ffi::OsStr,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
 
+#[cfg(windows)]
+use crate::subprocess::WindowsJob;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+#[cfg(windows)]
+use tokio::io::AsyncReadExt;
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -27,6 +31,7 @@ use uuid::Uuid;
 const CLOUDFLARED_VERSION: &str = "2026.8.3";
 const QUICK_TUNNEL_SUFFIX: &str = ".trycloudflare.com";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
@@ -279,9 +284,53 @@ async fn cached_binary_matches(
     if let Some(expected) = asset.binary_sha256 {
         return Ok(sha256_file(path).await? == expected);
     }
-    let output = Command::new(path).arg("--version").output().await?;
-    Ok(output.status.success()
-        && String::from_utf8_lossy(&output.stdout).contains(CLOUDFLARED_VERSION))
+    let (status, stdout) = cloudflared_version_output(path).await?;
+    Ok(status.success() && String::from_utf8_lossy(&stdout).contains(CLOUDFLARED_VERSION))
+}
+async fn cloudflared_version_output(path: &Path) -> io::Result<(ExitStatus, Vec<u8>)> {
+    let mut command = Command::new(path);
+    command
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(not(windows))]
+    {
+        let output = command.output().await?;
+        Ok((output.status, output.stdout))
+    }
+    #[cfg(windows)]
+    {
+        let (mut child, job) = WindowsJob::spawn(&mut command)?;
+        let Some(stdout) = child.stdout.take() else {
+            job.terminate();
+            let _ = child.wait().await;
+            return Err(io::Error::other(
+                "cloudflared version stdout is unavailable",
+            ));
+        };
+        let Some(stderr) = child.stderr.take() else {
+            job.terminate();
+            let _ = child.wait().await;
+            return Err(io::Error::other(
+                "cloudflared version stderr is unavailable",
+            ));
+        };
+        let stdout = tokio::spawn(read_all(stdout));
+        let stderr = tokio::spawn(read_all(stderr));
+        let status = child.wait().await;
+        // A version probe must not wait forever on pipes inherited by a descendant.
+        job.terminate();
+        let stdout = stdout.await.map_err(io::Error::other)??;
+        let _ = stderr.await.map_err(io::Error::other)??;
+        Ok((status?, stdout))
+    }
+}
+
+#[cfg(windows)]
+async fn read_all(mut reader: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    Ok(bytes)
 }
 
 async fn download_verified(
@@ -405,6 +454,8 @@ async fn set_executable_permissions(_path: &Path) -> Result<(), CloudflareTunnel
 
 struct RunningTunnel {
     child: Child,
+    #[cfg(windows)]
+    job: WindowsJob,
     endpoint: CloudflareTunnelEndpoint,
     started_at: Instant,
     readers: Vec<JoinHandle<()>>,
@@ -424,13 +475,32 @@ impl RunningTunnel {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(windows)]
+        let (mut child, job) = WindowsJob::spawn(&mut command)?;
+        #[cfg(not(windows))]
         let mut child = command.spawn()?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            CloudflareTunnelError::Io(io::Error::other("cloudflared stdout is unavailable"))
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            CloudflareTunnelError::Io(io::Error::other("cloudflared stderr is unavailable"))
-        })?;
+        let Some(stdout) = child.stdout.take() else {
+            terminate_child(
+                &mut child,
+                #[cfg(windows)]
+                &job,
+            )
+            .await;
+            return Err(CloudflareTunnelError::Io(io::Error::other(
+                "cloudflared stdout is unavailable",
+            )));
+        };
+        let Some(stderr) = child.stderr.take() else {
+            terminate_child(
+                &mut child,
+                #[cfg(windows)]
+                &job,
+            )
+            .await;
+            return Err(CloudflareTunnelError::Io(io::Error::other(
+                "cloudflared stderr is unavailable",
+            )));
+        };
         let (lines_tx, mut lines_rx) = mpsc::unbounded_channel();
         let mut readers = vec![
             tokio::spawn(read_lines(stdout, lines_tx.clone())),
@@ -457,14 +527,24 @@ impl RunningTunnel {
         let endpoint = match ready {
             Ok(Ok(endpoint)) => endpoint,
             Ok(Err(error)) => {
-                terminate_child(&mut child).await;
+                terminate_child(
+                    &mut child,
+                    #[cfg(windows)]
+                    &job,
+                )
+                .await;
                 for reader in readers.drain(..) {
                     reader.abort();
                 }
                 return Err(error);
             }
             Err(_) => {
-                terminate_child(&mut child).await;
+                terminate_child(
+                    &mut child,
+                    #[cfg(windows)]
+                    &job,
+                )
+                .await;
                 for reader in readers.drain(..) {
                     reader.abort();
                 }
@@ -476,6 +556,8 @@ impl RunningTunnel {
         }));
         Ok(Self {
             child,
+            #[cfg(windows)]
+            job,
             endpoint,
             started_at: Instant::now(),
             readers,
@@ -483,7 +565,18 @@ impl RunningTunnel {
     }
 
     async fn stop(&mut self) {
-        terminate_child(&mut self.child).await;
+        terminate_child(
+            &mut self.child,
+            #[cfg(windows)]
+            &self.job,
+        )
+        .await;
+        self.abort_readers();
+    }
+
+    fn finish_wait(&mut self) {
+        #[cfg(windows)]
+        self.job.terminate();
         self.abort_readers();
     }
 
@@ -491,6 +584,14 @@ impl RunningTunnel {
         for reader in self.readers.drain(..) {
             reader.abort();
         }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RunningTunnel {
+    fn drop(&mut self) {
+        self.job.terminate();
+        self.abort_readers();
     }
 }
 
@@ -529,7 +630,7 @@ async fn supervise(
             status = running.child.wait() => status,
         };
         let uptime = started_at.elapsed();
-        running.abort_readers();
+        running.finish_wait();
         if events.send(CloudflareTunnelEvent::Down).is_err() {
             return;
         }
@@ -618,6 +719,13 @@ fn quick_tunnel_endpoint(line: &str) -> Option<CloudflareTunnelEndpoint> {
     None
 }
 
+#[cfg(windows)]
+async fn terminate_child(child: &mut Child, job: &WindowsJob) {
+    job.terminate();
+    let _ = child.wait().await;
+}
+
+#[cfg(not(windows))]
 async fn terminate_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
@@ -662,6 +770,62 @@ mod tests {
         assert!(quick_tunnel_endpoint("https://trycloudflare.com.evil.test").is_none());
         assert!(quick_tunnel_endpoint("https://nested.name.trycloudflare.com").is_none());
         assert!(quick_tunnel_endpoint("https://quiet-river.trycloudflare.com/path").is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn direct_exit_reaps_tunnel_descendants_before_restart() {
+        let root = env::temp_dir().join(format!("tessivum-tunnel-job-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let started = root.join("started");
+        let orphan = root.join("orphan");
+        let descendant = format!(
+            "import pathlib,time;time.sleep(2);pathlib.Path({}).write_text('orphan')",
+            serde_json::to_string(&orphan.to_string_lossy()).unwrap()
+        );
+        let parent = format!(
+            "import pathlib,subprocess,sys\nsubprocess.Popen([sys.executable,'-c',{}])\npathlib.Path({}).write_text('started')",
+            serde_json::to_string(&descendant).unwrap(),
+            serde_json::to_string(&started.to_string_lossy()).unwrap(),
+        );
+        let mut command = Command::new("python");
+        command
+            .args(["-c", &parent])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let (child, job) = WindowsJob::spawn(&mut command).unwrap();
+        let mut running = RunningTunnel {
+            child,
+            job,
+            endpoint: CloudflareTunnelEndpoint {
+                origin: "https://test.trycloudflare.com".into(),
+                authority: "test.trycloudflare.com".into(),
+            },
+            started_at: Instant::now(),
+            readers: Vec::new(),
+        };
+
+        assert!(running.child.wait().await.unwrap().success());
+        assert!(
+            started.exists(),
+            "tunnel fixture did not start its descendant"
+        );
+        running.finish_wait();
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(!orphan.exists(), "exited tunnel left a descendant alive");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn version_probe_runs_as_an_owned_process() {
+        let (status, stdout) = cloudflared_version_output(Path::new("python"))
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert!(String::from_utf8_lossy(&stdout).starts_with("Python "));
     }
 
     #[cfg(unix)]

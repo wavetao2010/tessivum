@@ -1,14 +1,16 @@
+#[cfg(unix)]
+use std::process::Command;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-#[cfg(unix)]
-use std::{process::Command, sync::Arc, time::Duration};
+#[cfg(any(unix, windows))]
+use std::{sync::Arc, time::Duration};
 
 use serde_json::json;
 #[cfg(any(unix, windows))]
 use serde_json::Value;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tessivum::workspace::{SessionResourceResolver, WorkspaceRegistry};
 use tessivum::{
     builtin_tools::{BuiltinTools, BuiltinToolsConfig, DEFAULT_MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES},
@@ -46,7 +48,7 @@ fn context(root: &ContextHandle, call: &str) -> ToolRunContext {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn context_for(root: &ContextHandle, session: &str, call: &str) -> ToolRunContext {
     ToolRunContext {
         session: SessionId::from(session),
@@ -70,6 +72,30 @@ async fn assert_reaped(pid: &str) {
     panic!("persistent shell process {pid} must be reaped");
 }
 
+#[cfg(windows)]
+async fn assert_reaped(pid: &str) {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    let pid = pid.trim().parse::<u32>().expect("process id is numeric");
+    for _ in 0..100 {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return;
+        }
+        let mut exit_code = 0;
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) };
+        unsafe { CloseHandle(process) };
+        if queried == 0 || exit_code != 259 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("PowerShell process {pid} must be reaped");
+}
+
 fn text(output: &tessivum::tools::ToolOutput) -> &str {
     match output.content.as_slice() {
         [ContentBlock::Text { text }] => text,
@@ -77,14 +103,14 @@ fn text(output: &tessivum::tools::ToolOutput) -> &str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn code(output: &tessivum::tools::ToolOutput) -> &str {
     output.meta["code"]
         .as_str()
         .expect("error output has a stable code")
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn bash_config(cwd: &Path) -> BuiltinToolsConfig {
     BuiltinToolsConfig {
         enable_bash: true,
@@ -311,7 +337,7 @@ async fn invalid_configuration_and_arguments_fail_explicitly() {
         assert_eq!(error.code, "INVALID_BUILTIN_TOOLS_CONFIG");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let runtime = ToolRuntime::new();
         let _builtins =
@@ -734,9 +760,148 @@ async fn stale_workspace_retires_the_enabled_bash_shell() {
     shells.shutdown().await;
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn rejected_queued_persistent_command_keeps_active_session() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    let session = SessionId::from("persistent-admission");
+    shells.enable(session.clone());
+
+    #[cfg(unix)]
+    let (first_command, queued_command, observe_command) = (
+        "export TESSIVUM_ADMISSION=retained; : > admission-started; sleep 2; printf first",
+        "export TESSIVUM_ADMISSION=queued; printf queued",
+        "printf '%s' \"$TESSIVUM_ADMISSION\"",
+    );
+    #[cfg(windows)]
+    let (first_command, queued_command, observe_command) = (
+        "$tessivumAdmission = 'retained'; [IO.File]::WriteAllText('admission-started', ''); Start-Sleep -Seconds 2; [Console]::Out.Write('first')",
+        "$tessivumAdmission = 'queued'; [Console]::Out.Write('queued')",
+        "[Console]::Out.Write($tessivumAdmission)",
+    );
+
+    let first = tokio::spawn({
+        let runtime = runtime.clone();
+        let context = context_for(&ContextHandle::root(), session.as_str(), "admission-first");
+        async move {
+            runtime
+                .execute(context, "bash", json!({"command": first_command}))
+                .await
+        }
+    });
+    let started = directory.path().join("admission-started");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first persistent command starts");
+
+    let queued_root = ContextHandle::root();
+    let queued = tokio::spawn({
+        let runtime = runtime.clone();
+        let context = context_for(&queued_root, session.as_str(), "admission-queued");
+        async move {
+            runtime
+                .execute(context, "bash", json!({"command": queued_command}))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    queued_root.scope().dispose().await.unwrap();
+    assert_eq!(code(&queued.await.unwrap()), "CANCELLED");
+
+    let invalid = runtime
+        .execute(
+            context_for(
+                &ContextHandle::root(),
+                session.as_str(),
+                "admission-invalid",
+            ),
+            "bash",
+            json!({"command": "printf invalid\0"}),
+        )
+        .await;
+    assert_eq!(code(&invalid), "PERSISTENT_SHELL_INVALID_SCRIPT");
+
+    let first = first.await.unwrap();
+    assert!(!first.is_error, "{}", text(&first));
+    assert_eq!(text(&first), "first");
+    let observed = runtime
+        .execute(
+            context_for(
+                &ContextHandle::root(),
+                session.as_str(),
+                "admission-observe",
+            ),
+            "bash",
+            json!({"command": observe_command}),
+        )
+        .await;
+    assert!(!observed.is_error, "{}", text(&observed));
+    assert_eq!(text(&observed), "retained");
+    shells.shutdown().await;
+}
+
 #[cfg(windows)]
 #[tokio::test]
-async fn bash_registration_executes_windows_powershell() {
+async fn powershell_reports_unicode_and_native_powershell_and_parse_failures() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(&runtime, bash_config(directory.path()))
+        .expect("PowerShell registers on Windows");
+    let root = ContextHandle::root();
+
+    let unicode = runtime
+        .execute(
+            context(&root, "unicode"),
+            "bash",
+            json!({"command": "[Console]::Out.Write('中文'); [Console]::Error.Write('错误')"}),
+        )
+        .await;
+    assert!(!unicode.is_error, "{}", text(&unicode));
+    assert_eq!(text(&unicode), "中文\n[stderr]\n错误");
+    assert_eq!(unicode.meta["signal"], Value::Null);
+
+    let native = runtime
+        .execute(
+            context(&root, "native-exit"),
+            "bash",
+            json!({"command": "& $env:ComSpec /d /c 'exit 9'"}),
+        )
+        .await;
+    assert!(native.is_error);
+    assert_eq!(native.meta["exitCode"], json!(9));
+
+    let powershell = runtime
+        .execute(
+            context(&root, "powershell-error"),
+            "bash",
+            json!({"command": "Write-Error '运行错误'"}),
+        )
+        .await;
+    assert!(powershell.is_error);
+    assert_eq!(powershell.meta["exitCode"], json!(1));
+    assert!(text(&powershell).contains("运行错误"));
+
+    let parse = runtime
+        .execute(
+            context(&root, "parse-error"),
+            "bash",
+            json!({"command": "if ("}),
+        )
+        .await;
+    assert!(parse.is_error);
+    assert_eq!(parse.meta["exitCode"], json!(1));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_bounds_output_and_denies_unapproved_escalation_before_effect() {
     let directory = TempDir::new();
     let runtime = ToolRuntime::new();
     let _builtins = BuiltinTools::new(
@@ -745,63 +910,347 @@ async fn bash_registration_executes_windows_powershell() {
             enable_bash: true,
             cwd: directory.path().to_path_buf(),
             resolver: None,
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            max_output_bytes: 8,
         },
     )
-    .expect("PowerShell registers on Windows");
+    .unwrap();
     let root = ContextHandle::root();
-    let output = runtime
+
+    let bounded = runtime
         .execute(
-            context(&root, "windows-powershell"),
+            context(&root, "bounded"),
             "bash",
-            json!({"command": "[Console]::Out.Write('WINDOWS_SHELL_OK')"}),
+            json!({"command": "[Console]::Out.Write('1234567890')"}),
         )
         .await;
-    assert!(!output.is_error);
-    assert_eq!(text(&output), "WINDOWS_SHELL_OK");
-    assert_eq!(output.meta["signal"], Value::Null);
+    assert!(!bounded.is_error);
+    assert_eq!(text(&bounded), "12345678");
+    assert_eq!(bounded.meta["outputBytes"], json!(8));
+    assert_eq!(bounded.meta["truncated"], Value::Bool(true));
+
+    let denied = runtime
+        .execute(
+            context(&root, "denied"),
+            "bash",
+            json!({
+                "command": "Set-Content -LiteralPath approval-effect.txt -Value forbidden",
+                "sandbox_permissions": "danger-full-access"
+            }),
+        )
+        .await;
+    assert_eq!(code(&denied), "TOOL_APPROVAL_DENIED");
+    assert!(!directory.path().join("approval-effect.txt").exists());
 }
 
 #[cfg(windows)]
 #[tokio::test]
-async fn persistent_powershell_keeps_state_and_cwd() {
+async fn powershell_uses_only_the_workspace_bound_to_its_session() {
+    let root = TempDir::new();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let registry = WorkspaceRegistry::open(root.path().join("data"), &first, Vec::new()).unwrap();
+    let first_workspace = registry.list()[0].workspace_id.clone();
+    let second_workspace = registry
+        .create(&second, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    for (session, workspace) in [
+        (SessionId::from("workspace-first"), first_workspace),
+        (SessionId::from("workspace-second"), second_workspace),
+    ] {
+        registry.recognize_session(&session).unwrap();
+        registry.attach_session(&workspace, &session, None).unwrap();
+    }
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(
+        &runtime,
+        BuiltinToolsConfig {
+            enable_bash: true,
+            cwd: root.path().to_path_buf(),
+            resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        },
+    )
+    .unwrap();
+    let context_root = ContextHandle::root();
+
+    for (session, value) in [("workspace-first", "first"), ("workspace-second", "second")] {
+        let output = runtime
+            .execute(
+                context_for(&context_root, session, value),
+                "bash",
+                json!({"command": format!("Set-Content -LiteralPath bound.txt -Value '{value}' -NoNewline")}),
+            )
+            .await;
+        assert!(!output.is_error, "{}", text(&output));
+    }
+    assert_eq!(
+        fs::read_to_string(first.join("bound.txt")).unwrap(),
+        "first"
+    );
+    assert_eq!(
+        fs::read_to_string(second.join("bound.txt")).unwrap(),
+        "second"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_cancellation_reaps_its_descendant_tree() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let root = ContextHandle::root();
+    let call = context(&root, "cancel-tree");
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .execute(
+                    call,
+                    "bash",
+                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; [IO.File]::WriteAllText('child.pid', [string]$child.Id); Wait-Process -Id $child.Id"}),
+                )
+                .await
+        }
+    });
+    let pid_path = directory.path().join("child.pid");
+    let pid = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(&pid_path) {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("PowerShell writes its descendant pid before cancellation");
+
+    root.scope().dispose().await.unwrap();
+    let output = task.await.unwrap();
+    assert_eq!(code(&output), "CANCELLED");
+    assert_reaped(&pid).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn persistent_powershell_keeps_isolated_state_cwd_and_environment() {
     let directory = TempDir::new();
     fs::create_dir(directory.path().join("nested")).unwrap();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let shells = builtins.persistent_shell_sessions();
+    let first_session = SessionId::from("persistent-first");
+    let second_session = SessionId::from("persistent-second");
+    shells.enable(first_session.clone());
+    shells.enable(second_session.clone());
+    let root = ContextHandle::root();
+
+    let initialized = runtime
+        .execute(
+            context_for(&root, first_session.as_str(), "persistent-start"),
+            "bash",
+            json!({"command": "$tessivumState = 'kept'; function Get-TessivumState { $tessivumState }; Set-Location nested"}),
+        )
+        .await;
+    assert!(!initialized.is_error, "{}", text(&initialized));
+    let background = runtime
+        .execute(
+            context_for(&root, first_session.as_str(), "persistent-background"),
+            "bash",
+            json!({"command": "Set-Content should-not-exist.txt bad", "run_in_background": true}),
+        )
+        .await;
+    assert_eq!(code(&background), "PERSISTENT_SHELL_BACKGROUND_UNSUPPORTED");
+    let observed = runtime
+        .execute(
+            context_for(&root, first_session.as_str(), "persistent-next"),
+            "bash",
+            json!({"command": "Set-Content -LiteralPath persistent.txt -Value (Get-TessivumState) -NoNewline; [Console]::Out.Write((Get-TessivumState) + '|中文|' + $env:NO_COLOR + '|' + $env:PAGER + '|' + $env:GIT_PAGER)"}),
+        )
+        .await;
+    assert!(!observed.is_error, "{}", text(&observed));
+    assert_eq!(text(&observed), "kept|中文|1|cat|cat");
+    assert_eq!(
+        fs::read_to_string(directory.path().join("nested/persistent.txt")).unwrap(),
+        "kept"
+    );
+    assert!(!directory
+        .path()
+        .join("nested/should-not-exist.txt")
+        .exists());
+
+    let isolated = runtime
+        .execute(
+            context_for(&root, second_session.as_str(), "persistent-isolated"),
+            "bash",
+            json!({"command": "[Console]::Out.Write($(if (Get-Variable tessivumState -ErrorAction SilentlyContinue) { 'leaked' } else { 'missing' }))"}),
+        )
+        .await;
+    assert!(!isolated.is_error, "{}", text(&isolated));
+    assert_eq!(text(&isolated), "missing");
+    shells.shutdown().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() {
+    let directory = TempDir::new();
+    let runtime = ToolRuntime::new();
+    let builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let shells = builtins.persistent_shell_sessions();
+
+    let cancelled = SessionId::from("persistent-cancelled");
+    shells.enable(cancelled.clone());
+    let root = ContextHandle::root();
+    let call = context_for(&root, cancelled.as_str(), "persistent-cancel");
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .execute(
+                    call,
+                    "bash",
+                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; [IO.File]::WriteAllText('persistent-child.pid', [string]$child.Id); Wait-Process -Id $child.Id"}),
+                )
+                .await
+        }
+    });
+    let child_path = directory.path().join("persistent-child.pid");
+    let child_pid = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(&child_path) {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("persistent PowerShell writes its descendant pid");
+    root.scope().dispose().await.unwrap();
+    assert_eq!(code(&task.await.unwrap()), "CANCELLED");
+    assert_reaped(&child_pid).await;
+
+    let disabled = SessionId::from("persistent-disabled");
+    shells.enable(disabled.clone());
+    let disabled_root = ContextHandle::root();
+    let disabled_call = context_for(&disabled_root, disabled.as_str(), "persistent-disable");
+    let disabled_task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .execute(
+                    disabled_call,
+                    "bash",
+                    json!({"command": "[IO.File]::WriteAllText('disabled.pid', [string]$PID); Start-Sleep -Seconds 30"}),
+                )
+                .await
+        }
+    });
+    let disabled_path = directory.path().join("disabled.pid");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !disabled_path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("persistent PowerShell starts before disable");
+    let disabled_pid = fs::read_to_string(&disabled_path).unwrap();
+    shells.disable(&disabled).await;
+    assert_eq!(
+        code(&disabled_task.await.unwrap()),
+        "PERSISTENT_SHELL_DISPOSED"
+    );
+    assert_reaped(&disabled_pid).await;
+
+    let shutdown = SessionId::from("persistent-shutdown");
+    shells.enable(shutdown.clone());
+    let shutdown_root = ContextHandle::root();
+    let shutdown_call = context_for(&shutdown_root, shutdown.as_str(), "persistent-shutdown");
+    let shutdown_task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .execute(
+                    shutdown_call,
+                    "bash",
+                    json!({"command": "[IO.File]::WriteAllText('shutdown.pid', [string]$PID); Start-Sleep -Seconds 30"}),
+                )
+                .await
+        }
+    });
+    let shutdown_path = directory.path().join("shutdown.pid");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !shutdown_path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("persistent PowerShell starts before shutdown");
+    let shutdown_pid = fs::read_to_string(&shutdown_path).unwrap();
+    shells.shutdown().await;
+    assert_eq!(
+        code(&shutdown_task.await.unwrap()),
+        "PERSISTENT_SHELL_DISPOSED"
+    );
+    assert_reaped(&shutdown_pid).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn stale_workspace_retires_persistent_powershell() {
+    let root = TempDir::new();
+    let workspace = root.path().join("workspace");
+    let replacement = root.path().join("replacement");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&replacement).unwrap();
+    let registry =
+        WorkspaceRegistry::open(root.path().join("data"), &workspace, Vec::new()).unwrap();
+    let workspace_id = registry.list()[0].workspace_id.clone();
+    let session = SessionId::from("persistent-stale");
+    registry.recognize_session(&session).unwrap();
+    registry
+        .attach_session(&workspace_id, &session, None)
+        .unwrap();
     let runtime = ToolRuntime::new();
     let builtins = BuiltinTools::new(
         &runtime,
         BuiltinToolsConfig {
             enable_bash: true,
-            cwd: directory.path().to_path_buf(),
-            resolver: None,
+            cwd: root.path().to_path_buf(),
+            resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         },
     )
     .unwrap();
     let shells = builtins.persistent_shell_sessions();
-    shells.enable(SessionId::from("builtin-tools"));
-    let root = ContextHandle::root();
-    let first = runtime
+    shells.enable(session.clone());
+    let context_root = ContextHandle::root();
+    let started = runtime
         .execute(
-            context(&root, "persistent-start"),
+            context_for(&context_root, session.as_str(), "persistent-start"),
             "bash",
-            json!({"command": "$tessivumState = 'kept'; function Get-TessivumState { $tessivumState }; Set-Location nested"}),
+            json!({"command": "[IO.File]::WriteAllText('shell.pid', [string]$PID)"}),
         )
         .await;
-    assert!(!first.is_error, "{}", text(&first));
-    let second = runtime
+    assert!(!started.is_error, "{}", text(&started));
+    let pid = fs::read_to_string(workspace.join("shell.pid")).unwrap();
+    fs::rename(&workspace, root.path().join("old-workspace")).unwrap();
+    fs::rename(&replacement, &workspace).unwrap();
+
+    let stale = runtime
         .execute(
-            context(&root, "persistent-next"),
+            context_for(&context_root, session.as_str(), "persistent-stale"),
             "bash",
-            json!({"command": "Set-Content -LiteralPath persistent.txt -Value (Get-TessivumState) -NoNewline; [Console]::Out.Write((Get-TessivumState))"}),
+            json!({"command": "Set-Content should-not-run.txt bad"}),
         )
         .await;
-    assert!(!second.is_error, "{}", text(&second));
-    assert_eq!(text(&second), "kept");
-    assert_eq!(
-        fs::read_to_string(directory.path().join("nested/persistent.txt")).unwrap(),
-        "kept"
-    );
+    assert_eq!(code(&stale), "STALE_WORKSPACE_LEASE");
+    assert_reaped(&pid).await;
+    assert!(!workspace.join("should-not-run.txt").exists());
     shells.shutdown().await;
 }
 

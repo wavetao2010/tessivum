@@ -589,7 +589,13 @@ pub trait HostDirectoryPicker: Send + Sync {
 pub struct SystemPathOpener;
 
 impl SystemPathOpener {
-    async fn run(&self, program: &str, args: Vec<OsString>) -> Result<(), TessivumError> {
+    async fn delegate_to_desktop(
+        &self,
+        program: &str,
+        args: Vec<OsString>,
+    ) -> Result<(), TessivumError> {
+        // Deliberately do not place this launcher in a Windows Job: its product is a
+        // user-owned desktop application that must outlive the short-lived helper.
         let output = tokio::process::Command::new(program)
             .args(args)
             .kill_on_drop(true)
@@ -616,7 +622,7 @@ impl SystemPathOpener {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn open_windows_path(&self, path: PathBuf) -> Result<(), TessivumError> {
-        self.run(
+        self.delegate_to_desktop(
             "powershell.exe",
             vec![
                 OsString::from("-NoProfile"),
@@ -656,7 +662,9 @@ impl HostPathOpener for SystemPathOpener {
 
     async fn open_path(&self, path: PathBuf) -> Result<(), TessivumError> {
         #[cfg(target_os = "macos")]
-        return self.run("open", vec![path.into_os_string()]).await;
+        return self
+            .delegate_to_desktop("open", vec![path.into_os_string()])
+            .await;
 
         #[cfg(target_os = "windows")]
         return self.open_windows_path(path).await;
@@ -696,7 +704,9 @@ impl HostPathOpener for SystemPathOpener {
                 }
                 return self.open_windows_path(PathBuf::from(translated)).await;
             }
-            return self.run("xdg-open", vec![path.into_os_string()]).await;
+            return self
+                .delegate_to_desktop("xdg-open", vec![path.into_os_string()])
+                .await;
         }
 
         #[allow(unreachable_code)]
@@ -711,7 +721,7 @@ impl HostPathOpener for SystemPathOpener {
     async fn open_text_file(&self, path: PathBuf) -> Result<(), TessivumError> {
         #[cfg(target_os = "macos")]
         return self
-            .run("open", vec![OsString::from("-t"), path.into_os_string()])
+            .delegate_to_desktop("open", vec![OsString::from("-t"), path.into_os_string()])
             .await;
 
         #[cfg(not(target_os = "macos"))]
@@ -808,6 +818,38 @@ impl HostDirectoryPicker for SystemDirectoryPicker {
             return Ok(None);
         }
         Ok(Some(PathBuf::from(selected)))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_path_opener_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn desktop_delegation_does_not_job_kill_launched_application() {
+        let root =
+            std::env::temp_dir().join(format!("tessivum-desktop-delegation-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let marker = root.join("launched");
+        let descendant = format!(
+            "import pathlib,time;time.sleep(.5);pathlib.Path({}).write_text('launched')",
+            serde_json::to_string(&marker.to_string_lossy()).unwrap()
+        );
+        let parent = format!(
+            "import subprocess,sys;subprocess.Popen([sys.executable,'-c',{}])",
+            serde_json::to_string(&descendant).unwrap()
+        );
+
+        SystemPathOpener
+            .delegate_to_desktop("python", vec![OsString::from("-c"), OsString::from(parent)])
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(
+            marker.exists(),
+            "desktop delegation killed the launched application with its helper"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 

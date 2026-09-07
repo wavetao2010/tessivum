@@ -165,9 +165,31 @@ impl PersistentShellSessions {
                 shell
             }
         };
-        let result = shell.run(command).await;
-        if result.is_err() {
+        if !entry.enabled.load(Ordering::Acquire) {
             let retired = state.take();
+            drop(state);
+            if let Some(retired) = retired {
+                retired.shell.dispose().await;
+            }
+            return Err(persistent_bash_error(
+                "PERSISTENT_SHELL_DISABLED",
+                "persistent shell is not enabled for this session",
+                json!({"sessionId": session}),
+            ));
+        }
+        drop(state);
+
+        let result = shell.run(command).await;
+        if result.is_err() && shell.is_terminated() {
+            let mut state = entry.shell.lock().await;
+            let retired = if state
+                .as_ref()
+                .is_some_and(|current| current.shell.is_same_instance(&shell))
+            {
+                state.take()
+            } else {
+                None
+            };
             drop(state);
             if let Some(retired) = retired {
                 retired.shell.dispose().await;
@@ -1091,54 +1113,28 @@ async fn run_windows_powershell(
             .map_err(|error| workspace_error(context, error))?,
         None => cwd.to_path_buf(),
     };
-    let mut last_not_found = None;
-    let mut child = None;
-    for program in ["pwsh.exe", "powershell.exe"] {
-        let raw_argv = vec![
-            program.into(),
-            "-NoLogo".into(),
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-Command".into(),
-            script.clone(),
-        ];
-        let argv = prepare_windows_shell_argv(raw_argv, lease, sandbox, mode, &context.session)?;
-        let mut shell = Command::new(&argv[0]);
-        shell
-            .args(&argv[1..])
-            .current_dir(&workspace)
-            .env("NO_COLOR", "1")
-            .env("PAGER", "cat")
-            .env("GIT_PAGER", "cat")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        match shell.spawn() {
-            Ok(started) => {
-                child = Some(started);
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => last_not_found = Some(error),
-            Err(error) => return Err(bash_error("could not start PowerShell", error)),
-        }
-    }
-    let mut child = child.ok_or_else(|| {
-        bash_error(
-            "could not find PowerShell 7 or Windows PowerShell",
-            last_not_found.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound)),
-        )
-    })?;
-    let job = match WindowsJob::assign(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(bash_error(
-                "could not assign PowerShell to a Windows Job Object",
-                error,
-            ));
-        }
-    };
+    let program = windows_powershell_program()?;
+    let raw_argv = vec![
+        program,
+        "-NoLogo".into(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-Command".into(),
+        script,
+    ];
+    let argv = prepare_windows_shell_argv(raw_argv, lease, sandbox, mode, &context.session)?;
+    let mut shell = Command::new(&argv[0]);
+    shell
+        .args(&argv[1..])
+        .current_dir(&workspace)
+        .env("NO_COLOR", "1")
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, job) = WindowsJob::spawn(&mut shell)
+        .map_err(|error| bash_error("could not start PowerShell in a Windows Job Object", error))?;
     let stdout = child.stdout.take().expect("piped stdout is available");
     let stderr = child.stderr.take().expect("piped stderr is available");
     let output = Arc::new(Mutex::new(CapturedOutput::default()));
@@ -1228,8 +1224,8 @@ fn prepare_windows_shell_argv(
                     read_policy: SandboxReadPolicy::Deny,
                     read_roots: Vec::new(),
                     write_roots: vec![workspace],
-                    approval: (mode == SandboxMode::WorkspaceWrite).then_some(SandboxApproval {
-                        mode: Some(SandboxMode::WorkspaceWrite),
+                    approval: (mode != SandboxMode::ReadOnly).then_some(SandboxApproval {
+                        mode: Some(mode),
                         read_policy: None,
                     }),
                 },
@@ -1261,8 +1257,8 @@ fn prepare_bash_argv(
                     read_policy: SandboxReadPolicy::Deny,
                     read_roots: Vec::new(),
                     write_roots,
-                    approval: (mode == SandboxMode::WorkspaceWrite).then_some(SandboxApproval {
-                        mode: Some(SandboxMode::WorkspaceWrite),
+                    approval: (mode != SandboxMode::ReadOnly).then_some(SandboxApproval {
+                        mode: Some(mode),
                         read_policy: None,
                     }),
                 },
@@ -1344,7 +1340,7 @@ fn persistent_bash_plan(
     session: SessionId,
 ) -> Result<PersistentBashPlan, TessivumError> {
     let raw_argv = vec![
-        windows_powershell_program(),
+        windows_powershell_program()?,
         "-NoLogo".into(),
         "-NoProfile".into(),
         "-NonInteractive".into(),
@@ -1399,21 +1395,39 @@ fn persistent_bash_plan(
 }
 
 #[cfg(windows)]
-fn windows_powershell_program() -> String {
-    let installed = std::env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .map(|root| root.join("PowerShell").join("7").join("pwsh.exe"))
-        .filter(|path| path.is_file());
-    installed
-        .or_else(|| {
-            std::env::var_os("PATH").and_then(|paths| {
-                std::env::split_paths(&paths)
-                    .map(|path| path.join("pwsh.exe"))
-                    .find(|path| path.is_file())
-            })
-        })
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "powershell.exe".into())
+fn windows_powershell_program() -> Result<String, TessivumError> {
+    let path = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut candidates = Vec::new();
+    if let Some(root) = std::env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(root).join("PowerShell/7/pwsh.exe"));
+    }
+    candidates.extend(path.iter().map(|root| root.join("pwsh.exe")));
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        candidates.push(PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+    }
+    candidates.extend(path.iter().map(|root| root.join("powershell.exe")));
+
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            std::env::current_dir()
+                .map_err(|error| bash_error("could not resolve PowerShell", error))?
+                .join(candidate)
+        };
+        if let Ok(program) = candidate.into_os_string().into_string() {
+            return Ok(program);
+        }
+    }
+    Err(bash_error(
+        "could not find PowerShell 7 or Windows PowerShell",
+        std::io::Error::from(std::io::ErrorKind::NotFound),
+    ))
 }
 
 #[cfg(unix)]

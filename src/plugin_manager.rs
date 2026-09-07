@@ -21,6 +21,8 @@ use tessivum_core::{CancellationToken, Entry, EntryId, EntryOptions, EntryTree, 
 use tessivum_node_bridge::{BridgeError, ClientConfig, HostCommand};
 use thiserror::Error;
 
+#[cfg(windows)]
+use crate::subprocess::WindowsJob;
 use crate::{
     host::{HostConfig, LegacyHostConfig},
     legacy::ProductPackageResolver,
@@ -133,7 +135,22 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
             error => BridgeError::Process(error.to_string()),
         })?;
         let reconciliation = reconciliation_mode(&args);
-        let mut command = TokioCommand::new("pnpm");
+        #[cfg(windows)]
+        let program = match pnpm_program() {
+            Ok(program) => program,
+            Err(error) => {
+                return Err(restore_pnpm_boundary_failure(
+                    &profile,
+                    &transaction,
+                    false,
+                    BridgeError::Process(format!("could not resolve pnpm: {error}")),
+                )
+                .await);
+            }
+        };
+        #[cfg(not(windows))]
+        let program = pnpm_program();
+        let mut command = TokioCommand::new(program);
         command
             .current_dir(&profile)
             .args(&args)
@@ -143,6 +160,20 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         if let Err(error) = set_process_group(&mut command) {
             return Err(restore_pnpm_boundary_failure(&profile, &transaction, false, error).await);
         }
+        #[cfg(windows)]
+        let (mut child, job) = match WindowsJob::spawn(&mut command) {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                return Err(restore_pnpm_boundary_failure(
+                    &profile,
+                    &transaction,
+                    false,
+                    BridgeError::Process(format!("could not run pnpm: {error}")),
+                )
+                .await);
+            }
+        };
+        #[cfg(not(windows))]
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -172,6 +203,30 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         tokio::pin!(deadline);
         let mut ended = 0;
         let mut failure = None;
+        let mut status = None;
+        #[cfg(windows)]
+        while ended < 2 || status.is_none() {
+            tokio::select! {
+                _ = cancellation.cancelled() => { failure = Some(BridgeError::Cancelled); break; }
+                _ = &mut deadline => { failure = Some(BridgeError::Timeout); break; }
+                result = child.wait(), if status.is_none() => match result {
+                    Ok(result) => {
+                        job.terminate();
+                        status = Some(result);
+                    }
+                    Err(error) => {
+                        failure = Some(BridgeError::Process(format!("could not wait for pnpm: {error}")));
+                        break;
+                    }
+                },
+                item = receiver.recv(), if ended < 2 => match item {
+                    Some(Some((stream, bytes))) => if let Err(error) = sink.emit(stream, &bytes) { failure = Some(error); break; },
+                    Some(None) => ended += 1,
+                    None => ended = 2,
+                },
+            }
+        }
+        #[cfg(not(windows))]
         while ended < 2 {
             tokio::select! {
                 _ = cancellation.cancelled() => { failure = Some(BridgeError::Cancelled); break; }
@@ -184,31 +239,37 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
             }
         }
         if failure.is_some() {
+            #[cfg(windows)]
+            job.terminate();
+            #[cfg(not(windows))]
             stop_process_group(&mut child).await;
+            stdout_task.abort();
+            stderr_task.abort();
         }
-        let status = match child.wait().await {
-            Ok(status) => status,
-            Err(error) => {
-                return Err(restore_pnpm_boundary_failure(
-                    &profile,
-                    &transaction,
-                    true,
-                    BridgeError::Process(format!("could not wait for pnpm: {error}")),
-                )
-                .await);
+        if status.is_none() {
+            match child.wait().await {
+                Ok(result) => status = Some(result),
+                Err(error) if failure.is_none() => {
+                    failure = Some(BridgeError::Process(format!(
+                        "could not wait for pnpm: {error}"
+                    )));
+                }
+                Err(_) => {}
             }
-        };
+        }
+        #[cfg(windows)]
+        job.terminate();
         for task in [stdout_task, stderr_task] {
-            let output = task
-                .await
-                .map_err(|error| {
-                    BridgeError::Process(format!("pnpm output worker failed: {error}"))
-                })
-                .and_then(|result| {
-                    result.map_err(|error| {
-                        BridgeError::Process(format!("could not read pnpm output: {error}"))
-                    })
-                });
+            let output = match task.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(BridgeError::Process(format!(
+                    "could not read pnpm output: {error}"
+                ))),
+                Err(error) if failure.is_some() && error.is_cancelled() => Ok(()),
+                Err(error) => Err(BridgeError::Process(format!(
+                    "pnpm output worker failed: {error}"
+                ))),
+            };
             if let Err(error) = output {
                 return Err(
                     restore_pnpm_boundary_failure(&profile, &transaction, true, error).await,
@@ -218,6 +279,7 @@ impl crate::bridge::PnpmBoundary for PnpmProfileBoundary {
         if let Some(error) = failure {
             return Err(restore_pnpm_boundary_failure(&profile, &transaction, true, error).await);
         }
+        let status = status.expect("pnpm completed without a wait failure");
         if !status.success() {
             let diagnostic = format!(
                 "tessivum: pnpm exited with {}; partial state: {}\n",
@@ -510,6 +572,59 @@ fn profile_document_state(profile: &Path) -> (String, String) {
     (manifest, lock)
 }
 
+#[cfg(not(windows))]
+fn pnpm_program() -> PathBuf {
+    PathBuf::from("pnpm")
+}
+
+#[cfg(windows)]
+fn pnpm_program() -> io::Result<PathBuf> {
+    let path = windows_environment("PATH")
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "PATH is required to resolve pnpm"))?;
+    resolve_windows_pnpm(
+        &path,
+        windows_environment("PATHEXT").as_deref(),
+        &env::current_dir()?,
+    )
+}
+
+#[cfg(windows)]
+fn windows_environment(name: &str) -> Option<std::ffi::OsString> {
+    env::vars_os().find_map(|(key, value)| {
+        key.to_str()
+            .is_some_and(|key| key.eq_ignore_ascii_case(name))
+            .then_some(value)
+    })
+}
+
+#[cfg(windows)]
+fn resolve_windows_pnpm(
+    path: &std::ffi::OsStr,
+    pathext: Option<&std::ffi::OsStr>,
+    cwd: &Path,
+) -> io::Result<PathBuf> {
+    let pathext = pathext.unwrap_or_else(|| std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD"));
+    for directory in env::split_paths(path) {
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            cwd.join(directory)
+        };
+        for extension in env::split_paths(pathext).filter(|value| !value.as_os_str().is_empty()) {
+            let mut executable = std::ffi::OsString::from("pnpm");
+            executable.push(extension);
+            let candidate = directory.join(executable);
+            if candidate.is_file() {
+                return fs::canonicalize(candidate);
+            }
+        }
+    }
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        "pnpm was not found on PATH using PATHEXT",
+    ))
+}
+
 #[cfg(unix)]
 fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
@@ -540,6 +655,7 @@ fn set_process_group(_: &mut TokioCommand) -> Result<(), BridgeError> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 async fn stop_process_group(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(id) = child.id() {
@@ -1235,17 +1351,35 @@ fn run_generic_mutation_pnpm(
     argument: &str,
     pnpm_started: &mut bool,
 ) -> Result<(), PluginManagerError> {
-    let mut child = Command::new("pnpm")
+    #[cfg(windows)]
+    let program = pnpm_program()
+        .map_err(|error| PluginManagerError::Invalid(format!("could not resolve pnpm: {error}")))?;
+    #[cfg(not(windows))]
+    let program = pnpm_program();
+    let mut command = Command::new(program);
+    command
         .current_dir(profile)
         .args(arguments)
         .arg(argument)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    let (mut child, job) = WindowsJob::spawn_std(&mut command)
+        .map_err(|error| PluginManagerError::Invalid(format!("could not run pnpm: {error}")))?;
+    #[cfg(not(windows))]
+    let mut child = command
         .spawn()
         .map_err(|error| PluginManagerError::Invalid(format!("could not run pnpm: {error}")))?;
     *pnpm_started = true;
-    let status = child.wait().map_err(|error| {
+    let waited = child.wait();
+    #[cfg(windows)]
+    job.terminate();
+    #[cfg(windows)]
+    if waited.is_err() {
+        let _ = child.wait();
+    }
+    let status = waited.map_err(|error| {
         PluginManagerError::Invalid(format!("could not wait for pnpm: {error}"))
     })?;
     if status.success() {
@@ -1321,7 +1455,13 @@ fn restore_profile_node_modules(
     }
     let scripts_allowed = profile_allows_builds(profile)
         .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
-    let mut command = Command::new("pnpm");
+    #[cfg(windows)]
+    let program = pnpm_program().map_err(|error| {
+        PluginManagerError::Invalid(format!("could not resolve pnpm restoration: {error}"))
+    })?;
+    #[cfg(not(windows))]
+    let program = pnpm_program();
+    let mut command = Command::new(program);
     command
         .current_dir(profile)
         .arg("install")
@@ -1331,22 +1471,42 @@ fn restore_profile_node_modules(
     if !scripts_allowed {
         command.arg("--ignore-scripts");
     }
+    #[cfg(windows)]
+    let (mut child, job) = WindowsJob::spawn_std(&mut command).map_err(|error| {
+        PluginManagerError::Invalid(format!("could not run pnpm restoration: {error}"))
+    })?;
+    #[cfg(not(windows))]
     let mut child = command.spawn().map_err(|error| {
         PluginManagerError::Invalid(format!("could not run pnpm restoration: {error}"))
     })?;
     let deadline = Instant::now() + PNPM_OPERATION_TIMEOUT;
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| {
-            PluginManagerError::Invalid(format!("could not wait for pnpm restoration: {error}"))
-        })? {
-            return status.success().then_some(()).ok_or_else(|| {
-                PluginManagerError::Invalid(status.code().map_or_else(
-                    || "pnpm restoration terminated without an exit code".into(),
-                    |code| format!("pnpm restoration exited with code {code}"),
-                ))
-            });
+        let waited = child.try_wait();
+        match waited {
+            Ok(Some(status)) => {
+                #[cfg(windows)]
+                job.terminate();
+                return status.success().then_some(()).ok_or_else(|| {
+                    PluginManagerError::Invalid(status.code().map_or_else(
+                        || "pnpm restoration terminated without an exit code".into(),
+                        |code| format!("pnpm restoration exited with code {code}"),
+                    ))
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                #[cfg(windows)]
+                job.terminate();
+                let _ = child.wait();
+                return Err(PluginManagerError::Invalid(format!(
+                    "could not wait for pnpm restoration: {error}"
+                )));
+            }
         }
         if Instant::now() >= deadline {
+            #[cfg(windows)]
+            job.terminate();
+            #[cfg(not(windows))]
             let _ = child.kill();
             let _ = child.wait();
             return Err(PluginManagerError::Invalid(
@@ -1883,7 +2043,14 @@ fn run_first_party_market_pnpm(
 ) -> Result<(), PluginManagerError> {
     let scripts_allowed = profile_allows_builds(profile)
         .map_err(|error| PluginManagerError::Invalid(error.to_string()))?;
-    let mut command = Command::new("pnpm");
+    #[cfg(windows)]
+    let program = pnpm_program().map_err(|error| PluginManagerError::Mutation {
+        reason: format!("could not resolve pnpm: {error}"),
+        partial_state: first_party_market_partial_state(profile),
+    })?;
+    #[cfg(not(windows))]
+    let program = pnpm_program();
+    let mut command = Command::new(program);
     command
         .current_dir(profile)
         .stdin(Stdio::inherit())
@@ -1913,6 +2080,13 @@ fn run_first_party_market_pnpm(
             "--ignore-scripts"
         });
     }
+    #[cfg(windows)]
+    let (mut child, job) =
+        WindowsJob::spawn_std(&mut command).map_err(|error| PluginManagerError::Mutation {
+            reason: format!("could not run pnpm: {error}"),
+            partial_state: first_party_market_partial_state(profile),
+        })?;
+    #[cfg(not(windows))]
     let mut child = command
         .spawn()
         .map_err(|error| PluginManagerError::Mutation {
@@ -1922,7 +2096,14 @@ fn run_first_party_market_pnpm(
     if let Some(pnpm_started) = pnpm_started {
         *pnpm_started = true;
     }
-    let status = child.wait().map_err(|error| PluginManagerError::Mutation {
+    let waited = child.wait();
+    #[cfg(windows)]
+    job.terminate();
+    #[cfg(windows)]
+    if waited.is_err() {
+        let _ = child.wait();
+    }
+    let status = waited.map_err(|error| PluginManagerError::Mutation {
         reason: format!("could not wait for pnpm: {error}"),
         partial_state: first_party_market_partial_state(profile),
     })?;
@@ -3532,6 +3713,119 @@ mod tests {
         );
 
         fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_relative_pnpm_path_cannot_be_poisoned_by_command_cwd() {
+        let root = temporary_profile();
+        let caller = root.join("caller");
+        let profile = root.join("profile");
+        let relative = Path::new("pnpm path 中文");
+        let trusted = caller.join(relative).join("pnpm.CMD");
+        let poisoned = profile.join(relative).join("pnpm.CMD");
+        let output = root.join("source.txt");
+        fs::create_dir_all(trusted.parent().unwrap()).unwrap();
+        fs::create_dir_all(poisoned.parent().unwrap()).unwrap();
+        fs::write(
+            &trusted,
+            "@echo off\r\n> \"%TESSIVUM_PNPM_SOURCE%\" echo caller\r\n",
+        )
+        .unwrap();
+        fs::write(
+            &poisoned,
+            "@echo off\r\n> \"%TESSIVUM_PNPM_SOURCE%\" echo profile\r\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_windows_pnpm(
+            relative.as_os_str(),
+            Some(std::ffi::OsStr::new(".cmd")),
+            &caller,
+        )
+        .unwrap();
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, fs::canonicalize(&trusted).unwrap());
+
+        let mut command = Command::new(resolved);
+        command
+            .current_dir(&profile)
+            .env("TESSIVUM_PNPM_SOURCE", &output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let (mut child, job) = WindowsJob::spawn_std(&mut command).unwrap();
+        let status = child.wait().unwrap();
+        job.terminate();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(output).unwrap().trim(), "caller");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pnpm_batch_shim_preserves_literal_argv_and_owns_descendants() {
+        let root = temporary_profile().join("pnpm path 中文");
+        fs::create_dir_all(&root).unwrap();
+        let shim = root.join("pnpm.CMD");
+        let capture = root.join("capture.ps1");
+        let worker = root.join("worker.ps1");
+        let output = root.join("argv.txt");
+        let started = root.join("started.txt");
+        let escaped = root.join("escaped.txt");
+        fs::write(
+            &capture,
+            "[IO.File]::WriteAllLines($env:TESSIVUM_PNPM_ARGV, [string[]]$args, [Text.UTF8Encoding]::new($false))\r\n",
+        )
+        .unwrap();
+        fs::write(
+            &worker,
+            "[IO.File]::WriteAllText($env:TESSIVUM_PNPM_STARTED, 'started')\r\nStart-Sleep -Seconds 3\r\n[IO.File]::WriteAllText($env:TESSIVUM_PNPM_ESCAPE, 'escaped')\r\n",
+        )
+        .unwrap();
+        fs::write(
+            &shim,
+            "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0capture.ps1\" %*\r\nif errorlevel 1 exit /b %errorlevel%\r\nstart \"\" /b powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0worker.ps1\"\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$deadline = [DateTime]::UtcNow.AddSeconds(10); while (-not ([IO.File]::Exists($env:TESSIVUM_PNPM_STARTED))) { if ([DateTime]::UtcNow -ge $deadline) { exit 97 }; Start-Sleep -Milliseconds 10 }\"\r\nexit /b %errorlevel%\r\n",
+        )
+        .unwrap();
+        let resolved = resolve_windows_pnpm(
+            root.as_os_str(),
+            Some(std::ffi::OsStr::new(".CMD")),
+            &env::current_dir().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolved, fs::canonicalize(shim).unwrap());
+
+        let expected = [
+            "space value",
+            "中文",
+            "amp&ersand",
+            "percent%PATH%",
+            "bang!",
+            "caret^",
+            "pipe|value",
+            "paren(value)",
+            "\"quoted\"",
+        ];
+        let mut command = Command::new(resolved);
+        command
+            .args(expected)
+            .env("TESSIVUM_PNPM_ARGV", &output)
+            .env("TESSIVUM_PNPM_STARTED", &started)
+            .env("TESSIVUM_PNPM_ESCAPE", &escaped)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let (mut child, job) = WindowsJob::spawn_std(&mut command).unwrap();
+        let status = child.wait().unwrap();
+        job.terminate();
+        assert!(status.success());
+        let actual = fs::read_to_string(output).unwrap();
+        assert_eq!(actual.lines().collect::<Vec<_>>(), expected);
+        assert!(started.is_file());
+        std::thread::sleep(Duration::from_millis(3_500));
+        assert!(!escaped.exists(), "pnpm descendant escaped its Windows Job");
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     fn set_test_manifest(profile: &Path, dependencies: &[&str], bundles: Option<&[&str]>) {

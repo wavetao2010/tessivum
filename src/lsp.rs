@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use crate::subprocess::WindowsJob;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -538,6 +540,8 @@ impl StdioLspConfig {
 
 struct StdioSession {
     child: Child,
+    #[cfg(windows)]
+    job: WindowsJob,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -577,6 +581,15 @@ impl StdioLspProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        let (mut child, job) = WindowsJob::spawn(&mut command).map_err(|error| {
+            lsp_error(
+                "LSP_UNAVAILABLE",
+                "could not start the configured language server",
+                json!({"error": error.to_string()}),
+            )
+        })?;
+        #[cfg(not(windows))]
         let mut child = command.spawn().map_err(|error| {
             lsp_error(
                 "LSP_UNAVAILABLE",
@@ -585,7 +598,11 @@ impl StdioLspProvider {
             )
         })?;
         let Some(stdin) = child.stdin.take() else {
+            #[cfg(windows)]
+            job.terminate();
+            #[cfg(not(windows))]
             let _ = child.kill().await;
+            let _ = child.wait().await;
             return Err(lsp_error(
                 "LSP_UNAVAILABLE",
                 "language server did not provide stdin",
@@ -593,7 +610,11 @@ impl StdioLspProvider {
             ));
         };
         let Some(stdout) = child.stdout.take() else {
+            #[cfg(windows)]
+            job.terminate();
+            #[cfg(not(windows))]
             let _ = child.kill().await;
+            let _ = child.wait().await;
             return Err(lsp_error(
                 "LSP_UNAVAILABLE",
                 "language server did not provide stdout",
@@ -605,6 +626,8 @@ impl StdioLspProvider {
                 config,
                 session: AsyncMutex::new(Some(StdioSession {
                     child,
+                    #[cfg(windows)]
+                    job,
                     stdin,
                     stdout: BufReader::new(stdout),
                     next_id: 1,
@@ -685,18 +708,14 @@ impl StdioLspProvider {
                 &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
             )
             .await?;
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => Err(lsp_cancelled()),
-                result = time::timeout(
-                    self.inner.config.request_timeout,
-                    read_response(&mut session.stdout, id, self.inner.config.max_result_bytes),
-                ) => result.map_err(|_| lsp_error(
-                    "LSP_TIMEOUT",
-                    "language server response exceeded its configured time limit",
-                    json!({"timeoutMs": self.inner.config.request_timeout.as_millis()}),
-                ))?,
-            }
+            await_response(
+                session,
+                id,
+                self.inner.config.request_timeout,
+                self.inner.config.max_result_bytes,
+                &cancellation,
+            )
+            .await
         };
         if response.is_err() {
             let _ = self.dispose().await;
@@ -772,10 +791,20 @@ impl LspProvider for StdioLspProvider {
         let session = self.inner.session.lock().await.take();
         if let Some(mut session) = session {
             let _ = graceful_shutdown(&mut session, self.inner.config.max_result_bytes).await;
-            let _ = time::timeout(DISPOSE_GRACE, session.child.wait()).await;
-            if session.child.try_wait().ok().flatten().is_none() {
-                let _ = session.child.kill().await;
+            #[cfg(windows)]
+            {
+                let _ = time::timeout(DISPOSE_GRACE, session.child.wait()).await;
+                // A compliant server may exit while one of its descendants keeps stdio open.
+                session.job.terminate();
                 let _ = session.child.wait().await;
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = time::timeout(DISPOSE_GRACE, session.child.wait()).await;
+                if session.child.try_wait().ok().flatten().is_none() {
+                    let _ = session.child.kill().await;
+                    let _ = session.child.wait().await;
+                }
             }
         }
         Ok(())
@@ -793,16 +822,63 @@ async fn graceful_shutdown(
         &json!({"jsonrpc": "2.0", "id": id, "method": "shutdown", "params": {}}),
     )
     .await?;
-    let _ = time::timeout(
-        DISPOSE_GRACE,
-        read_response(&mut session.stdout, id, max_result_bytes),
-    )
-    .await;
+    let cancellation = ContextHandle::root().scope().cancellation();
+    let _ = await_response(session, id, DISPOSE_GRACE, max_result_bytes, &cancellation).await;
     send_frame(
         &mut session.stdin,
         &json!({"jsonrpc": "2.0", "method": "exit", "params": {}}),
     )
     .await
+}
+
+async fn await_response(
+    session: &mut StdioSession,
+    id: u64,
+    request_timeout: Duration,
+    max_result_bytes: usize,
+    cancellation: &CancellationToken,
+) -> Result<Value, TessivumError> {
+    #[cfg(windows)]
+    {
+        let response = time::timeout(
+            request_timeout,
+            read_response(&mut session.stdout, id, max_result_bytes),
+        );
+        tokio::pin!(response);
+        let mut child_exited = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(lsp_cancelled()),
+                result = &mut response => return result.map_err(|_| lsp_error(
+                    "LSP_TIMEOUT",
+                    "language server response exceeded its configured time limit",
+                    json!({"timeoutMs": request_timeout.as_millis()}),
+                ))?,
+                status = session.child.wait(), if !child_exited => {
+                    child_exited = true;
+                    // Close pipes inherited by descendants without dropping the in-flight frame.
+                    session.job.terminate();
+                    status.map_err(lsp_unavailable_with)?;
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(lsp_cancelled()),
+            result = time::timeout(
+                request_timeout,
+                read_response(&mut session.stdout, id, max_result_bytes),
+            ) => result.map_err(|_| lsp_error(
+                "LSP_TIMEOUT",
+                "language server response exceeded its configured time limit",
+                json!({"timeoutMs": request_timeout.as_millis()}),
+            ))?,
+        }
+    }
 }
 
 async fn send_frame(stdin: &mut ChildStdin, value: &Value) -> Result<(), TessivumError> {
@@ -987,6 +1063,131 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<(), TessivumError
         Err(lsp_cancelled())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disposal_reaps_language_server_descendants() {
+        let workspace =
+            std::env::temp_dir().join(format!("tessivum-lsp-job-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&workspace).unwrap();
+        let started = workspace.join("started");
+        let orphan = workspace.join("orphan");
+        let script = r#"import json,pathlib,subprocess,sys
+started=__STARTED__
+orphan=__ORPHAN__
+descendant="import pathlib,time;time.sleep(2);pathlib.Path("+repr(orphan)+").write_text('orphan')"
+subprocess.Popen([sys.executable,'-c',descendant])
+pathlib.Path(started).write_text('started')
+def receive():
+    length=None
+    while True:
+        line=sys.stdin.buffer.readline()
+        if not line:return None
+        if line in (b'\r\n',b'\n'):break
+        name,value=line.decode().split(':',1)
+        if name.lower()=='content-length':length=int(value.strip())
+    return json.loads(sys.stdin.buffer.read(length))
+def send(value):
+    body=json.dumps(value,separators=(',',':')).encode()
+    sys.stdout.buffer.write(b'Content-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body)
+    sys.stdout.buffer.flush()
+while True:
+    request=receive()
+    if request is None:break
+    method=request.get('method')
+    if method=='initialize':send({'jsonrpc':'2.0','id':request['id'],'result':{'capabilities':{'positionEncoding':'utf-16'}}})
+    elif method=='shutdown':send({'jsonrpc':'2.0','id':request['id'],'result':None})
+    elif method=='exit':break
+"#
+        .replace(
+            "__STARTED__",
+            &serde_json::to_string(&started.to_string_lossy()).unwrap(),
+        )
+        .replace(
+            "__ORPHAN__",
+            &serde_json::to_string(&orphan.to_string_lossy()).unwrap(),
+        );
+        let mut config = StdioLspConfig::new("python", &workspace);
+        config.args = vec!["-u".into(), "-c".into(), script];
+        config.request_timeout = Duration::from_secs(2);
+        let provider = StdioLspProvider::spawn(config).await.unwrap();
+        assert!(
+            started.exists(),
+            "language server did not start its descendant"
+        );
+
+        provider.dispose().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(
+            !orphan.exists(),
+            "disposed language server left a descendant alive"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn direct_exit_preserves_fragmented_response() {
+        let workspace =
+            std::env::temp_dir().join(format!("tessivum-lsp-frame-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("input.rs"), "fn main() {}\n").unwrap();
+        let script = r#"import json,os,sys,time
+def receive():
+    length=None
+    while True:
+        line=sys.stdin.buffer.readline()
+        if not line:return None
+        if line in (b'\r\n',b'\n'):break
+        name,value=line.decode().split(':',1)
+        if name.lower()=='content-length':length=int(value.strip())
+    return json.loads(sys.stdin.buffer.read(length))
+def send(value):
+    body=json.dumps(value,separators=(',',':')).encode()
+    sys.stdout.buffer.write(b'Content-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body)
+    sys.stdout.buffer.flush()
+while True:
+    request=receive()
+    if request is None:break
+    method=request.get('method')
+    if method=='initialize':send({'jsonrpc':'2.0','id':request['id'],'result':{'capabilities':{'positionEncoding':'utf-16'}}})
+    elif method=='textDocument/hover':
+        body=json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'contents':'fragmented'}},separators=(',',':')).encode()
+        header=b'Content-Length: '+str(len(body)).encode()+b'\r\n\r\n'
+        split=len(body)//2
+        sys.stdout.buffer.write(header+body[:split])
+        sys.stdout.buffer.flush()
+        time.sleep(.1)
+        sys.stdout.buffer.write(body[split:])
+        sys.stdout.buffer.flush()
+        os._exit(0)
+"#;
+        let mut config = StdioLspConfig::new("python", &workspace);
+        config.args = vec!["-u".into(), "-c".into(), script.into()];
+        config.request_timeout = Duration::from_secs(2);
+        let provider = StdioLspProvider::spawn(config).await.unwrap();
+
+        let result = provider
+            .request(
+                LspRequest::hover(
+                    "input.rs",
+                    LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                ),
+                ContextHandle::root().scope().cancellation(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"contents": "fragmented"}));
+
+        provider.dispose().await.unwrap();
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
 

@@ -2,6 +2,8 @@
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(windows)]
+use std::sync::atomic::AtomicUsize;
 #[cfg(any(unix, windows))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
@@ -191,42 +193,126 @@ pub(crate) struct WindowsJob(isize);
 
 #[cfg(windows)]
 impl WindowsJob {
-    pub(crate) fn assign(child: &Child) -> std::io::Result<Self> {
+    /// Spawns a Tokio child suspended, attaches it to a kill-on-close Job,
+    /// then resumes its only thread. No child instruction can run before the
+    /// Job owns the process. Every post-spawn failure terminates and waits for
+    /// the still-suspended process before returning.
+    /// This helper owns `CommandExt::creation_flags`; callers must not depend
+    /// on flags configured on the command before this call.
+    pub(crate) fn spawn(command: &mut Command) -> std::io::Result<(Child, Self)> {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+        command.as_std_mut().creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn()?;
+        let process = match child.raw_handle() {
+            Some(process) => process as windows_sys::Win32::Foundation::HANDLE,
+            None => {
+                terminate_and_reap_tokio_child(&mut child);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "suspended process has no process handle",
+                ));
+            }
+        };
+        let pid = child.id().ok_or_else(|| {
+            terminate_and_wait_process(process);
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "suspended process has no process identifier",
+            )
+        })?;
+        let job = match unsafe { Self::assign_raw(process) } {
+            Ok(job) => job,
+            Err(error) => {
+                terminate_and_wait_process(process);
+                return Err(error);
+            }
+        };
+        if let Err(error) = resume_suspended_process(pid) {
+            job.terminate();
+            terminate_and_wait_process(process);
+            return Err(error);
+        }
+        Ok((child, job))
+    }
+
+    /// `std::process` counterpart to [`WindowsJob::spawn`].
+    pub(crate) fn spawn_std(
+        command: &mut std::process::Command,
+    ) -> std::io::Result<(std::process::Child, Self)> {
+        use std::os::windows::{io::AsRawHandle, process::CommandExt};
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+        command.creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn()?;
+        let process = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        if process.is_null() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "suspended process has no process handle",
+            ));
+        }
+        let pid = child.id();
+        let job = match unsafe { Self::assign_raw(process) } {
+            Ok(job) => job,
+            Err(error) => {
+                terminate_and_wait_process(process);
+                return Err(error);
+            }
+        };
+        if let Err(error) = resume_suspended_process(pid) {
+            job.terminate();
+            terminate_and_wait_process(process);
+            return Err(error);
+        }
+        Ok((child, job))
+    }
+
+    /// Attaches an already-suspended process to a new kill-on-close Job.
+    ///
+    /// # Safety
+    /// `process` must be a valid process handle with assignment rights and its
+    /// primary thread must not have been resumed. The caller owns that process
+    /// handle, must terminate and wait for it if this returns `Err`, and may
+    /// resume it only after this returns `Ok`.
+    pub(crate) unsafe fn assign_raw(
+        process: windows_sys::Win32::Foundation::HANDLE,
+    ) -> std::io::Result<Self> {
         use windows_sys::Win32::{
-            Foundation::HANDLE,
+            Foundation::INVALID_HANDLE_VALUE,
             System::JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
         };
-        let process = child.raw_handle().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "spawned process has already exited",
-            )
-        })?;
 
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if process.is_null() || process == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "process handle is invalid",
+            ));
+        }
+        let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
         }
         let job = Self(handle as isize);
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let configured = unsafe {
-            SetInformationJobObject(
-                handle,
-                JobObjectExtendedLimitInformation,
-                std::ptr::from_ref(&limits).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            )
-        };
-        if configured == 0 {
+        if SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        ) == 0
+        {
             return Err(std::io::Error::last_os_error());
         }
-        let assigned = unsafe { AssignProcessToJobObject(handle, process as HANDLE) };
-        if assigned == 0 {
+        if AssignProcessToJobObject(handle, process) == 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(job)
@@ -244,9 +330,86 @@ impl WindowsJob {
 impl Drop for WindowsJob {
     fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
+        self.terminate();
         unsafe {
             CloseHandle(self.0 as _);
         }
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> std::io::Result<()> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            },
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut found = None;
+    let mut present = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while present {
+        if entry.th32OwnerProcessID == pid {
+            found = Some(entry.th32ThreadID);
+            break;
+        }
+        present = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    let thread_id = found.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "suspended process primary thread was not found",
+        )
+    })?;
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let previous = unsafe { ResumeThread(thread) };
+    let resume_error = (previous == u32::MAX).then(std::io::Error::last_os_error);
+    unsafe { CloseHandle(thread) };
+    if let Some(error) = resume_error {
+        return Err(error);
+    }
+    if previous != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("suspended process thread had unexpected suspend count {previous}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_and_reap_tokio_child(child: &mut Child) {
+    let _ = child.start_kill();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn terminate_and_wait_process(process: windows_sys::Win32::Foundation::HANDLE) {
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject, INFINITE};
+    unsafe {
+        TerminateProcess(process, 1);
+        WaitForSingleObject(process, INFINITE);
     }
 }
 
@@ -451,6 +614,21 @@ impl Subprocess {
 struct RuntimeInner {
     children: Mutex<HashMap<u32, Arc<ProcessInner>>>,
 }
+#[cfg(windows)]
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        for inner in lock(&self.children).values() {
+            let mut state = lock(&inner.state);
+            if state.done.is_none() && state.termination.is_none() {
+                state.termination = Some(ProcessTermination::Shutdown);
+            }
+            drop(state);
+            if let Some(job) = lock(&inner.job).as_ref() {
+                job.terminate();
+            }
+        }
+    }
+}
 struct ReapStreams {
     input: Option<Vec<u8>>,
     stdout: Option<ChildStdout>,
@@ -499,6 +677,7 @@ impl SubprocessRuntime {
         configure_environment(&mut command, &request.env)?;
         configure_stdio(&mut command, &request)?;
         configure_process_group(&mut command);
+        #[cfg(not(windows))]
         let mut child = command.spawn().map_err(|error| {
             process_error(
                 "SUBPROCESS_SPAWN_FAILED",
@@ -507,18 +686,13 @@ impl SubprocessRuntime {
             )
         })?;
         #[cfg(windows)]
-        let job = match WindowsJob::assign(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(process_error(
-                    "SUBPROCESS_JOB_FAILED",
-                    "subprocess could not be assigned to a Windows Job Object",
-                    json!({"program": request.argv[0], "error": error.to_string()}),
-                ));
-            }
-        };
+        let (mut child, job) = WindowsJob::spawn(&mut command).map_err(|error| {
+            process_error(
+                "SUBPROCESS_SPAWN_FAILED",
+                "subprocess could not be spawned into a managed Windows Job Object",
+                json!({"program": request.argv[0], "error": error.to_string()}),
+            )
+        })?;
         let pid = child.id().ok_or_else(|| {
             process_error(
                 "SUBPROCESS_SPAWN_FAILED",
@@ -773,13 +947,40 @@ impl PersistentShellCommandState {
 /// current command and permanently retires the instance rather than waiting for
 /// a marker that cannot arrive.
 #[cfg(any(unix, windows))]
-#[derive(Clone)]
+#[cfg_attr(unix, derive(Clone))]
 pub struct PersistentShell {
     inner: Arc<PersistentShellInner>,
 }
 
+#[cfg(windows)]
+impl Clone for PersistentShell {
+    fn clone(&self) -> Self {
+        self.inner.owners.fetch_add(1, Ordering::Relaxed);
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PersistentShell {
+    fn drop(&mut self) {
+        if self.inner.owners.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        self.inner.disposed.store(true, Ordering::Release);
+        self.inner.closed.store(true, Ordering::Release);
+        self.inner.dispose_signal.notify_waiters();
+        if let Some(job) = lock(&self.inner.job).as_ref() {
+            job.terminate();
+        }
+    }
+}
+
 #[cfg(any(unix, windows))]
 struct PersistentShellInner {
+    #[cfg(windows)]
+    owners: AtomicUsize,
     pid: u32,
     validator: PersistentShellLeaseValidator,
     max_output_bytes: usize,
@@ -853,6 +1054,7 @@ impl PersistentShell {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         configure_process_group(&mut command);
+        #[cfg(not(windows))]
         let mut child = command.spawn().map_err(|error| {
             persistent_shell_error(
                 "PERSISTENT_SHELL_UNAVAILABLE",
@@ -861,20 +1063,18 @@ impl PersistentShell {
             )
         })?;
         #[cfg(windows)]
-        let job = match WindowsJob::assign(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(persistent_shell_error(
-                    "PERSISTENT_SHELL_UNAVAILABLE",
-                    "persistent PowerShell could not be assigned to a Windows Job Object",
-                    json!({"program": program, "error": error.to_string()}),
-                ));
-            }
-        };
+        let (mut child, job) = WindowsJob::spawn(&mut command).map_err(|error| {
+            persistent_shell_error(
+                "PERSISTENT_SHELL_UNAVAILABLE",
+                "persistent PowerShell could not be spawned into a managed Windows Job Object",
+                json!({"program": program, "error": error.to_string()}),
+            )
+        })?;
         let Some(pid) = child.id() else {
+            #[cfg(windows)]
+            job.terminate();
             let _ = child.kill().await;
+            let _ = child.wait().await;
             return Err(persistent_shell_error(
                 "PERSISTENT_SHELL_UNAVAILABLE",
                 "persistent shell did not report a process identifier",
@@ -896,6 +1096,8 @@ impl PersistentShell {
             ));
         };
         let inner = Arc::new(PersistentShellInner {
+            #[cfg(windows)]
+            owners: AtomicUsize::new(1),
             pid,
             validator,
             max_output_bytes: config.max_output_bytes,
@@ -934,6 +1136,14 @@ impl PersistentShell {
 
     pub fn pid(&self) -> u32 {
         self.inner.pid
+    }
+
+    pub(crate) fn is_terminated(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire) || self.inner.disposed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Evaluates one script after the lease remains valid. Calls never overlap.
@@ -1175,6 +1385,7 @@ async fn reap_persistent_shell(
     inner: Arc<PersistentShellInner>,
 ) {
     let status = child.wait().await;
+    inner.closed.store(true, Ordering::Release);
     #[cfg(windows)]
     if let Some(job) = lock(&inner.job).take() {
         job.terminate();
@@ -1392,29 +1603,59 @@ command printf '\036TESSIVUM-SHELL:{nonce}:E:%s\037\n' "${variable}" >&2
 
 #[cfg(windows)]
 fn persistent_shell_frame(script: &str, nonce: &str) -> String {
+    let script = base64_encode(script.as_bytes());
+    let status = format!("__tessivum_status_{nonce}");
+    let succeeded = format!("__tessivum_succeeded_{nonce}");
+    let block = format!("__tessivum_block_{nonce}");
+    let marker = format!("__tessivum_marker_{nonce}");
     format!(
-        r#"$global:LASTEXITCODE = $null
-$__tessivum_status = 0
+        r#"$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$global:LASTEXITCODE = $null
+${status} = 0
 try {{
-. {{
-{script}
-}}
-$__tessivum_ok = $?
-if ($null -ne $LASTEXITCODE) {{ $__tessivum_status = [int]$LASTEXITCODE }} elseif (-not $__tessivum_ok) {{ $__tessivum_status = 1 }}
+${block} = [ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{script}')))
+. ${block}
+${succeeded} = $?
+if ($null -ne $LASTEXITCODE) {{ ${status} = [int]$LASTEXITCODE }} elseif (-not ${succeeded}) {{ ${status} = 1 }}
 }} catch {{
-[Console]::Error.WriteLine($_)
-$__tessivum_status = 1
+[Console]::Error.WriteLine($_.Exception.Message)
+${status} = 1
 }}
-if ($__tessivum_status -lt 0 -or $__tessivum_status -gt 255) {{ $__tessivum_status = 1 }}
-$__tessivum_marker = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:O:' + $__tessivum_status + [char]0x1f + "`n"
-[Console]::Out.Write($__tessivum_marker)
+if (${status} -lt 0 -or ${status} -gt 255) {{ ${status} = 1 }}
+${marker} = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:O:' + ${status} + [char]0x1f + "`n"
+[Console]::Out.Write(${marker})
 [Console]::Out.Flush()
-$__tessivum_marker = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:E:' + $__tessivum_status + [char]0x1f + "`n"
-[Console]::Error.Write($__tessivum_marker)
+${marker} = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:E:' + ${status} + [char]0x1f + "`n"
+[Console]::Error.Write(${marker})
 [Console]::Error.Flush()
+Remove-Variable -Name '{status}','{succeeded}','{block}','{marker}' -ErrorAction SilentlyContinue
 
 "#
     )
+}
+
+#[cfg(windows)]
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let bits = (chunk[0] as u32) << 16
+            | (chunk.get(1).copied().unwrap_or(0) as u32) << 8
+            | chunk.get(2).copied().unwrap_or(0) as u32;
+        encoded.push(ALPHABET[((bits >> 18) & 63) as usize] as char);
+        encoded.push(ALPHABET[((bits >> 12) & 63) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[((bits >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(bits & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 #[cfg(unix)]
