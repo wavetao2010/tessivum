@@ -173,6 +173,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"
 - 校验和可以检测损坏，但不是签名；Alpha.23 二进制未进行代码签名或公证；
 - 除非显式启用带独立权限检查的远程访问，否则 HTTP listener 保持 loopback-only；
 - Legacy Node 插件和 pnpm 子进程是受信任的本地代码，不是沙箱扩展。
+- Windows 源码中的 ACL runner 只限制写入，不隔离读取、网络或进程可见性。为兼容运行时保留 Everyone/logon SID 的环境权限；NTFS 硬链接别名共享文件权限，因此不是完整的路径隔离。`danger-full-access` 必须显式批准；Windows 发行包仍未发布。
 
 ## 可复现 Benchmark
 

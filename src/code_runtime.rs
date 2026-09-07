@@ -1216,6 +1216,52 @@ except Exception as e:emit({'type':'done','error':{'kind':'exception','message':
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+    async fn wait_for_child_pid(path: &PathBuf) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(9);
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(path).and_then(|value| {
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }) {
+                if pid != 0 {
+                    return pid;
+                }
+            }
+            assert!(Instant::now() < deadline, "child did not publish its PID");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn open_live_process(pid: u32) -> windows_sys::Win32::Foundation::HANDLE {
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+        let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        assert!(
+            !process.is_null(),
+            "child {pid} was not running at readiness"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(process, 0) },
+            WAIT_TIMEOUT,
+            "child {pid} exited before consumer cleanup"
+        );
+        process
+    }
+
+    fn assert_process_exited(process: windows_sys::Win32::Foundation::HANDLE, pid: u32) {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::WaitForSingleObject,
+        };
+
+        let waited = unsafe { WaitForSingleObject(process, 10_000) };
+        unsafe { CloseHandle(process) };
+        assert_eq!(waited, WAIT_OBJECT_0, "consumer left child {pid} alive");
+    }
 
     #[tokio::test]
     async fn timeout_reaps_worker_descendants_before_returning() {
@@ -1224,29 +1270,30 @@ mod windows_tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir(&root).unwrap();
-        let started = root.join("started");
-        let orphan = root.join("orphan");
+        let ready = root.join("ready");
         let descendant = format!(
-            "import pathlib,time;time.sleep(5);pathlib.Path({}).write_text('orphan')",
-            serde_json::to_string(&orphan.to_string_lossy()).unwrap()
+            "import os,pathlib,time;pathlib.Path({}).write_text(str(os.getpid()));time.sleep(300)",
+            serde_json::to_string(&ready.to_string_lossy()).unwrap()
         );
         let program = format!(
-            "import pathlib,subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',{}])\npathlib.Path({}).write_text('started')\ntime.sleep(30)",
+            "import pathlib,subprocess,sys,time\nready=pathlib.Path({})\nsubprocess.Popen([sys.executable,'-c',{}])\ndeadline=time.monotonic()+8\nwhile True:\n    try:\n        if int(ready.read_text()) > 0:\n            break\n    except (FileNotFoundError,ValueError):\n        pass\n    if time.monotonic() >= deadline:\n        raise RuntimeError('descendant readiness timed out')\n    time.sleep(.01)\ntime.sleep(300)",
+            serde_json::to_string(&ready.to_string_lossy()).unwrap(),
             serde_json::to_string(&descendant).unwrap(),
-            serde_json::to_string(&started.to_string_lossy()).unwrap(),
         );
         let mut config = ProcessCodeRuntimeConfig::python("python");
-        config.timeout = Duration::from_secs(3);
+        config.timeout = Duration::from_secs(10);
         let runtime = ProcessCodeRuntime::new(config).unwrap();
 
-        let result = runtime
-            .run(CodeRunRequest::new(program, Vec::new()))
-            .await
-            .unwrap();
+        let (result, (pid, process)) = tokio::join!(
+            runtime.run(CodeRunRequest::new(program, Vec::new())),
+            async {
+                let pid = wait_for_child_pid(&ready).await;
+                (pid, open_live_process(pid))
+            }
+        );
+        let result = result.unwrap();
         assert_eq!(result.error.unwrap().kind, CodeRunFailureKind::Timeout);
-        assert!(started.exists(), "worker did not start its descendant");
-        tokio::time::sleep(Duration::from_millis(2_500)).await;
-        assert!(!orphan.exists(), "timed-out worker left a descendant alive");
+        assert_process_exited(process, pid);
         let _ = std::fs::remove_dir_all(root);
     }
 }

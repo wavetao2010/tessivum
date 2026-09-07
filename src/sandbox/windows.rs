@@ -115,6 +115,16 @@ impl SandboxProvider for WindowsAclProvider {
             return Err(unavailable("unsupported Windows ACL mode"));
         }
         validate_bounded_argv(argv)?;
+        let preflight = (|| -> io::Result<()> {
+            let token = open_current_token()?;
+            let user_sid = token_sid(token.0, TokenUser, false)?;
+            PinnedDirectory::open(&request.workspace, &user_sid, false)?;
+            for root in &request.write_roots {
+                PinnedDirectory::open(root, &user_sid, true)?;
+            }
+            Ok(())
+        })();
+        preflight.map_err(|error| unavailable(&error.to_string()))?;
         let payload = serde_json::to_string(&RunnerInput {
             version: PAYLOAD_VERSION,
             mode: request.mode,
@@ -436,6 +446,7 @@ fn spawn_wait(token: HANDLE, argv: &[String], cwd: &Path, temp: &Path) -> io::Re
         return Err(last_error("GetExitCodeProcess"));
     }
     job.terminate();
+    job.wait_for_exit()?;
     drop(job);
     Ok(code)
 }
@@ -507,17 +518,18 @@ struct NamedMutex(OwnedHandle);
 impl NamedMutex {
     fn acquire(path: &Path) -> io::Result<Self> {
         let digest = Sha256::digest(path.to_string_lossy().to_lowercase().as_bytes());
-        Self::acquire_name(&format!("Local\\TessivumAcl-{}", hex(&digest[..16])))
+        Self::acquire_name(&format!("Global\\TessivumAcl-{}", hex(&digest[..16])))
     }
 
     fn acquire_recovery(user_sid: &Sid) -> io::Result<Self> {
         Self::acquire_name(&format!(
-            "Local\\TessivumAcl-Recovery-{}",
+            "Global\\TessivumAcl-Recovery-{}",
             hex(user_sid.bytes())
         ))
     }
 
     fn acquire_name(name: &str) -> io::Result<Self> {
+        // Files and temp roots are shared across this user's Windows logon sessions.
         let name = wide(OsStr::new(name));
         let handle = OwnedHandle::new(
             unsafe { CreateMutexW(null(), 0, name.as_ptr()) },
@@ -1201,7 +1213,7 @@ fn resolve_runner() -> Option<PathBuf> {
     if is_tessivum_exe(&current) {
         return Some(current);
     }
-    [current.parent(), current.parent().and_then(Path::parent)]
+    let runner = [current.parent(), current.parent().and_then(Path::parent)]
         .into_iter()
         .flatten()
         .map(|parent| parent.join("tessivum.exe"))
@@ -1211,7 +1223,8 @@ fn resolve_runner() -> Option<PathBuf> {
                 .then(|| candidate.canonicalize().ok())
                 .flatten()
         })
-        .filter(|candidate| is_tessivum_exe(candidate))
+        .filter(|candidate| is_tessivum_exe(candidate));
+    runner
 }
 
 fn is_tessivum_exe(path: &Path) -> bool {

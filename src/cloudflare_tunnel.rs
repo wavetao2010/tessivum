@@ -775,18 +775,23 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn direct_exit_reaps_tunnel_descendants_before_restart() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
         let root = env::temp_dir().join(format!("tessivum-tunnel-job-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        let started = root.join("started");
-        let orphan = root.join("orphan");
+        let ready = root.join("descendant-ready");
         let descendant = format!(
-            "import pathlib,time;time.sleep(2);pathlib.Path({}).write_text('orphan')",
-            serde_json::to_string(&orphan.to_string_lossy()).unwrap()
+            "import os,pathlib,time;pathlib.Path({}).write_text(str(os.getpid()));time.sleep(300)",
+            serde_json::to_string(&ready.to_string_lossy()).unwrap()
         );
         let parent = format!(
-            "import pathlib,subprocess,sys\nsubprocess.Popen([sys.executable,'-c',{}])\npathlib.Path({}).write_text('started')",
+            "import pathlib,subprocess,sys,time\nready=pathlib.Path({})\nchild=subprocess.Popen([sys.executable,'-c',{}])\ndeadline=time.monotonic()+10\nwhile not ready.exists():\n    if child.poll() is not None:raise RuntimeError('descendant exited before readiness')\n    if time.monotonic()>=deadline:raise TimeoutError('descendant readiness timed out')\n    time.sleep(0.01)",
+            serde_json::to_string(&ready.to_string_lossy()).unwrap(),
             serde_json::to_string(&descendant).unwrap(),
-            serde_json::to_string(&started.to_string_lossy()).unwrap(),
         );
         let mut command = Command::new("python");
         command
@@ -807,14 +812,36 @@ mod tests {
             readers: Vec::new(),
         };
 
-        assert!(running.child.wait().await.unwrap().success());
         assert!(
-            started.exists(),
-            "tunnel fixture did not start its descendant"
+            tokio::time::timeout(Duration::from_secs(15), running.child.wait())
+                .await
+                .expect("tunnel fixture parent did not exit before its deadline")
+                .unwrap()
+                .success(),
+            "tunnel fixture parent failed"
         );
+        let descendant_pid: u32 = std::fs::read_to_string(&ready)
+            .expect("tunnel descendant did not report readiness")
+            .parse()
+            .expect("tunnel descendant wrote an invalid PID");
+        let descendant = unsafe { OpenProcess(SYNCHRONIZE, 0, descendant_pid) };
+        assert!(
+            !descendant.is_null(),
+            "could not open ready tunnel descendant {descendant_pid}"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant, 0) },
+            WAIT_TIMEOUT,
+            "tunnel descendant {descendant_pid} exited before parent cleanup"
+        );
+
         running.finish_wait();
-        tokio::time::sleep(Duration::from_millis(2_500)).await;
-        assert!(!orphan.exists(), "exited tunnel left a descendant alive");
+        let wait = unsafe { WaitForSingleObject(descendant, 10_000) };
+        unsafe { CloseHandle(descendant) };
+        assert_eq!(
+            wait, WAIT_OBJECT_0,
+            "exited tunnel left descendant {descendant_pid} alive"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

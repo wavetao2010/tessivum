@@ -3716,6 +3716,37 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn open_live_process(pid: u32) -> windows_sys::Win32::Foundation::HANDLE {
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+        let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        assert!(
+            !process.is_null(),
+            "child {pid} was not running at readiness"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(process, 0) },
+            WAIT_TIMEOUT,
+            "child {pid} exited before consumer cleanup"
+        );
+        process
+    }
+
+    #[cfg(windows)]
+    fn assert_process_exited(process: windows_sys::Win32::Foundation::HANDLE, pid: u32) {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::WaitForSingleObject,
+        };
+
+        let waited = unsafe { WaitForSingleObject(process, 10_000) };
+        unsafe { CloseHandle(process) };
+        assert_eq!(waited, WAIT_OBJECT_0, "consumer left child {pid} alive");
+    }
+
+    #[cfg(windows)]
     #[test]
     fn windows_relative_pnpm_path_cannot_be_poisoned_by_command_cwd() {
         let root = temporary_profile();
@@ -3771,8 +3802,7 @@ mod tests {
         let capture = root.join("capture.ps1");
         let worker = root.join("worker.ps1");
         let output = root.join("argv.txt");
-        let started = root.join("started.txt");
-        let escaped = root.join("escaped.txt");
+        let ready = root.join("ready.txt");
         fs::write(
             &capture,
             "[IO.File]::WriteAllLines($env:TESSIVUM_PNPM_ARGV, [string[]]$args, [Text.UTF8Encoding]::new($false))\r\n",
@@ -3780,12 +3810,12 @@ mod tests {
         .unwrap();
         fs::write(
             &worker,
-            "[IO.File]::WriteAllText($env:TESSIVUM_PNPM_STARTED, 'started')\r\nStart-Sleep -Seconds 3\r\n[IO.File]::WriteAllText($env:TESSIVUM_PNPM_ESCAPE, 'escaped')\r\n",
+            "[IO.File]::WriteAllText($env:TESSIVUM_PNPM_READY, [string]$PID, [Text.UTF8Encoding]::new($false))\r\nStart-Sleep -Seconds 300\r\n",
         )
         .unwrap();
         fs::write(
             &shim,
-            "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0capture.ps1\" %*\r\nif errorlevel 1 exit /b %errorlevel%\r\nstart \"\" /b powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0worker.ps1\"\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$deadline = [DateTime]::UtcNow.AddSeconds(10); while (-not ([IO.File]::Exists($env:TESSIVUM_PNPM_STARTED))) { if ([DateTime]::UtcNow -ge $deadline) { exit 97 }; Start-Sleep -Milliseconds 10 }\"\r\nexit /b %errorlevel%\r\n",
+            "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0capture.ps1\" %*\r\nif errorlevel 1 exit /b %errorlevel%\r\nstart \"\" /b powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0worker.ps1\"\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$deadline = [DateTime]::UtcNow.AddSeconds(10); while ($true) { $pidValue = 0; if ([IO.File]::Exists($env:TESSIVUM_PNPM_READY) -and [UInt32]::TryParse([IO.File]::ReadAllText($env:TESSIVUM_PNPM_READY), [ref]$pidValue) -and $pidValue -gt 0) { exit 0 }; if ([DateTime]::UtcNow -ge $deadline) { exit 97 }; Start-Sleep -Milliseconds 10 }\"\r\nexit /b %errorlevel%\r\n",
         )
         .unwrap();
         let resolved = resolve_windows_pnpm(
@@ -3811,20 +3841,23 @@ mod tests {
         command
             .args(expected)
             .env("TESSIVUM_PNPM_ARGV", &output)
-            .env("TESSIVUM_PNPM_STARTED", &started)
-            .env("TESSIVUM_PNPM_ESCAPE", &escaped)
+            .env("TESSIVUM_PNPM_READY", &ready)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let (mut child, job) = WindowsJob::spawn_std(&mut command).unwrap();
         let status = child.wait().unwrap();
-        job.terminate();
         assert!(status.success());
+        let pid = fs::read_to_string(&ready)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let process = open_live_process(pid);
+        job.terminate();
+        assert_process_exited(process, pid);
         let actual = fs::read_to_string(output).unwrap();
         assert_eq!(actual.lines().collect::<Vec<_>>(), expected);
-        assert!(started.is_file());
-        std::thread::sleep(Duration::from_millis(3_500));
-        assert!(!escaped.exists(), "pnpm descendant escaped its Windows Job");
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 

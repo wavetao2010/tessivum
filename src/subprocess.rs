@@ -324,6 +324,41 @@ impl WindowsJob {
             TerminateJobObject(self.0 as _, 1);
         }
     }
+
+    /// Fences permission teardown against asynchronous Job termination.
+    pub(crate) fn wait_for_exit(&self) -> std::io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            if unsafe {
+                QueryInformationJobObject(
+                    self.0 as _,
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut info).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if info.ActiveProcesses == 0 {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Windows Job processes did not exit after termination",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 }
 
 #[cfg(windows)]

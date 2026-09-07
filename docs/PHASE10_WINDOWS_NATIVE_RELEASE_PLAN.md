@@ -1,6 +1,6 @@
 # Tessivum Phase 10 Windows 原生发行开发计划
 
-> 状态：实施中（Milestone 10-A Windows CI gate）
+> 状态：实施中（Milestone 10-B 已实现，Windows 原生安全验收进行中；10-C/D/E 尚未完成）
 > 计划日期：2026-09-04
 > Tessivum 起点：`v0.1.0-alpha.23` / `4674aeda870989fede1fc79fb07afbe764d3a1eb`
 > 产品 Core pin：`tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`
@@ -216,14 +216,14 @@ Windows 没有可靠通用 SIGTERM 等价物。首版直接终止 Job，不伪�
 按照已固定 DeepSeek Harness `dsh-sandbox-windows-acl` 的语义，在 Rust 侧实现最小必要 Win32 后端；不采用“只改 cwd”或 PowerShell ExecutionPolicy 冒充 sandbox：
 
 - `read-only`：创建 write-restricted token，不授予 workspace/temp 写 capability；
-- `workspace-write`：以 canonical workspace 派生稳定 SID，只给批准的 workspace roots 添加写 ACE；
+- `workspace-write`：以每个 canonical 批准 write root 派生稳定 SID（整个 workspace 获批时即 workspace SID），只携带当前批准 roots 的 capability，避免旧 ACE 扩大后续较窄请求的权限；
 - 每个 Session/命令使用独立 private temp SID 和 temp root，兄弟 Session 不能互写；
 - `danger-full-access`：只在现有显式权限/approval 路径通过后执行原 argv；
 - Restricted token、DACL、Job Object、stdio inheritance 和 child creation 任一步失败都在 spawn 前 fail closed；
 - workspace 必须位于支持所有者 DACL 的文件系统；FAT、只读卷、无权修改 DACL 的网络目录给出稳定 `SANDBOX_UNAVAILABLE`，不自动裸跑；
 - canonical handle/path、reparse point、workspace/temp 相交、owner 和 exact ACE 均需验证；
 - workspace ACE 可按上游语义复用；private temp ACE 在正常 dispose 时撤销，异常退出留下的受控临时目录由下次启动按 owner marker 清理；
-- Windows sandbox 只承诺写限制；读取、网络和进程可见性边界必须与上游限制一同写入安全文档。
+- Windows sandbox 只承诺写限制；保留 Everyone/logon SID 的环境授权及 NTFS 硬链接别名共享 DACL 的上游限制，不保证完整路径隔离；读取、网络和进程可见性不受此 sandbox 隔离。
 
 为保留当前 `SandboxPlan.argv` seam，优先使用同一 `tessivum.exe` 的隐藏内部 runner 子命令：主 Host 只生成结构化、有界参数，runner 建立 token/DACL/Job 后执行目标 argv。除非该路径无法保留 inherited stdio 和清理契约，否则不增加第二个 helper executable。
 

@@ -1072,17 +1072,25 @@ mod windows_tests {
 
     #[tokio::test]
     async fn disposal_reaps_language_server_descendants() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
         let workspace =
             std::env::temp_dir().join(format!("tessivum-lsp-job-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&workspace).unwrap();
-        let started = workspace.join("started");
-        let orphan = workspace.join("orphan");
-        let script = r#"import json,pathlib,subprocess,sys
-started=__STARTED__
-orphan=__ORPHAN__
-descendant="import pathlib,time;time.sleep(2);pathlib.Path("+repr(orphan)+").write_text('orphan')"
-subprocess.Popen([sys.executable,'-c',descendant])
-pathlib.Path(started).write_text('started')
+        let ready = workspace.join("descendant-ready");
+        let script = r#"import json,pathlib,subprocess,sys,time
+ready=__READY__
+descendant="import os,pathlib,time;pathlib.Path("+repr(ready)+").write_text(str(os.getpid()));time.sleep(300)"
+child=subprocess.Popen([sys.executable,'-c',descendant])
+deadline=time.monotonic()+10
+while not pathlib.Path(ready).exists():
+    if child.poll() is not None:raise RuntimeError('descendant exited before readiness')
+    if time.monotonic()>=deadline:raise TimeoutError('descendant readiness timed out')
+    time.sleep(0.01)
 def receive():
     length=None
     while True:
@@ -1105,27 +1113,34 @@ while True:
     elif method=='exit':break
 "#
         .replace(
-            "__STARTED__",
-            &serde_json::to_string(&started.to_string_lossy()).unwrap(),
-        )
-        .replace(
-            "__ORPHAN__",
-            &serde_json::to_string(&orphan.to_string_lossy()).unwrap(),
+            "__READY__",
+            &serde_json::to_string(&ready.to_string_lossy()).unwrap(),
         );
         let mut config = StdioLspConfig::new("python", &workspace);
         config.args = vec!["-u".into(), "-c".into(), script];
-        config.request_timeout = Duration::from_secs(2);
+        config.request_timeout = Duration::from_secs(15);
         let provider = StdioLspProvider::spawn(config).await.unwrap();
+        let descendant_pid: u32 = std::fs::read_to_string(&ready)
+            .expect("language server descendant did not report readiness")
+            .parse()
+            .expect("language server descendant wrote an invalid PID");
+        let descendant = unsafe { OpenProcess(SYNCHRONIZE, 0, descendant_pid) };
         assert!(
-            started.exists(),
-            "language server did not start its descendant"
+            !descendant.is_null(),
+            "could not open ready language server descendant {descendant_pid}"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant, 0) },
+            WAIT_TIMEOUT,
+            "language server descendant {descendant_pid} exited before disposal"
         );
 
         provider.dispose().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(2_500)).await;
-        assert!(
-            !orphan.exists(),
-            "disposed language server left a descendant alive"
+        let wait = unsafe { WaitForSingleObject(descendant, 10_000) };
+        unsafe { CloseHandle(descendant) };
+        assert_eq!(
+            wait, WAIT_OBJECT_0,
+            "disposed language server left descendant {descendant_pid} alive"
         );
         let _ = std::fs::remove_dir_all(workspace);
     }

@@ -1,6 +1,6 @@
 # Tessivum 二阶段开发计划
 
-> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 Windows 原生运行时、安全沙箱、安装与发行待实施
+> 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
 > 计划校准日期：2026-09-04
 > Tessivum 实现基线：`v0.1.0-alpha.23`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`

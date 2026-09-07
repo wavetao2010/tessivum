@@ -402,13 +402,18 @@ fn runner_job_kills_started_descendant_after_parent_exits() {
     let root = TestRoot::new("job");
     let pid_file = root.0.join("descendant.pid");
     let release = root.0.join("release-parent");
-    let script = format!(
-        "$child = Start-Process powershell.exe -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',{}) -PassThru; if ($child.HasExited) {{ exit 61 }}; Set-Content -LiteralPath {} -Value $child.Id -NoNewline; while (-not (Test-Path -LiteralPath {})) {{ Start-Sleep -Milliseconds 10 }}",
-        ps_text("Start-Sleep -Seconds 60"),
+    let temp_file = root.0.join("descendant.temp");
+    let descendant = format!(
+        "$held = [IO.File]::Open((Join-Path $env:TEMP 'held.txt'), [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); [IO.File]::WriteAllText({}, $env:TEMP); [IO.File]::WriteAllText({}, [string]$PID); Start-Sleep -Seconds 300",
+        ps(&temp_file),
         ps(&pid_file),
+    );
+    let script = format!(
+        "$child = Start-Process powershell.exe -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',{}) -PassThru; if ($child.HasExited) {{ exit 61 }}; while (-not (Test-Path -LiteralPath {})) {{ Start-Sleep -Milliseconds 10 }}",
+        ps_text(&descendant),
         ps(&release),
     );
-    let mut runner = spawn(SandboxMode::WorkspaceWrite, &root.0, script);
+    let runner = spawn(SandboxMode::WorkspaceWrite, &root.0, script);
     wait_for(&pid_file);
     let pid = fs::read_to_string(&pid_file)
         .unwrap()
@@ -428,4 +433,28 @@ fn runner_job_kills_started_descendant_after_parent_exits() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_process_exits(pid);
+    let private_temp = fs::read_to_string(temp_file).unwrap();
+    assert!(
+        !Path::new(&private_temp).exists(),
+        "private temp survived Job cleanup"
+    );
+}
+
+#[test]
+fn unsupported_workspace_owner_is_unavailable_before_launch() {
+    let root = TestRoot::new("unavailable");
+    let marker = root.0.join("must-not-run");
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .canonicalize()
+        .unwrap();
+    let argv = powershell(format!(
+        "Set-Content -LiteralPath {} -Value bad",
+        ps(&marker)
+    ));
+    let error = Sandbox::local()
+        .prepare(&request(SandboxMode::WorkspaceWrite, &system, true), &argv)
+        .unwrap_err();
+    assert_eq!(error.code, "SANDBOX_UNAVAILABLE");
+    assert!(!marker.exists());
 }
