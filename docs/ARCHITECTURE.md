@@ -524,6 +524,8 @@ Windows 工具继续使用 `bash` 协议，内部执行 PowerShell；持久 Shel
 
 Windows ACL runner 使用 write-restricted token：当前批准的 canonical write roots 各自具有稳定 capability SID，每次执行只携带当前 roots；private temp 使用独立 SID，正常撤销，异常遗留由同一用户的后续 runner 在跨 logon-session mutex 下按 owner marker 恢复。`read-only` 不授予 workspace/temp 写 capability，`danger-full-access` 必须显式批准。此边界保留 Everyone/logon SID 的环境授权及 NTFS 硬链接别名的共享 DACL 语义，不保证完整路径隔离，也不隔离读取、网络或进程可见性。
 
+当前严格 `read-only` 也禁止 private temp 写入。PowerShell 启动策略探针无法创建临时文件时会进入 `ConstrainedLanguage`，从而拒绝现有 UTF-8 初始化和持久脚本使用的部分 .NET 调用；该组合尚未通过 Windows 验收。不能将此状态描述为完整 PowerShell 支持，也不能自动开放 temp 或关闭系统策略来绕过。独占 temp 是否允许写入仍需明确的产品策略决定。
+
 ## 18. 架构验收不变量
 
 1. 卸载完成后没有该 Scope 拥有的资源。

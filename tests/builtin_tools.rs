@@ -778,7 +778,7 @@ async fn rejected_queued_persistent_command_keeps_active_session() {
     );
     #[cfg(windows)]
     let (first_command, queued_command, observe_command) = (
-        "$tessivumAdmission = 'retained'; [IO.File]::WriteAllText('admission-started', ''); Start-Sleep -Seconds 2; [Console]::Out.Write('first')",
+        "$tessivumAdmission = 'retained'; Set-Content -LiteralPath 'admission-started' -Value '' -NoNewline; Start-Sleep -Seconds 2; [Console]::Out.Write('first')",
         "$tessivumAdmission = 'queued'; [Console]::Out.Write('queued')",
         "[Console]::Out.Write($tessivumAdmission)",
     );
@@ -1012,7 +1012,7 @@ async fn powershell_cancellation_reaps_its_descendant_tree() {
                 .execute(
                     call,
                     "bash",
-                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; [IO.File]::WriteAllText('child.pid', [string]$child.Id); Wait-Process -Id $child.Id"}),
+                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; Set-Content -LiteralPath 'child.pid' -Value $child.Id -NoNewline; Wait-Process -Id $child.Id"}),
                 )
                 .await
         }
@@ -1114,7 +1114,7 @@ async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() 
                 .execute(
                     call,
                     "bash",
-                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; [IO.File]::WriteAllText('persistent-child.pid', [string]$child.Id); Wait-Process -Id $child.Id"}),
+                    json!({"command": "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping -n 30 127.0.0.1 >nul' -PassThru; Set-Content -LiteralPath 'persistent-child.pid' -Value $child.Id -NoNewline; Wait-Process -Id $child.Id"}),
                 )
                 .await
         }
@@ -1145,7 +1145,7 @@ async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() 
                 .execute(
                     disabled_call,
                     "bash",
-                    json!({"command": "[IO.File]::WriteAllText('disabled.pid', [string]$PID); Start-Sleep -Seconds 30"}),
+                    json!({"command": "Set-Content -LiteralPath 'disabled.pid' -Value $PID -NoNewline; Start-Sleep -Seconds 30"}),
                 )
                 .await
         }
@@ -1177,7 +1177,7 @@ async fn persistent_powershell_cancel_disable_and_shutdown_reap_process_trees() 
                 .execute(
                     shutdown_call,
                     "bash",
-                    json!({"command": "[IO.File]::WriteAllText('shutdown.pid', [string]$PID); Start-Sleep -Seconds 30"}),
+                    json!({"command": "Set-Content -LiteralPath 'shutdown.pid' -Value $PID -NoNewline; Start-Sleep -Seconds 30"}),
                 )
                 .await
         }
@@ -1233,7 +1233,7 @@ async fn stale_workspace_retires_persistent_powershell() {
         .execute(
             context_for(&context_root, session.as_str(), "persistent-start"),
             "bash",
-            json!({"command": "[IO.File]::WriteAllText('shell.pid', [string]$PID)"}),
+            json!({"command": "Set-Content -LiteralPath 'shell.pid' -Value $PID -NoNewline"}),
         )
         .await;
     assert!(!started.is_error, "{}", text(&started));
