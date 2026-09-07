@@ -82,6 +82,8 @@ jobs:
 
       - name: Verify first-party market
         working-directory: plugins/market
+        env:
+          TESSIVUM_REQUIRE_FILE_SYMLINKS: '1'
         run: |
           bun install --frozen-lockfile
           bun run check
@@ -149,6 +151,8 @@ jobs:
 
       - name: Verify compatibility baselines
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           python scripts/check_compat_baseline.py
           python scripts/check_plugin_verification.py
           python scripts/check_release_facts.py
@@ -163,12 +167,16 @@ jobs:
       - name: Build Browser shell
         working-directory: web
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           bun install --frozen-lockfile
           bun run build
 
       - name: Verify first-party market
         working-directory: plugins/market
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           bun install --frozen-lockfile
           bun run check
           bun run test

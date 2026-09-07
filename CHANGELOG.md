@@ -31,6 +31,11 @@
   failing after five seconds under process-cold Compatibility runs.
 - Preserve active persistent shells when queued commands are cancelled or rejected
   before admission, and retain partially read LSP responses across direct child exit.
+- Make Market snapshot file-symlink fixtures skip only for Windows capability
+  `EPERM`, require them on capable CI, and keep directory-link protection active
+  through a Windows junction.
+- Make multiline Windows CI steps stop on non-zero native-command exits instead
+  of allowing later commands to mask the prerequisite failure.
 
 ## 0.1.0-alpha.23 - 2026-09-03
 

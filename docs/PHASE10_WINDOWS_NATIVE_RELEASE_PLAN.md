@@ -501,3 +501,90 @@ Phase 10 只有在以下全部满足后才能标记完成：
 | Windows ARM64 被误认为支持 | 下载表只列 x86-64；ARM64 保持 Not published |
 | 历史“四平台”文档被错误改写 | 历史记录不动；当前 inventory 精确列举五个 target |
 | SmartScreen 阻碍首次运行 | 明确无签名状态和 checksum；有可信签名链后单独实施 |
+
+## 14. Windows 普通用户源码验收修复计划
+
+状态：本轮修复整理为候选提交，等待原生 Windows 复验；源码验收仍为 **FAIL / 待复验**。依据 2026-09-07《Tessivum Windows 源码测试报告》；原始报告保留，不以此前 CI 或非 Windows 成功覆盖其 FAIL 结论。本机补充验证以 `6fe3b4e2f53975ba1731cf71f0c8e67151b39020` 加本轮修复为基线；交付时提供完整候选提交 SHA，实习生只测试该固定提交。
+
+### 目标与边界
+
+在 Windows 11 x64、NTFS、非管理员、未开启 Developer Mode、中文与空格路径下，打通依赖安装 → Web 构建 → Rust 验证 → Agent 首次运行与恢复 → Web 启停。
+
+本次不扩展到 ZIP、安装器、升级或卸载；不移除 `build.rs` 的资产检查，不伪造 `web/dist`，不要求关闭安全软件或提升用户权限，不重写已通过验收的 PowerShell/ACL 实现。
+
+本节保留以下全部工作项和完成标准；当前记录只区分已实施、补充证据和仍阻塞，不能把未运行项标为完成。复验入口见 [Windows 11 普通用户源码验收说明](WINDOWS_SOURCE_TEST.md)，它要求 PowerShell 7.4+、原 16 组命令和逐组 fail-fast 记录。
+
+### A. 核对版本与证据（共同前置）
+
+- 对照报告提交 `630fe949cb8908665ca6d0bad5ba6410a6bc4446` 与实施时的目标提交，只核查相关改动，不能直接认定旧提交故障已修复或仍存在。
+- 原 pnpm/Market 日志已无法取得，保留现有报告与原测试说明；不再把取回旧日志作为复验前置。新一轮从开始保存日志、实际解析到的 Node、pnpm、Bun、Rust 版本及 executable 路径，以及与安装相关的有效 pnpm 配置。
+- 当前 Windows CI 同样固定 pnpm `11.7.0`，因此不能把问题简单归因于实习生用了不同 pnpm 版本。CI 的 Windows Server 2025 环境也不能代替普通用户 Windows 11 验收。
+
+完成标准：确定一个候选提交、一份环境差异表及新一轮完整执行证据。旧故障根因单独记录；新提交验收不以查明旧故障为前置。
+
+当前基线与环境差异：
+
+| 项目 | 原 Windows 报告 | 当前目标 / 补充 Mac 环境 | 影响 |
+|---|---|---|---|
+| Tessivum | `630fe949cb8908665ca6d0bad5ba6410a6bc4446` | 本机验证时为 HEAD `6fe3b4e2f53975ba1731cf71f0c8e67151b39020` 加本轮修复 | 原结果不覆盖当前改动；Windows 复验使用交付的候选提交 SHA |
+| 系统与权限 | Windows 11 25H2 build 26200、x64、普通用户、NTFS、Developer Mode 关闭 | macOS 26.2（Darwin 25.2）、arm64、原生本机 | Mac 结果不能替代目标 Windows 文件系统或权限证据 |
+| 工具 | PowerShell 7.6.4、Node 24.11.1、Bun 1.4.0、pnpm 11.7.0、Rust/Cargo 1.94.0、Python 3.12.10 | PowerShell 7.6.5、Node 26.5.0、Bun 1.4.0、pnpm 11.25.0、Rust/Cargo 1.97.1、Python 3.9.6 | 除 Bun 外均有差异；11.25.0 未用于重装上游，也不是修复证据 |
+| 固定源码 | Harness `47f94385`、Cordis `8cc9e33f`、Core `86c7e1c7` | 首次检查误用了旁边 HEAD 为 `f068401` 的 Core 工作树；改用现有 Cargo checkout `86c7e1c` 后，`git rev-parse HEAD` 确认为 `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，基线检查通过 | 未改动旁边的 Core 工作树；后续补充验证使用实际固定源码 |
+| 原始材料 | 报告引用 Windows `test-artifacts/*.log`，并只给出 Bun 路径及 pnpm 用户级 prefix | 已有两份 Desktop 文档；原始 pnpm/Market 日志无法取得 | 历史根因证据不足；改为采集新一轮完整证据，不阻塞候选提交复验 |
+
+### B. P0：修复上游依赖安装阻断
+
+- 如新一轮再次出现 `esbuild_tmp_* → esbuild` rename EPERM，根据新日志设计有区分度的定点实验；必要时采集失败瞬间的文件操作与占用证据。pnpm 导入竞态、短暂文件占用等仍是候选原因，不提前写成定论。
+- 修复真实故障点，优先使用有证据支持的上游修复或必要的安装配置；不继续堆叠盲目重试，不删除全局 store，不改全局代理或系统安全设置。
+- 若证据要求调整固定工具版本，统一开发说明、CI、release 和其他安装入口，保留冻结依赖树；任何 lockfile 变化必须有明确原因，不能靠重生成锁文件绕过故障。
+- 安装失败应在依赖准备阶段明确终止，不再把下游缺失资产报告为多个独立缺陷。
+
+主要涉及：上游依赖安装入口、`.github/workflows/ci.yml`，以及确需同步的版本约束与测试说明。
+
+完成标准：目标普通用户环境从干净依赖目录完成 frozen-lockfile 安装，esbuild 可实际执行，DeepSeek 构建及 `web` 的 `bun run build` 成功，生成真实 `web/dist` 和 `web/client-packages`；再验证一次已安装状态下的重跑。全程无提权或手工修补 node_modules。
+
+当前结论：**历史 EPERM 根因未查明，未声称已修复；新提交安装验收待执行**。若全部验收要求通过，可记录该提交在该环境通过，历史故障未复现。
+
+- pnpm [11.7.0 indexed importer 源码](https://github.com/pnpm/pnpm/blob/v11.7.0/fs/indexed-pkg-importer/src/importIndexedDir.ts) 与 [11.25.0 indexed importer 源码](https://github.com/pnpm/pnpm/blob/v11.25.0/pnpm11/fs/indexed-pkg-importer/src/importIndexedDir.ts) 的默认 isolated directory staging 分支都仍以 `renameOverwriteSync(stage, newDir)` 提交完整目录。
+- [pnpm PR #14242](https://github.com/pnpm/pnpm/pull/14242) 修复的是 hoisted `hardLinkDir` backfill 的破坏性目录交换，并把相关覆盖改成逐文件 `renameFileWithRetry`；它没有替换上述默认 isolated staging-directory rename，不能据此声称本报告的 `esbuild_tmp_* -> esbuild` EPERM 已修复，也不构成升级 pnpm 的理由。继续保留 pnpm 11.7.0、frozen lockfiles 和现有全局设置。
+- 下一步由实习生对交付的固定提交执行一次完整复验，从开始保存新日志及安装相关的有效 pnpm 配置。若安装失败，立即停止并保留现场，再针对失败 rename 采集文件操作证据；不要求找回旧日志，不盲目重复安装、删除全局 store、修改全局代理/安全设置或强制更换工具版本。
+
+### C. P1：修复 Market 文件 symlink 夹具权限假设
+
+- 修改 `plugins/market/tests/snapshot.spec.ts` 中 dangling optional-file 和 live file-symlink 两项夹具，参考现有 `backup.spec.ts` 的能力探测模式，但必须探测相同的文件 symlink 类型。
+- 只对已确认的 Windows symlink 权限缺失作显式 capability skip；其他异常仍应失败，不能用宽泛 catch 隐藏产品错误。
+- 无权限环境继续执行实际可运行的普通文件、路径越界和 junction 防护检查；junction 不宣称等价覆盖文件 symlink 的 dangling/live 语义。
+- 在有文件 symlink 能力的验证环境强制执行这两项真实测试，并保留普通用户、Developer Mode 关闭的验证记录。不能用整套跳过或 mock 文件系统换取全绿。
+
+完成标准：普通用户环境不再因夹具权限误报失败；能力缺失明确可见；两项真实文件 symlink 安全行为在具备能力的环境通过，原有拒绝恢复/防覆盖语义不变。
+
+当前实施记录（不改变以上完成标准）：
+
+- `snapshot.spec.ts` 现在探测同类型 file symlink；只把 Windows `symlink` 操作返回的 `EPERM` 视为 capability skip，其他平台、错误码和 probe setup/cleanup 错误仍失败。非严格路径会以 warning 明示因 `EPERM` 跳过 dangling optional-file 和 live file-symlink 两项行为；`TESSIVUM_REQUIRE_FILE_SYMLINKS=1` 则把缺能力转为失败。
+- `backup.spec.ts` 的目录链接防护不再因 Windows file-symlink 权限而跳过：Windows 使用无需该权限的 junction，POSIX 使用 directory symlink。Ubuntu Market CI 设置严格环境变量，保证有能力的 runner 必须执行两项 file-symlink 安全测试。
+- 故障注入已覆盖 skip、strict、非 Windows、setup error 及真实临时目录清理；这是分类器证据，不是 Windows 文件系统证据。具备能力的 Mac 严格套件已无 skip 通过，但目标普通用户 Windows 尚未复验，因此 C 仍未达到完成标准。
+
+### D. 集成复验与结案
+
+本轮已实施的修复与测试说明合为候选提交后即可开始复验，不等待历史 EPERM 根因查明。新一轮失败则按新证据继续修复，未执行的后续项保持 NOT RUN。
+
+- 在同一目标提交重新执行报告中的 16 组命令，记录每项退出码及实际执行/跳过情况；兼容账本检查不计作真实运行时验证。
+- 验证 Agent 输出 `CLI_TOOL_ROUND_TRIP`，首次运行产生真实 Session，`--resume` 使用同一状态目录成功恢复。
+- 验证 Web 实际监听并可访问，完成原测试说明中的人工检查；Ctrl+C 后端口释放，相关进程无残留。
+- 运行现有 Windows CI，并保留普通用户 Windows 11 的独立证据；如 CI 无法模拟该权限环境，明确记录覆盖边界，不以 CI 绿灯代替人工环境验收。
+- 当前 Windows 多命令 CI 的三个 PowerShell 组已启用 `$PSNativeCommandUseErrorActionPreference = $true`，使 Python baseline、Web build 和 Market 组在首个非零 native exit 处停止；这只修复失败被后续命令掩盖的问题。本轮改动尚未在 GitHub Actions 上运行。
+- 更新测试说明、必要的文档和 Changelog，输出修复提交、环境、原始日志及前后对照结论；仅清理本次测试产生的工件，保留失败证据。
+
+结案标准：16 组命令全部成功、Agent round trip/resume 与 Web 启停实际通过、文件 symlink 的条件覆盖证据齐全、安全行为未放宽。任一必要条件未满足，继续保持本次源码验收 FAIL；本计划通过也不等于 Windows 安装包已达到发布标准。
+
+### 当前补充证据与剩余阻塞
+
+补充日志位于 `tessivum/test-artifacts/windows-source-remediation-20260907`。在上述差异明显的 Mac 环境中，Web 与 Market frozen install、三项 Python 检查、Web build、Market check、严格 Market 全套（53 files / 1059 tests，全部通过、无 skip）以及 locked all-targets Cargo check/Clippy 已通过；这些是回归信号，不是 Windows 11 验收。
+
+Source-client 首次与 Rust 编译并发时有一个 lazy grammar test 超时（3166/3167 通过）；保留原失败日志后，以完全相同命令单独运行即全部通过，未修改 timeout，也未增加重试机制。macOS PowerShell 7.6.5 实测 native exit 37 会在 downstream sentinel 前抛错，文档主 PowerShell block 解析成功；这证明 fail-fast 设置和脚本文法，不证明 Windows native 行为。
+
+最后的本机门槛：Market 严格套件再次 1059/1059 通过；source-client 3167/3167 通过；Cargo fmt/check/Clippy 与完整 all-targets tests 通过（48 个测试目标合计 515 tests，Windows cfg 测试不在此计数中）。集成审查发现默认 Vitest reporter 会隐藏跳过名称，已补充仅在获准跳过时输出的可见提示，分类器探针确认提示、strict failure 和清理均保留。
+
+实际 CLI 首次与 `--resume` 均输出 `CLI_TOOL_ROUND_TRIP`；中文与空格临时状态路径下，原 Session 字节前缀保留，形成两组配对 turn/tool 事件。实际 debug Web 在独立端口 56895 返回 HTTP 200，Chromium 完成首次进入并显示工作区，截图保存为 `actual-web.png`；终端 Ctrl+C 返回预期 130，端口可重新绑定，未发现本次进程残留。用户现有 3000 端口服务未动。Ego 截图接口超时已保留日志，视觉证据改由独立 Chromium 获取；此处不是 Windows release Web 验收。
+
+尚未验证：本轮候选提交上的原生 Windows 11 全 16 组、Windows Agent 首次运行/恢复、Windows release Web HTTP/Ctrl+C/残留进程、Windows 文件 symlink capability 结果及 GitHub Windows CI。当前本机没有可用 Windows 11 SSH、VM 或 self-hosted Actions runner；由实习生取得固定候选提交后复验。旧日志缺失不再阻塞这次复验；在新证据齐全前，结论继续为 **FAIL / 待复验**，不得声明 Windows 11 acceptance。
