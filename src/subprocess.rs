@@ -2,30 +2,33 @@
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(any(unix, windows))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, Weak,
-    },
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
+#[cfg(any(unix, windows))]
+use tessivum_core::CancellationToken;
+use tessivum_core::{ContextHandle, CoreError, ServiceHandle, ServiceKey};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{Mutex as AsyncMutex, Notify},
+    process::{Child, ChildStderr, ChildStdout, Command},
+    sync::Notify,
     time,
 };
+#[cfg(any(unix, windows))]
+use tokio::{process::ChildStdin, sync::Mutex as AsyncMutex};
 
 use crate::TessivumError;
 
@@ -178,7 +181,73 @@ struct ProcessState {
 
 struct ProcessInner {
     state: Mutex<ProcessState>,
+    #[cfg(windows)]
+    job: Mutex<Option<WindowsJob>>,
     done: Notify,
+}
+
+#[cfg(windows)]
+pub(crate) struct WindowsJob(isize);
+
+#[cfg(windows)]
+impl WindowsJob {
+    pub(crate) fn assign(child: &Child) -> std::io::Result<Self> {
+        use windows_sys::Win32::{
+            Foundation::HANDLE,
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let process = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "spawned process has already exited",
+            )
+        })?;
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let job = Self(handle as isize);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let assigned = unsafe { AssignProcessToJobObject(handle, process as HANDLE) };
+        if assigned == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+
+    pub(crate) fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            TerminateJobObject(self.0 as _, 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe {
+            CloseHandle(self.0 as _);
+        }
+    }
 }
 
 /// Handle to one owned child process group.
@@ -353,7 +422,12 @@ impl Subprocess {
         if !first {
             return;
         }
+        #[cfg(unix)]
         let _ = signal_tree(pid, libc::SIGTERM);
+        #[cfg(windows)]
+        if let Some(job) = lock(&self.inner.job).as_ref() {
+            job.terminate();
+        }
         let notified = self.inner.done.notified();
         if self.done().is_none() {
             tokio::select! {
@@ -362,7 +436,7 @@ impl Subprocess {
             }
         }
         if self.done().is_none() {
-            let _ = signal_tree(pid, libc::SIGKILL);
+            force_terminate_tree(pid);
         }
     }
 
@@ -432,6 +506,19 @@ impl SubprocessRuntime {
                 json!({"program": request.argv[0], "error": error.to_string()}),
             )
         })?;
+        #[cfg(windows)]
+        let job = match WindowsJob::assign(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(process_error(
+                    "SUBPROCESS_JOB_FAILED",
+                    "subprocess could not be assigned to a Windows Job Object",
+                    json!({"program": request.argv[0], "error": error.to_string()}),
+                ));
+            }
+        };
         let pid = child.id().ok_or_else(|| {
             process_error(
                 "SUBPROCESS_SPAWN_FAILED",
@@ -457,6 +544,8 @@ impl SubprocessRuntime {
                 stdout: CapturedOutput::empty(),
                 stderr: CapturedOutput::empty(),
             }),
+            #[cfg(windows)]
+            job: Mutex::new(Some(job)),
             done: Notify::new(),
         });
         lock(&self.inner.children).insert(pid, Arc::clone(&inner));
@@ -484,19 +573,20 @@ impl SubprocessRuntime {
 
 /// Caller-owned authority check performed before every persistent shell command.
 /// A stale workspace must return an error rather than reuse an old shell.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub type PersistentShellLeaseValidator =
     Arc<dyn Fn() -> Result<(), TessivumError> + Send + Sync + 'static>;
 
-/// Immutable spawn plan for one persistent Unix shell.
-#[cfg(unix)]
+/// Immutable spawn plan for one persistent platform shell.
+#[cfg(any(unix, windows))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistentShellConfig {
-    /// Fixed shell or sandbox-wrapper argv. The default is `/bin/sh -s`.
+    /// Fixed shell or sandbox-wrapper argv.
     pub argv: Vec<String>,
     /// Fallback workspace path used when no validated directory descriptor is supplied.
     pub workspace: PathBuf,
     /// A caller-validated directory descriptor used for the initial child cwd.
+    #[cfg(unix)]
     pub cwd_fd: Option<RawFd>,
     /// Explicit environment additions/removals after the normal ambient-secret scrub.
     pub env: BTreeMap<String, Option<String>>,
@@ -505,12 +595,24 @@ pub struct PersistentShellConfig {
     pub terminate_grace: Duration,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PersistentShellConfig {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
+        #[cfg(unix)]
+        let argv = vec!["/bin/sh".into(), "-s".into()];
+        #[cfg(windows)]
+        let argv = vec![
+            "powershell.exe".into(),
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "-".into(),
+        ];
         Self {
-            argv: vec!["/bin/sh".into(), "-s".into()],
+            argv,
             workspace: workspace.into(),
+            #[cfg(unix)]
             cwd_fd: None,
             env: BTreeMap::new(),
             max_output_bytes: DEFAULT_TAIL_BYTES,
@@ -520,7 +622,7 @@ impl PersistentShellConfig {
 }
 
 /// One request evaluated by a [`PersistentShell`].
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Debug)]
 pub struct PersistentShellCommand {
     pub script: String,
@@ -528,7 +630,7 @@ pub struct PersistentShellCommand {
     pub cancellation: Option<CancellationToken>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PersistentShellCommand {
     pub fn new(script: impl Into<String>) -> Self {
         Self {
@@ -545,7 +647,7 @@ impl PersistentShellCommand {
 }
 
 /// Completed bounded output from one persistent shell command.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistentShellResult {
     pub exit_code: i32,
@@ -553,14 +655,14 @@ pub struct PersistentShellResult {
     pub stderr: ProcessOutputSnapshot,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct PersistentShellCommandState {
     nonce: String,
     state: Mutex<PersistentShellCommandCapture>,
     done: Notify,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct PersistentShellCommandCapture {
     stdout: CapturedOutput,
     stderr: CapturedOutput,
@@ -569,7 +671,7 @@ struct PersistentShellCommandCapture {
     error: Option<TessivumError>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PersistentShellCommandState {
     fn new(nonce: String, max_output_bytes: usize) -> Self {
         Self {
@@ -664,19 +766,19 @@ impl PersistentShellCommandState {
     }
 }
 
-/// Session-owned reusable `/bin/sh` with a fixed canonical workspace.
+/// Session-owned reusable platform shell with a fixed canonical workspace.
 ///
 /// Commands are serialized. Output frames are random per command and removed
 /// from the captured stream; an EOF, replaced shell, or closed stdin fails the
 /// current command and permanently retires the instance rather than waiting for
 /// a marker that cannot arrive.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone)]
 pub struct PersistentShell {
     inner: Arc<PersistentShellInner>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct PersistentShellInner {
     pid: u32,
     validator: PersistentShellLeaseValidator,
@@ -686,6 +788,8 @@ struct PersistentShellInner {
     serial: AsyncMutex<()>,
     active: Mutex<Option<Arc<PersistentShellCommandState>>>,
     termination: Mutex<Option<ProcessTermination>>,
+    #[cfg(windows)]
+    job: Mutex<Option<WindowsJob>>,
     done_state: Mutex<Option<ProcessDone>>,
     done: Notify,
     closed: AtomicBool,
@@ -694,7 +798,7 @@ struct PersistentShellInner {
     dispose_gate: AsyncMutex<()>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl fmt::Debug for PersistentShell {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -705,9 +809,9 @@ impl fmt::Debug for PersistentShell {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PersistentShell {
-    /// Starts exactly one `/bin/sh -s` using the supplied canonical workspace
+    /// Starts exactly one platform shell using the supplied canonical workspace
     /// plan. The lease validator is required and runs before the initial spawn
     /// and every later command.
     pub async fn start(
@@ -717,13 +821,16 @@ impl PersistentShell {
         validate_persistent_shell_config(&config)?;
         let validator: PersistentShellLeaseValidator = Arc::new(validate_lease);
         validator()?;
+        #[cfg(unix)]
         let cwd = config
             .cwd_fd
             .is_none()
             .then(|| canonical_cwd(&config.workspace))
             .transpose()?;
-        let mut command = Command::new(&config.argv[0]);
+        let program = config.argv[0].clone();
+        let mut command = Command::new(&program);
         command.args(&config.argv[1..]);
+        #[cfg(unix)]
         if let Some(directory) = config.cwd_fd {
             use std::os::unix::process::CommandExt;
 
@@ -739,6 +846,8 @@ impl PersistentShell {
         } else {
             command.current_dir(cwd.expect("cwd is present without a directory descriptor"));
         }
+        #[cfg(windows)]
+        command.current_dir(canonical_cwd(&config.workspace)?);
         configure_environment(&mut command, &config.env)?;
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
@@ -748,21 +857,37 @@ impl PersistentShell {
             persistent_shell_error(
                 "PERSISTENT_SHELL_UNAVAILABLE",
                 "persistent shell could not be spawned",
-                json!({"program": "/bin/sh", "error": error.to_string()}),
+                json!({"program": program, "error": error.to_string()}),
             )
         })?;
+        #[cfg(windows)]
+        let job = match WindowsJob::assign(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(persistent_shell_error(
+                    "PERSISTENT_SHELL_UNAVAILABLE",
+                    "persistent PowerShell could not be assigned to a Windows Job Object",
+                    json!({"program": program, "error": error.to_string()}),
+                ));
+            }
+        };
         let Some(pid) = child.id() else {
             let _ = child.kill().await;
             return Err(persistent_shell_error(
                 "PERSISTENT_SHELL_UNAVAILABLE",
                 "persistent shell did not report a process identifier",
-                json!({"program": "/bin/sh"}),
+                json!({"program": program}),
             ));
         };
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            let _ = signal_tree(pid, libc::SIGKILL);
+            #[cfg(unix)]
+            terminate_persistent_shell_tree(pid, true).await;
+            #[cfg(windows)]
+            job.terminate();
             let _ = child.wait().await;
             return Err(persistent_shell_error(
                 "PERSISTENT_SHELL_UNAVAILABLE",
@@ -780,6 +905,8 @@ impl PersistentShell {
             active: Mutex::new(None),
             termination: Mutex::new(None),
             done_state: Mutex::new(None),
+            #[cfg(windows)]
+            job: Mutex::new(Some(job)),
             done: Notify::new(),
             closed: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
@@ -920,7 +1047,7 @@ impl PersistentShell {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PersistentShellInner {
     async fn disposed(&self) {
         loop {
@@ -1001,7 +1128,12 @@ impl PersistentShellInner {
         }
         self.closed.store(true, Ordering::Release);
         self.fail_active(persistent_shell_termination(cause));
-        let _ = signal_tree(self.pid, libc::SIGTERM);
+        #[cfg(unix)]
+        terminate_persistent_shell_tree(self.pid, false).await;
+        #[cfg(windows)]
+        if let Some(job) = lock(&self.job).as_ref() {
+            job.terminate();
+        }
         let notified = self.done.notified();
         if self.done().is_none() {
             tokio::select! {
@@ -1010,7 +1142,8 @@ impl PersistentShellInner {
             }
         }
         if self.done().is_none() {
-            let _ = signal_tree(self.pid, libc::SIGKILL);
+            #[cfg(unix)]
+            terminate_persistent_shell_tree(self.pid, true).await;
         }
         self.wait_closed().await;
     }
@@ -1034,7 +1167,7 @@ impl PersistentShellInner {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn reap_persistent_shell(
     mut child: Child,
     stdout_task: tokio::task::JoinHandle<()>,
@@ -1042,11 +1175,18 @@ async fn reap_persistent_shell(
     inner: Arc<PersistentShellInner>,
 ) {
     let status = child.wait().await;
+    #[cfg(windows)]
+    if let Some(job) = lock(&inner.job).take() {
+        job.terminate();
+    }
     let incomplete = inner.fail_active(persistent_shell_closed());
+    #[cfg(windows)]
+    let _ = incomplete;
+    #[cfg(unix)]
     if incomplete && inner.terminated().is_none() {
-        let _ = signal_tree(inner.pid, libc::SIGTERM);
+        terminate_persistent_shell_tree(inner.pid, false).await;
         time::sleep(inner.terminate_grace).await;
-        let _ = signal_tree(inner.pid, libc::SIGKILL);
+        terminate_persistent_shell_tree(inner.pid, true).await;
     }
     let _ = stdout_task.await;
     let _ = stderr_task.await;
@@ -1061,7 +1201,7 @@ async fn reap_persistent_shell(
     });
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn drain_persistent_shell_stream<R>(
     mut reader: R,
     stdout: bool,
@@ -1097,7 +1237,7 @@ async fn drain_persistent_shell_stream<R>(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn dispatch_persistent_shell_token(
     inner: &PersistentShellInner,
     stdout: bool,
@@ -1121,14 +1261,14 @@ fn dispatch_persistent_shell_token(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PERSISTENT_SHELL_FRAME_PREFIX: &[u8] = b"\x1eTESSIVUM-SHELL:";
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PERSISTENT_SHELL_FRAME_SUFFIX: &[u8] = b"\x1f\n";
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_PERSISTENT_SHELL_FRAME_BYTES: usize = 128;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum PersistentShellStreamToken {
     Data(Vec<u8>),
     Marker {
@@ -1138,13 +1278,13 @@ enum PersistentShellStreamToken {
     },
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Default)]
 struct PersistentShellFrameParser {
     pending: Vec<u8>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PersistentShellFrameParser {
     fn feed(&mut self, bytes: &[u8]) -> Vec<PersistentShellStreamToken> {
         self.pending.extend_from_slice(bytes);
@@ -1206,7 +1346,7 @@ impl PersistentShellFrameParser {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn parse_persistent_shell_marker(bytes: &[u8]) -> Option<(String, bool, i32)> {
     let middle = bytes
         .strip_prefix(PERSISTENT_SHELL_FRAME_PREFIX)?
@@ -1230,7 +1370,7 @@ fn parse_persistent_shell_marker(bytes: &[u8]) -> Option<(String, bool, i32)> {
     Some((nonce.to_owned(), stdout, status))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_marker_bytes(nonce: &str, stdout: bool, status: i32) -> Vec<u8> {
     let stream = if stdout { "O" } else { "E" };
     format!("\x1eTESSIVUM-SHELL:{nonce}:{stream}:{status}\x1f\n").into_bytes()
@@ -1250,14 +1390,47 @@ command printf '\036TESSIVUM-SHELL:{nonce}:E:%s\037\n' "${variable}" >&2
     )
 }
 
+#[cfg(windows)]
+fn persistent_shell_frame(script: &str, nonce: &str) -> String {
+    format!(
+        r#"$global:LASTEXITCODE = $null
+$__tessivum_status = 0
+try {{
+. {{
+{script}
+}}
+$__tessivum_ok = $?
+if ($null -ne $LASTEXITCODE) {{ $__tessivum_status = [int]$LASTEXITCODE }} elseif (-not $__tessivum_ok) {{ $__tessivum_status = 1 }}
+}} catch {{
+[Console]::Error.WriteLine($_)
+$__tessivum_status = 1
+}}
+if ($__tessivum_status -lt 0 -or $__tessivum_status -gt 255) {{ $__tessivum_status = 1 }}
+$__tessivum_marker = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:O:' + $__tessivum_status + [char]0x1f + "`n"
+[Console]::Out.Write($__tessivum_marker)
+[Console]::Out.Flush()
+$__tessivum_marker = [char]0x1e + 'TESSIVUM-SHELL:{nonce}:E:' + $__tessivum_status + [char]0x1f + "`n"
+[Console]::Error.Write($__tessivum_marker)
+[Console]::Error.Flush()
+
+"#
+    )
+}
+
 #[cfg(unix)]
+async fn terminate_persistent_shell_tree(pid: u32, force: bool) {
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    let _ = signal_tree(pid, signal);
+}
+
+#[cfg(any(unix, windows))]
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn prefix_suffix_len(bytes: &[u8], prefix: &[u8]) -> usize {
     (1..prefix.len())
         .rev()
@@ -1265,7 +1438,7 @@ fn prefix_suffix_len(bytes: &[u8], prefix: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn optional_cancellation(cancellation: Option<CancellationToken>) {
     match cancellation {
         Some(cancellation) => cancellation.cancelled().await,
@@ -1273,7 +1446,7 @@ async fn optional_cancellation(cancellation: Option<CancellationToken>) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn validate_persistent_shell_config(config: &PersistentShellConfig) -> Result<(), TessivumError> {
     let Some(program) = config.argv.first() else {
         return Err(persistent_shell_error(
@@ -1323,7 +1496,7 @@ fn validate_persistent_shell_config(config: &PersistentShellConfig) -> Result<()
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn validate_persistent_shell_command(
     request: &PersistentShellCommand,
 ) -> Result<(), TessivumError> {
@@ -1344,12 +1517,12 @@ fn validate_persistent_shell_command(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_error(code: &str, message: &str, details: serde_json::Value) -> TessivumError {
     TessivumError::new(code, message, "persistent-shell", details)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_closed() -> TessivumError {
     persistent_shell_error(
         "PERSISTENT_SHELL_CLOSED",
@@ -1358,7 +1531,7 @@ fn persistent_shell_closed() -> TessivumError {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_disposed() -> TessivumError {
     persistent_shell_error(
         "PERSISTENT_SHELL_DISPOSED",
@@ -1367,7 +1540,7 @@ fn persistent_shell_disposed() -> TessivumError {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_cancelled() -> TessivumError {
     persistent_shell_error(
         "PERSISTENT_SHELL_CANCELLED",
@@ -1376,7 +1549,7 @@ fn persistent_shell_cancelled() -> TessivumError {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_timed_out(timeout: Duration) -> TessivumError {
     persistent_shell_error(
         "PERSISTENT_SHELL_TIMEOUT",
@@ -1385,7 +1558,7 @@ fn persistent_shell_timed_out(timeout: Duration) -> TessivumError {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn persistent_shell_termination(cause: ProcessTermination) -> TessivumError {
     match cause {
         ProcessTermination::TimedOut => persistent_shell_error(
@@ -1426,6 +1599,10 @@ async fn reap_child(
     let stdout_task = tokio::spawn(collect_stdout(stdout, stdout_policy));
     let stderr_task = tokio::spawn(collect_stderr(stderr, stderr_policy));
     let status = child.wait().await;
+    #[cfg(windows)]
+    if let Some(job) = lock(&inner.job).take() {
+        job.terminate();
+    }
     if let Some(task) = stdin_task {
         let _ = task.await;
     }
@@ -1828,10 +2005,13 @@ fn signal_tree(pid: u32, signal: i32) -> std::io::Result<()> {
     Err(group_error)
 }
 
-#[cfg(not(unix))]
-fn signal_tree(_: u32, _: i32) -> std::io::Result<()> {
-    Ok(())
+#[cfg(unix)]
+fn force_terminate_tree(pid: u32) {
+    let _ = signal_tree(pid, libc::SIGKILL);
 }
+
+#[cfg(not(unix))]
+fn force_terminate_tree(_: u32) {}
 
 fn exit_facts(status: std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
     #[cfg(unix)]

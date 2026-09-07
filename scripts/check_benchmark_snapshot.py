@@ -58,6 +58,8 @@ def identity(report: dict[str, Any]) -> dict[str, Any]:
             "drivers": provenance.get("drivers"),
             "replaySha256": provenance.get("replay", {}).get("sha256"),
             "profileSha256": sorted((item.get("manifest"), item.get("sha256")) for item in provenance.get("profiles", [])),
+            **({"runtimeInputs": sorted((item.get("name"), item.get("sha256")) for item in provenance["runtimeInputs"])} if provenance.get("runtimeInputs") else {}),
+            **({"dataSeeds": sorted((item.get("manifest"), item.get("runtime"), item.get("sha256")) for item in provenance["dataSeeds"])} if provenance.get("dataSeeds") else {}),
             "hostModuleSha256": sorted(value.get("sha256") for value in provenance.get("hostModules", [])),
             "runtimes": [{key: runtime.get(key) for key in ("id", "version", "sha256")} for runtime in provenance.get("runtimes", [])],
         }

@@ -725,18 +725,20 @@ pub struct SystemDirectoryPicker;
 impl HostDirectoryPicker for SystemDirectoryPicker {
     async fn pick_directory(&self) -> Result<Option<PathBuf>, TessivumError> {
         #[cfg(target_os = "macos")]
-        let output = tokio::process::Command::new("osascript")
-            .args([
-                "-e",
-                "set selectedFolder to choose folder with prompt \"Select Workspace Directory\"",
-                "-e",
-                "POSIX path of selectedFolder",
-            ])
-            .kill_on_drop(true)
-            .output()
-            .await;
+        let output: std::io::Result<std::process::Output> = tokio::process::Command::new(
+            "osascript",
+        )
+        .args([
+            "-e",
+            "set selectedFolder to choose folder with prompt \"Select Workspace Directory\"",
+            "-e",
+            "POSIX path of selectedFolder",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await;
         #[cfg(target_os = "linux")]
-        let output = {
+        let output: std::io::Result<std::process::Output> = {
             let first = tokio::process::Command::new("zenity")
                 .args([
                     "--file-selection",
@@ -764,12 +766,12 @@ impl HostDirectoryPicker for SystemDirectoryPicker {
             }
         };
         #[cfg(target_os = "windows")]
-        let output = Err(std::io::Error::new(
+        let output: std::io::Result<std::process::Output> = Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "native directory picker is unsupported on this build",
         ));
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        let output = Err(std::io::Error::new(
+        let output: std::io::Result<std::process::Output> = Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "native directory picker is unsupported on this platform",
         ));

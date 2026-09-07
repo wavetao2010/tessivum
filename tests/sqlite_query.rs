@@ -121,6 +121,7 @@ async fn sqlite_commits_exact_dtos_and_rejects_partial_or_concurrent_duplicates(
             .unwrap(),
         vec![event(0), event(1)]
     );
+    drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -173,6 +174,8 @@ async fn sqlite_seed_creation_rolls_back_the_whole_session_on_event_failure() {
             .unwrap(),
         seed
     );
+    drop(trigger);
+    drop(persistence);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -345,6 +348,7 @@ async fn sqlite_rollback_is_explicit_and_jsonl_dtos_import_without_loss() {
             .incarnation,
         2
     );
+    drop(persistence);
     fs::remove_dir_all(root).unwrap();
 }
 

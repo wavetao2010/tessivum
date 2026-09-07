@@ -1,6 +1,6 @@
 {"requestId":"provider-request-1","chunk":{"type":"block-start","index":0,"blockType":"tool-call"}}
-{"requestId":"provider-request-1","chunk":{"type":"tool-call-delta","index":0,"id":"cli-smoke-call","name":"bash","argumentsDelta":"{\"command\":\"printf CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"}}
-{"requestId":"provider-request-1","chunk":{"type":"block-end","index":0,"block":{"type":"tool-call","id":"cli-smoke-call","name":"bash","arguments":"{\"command\":\"printf CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"}}}
+{"requestId":"provider-request-1","chunk":{"type":"tool-call-delta","index":0,"id":"cli-smoke-call","name":"bash","argumentsDelta":"{\"command\":\"echo CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"}}
+{"requestId":"provider-request-1","chunk":{"type":"block-end","index":0,"block":{"type":"tool-call","id":"cli-smoke-call","name":"bash","arguments":"{\"command\":\"echo CLI_TOOL_ROUND_TRIP\",\"description\":\"Prove the CLI tool round trip.\"}"}}}
 {"requestId":"provider-request-1","chunk":{"type":"usage","usage":{"inputTokens":11,"outputTokens":3,"cacheReadTokens":2}}}
 {"requestId":"provider-request-1","chunk":{"type":"finish","reason":{"kind":"tool-calls"}}}
 {"requestId":"provider-request-2","chunk":{"type":"block-start","index":0,"blockType":"text"}}

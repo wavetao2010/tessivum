@@ -341,7 +341,7 @@ fn canonical_roots(roots: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Tessi
 
 #[derive(Clone, Debug)]
 struct LocalSandboxProvider {
-    runner: String,
+    _runner: String,
 }
 
 impl LocalSandboxProvider {
@@ -350,12 +350,12 @@ impl LocalSandboxProvider {
         {
             let runner = Path::new("/usr/bin/sandbox-exec");
             return runner.is_file().then(|| Self {
-                runner: runner.display().to_string(),
+                _runner: runner.display().to_string(),
             });
         }
         #[cfg(target_os = "linux")]
         {
-            return executable("bwrap").map(|runner| Self { runner });
+            return executable("bwrap").map(|_runner| Self { _runner });
         }
         #[allow(unreachable_code)]
         None
@@ -396,7 +396,7 @@ impl SandboxProvider for LocalSandboxProvider {
                 ));
             }
             let mut wrapped = vec![
-                self.runner.clone(),
+                self._runner.clone(),
                 "-p".into(),
                 forms.join(" "),
                 "--".into(),
@@ -407,7 +407,7 @@ impl SandboxProvider for LocalSandboxProvider {
         #[cfg(target_os = "linux")]
         let wrapped = {
             let mut wrapped = vec![
-                self.runner.clone(),
+                self._runner.clone(),
                 "--ro-bind".into(),
                 "/".into(),
                 "/".into(),
@@ -428,6 +428,8 @@ impl SandboxProvider for LocalSandboxProvider {
             wrapped.extend_from_slice(argv);
             wrapped
         };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = request;
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let wrapped = argv.to_vec();
         Ok(SandboxPlan {

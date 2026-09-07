@@ -12,7 +12,9 @@ docker build --platform linux/arm64 --tag "$image" --file "$product/benchmarks/D
 container=$(docker create --init --platform linux/arm64 --shm-size 2g \
   --env "SAMPLES=${SAMPLES:-30}" \
   --env "VERIFY_PLUGIN=${VERIFY_PLUGIN:-0}" \
+  --env "CARGO_TARGET_DIR=/opt/cargo/target" \
   --mount type=volume,source=tessivum-benchmark-cargo-target,target=/opt/cargo/target \
+  --mount type=volume,source=tessivum-benchmark-pnpm-store,target=/opt/pnpm/store \
   --volume "$workspace:/source:ro" \
   "$image")
 trap 'docker rm --force "$container" >/dev/null 2>&1 || true' EXIT

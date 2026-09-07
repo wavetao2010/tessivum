@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { createRequire } from 'node:module'
+import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -102,7 +103,21 @@ async function main() {
     if (missingPlugins.length !== 0) throw new Error(`Browser boot graph is missing: ${missingPlugins.join(', ')}`)
     result.bootPlugins = bootEntries.filter(entry => options.expectPlugins.includes(entry.id))
 
-    const composer = page.locator('textarea:enabled').last()
+    const workspaceTrigger = page.getByRole('textbox', { name: 'Choose workspace' })
+    if (await workspaceTrigger.count() !== 0) {
+      const workspace = '/tmp/tessivum-benchmark-workspace'
+      mkdirSync(workspace, { recursive: true })
+      await workspaceTrigger.click()
+      const dialog = page.getByRole('dialog', { name: 'Select Workspace Directory' })
+      await dialog.waitFor({ timeout: options.timeoutMs })
+      await dialog.getByRole('button', { name: 'Edit path' }).click()
+      const pathInput = dialog.getByRole('textbox', { name: 'Edit path' })
+      await pathInput.fill(workspace)
+      await pathInput.press('Enter')
+      await dialog.getByRole('button', { name: 'Open', exact: true }).click()
+    }
+
+    const composer = page.locator('textarea:enabled:not([readonly])').last()
     await composer.waitFor({ timeout: options.timeoutMs })
     result.timestamps.composerEnabledMs = now()
     result.sessionCompletionMs = {}

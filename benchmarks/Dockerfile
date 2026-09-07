@@ -44,8 +44,9 @@ RUN bun install --frozen-lockfile \
  && rm -rf /var/lib/apt/lists/*
 
 RUN /usr/sbin/useradd --create-home --uid 10001 benchmark \
- && mkdir -p /bench /results /opt/cargo/target \
- && chown -R benchmark:benchmark /bench /results /opt/cargo /opt/rustup /opt/ms-playwright /opt/playwright
+ && mkdir -p /bench /results /opt/cargo/target /opt/pnpm/store /home/benchmark/.config/pnpm \
+ && printf 'store-dir=/opt/pnpm/store\n' > /home/benchmark/.config/pnpm/rc \
+ && chown -R benchmark:benchmark /bench /results /opt/cargo /opt/pnpm /opt/rustup /opt/ms-playwright /opt/playwright /home/benchmark/.config
 
 COPY --chown=benchmark:benchmark benchmarks/run-linux.sh /usr/local/bin/run-tessivum-benchmarks
 USER benchmark

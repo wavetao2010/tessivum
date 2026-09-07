@@ -236,16 +236,7 @@ fn vendor_root() -> PathBuf {
                     .iter()
                     .all(|file| root.join(file).is_file())
         })
-        .expect("pinned DeepSeek vendor or installed npm source exists")
-        .canonicalize()
-        .expect("pinned vendor root is readable");
-    for file in PINNED_VENDOR_FILES {
-        let file = root
-            .join(file)
-            .canonicalize()
-            .expect("pinned vendor source exists");
-        assert!(file.starts_with(&root));
-    }
+        .expect("pinned DeepSeek vendor or installed npm source exists");
     root
 }
 

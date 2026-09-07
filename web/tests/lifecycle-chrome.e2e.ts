@@ -131,13 +131,13 @@ describe('lifecycle chrome over RustWebHarness', () => {
       await input.fill(PROMPT)
       await input.press('Enter')
       const liveTail = harness.page.locator('[data-variant="think"][data-state="running"] [data-follow-end]')
-      await waitUntil(async () => {
-        if (await liveTail.count() === 0) return false
-        return liveTail.evaluate(element => (
-          element.scrollWidth > element.clientWidth
-            && element.scrollLeft >= element.scrollWidth - element.clientWidth - 1
-        ))
-      }, value => value, 10_000)
+      await waitUntil(
+        () => liveTail.evaluateAll(elements => elements.some(element => (
+          element.scrollLeft >= element.scrollWidth - element.clientWidth - 1
+        ))),
+        value => value,
+        10_000,
+      )
       sessionId = await settled
     } finally {
       await harness.page.setViewportSize(originalViewport)

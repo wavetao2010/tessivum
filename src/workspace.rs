@@ -4,6 +4,8 @@
 //! connection to Host or the browser protocol: callers must resolve a private
 //! [`WorkspaceLease`] before using a workspace root.
 
+#[cfg(unix)]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -14,13 +16,26 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Weak,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
 use std::os::unix::{
     fs::MetadataExt,
     io::{AsRawFd, FromRawFd, RawFd},
+};
+
+#[cfg(windows)]
+use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    Storage::FileSystem::{
+        GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -48,7 +63,14 @@ struct FileIdentity {
     ino: u64,
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    volume: u32,
+    index: u64,
+}
+
+#[cfg(all(not(unix), not(windows)))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity;
 
@@ -270,7 +292,7 @@ pub struct WorkspaceLease {
     workspace_id: WorkspaceId,
     generation: u64,
     canonical_root: PathBuf,
-    directory: File,
+    _directory: File,
     identity: FileIdentity,
 }
 
@@ -294,7 +316,7 @@ impl WorkspaceLease {
     #[cfg(unix)]
     pub(crate) fn directory_fd(&self) -> Result<RawFd, WorkspaceError> {
         self.validate_current()?;
-        Ok(self.directory.as_raw_fd())
+        Ok(self._directory.as_raw_fd())
     }
 
     /// Verifies registration, generation, and the current pathname identity.
@@ -853,7 +875,7 @@ impl WorkspaceRegistry {
             workspace_id: id,
             generation,
             canonical_root,
-            directory,
+            _directory: directory,
             identity,
         })
     }
@@ -995,7 +1017,24 @@ fn open_directory(path: &Path) -> io::Result<(File, FileIdentity)> {
         let identity = file_identity(&file)?;
         Ok((file, identity))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let info = file_information(&file)?;
+        if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is not a non-reparse directory",
+            ));
+        }
+        Ok((file, file_identity_from_information(&info)))
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         let file = File::open(path)?;
         Ok((file, FileIdentity))
@@ -1011,9 +1050,22 @@ fn file_identity(file: &File) -> io::Result<FileIdentity> {
     })
 }
 
-#[cfg(not(unix))]
-fn file_identity(_file: &File) -> io::Result<FileIdentity> {
-    Ok(FileIdentity)
+#[cfg(windows)]
+fn file_information(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(info)
+    }
+}
+
+#[cfg(windows)]
+fn file_identity_from_information(info: &BY_HANDLE_FILE_INFORMATION) -> FileIdentity {
+    FileIdentity {
+        volume: info.dwVolumeSerialNumber,
+        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    }
 }
 
 #[cfg(unix)]
@@ -1039,11 +1091,28 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
         0o600,
     )
     .map_err(|error| io_error("open workspace lock", error))?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            return Err(WorkspaceError::Locked)
+        }
+        Err(error) => return Err(io_error("open workspace lock", error)),
+    };
+    #[cfg(all(not(unix), not(windows)))]
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)
         .map_err(|error| io_error("open workspace lock", error))?;
     #[cfg(unix)]
@@ -1076,6 +1145,15 @@ fn open_registry_lock(data_dir: &Path) -> Result<File, WorkspaceError> {
             return Err(WorkspaceError::Locked);
         }
     }
+    #[cfg(windows)]
+    {
+        let info = file_information(&file).map_err(|e| io_error("inspect workspace lock", e))?;
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return Err(WorkspaceError::Corrupt(
+                "workspace lock must be a regular non-reparse file".into(),
+            ));
+        }
+    }
     Ok(file)
 }
 
@@ -1090,7 +1168,17 @@ fn open_registry_file(path: &Path) -> Result<Option<File>, WorkspaceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(WorkspaceError::Corrupt(format!("open registry: {error}"))),
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("open registry", error)),
+    };
+    #[cfg(all(not(unix), not(windows)))]
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1107,6 +1195,16 @@ fn open_registry_file(path: &Path) -> Result<Option<File>, WorkspaceError> {
         {
             return Err(WorkspaceError::Corrupt(
                 "workspace registry must be an effective-user-owned regular 0600 file".into(),
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let info = file_information(&file)
+            .map_err(|error| WorkspaceError::Corrupt(format!("inspect registry: {error}")))?;
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return Err(WorkspaceError::Corrupt(
+                "workspace registry must be a regular non-reparse file".into(),
             ));
         }
     }
@@ -1431,7 +1529,7 @@ fn atomic_write(
             "workspace data directory changed identity".into(),
         ));
     }
-    let (directory, current_identity) =
+    let (_directory, current_identity) =
         open_directory(data_dir).map_err(|e| io_error("open workspace directory", e))?;
     if current_identity != expected_data_dir_identity {
         return Err(WorkspaceError::Persistence(
@@ -1461,8 +1559,9 @@ fn atomic_write(
                 "workspace data directory changed identity".into(),
             ));
         }
-        fs::rename(&temporary, path).map_err(|e| io_error("rename workspace temporary", e))?;
-        directory
+        replace_file(&temporary, path).map_err(|e| io_error("rename workspace temporary", e))?;
+        #[cfg(unix)]
+        _directory
             .sync_all()
             .map_err(|e| io_error("sync workspace directory", e))?;
         Ok(())
@@ -1471,6 +1570,42 @@ fn atomic_write(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    let from = wide_path(from)?;
+    let to = wide_path(to)?;
+    if unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains NUL",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
 }
 
 fn io_error(operation: &str, error: std::io::Error) -> WorkspaceError {

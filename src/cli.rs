@@ -103,11 +103,11 @@ impl fmt::Display for DataRootError {
             ),
             Self::MissingHome => write!(
                 formatter,
-                "HOME is not set; set HOME or TESSIVUM_HOME, or pass --data-dir <DIR>"
+                "HOME/USERPROFILE is not set; set one of them or TESSIVUM_HOME, or pass --data-dir <DIR>"
             ),
             Self::RelativeHome(path) => write!(
                 formatter,
-                "HOME must be an absolute directory, got {}",
+                "HOME/USERPROFILE must be an absolute directory, got {}",
                 path.display()
             ),
             Self::LegacyCwd { legacy, target } => write!(
@@ -136,7 +136,9 @@ impl std::error::Error for DataRootError {
 
 /// Resolves persistent storage without copying legacy project-local state.
 pub fn resolve_data_root(data_dir: Option<PathBuf>) -> Result<DataRoot, DataRootError> {
-    let cwd = env::current_dir().map_err(DataRootError::CurrentDir)?;
+    let cwd = env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(DataRootError::CurrentDir)?;
     if let Some(data_dir) = data_dir {
         return Ok(DataRoot {
             data_dir: if data_dir.is_absolute() {
@@ -156,6 +158,8 @@ pub fn resolve_data_root(data_dir: Option<PathBuf>) -> Result<DataRoot, DataRoot
     }
 
     let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
         .map(PathBuf::from)
         .ok_or(DataRootError::MissingHome)?;
     if !home.is_absolute() {

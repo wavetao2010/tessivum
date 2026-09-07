@@ -14,12 +14,20 @@ use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
 use serde_json::{json, Value};
+#[cfg(unix)]
 use tessivum::{
     agent::AgentRegistry,
-    agent_mode::AgentModeTrust,
-    api::{ApiServer, ApiServerConfig, MAX_FRAME_BYTES},
-    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
+    api::ApiServerConfig,
     bridge::{BridgeServices, DomainBridge},
+    llm::LlmRuntime,
+    session::{MemorySessionPersistence, SessionStore},
+    system_prompt::SystemPrompt,
+    tools::ToolRuntime,
+};
+use tessivum::{
+    agent_mode::AgentModeTrust,
+    api::{ApiServer, MAX_FRAME_BYTES},
+    approval::{ApprovalId, ApprovalOutcome, ApprovalRequested, ApprovalResolved},
     host::{
         HostApi, HostConfig, HostLlmAdapterFactory, HostModelGroup, HostModelInfo,
         HostModelReasoning, HostModelReasoningEffort, HostNotification, HostPathOpener,
@@ -28,7 +36,7 @@ use tessivum::{
         HostSessionSearchHit, HostSessionSearchResult, SessionQueueAction,
         SessionUpdateQueueParams, SessionUpdateQueueResult,
     },
-    llm::{LlmAdapter, LlmRuntime, LlmStream},
+    llm::{LlmAdapter, LlmStream},
     openai_responses::{ResponsesModel, ResponsesRoute},
     protocol::{
         AgentCancelCause, ContentBlock, FinishReason, GenerateRequest, InitializeParams,
@@ -36,15 +44,12 @@ use tessivum::{
         SessionId, SessionModelSelection, SessionPromptParams, SessionPromptResult, SessionStatus,
         StreamChunk,
     },
-    session::{MemorySessionPersistence, SessionStore},
     settings::{MemorySettingsProvider, Settings, SettingsRegistration},
     subagent::{
         SessionProjectionsBlock, SubagentDeleteRequest, SubagentDeleteResult,
         SubagentHistoryRequest, SubagentHistoryResult, SubagentInterruptRequest,
         SubagentInterruptResult, SubagentMode, SubagentPromptRequest, SubagentPromptResult,
     },
-    system_prompt::SystemPrompt,
-    tools::ToolRuntime,
     TessivumError,
 };
 use tokio::{
@@ -2408,30 +2413,40 @@ async fn browser_workspace_insert_before_is_durable_and_broadcasts_complete_orde
 
     let data_dir = fixture.0.join("data");
     let displaced_data_dir = fixture.0.join("data-displaced");
-    fs::rename(&data_dir, &displaced_data_dir).unwrap();
-    fs::create_dir(&data_dir).unwrap();
-    let failed_write = browser_call(
-        &client,
-        &base,
-        "workspace-order-failed-write",
-        "workspace.insertBefore",
-        json!({"workspaceId": first_id, "beforeWorkspaceId": second_id}),
-    )
-    .await;
-    fs::remove_dir(&data_dir).unwrap();
-    fs::rename(&displaced_data_dir, &data_dir).unwrap();
+    #[cfg(windows)]
     assert_eq!(
-        failed_write,
-        json!({
-            "type": "server-response",
-            "rpcId": "workspace-order-failed-write",
-            "result": {"ok": false, "error": {
-                "code": "internal",
-                "message": "workspace operation failed: WORKSPACE_PERSISTENCE_FAILED",
-                "details": {},
-            }},
-        })
+        fs::rename(&data_dir, &displaced_data_dir)
+            .expect_err("the held directory capability prevents replacement")
+            .kind(),
+        io::ErrorKind::PermissionDenied
     );
+    #[cfg(not(windows))]
+    {
+        fs::rename(&data_dir, &displaced_data_dir).unwrap();
+        fs::create_dir(&data_dir).unwrap();
+        let failed_write = browser_call(
+            &client,
+            &base,
+            "workspace-order-failed-write",
+            "workspace.insertBefore",
+            json!({"workspaceId": first_id, "beforeWorkspaceId": second_id}),
+        )
+        .await;
+        fs::remove_dir(&data_dir).unwrap();
+        fs::rename(&displaced_data_dir, &data_dir).unwrap();
+        assert_eq!(
+            failed_write,
+            json!({
+                "type": "server-response",
+                "rpcId": "workspace-order-failed-write",
+                "result": {"ok": false, "error": {
+                    "code": "internal",
+                    "message": "workspace operation failed: WORKSPACE_PERSISTENCE_FAILED",
+                    "details": {},
+                }},
+            })
+        );
+    }
     let unchanged = browser_call(
         &client,
         &base,

@@ -52,7 +52,7 @@ def main() -> int:
     require(core.get("revisions") == {
         "core": "4674aeda870989fede1fc79fb07afbe764d3a1eb",
         "dsh": "47f943859bef60e4160492346772ded9b24f765a",
-        "product": "d21f0a423076acf50334af5056943205d677ea1c",
+        "product": "d455d99270673be208aecc3182cbf47b9b17989e",
     }, "Core evidence revisions drifted")
     for runtime in ("rust", "typescript"):
         samples = [metric.get("samples") for metric in core["runtimes"][runtime]["benchmarks"]]
@@ -63,7 +63,7 @@ def main() -> int:
     scope_ratio = typescript["scope_create_dispose"]["median"] / rust["scope_create_dispose"]["median"]
     peak_ratio = typescript["process_pss_live"]["median"] / rust["process_pss_live"]["median"]
     loader_regression = rust["loader_update"]["median"] / typescript["loader_update"]["median"]
-    require((round(scope_ratio, 2), round(peak_ratio, 2), round(loader_regression, 2)) == (23.64, 17.43, 37.03), "Core release ratios drifted")
+    require((round(scope_ratio, 2), round(peak_ratio, 2), round(loader_regression, 2)) == (24.05, 17.15, 40.05), "Core release ratios drifted")
     require(rust["residue_after_dispose"]["max"] == 0 and typescript["residue_after_dispose"]["max"] == 0, "Core disposal residue is non-zero")
 
     product = load(PRODUCT_PATH)
@@ -75,17 +75,22 @@ def main() -> int:
     require(repositories.get("coreBenchmark") == {"clean": True, "path": "/bench/work/tessivum-core", "revision": core["revisions"]["core"]}, "product Core provenance drifted")
     require(repositories.get("product") == {"clean": True, "path": "/bench/work/tessivum", "revision": core["revisions"]["product"]}, "product source provenance drifted")
     dsh = repositories.get("deepseekHarness", {})
-    require(dsh.get("revision") == core["revisions"]["dsh"] and dsh.get("trackedDiffSha256") == "9e914d5998ccb2ca1faf8315a9d9a7235407c7830a8939255cd5838acd149ccd", "DeepSeek Harness provenance drifted")
-    summaries = {summary["manifest"]: summary for summary in product["summaries"]}
-    require(set(summaries) == {"Base", "Compatibility"}, "product evidence manifest set drifted")
+    require(dsh.get("revision") == core["revisions"]["dsh"] and dsh.get("trackedDiffSha256") == "9e914d5998ccb2ca1faf8315a9d9a7235407c7830a8939255cd5838acd149ccd", "patched DeepSeek Harness provenance drifted")
+    require(repositories.get("deepseekHarnessUpstream") == {"clean": True, "path": "/bench/work/upstream/deepseek-harness-upstream", "revision": core["revisions"]["dsh"]}, "upstream DeepSeek Harness provenance drifted")
+    summaries = {(summary["manifest"], summary["runtime"]): summary for summary in product["summaries"]}
+    expected_cells = {(manifest, runtime) for manifest in ("Base", "Compatibility") for runtime in ("tessivum", "deepseek-harness")}
+    require(set(summaries) == expected_cells, "product evidence matrix drifted")
     for name, summary in summaries.items():
         require(summary["successfulSamples"] == 30 and summary["failedSamples"] == 0, f"{name} is not 30/30")
-    require(len(product["rawSamples"]) == 60, "product evidence does not contain 60 raw samples")
+    require(len(product["rawSamples"]) == 120, "product evidence does not contain 120 raw samples")
+    compatibility_plugins = {"tessivum-market", "dsh-better-sidebar", "dsh-dream-skin"}
     for sample in product["rawSamples"]:
         browser = sample["web"]["browser"]
         probe = browser["result"]
         require(sample["success"] is True and sample["failures"] == [], "a product raw sample failed")
         require(probe["errors"] == [] and probe["promptSubmitted"] is True and probe["sessionsCompleted"] == 10, "a Browser probe failed")
+        expected_plugins = compatibility_plugins if sample["manifest"] == "Compatibility" else set()
+        require({entry["id"] for entry in probe["bootPlugins"]} == expected_plugins, "Browser plugin graph drifted")
         cleanup_rows = {
             "headless": sample["headless"]["cleanup"],
             "browser": browser["cleanup"],
@@ -97,14 +102,18 @@ def main() -> int:
             require(cleanup["residueAfterForcedCleanup"] == 0, f"{stage} cleanup left process residue")
 
     expected_hashes = {
-        CORE_PATH.name: "4ac31357ab07f5280e57ec510d970cbcd8653e9ed62e9c67daee2f2f3a5263b3",
-        PRODUCT_PATH.name: "89f4bfb7169d6074e1d846643041bfc19ad8d8a0579a60a4dab86134684bf52c",
+        CORE_PATH.name: "a2b0b468f85c021e0943aa24fee77b7d26fd46e954a4bcaf24ebcf48e4f151f9",
+        PRODUCT_PATH.name: "a3ba246f394e91175ae4a51ca766afd2a2bc7796d3a5ac1f2f85a6ec0e7d9bf5",
     }
     for path in (CORE_PATH, PRODUCT_PATH):
         require(sha256(path) == expected_hashes[path.name], f"{path.name} digest drifted")
 
-    base = summaries["Base"]["metrics"]
-    compatibility = summaries["Compatibility"]["metrics"]
+    cells = [summaries[(manifest, runtime)]["metrics"] for manifest, runtime in (
+        ("Base", "tessivum"),
+        ("Base", "deepseek-harness"),
+        ("Compatibility", "tessivum"),
+        ("Compatibility", "deepseek-harness"),
+    )]
     core_cells = [
         f"{pair(rust['scope_create_dispose'], 1_000_000, 3, 'ms')} | {pair(typescript['scope_create_dispose'], 1_000_000, 3, 'ms')}",
         f"{pair(rust['service_lookup'], 1_000_000, 3, 'M ops/s')} | {pair(typescript['service_lookup'], 1_000_000, 3, 'M ops/s')}",
@@ -128,36 +137,36 @@ def main() -> int:
     product_specs = [
         ("headless.completionElapsedNs", 1_000_000, 2, "ms"),
         ("web.readyElapsedNs", 1_000_000, 2, "ms"),
-        ("web.browser.composerEnabledElapsedMs", 1000, 3, "s"),
+        ("web.browser.composerEnabledElapsedMs", 1, 1, "ms"),
         ("web.browser.firstPromptCompletionElapsedMs", 1, 1, "ms"),
-        ("web.browser.tenSessionCompletionElapsedMs", 1000, 3, "s"),
+        ("web.browser.tenSessionCompletionElapsedMs", 1, 1, "ms"),
         ("web.treeIdlePssKiB", 1024, 2, "MiB"),
         ("web.treeOneSessionDeltaFromIdleKiB", 1024, 2, "MiB"),
         ("web.treeTenSessionDeltaFromIdleKiB", 1024, 2, "MiB"),
         ("web.treeTenSessionPerSessionKiB", 1024, 3, "MiB"),
         ("web.disposeElapsedNs", 1_000_000, 2, "ms"),
     ]
-    product_cells = [f"{pair(base[name], scale, digits, suffix)} | {pair(compatibility[name], scale, digits, suffix)}"
+    product_cells = [" | ".join(pair(cell[name], scale, digits, suffix) for cell in cells)
                      for name, scale, digits, suffix in product_specs]
-    ready_cost = compatibility["web.readyElapsedNs"]["median"] / base["web.readyElapsedNs"]["median"]
-    idle_cost_mib = (compatibility["web.treeIdlePssKiB"]["median"] - base["web.treeIdlePssKiB"]["median"]) / 1024
-    core_stability = [max(metric["p95"] / metric["median"] for metric in runtime.values() if metric["median"] > 0)
-                      for runtime in (rust, typescript)]
-    pss_metrics = ("web.treeIdlePssKiB", "web.treeTenSessionPssKiB")
-    pss_stability = max(summary[name]["p95"] / summary[name]["median"]
-                        for summary in (base, compatibility) for name in pss_metrics)
-    ready_stability = [summary["web.readyElapsedNs"]["p95"] / summary["web.readyElapsedNs"]["median"]
-                       for summary in (base, compatibility)]
-    headless_pss_stability = max(summary["headless.treePeakPssKiB"]["p95"] / summary["headless.treePeakPssKiB"]["median"]
-                                 for summary in (base, compatibility))
+    base_tessivum, base_dsh, compatibility_tessivum, compatibility_dsh = cells
+    product_ratios = [
+        base_dsh["headless.completionElapsedNs"]["median"] / base_tessivum["headless.completionElapsedNs"]["median"],
+        base_dsh["web.readyElapsedNs"]["median"] / base_tessivum["web.readyElapsedNs"]["median"],
+        base_dsh["web.treeIdlePssKiB"]["median"] / base_tessivum["web.treeIdlePssKiB"]["median"],
+        base_dsh["web.treeTenSessionDeltaFromIdleKiB"]["median"] / base_tessivum["web.treeTenSessionDeltaFromIdleKiB"]["median"],
+        compatibility_dsh["web.treeIdlePssKiB"]["median"] / compatibility_tessivum["web.treeIdlePssKiB"]["median"],
+        compatibility_dsh["web.treeTenSessionDeltaFromIdleKiB"]["median"] / compatibility_tessivum["web.treeTenSessionDeltaFromIdleKiB"]["median"],
+        compatibility_tessivum["web.readyElapsedNs"]["median"] / compatibility_dsh["web.readyElapsedNs"]["median"],
+    ]
+    pss_stability = max(cell[name]["p95"] / cell[name]["median"]
+                        for cell in cells for name in ("web.treeIdlePssKiB", "web.treeTenSessionPssKiB"))
     report_facts = [
-        *(f"{ratio:.2f}×" for ratio in core_ratios),
+        *(f"{ratio:.2f}×" for ratio in (*core_ratios, *product_ratios)),
         *core_cells,
         *product_cells,
-        f"{ready_cost:.2f}×",
-        f"{idle_cost_mib:.2f} MiB",
-        *(f"{ratio:.2f}" for ratio in (*core_stability, pss_stability, *ready_stability, headless_pss_stability)),
+        f"{pss_stability:.2f}",
         "30/30",
+        "120",
         *expected_hashes.values(),
         core["workloadSha256"],
         *(item["sha256"] for item in product["manifests"]),
@@ -166,7 +175,10 @@ def main() -> int:
         core["environmentSha256"],
         product["environmentSha256"],
         *product["provenance"]["drivers"].values(),
+        *(item["sha256"] for item in product["provenance"]["runtimes"]),
         product["provenance"]["replay"]["sha256"],
+        *(item["sha256"] for item in product["provenance"]["runtimeInputs"]),
+        *(item["sha256"] for item in product["provenance"]["dataSeeds"]),
         dsh["trackedDiffSha256"],
     ]
     for path in REPORTS:
@@ -200,7 +212,10 @@ def main() -> int:
     chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
     require("Principle and implementation, in concert." in english[:1000], "English product slogan drifted")
     require("道器相成" in chinese[:1000], "Chinese product slogan drifted")
-    readme_facts = [f"{ratio:.2f}×" for ratio in (scope_ratio, core_ratios[1], core_ratios[2], loader_regression, peak_ratio)]
+    readme_facts = [f"{ratio:.2f}×" for ratio in (
+        scope_ratio, core_ratios[1], core_ratios[2], loader_regression, peak_ratio,
+        product_ratios[1], product_ratios[2], product_ratios[4], product_ratios[6],
+    )]
     require(all(fact in english for fact in readme_facts) and "30/30" in english, "English README benchmark claim drifted")
     require(all(fact in chinese for fact in readme_facts) and "30/30" in chinese, "Chinese README benchmark claim drifted")
     require("PHASE9_BENCHMARK_REPORT.md" in english, "English README lost benchmark evidence link")

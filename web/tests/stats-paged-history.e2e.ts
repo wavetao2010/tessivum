@@ -64,6 +64,11 @@ test('stats-paged-history keeps whole-session counts while native history prepen
 
     await harness.page.getByRole('button', { name: 'Load earlier', exact: true }).click()
     await harness.page.getByText('m1', { exact: true }).waitFor({ timeout: 10_000 })
+    const backToBottom = harness.page.getByRole('button', { name: 'Back to bottom', exact: true })
+    if (await backToBottom.count() !== 0) {
+      await backToBottom.click()
+      await waitUntil(() => backToBottom.count(), count => count === 0)
+    }
     expect(await strip.textContent()).toBe(before)
     expect(await harness.page.locator('[data-chat-flow-key^="9:turn-tail"]').count()).toBe(TURNS)
     expect(`${await captureStatsAria(harness)}\n`).toBe(await readFile(UI_EXPECTED, 'utf8'))

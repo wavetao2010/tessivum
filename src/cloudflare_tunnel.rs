@@ -385,20 +385,20 @@ async fn sha256_file(path: &Path) -> Result<String, CloudflareTunnelError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-async fn set_directory_permissions(path: &Path) -> Result<(), CloudflareTunnelError> {
+async fn set_directory_permissions(_path: &Path) -> Result<(), CloudflareTunnelError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+        fs::set_permissions(_path, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())
 }
 
-async fn set_executable_permissions(path: &Path) -> Result<(), CloudflareTunnelError> {
+async fn set_executable_permissions(_path: &Path) -> Result<(), CloudflareTunnelError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+        fs::set_permissions(_path, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())
 }

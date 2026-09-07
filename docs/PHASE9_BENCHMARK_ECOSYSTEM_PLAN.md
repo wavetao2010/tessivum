@@ -107,13 +107,14 @@ vendored TypeScript Cordis `4.0.1`
 vs
 
 tessivum-core 0.1.6
-commit cedbeb9e1607056845b69e09b825eb7f5be67a69
+commit 4674aeda870989fede1fc79fb07afbe764d3a1eb
 
 Product：Tessivum 0.1.0-alpha.23
-commit 72a5f6104aaf35e19faa5d9897ec3cb845ad2ec0
+commit d455d99270673be208aecc3182cbf47b9b17989e
+vs DeepSeek Harness 0.1.0-rc.5 clean commit 47f943859bef60e4160492346772ded9b24f765a
 ```
 
-DeepSeek Harness `0.1.0-rc.5` 仍是产品兼容基线，但它与 Tessivum 当前没有同一离线 Replay、CLI 参数和数据根契约，因此首个试运行把上游产品数字明确标为 `unmeasured`，不拿不同任务伪装横向数据。产品层先报告 Tessivum Base/Compatibility 的绝对成本与兼容面；只有补齐同构上游产品 driver 后才能形成产品 A/B 性能结论。
+DeepSeek Harness `0.1.0-rc.5` 是产品兼容基线。首个试运行因缺少同构上游 driver 将它明确标为 `unmeasured`；当前实现已用上游原生 replay 插件补齐相同的可见 Prompt、工具 marker、十 Session、Browser 和清理契约。两边 replay 字节及内部路径不同，因此结论只覆盖该冻结离线产品契约，不外推为完整功能或生产 LLM 性能对等。
 
 JCode、OMP、Claude Code 等 Terminal Coding Agent 不进入第一版主表。它们的功能面和进程模型不同，只能在未来作为明确标注的行业参考，不能替代同一兼容基线的一对一比较。
 
@@ -121,20 +122,20 @@ JCode、OMP、Claude Code 等 Terminal Coding Agent 不进入第一版主表。�
 
 #### Base
 
-Tessivum 只启用冻结的基础 Host/Browser 功能面，不安装第三方插件。该组观察架构基础成本，但不能单独作为“同功能更快”的首页结论；未来上游产品对照必须复用同一功能边界。
+两个 runtime 都只启用冻结的基础 Host/Browser 功能面，不安装 Benchmark 插件，用于观察架构基础成本。
 
 #### Compatibility
 
-Tessivum 启用以下固定插件与 Browser Client bundles：
+两个 runtime 均启用以下固定插件与 Browser Client bundles：
 
 - Market；
 - Better Sidebar；
 - Dream Skin；
-- 相同 Web Profile、Session 数据和 Browser 资源。
+- 相同可见 Web Profile、Prompt/工具 marker 契约和 Browser 资源。
 
-该配置统计完整 Bun Legacy Host 子进程。只有未来上游产品对照也闭合同一插件、Session 和 Browser 工作量后，Compatibility 才能用于产品横向宣传。
+Tessivum 统计完整 Bun Legacy Host 子进程；DeepSeek Harness 统计完整 Node Host 子进程。Compatibility 只有在插件启动图、Session 工作量与 Browser 路径全部闭合后才进入横向结果。
 
-每组配置都保存机器可读 manifest，固定插件版本、Profile、环境变量和预装状态。当前产品试运行只执行 Tessivum；DeepSeek Harness 产品列保持 `unmeasured`。
+每组配置都保存机器可读 manifest，固定插件版本、Profile、环境变量和预装状态。公开运行已闭合 Tessivum 与 DeepSeek Harness 两个产品列，各有 30 个有效样本。
 
 ### 4.3 产品级公开指标
 
@@ -142,7 +143,7 @@ Tessivum 启用以下固定插件与 Browser Client bundles：
 |---|---|---|
 | Headless replay wall time | 新进程启动到同一固定 Replay 完整结束 | 排除模型和网络噪声 |
 | Web Host ready | 新进程启动到 API 与 Boot Graph 可用 | Host 启动成本 |
-| Web UI usable | 新进程启动到真实 Chromium Composer 可输入 | 用户真实等待时间 |
+| Web UI usable | HTTP ready 后，从 Browser worker 启动到真实 Chromium Composer 可输入 | Browser 初始化与必要的工作区选择成本 |
 | Idle process-tree PSS | Ready 后相同稳定窗口内 Host 及全部后代进程 PSS | 防止漏算 Node/Bun |
 | 1/10 resident Session PSS | 同一 Host 内加载同一固定 Session 工作量后的进程树增量 | 多会话扩展成本 |
 | Create/dispose stress | 固定数量 Scope/Agent 创建、注册、销毁后的时间与残留 | 生命周期与清理价值 |
@@ -207,7 +208,7 @@ exact lifecycle/service/event oracle traces
 
 - 产品与 Core 两层 driver 均可在固定 Linux 机器从干净 checkout 复现；
 - Base 与 Compatibility manifest 闭合；
-- 六项产品指标和 Core 配对附录都有 30 个有效或显式失败样本；
+- 十项产品指标和 Core 配对附录都有 30 个有效或显式失败样本；
 - PSS 覆盖完整进程树；
 - 真实 Chromium 证明 Web usable；
 - 兼容性结果与性能结果并列；
@@ -219,13 +220,13 @@ exact lifecycle/service/event oracle traces
 已实现并纳入 `v0.1.0-alpha.23`：
 
 - `tessivum-core/oracle/paired.ts` 与 `scripts/run_paired_benchmarks.py`；
-- `tessivum/scripts/benchmark_product.py` 与真实 Chromium worker；
+- `tessivum/scripts/benchmark_product.py`、真实 Chromium worker 与上游 DeepSeek Harness 适配器；
 - `tessivum/benchmarks/manifests/{base,compatibility}.json`；
 - `tessivum/benchmarks/Dockerfile`、`run-linux.sh` 与容器入口；
-- Linux 三样本协议试运行及 30 样本公开 raw snapshot，记录于 `benchmarks/fixtures/phase9-alpha23/`；
+- Linux 三样本协议试运行及每个 runtime/manifest 单元 30 样本的公开 raw snapshot，记录于 `benchmarks/fixtures/phase9-alpha23/`；
 - 中英文公开报告、README 数字和 `scripts/check_release_facts.py` 漂移门槛。
 
-Phase 9-A 已关闭：Core 两种 runtime 各 30 个有效样本，产品 Base 与 Compatibility 各 30/30 成功，真实 Chromium 十 Session 路径和完整进程树销毁残留均通过。公开结果同时披露 `loader_update` 回归及 Compatibility 启动/内存成本。Phase 9-B 也已关闭；Phase 9 总验收完成。
+Phase 9-A 已关闭：Core 两种 runtime 各 30 个有效样本；产品层 Tessivum/DeepSeek Harness × Base/Compatibility 四个单元均为 30/30 成功，真实 Chromium 十 Session 路径、相同可见插件图和完整进程树销毁残留均通过。公开结果同时披露 `loader_update` 回归、Tessivum Compatibility 启动回归及两产品的启动/内存差异。Phase 9-B 也已关闭；Phase 9 总验收完成。
 
 ## 5. Phase 9-B：社区插件发布与 Tessivum 验证
 

@@ -281,7 +281,7 @@ impl ProcessCodeRuntimeConfig {
 
 fn resolve_executable(path: &std::path::Path) -> Result<PathBuf, CodeRuntimeError> {
     if path.components().count() > 1 || path.is_absolute() {
-        return executable(path).then(|| path.to_path_buf()).ok_or_else(|| {
+        return executable_candidate(path).ok_or_else(|| {
             CodeRuntimeError::InvalidConfiguration(format!("executable {path:?} is not executable"))
         });
     }
@@ -296,8 +296,7 @@ fn resolve_executable(path: &std::path::Path) -> Result<PathBuf, CodeRuntimeErro
         )));
     };
     for directory in std::env::split_paths(&search_path) {
-        let candidate = directory.join(path);
-        if executable(&candidate) {
+        if let Some(candidate) = executable_candidate(&directory.join(path)) {
             return Ok(if candidate.is_absolute() {
                 candidate
             } else {
@@ -308,6 +307,20 @@ fn resolve_executable(path: &std::path::Path) -> Result<PathBuf, CodeRuntimeErro
     Err(CodeRuntimeError::InvalidConfiguration(format!(
         "executable {path:?} is not executable on PATH"
     )))
+}
+
+fn executable_candidate(path: &std::path::Path) -> Option<PathBuf> {
+    if executable(path) {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let candidate = path.with_extension("exe");
+        if executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(unix)]

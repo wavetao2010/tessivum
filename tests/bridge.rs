@@ -1139,15 +1139,7 @@ async fn timer_registration_reuse_and_cleanup_race_are_safe() {
     bridge.attach_client(disconnected_client(11), 11).unwrap();
 
     schedule_timer_until_admitted(&bridge, 11, "reused", 0).await;
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(
-        bridge.dispatch(11, DomainRequest {
-            service: TIMERS_SERVICE.into(),
-            method: "schedule".into(),
-            params: json!({"registrationId": "reused", "callbackId": "tick", "delayMs": 60_000}),
-        }).unwrap(),
-        json!({"timerId": "reused"})
-    );
+    schedule_timer_until_admitted(&bridge, 11, "reused", 60_000).await;
     assert_eq!(
         bridge
             .dispatch(

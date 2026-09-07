@@ -4536,10 +4536,9 @@ fn unknown_method(service: &str, method: &str) -> BridgeResult<Value> {
     ))
 }
 fn list_directory(requested: Option<String>) -> BridgeResult<Value> {
-    let home = std::env::var_os("HOME")
+    let home = crate::home_dir()
+        .and_then(|home| std::fs::canonicalize(home).ok())
         .ok_or_else(|| remote("DIRECTORY_UNREADABLE", "home directory is unavailable"))?;
-    let home = std::fs::canonicalize(home)
-        .map_err(|_| remote("DIRECTORY_UNREADABLE", "home directory is unavailable"))?;
     let path = std::fs::canonicalize(requested.unwrap_or_else(|| home.to_string_lossy().into()))
         .map_err(|_| remote("DIRECTORY_UNREADABLE", "directory does not exist"))?;
     if !path.is_dir() {
@@ -5826,7 +5825,10 @@ mod alpha11_tests {
         let request = PnpmRunRequest {
             operation_id: "missing".into(),
             args: vec!["install".into()],
-            invoking_dir: "/tmp/profile".into(),
+            invoking_dir: std::env::temp_dir()
+                .join("profile")
+                .to_string_lossy()
+                .into_owned(),
         };
         assert_eq!(
             remote_code(

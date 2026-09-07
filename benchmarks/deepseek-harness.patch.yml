@@ -1,0 +1,19 @@
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  disabled: true
+
+- id: session-title-llm
+  name: '@deepseek-ai/dsh-session-title-first-prompt-llm'
+  disabled: true
+
+- insert:
+    - id: benchmark-llm-replay
+      name: '@DSH_REPLAY_PLUGIN@'
+      config:
+        paceMs: 0
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            models:
+              - id: deepseek-v4-flash
+                contextWindow: 128000

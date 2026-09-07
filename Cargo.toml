@@ -11,9 +11,9 @@ default-run = "tessivum"
 build = "build.rs"
 
 [dependencies]
-tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "bafb893f182d64b7b464b6cf827676f7ac368168", version = "=0.1.6" }
-tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "bafb893f182d64b7b464b6cf827676f7ac368168", version = "=0.1.6" }
-tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "bafb893f182d64b7b464b6cf827676f7ac368168", version = "=0.1.6" }
+tessivum-core = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "640e9ea41810861eebd5bbf300052072e989259c", version = "=0.1.6" }
+tessivum-extism = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "640e9ea41810861eebd5bbf300052072e989259c", version = "=0.1.6" }
+tessivum-node-bridge = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "640e9ea41810861eebd5bbf300052072e989259c", version = "=0.1.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 zstd = "0.13"
 libc = "0.2"
+chrono-tz = "0.10"
 regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde_yaml = "0.9"
@@ -46,3 +47,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
 flate2 = "1"
 tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Environment", "Win32_System_JobObjects", "Win32_System_Threading"] }
