@@ -234,6 +234,10 @@ fn relaunch_web_process() -> Result<(), Diagnostic> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = tessivum::sandbox::dispatch_windows_sandbox_runner(env::args_os().skip(1)) {
+        process::exit(code);
+    }
     match Box::pin(run()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(diagnostic) => {

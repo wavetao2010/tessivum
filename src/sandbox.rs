@@ -1,5 +1,16 @@
 //! Fail-closed sandbox preparation for subprocess effects.
 
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn dispatch_windows_sandbox_runner(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Option<i32> {
+    windows::dispatch(args)
+}
+
 use std::{
     collections::BTreeSet,
     fmt,
@@ -153,6 +164,14 @@ impl Sandbox {
     }
     /// Uses the host's native file-effect sandbox when one is available.
     pub fn local() -> Self {
+        #[cfg(windows)]
+        {
+            Self {
+                provider: windows::WindowsAclProvider::detect()
+                    .map(|provider| Arc::new(provider) as Arc<dyn SandboxProvider>),
+            }
+        }
+        #[cfg(not(windows))]
         Self {
             provider: LocalSandboxProvider::detect()
                 .map(|provider| Arc::new(provider) as Arc<dyn SandboxProvider>),
@@ -164,7 +183,8 @@ impl Sandbox {
     }
 
     /// Validates the request and produces a provider-wrapped argv. Danger mode
-    /// is an explicit bypass; every other mode requires full enforcement.
+    /// is a bypass only with an exact explicit approval; every other mode
+    /// requires full enforcement.
     pub fn prepare(
         &self,
         request: &SandboxRequest,
@@ -283,7 +303,18 @@ fn effective_request(request: &SandboxRequest) -> Result<EffectiveSandboxRequest
     let workspace = canonical_directory(&request.workspace, "workspace")?;
     let approval = request.approval.as_ref();
     let mode = match request.mode {
-        SandboxMode::DangerFullAccess => SandboxMode::DangerFullAccess,
+        SandboxMode::DangerFullAccess => {
+            if approval.is_some_and(|approval| approval.mode == Some(SandboxMode::DangerFullAccess))
+            {
+                SandboxMode::DangerFullAccess
+            } else {
+                return Err(sandbox_error(
+                    "SANDBOX_DENIED",
+                    "danger-full-access requires explicit approval",
+                    json!({"mode": "danger-full-access"}),
+                ));
+            }
+        }
         SandboxMode::ReadOnly => SandboxMode::ReadOnly,
         SandboxMode::WorkspaceWrite => {
             if approval.is_some_and(|approval| approval.mode == Some(SandboxMode::WorkspaceWrite)) {
@@ -339,11 +370,13 @@ fn canonical_roots(roots: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Tessi
     Ok(canonical)
 }
 
+#[cfg(not(windows))]
 #[derive(Clone, Debug)]
 struct LocalSandboxProvider {
     _runner: String,
 }
 
+#[cfg(not(windows))]
 impl LocalSandboxProvider {
     fn detect() -> Option<Self> {
         #[cfg(target_os = "macos")]
@@ -362,6 +395,7 @@ impl LocalSandboxProvider {
     }
 }
 
+#[cfg(not(windows))]
 impl SandboxProvider for LocalSandboxProvider {
     fn confine(
         &self,
@@ -464,6 +498,8 @@ fn executable(name: &str) -> Option<String> {
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, TessivumError> {
+    #[cfg(windows)]
+    windows::reject_reparse_ancestors(path)?;
     if !path.is_absolute() {
         return Err(sandbox_error(
             "SANDBOX_INVALID_PATH",

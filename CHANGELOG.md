@@ -10,6 +10,14 @@
 - Add frozen Windows Server 2025 CI gates for the product and Core, covering
   MSVC compile/Clippy/tests, Web and plugin dependencies, Extism, and a real
   Legacy Node lifecycle.
+- Add Windows PowerShell one-shot and persistent execution behind the unchanged
+  `bash` tool protocol, with UTF-8 capture and owned Job Object process trees.
+- Add the same-executable Windows write-restricted ACL runner, current approved-root
+  capabilities, private temporary directories, and explicit danger-mode approval.
+  Everyone/logon ambient grants and NTFS hard-link aliases remain limitations;
+  reads, networking, and process visibility are not isolated. No Windows release is published.
+  Read-only mode permits writes only to its private TEMP in addition to existing ambient
+  grants, enabling PowerShell initialization without granting workspace write capabilities.
 
 ### Changed
 
@@ -21,6 +29,13 @@
 
 - Give cold Legacy Node plugin activation the Web readiness deadline instead of
   failing after five seconds under process-cold Compatibility runs.
+- Preserve active persistent shells when queued commands are cancelled or rejected
+  before admission, and retain partially read LSP responses across direct child exit.
+- Make Market snapshot file-symlink fixtures skip only for Windows capability
+  `EPERM`, require them on capable CI, and keep directory-link protection active
+  through a Windows junction.
+- Make multiline Windows CI steps stop on non-zero native-command exits instead
+  of allowing later commands to mask the prerequisite failure.
 
 ## 0.1.0-alpha.23 - 2026-09-03
 

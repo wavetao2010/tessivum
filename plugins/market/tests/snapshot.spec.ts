@@ -18,6 +18,30 @@ import {
   type ProfileSnapshot,
 } from '../src/snapshot.ts'
 
+const fileSymlinkCapability = (() => {
+  const root = mkdtempSync(join(tmpdir(), 'dshm-file-symlink-probe-'))
+  try {
+    const target = join(root, 'target')
+    writeFileSync(target, 'probe')
+    try {
+      symlinkSync(target, join(root, 'link'), 'file')
+    } catch (error) {
+      if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+      const reason = 'Windows denied file symlink creation with EPERM'
+      if (process.env.TESSIVUM_REQUIRE_FILE_SYMLINKS === '1') {
+        throw new Error(`TESSIVUM_REQUIRE_FILE_SYMLINKS=1: ${reason}`, { cause: error })
+      }
+      console.warn(`Skipping dangling optional-file capture and live-symlink restore tests: ${reason}`)
+      return { available: false, reason }
+    }
+    return { available: true, reason: '' }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})()
+
+const fileSymlinkSkipReason = fileSymlinkCapability.available ? '' : ` (skipped: ${fileSymlinkCapability.reason})`
+
 let tmp: string
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'dshm-snap-'))
@@ -128,7 +152,7 @@ describe('createProfileSnapshot', () => {
     expect(existsSync(snapshotsDir(dir))).toBe(false)
   })
 
-  it('does not mislabel a dangling optional-file symlink as absent', () => {
+  it.skipIf(!fileSymlinkCapability.available)(`does not mislabel a dangling optional-file symlink as absent${fileSymlinkSkipReason}`, () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
     symlinkSync(join(dir, 'missing-cordis.patch.yml'), join(dir, 'cordis.patch.yml'), 'file')
@@ -259,7 +283,7 @@ describe('restoreSnapshot', () => {
     expect(JSON.parse(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8'))).toEqual({ disabled: ['later'] })
   })
 
-  it('refuses to replace a live symlink with a regular file', () => {
+  it.skipIf(!fileSymlinkCapability.available)(`refuses to replace a live symlink with a regular file${fileSymlinkSkipReason}`, () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
     writeFileSync(join(dir, 'cordis.patch.yml'), SAMPLE_PATCH)

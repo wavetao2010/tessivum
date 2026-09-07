@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use crate::subprocess::WindowsJob;
 use async_trait::async_trait;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -426,6 +428,21 @@ impl ProcessCodeRuntime {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        #[cfg(windows)]
+        let (mut child, job) = match WindowsJob::spawn(&mut command) {
+            Ok(owned) => owned,
+            Err(error) => {
+                return ledger.failure(failure(
+                    CodeRunFailureKind::WorkerExit,
+                    format!("could not start process: {error}"),
+                ))
+            }
+        };
+        #[cfg(not(windows))]
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -436,13 +453,34 @@ impl ProcessCodeRuntime {
             }
         };
         let Some(mut stdin) = child.stdin.take() else {
-            return reap(child, ledger, "process did not provide stdin").await;
+            return reap(
+                child,
+                #[cfg(windows)]
+                job,
+                ledger,
+                "process did not provide stdin",
+            )
+            .await;
         };
         let Some(stdout) = child.stdout.take() else {
-            return reap(child, ledger, "process did not provide stdout").await;
+            return reap(
+                child,
+                #[cfg(windows)]
+                job,
+                ledger,
+                "process did not provide stdout",
+            )
+            .await;
         };
         let Some(stderr) = child.stderr.take() else {
-            return reap(child, ledger, "process did not provide stderr").await;
+            return reap(
+                child,
+                #[cfg(windows)]
+                job,
+                ledger,
+                "process did not provide stderr",
+            )
+            .await;
         };
         let boot = json!({"program":request.program,"bindings":bindings.manifest});
         let mut outcome = write(&mut stdin, &boot).await.err().map(|e| {
@@ -483,7 +521,19 @@ impl ProcessCodeRuntime {
                 reply = pending.next(), if !pending.is_empty() => if let Some(reply) = reply {
                     if let Err(error) = reply.write_to(&mut stdin).await { outcome = Some(Outcome::Failure(failure(CodeRunFailureKind::WorkerExit, format!("could not reply to binding call: {error}")))); }
                 },
-                waited = child.wait(), if !exited => match waited { Ok(_) => exited = true, Err(error) => { exited = true; outcome = Some(Outcome::Failure(failure(CodeRunFailureKind::WorkerExit, format!("could not wait for process: {error}")))); } },
+                waited = child.wait(), if !exited => match waited {
+                    Ok(_) => {
+                        exited = true;
+                        #[cfg(windows)]
+                        job.terminate();
+                    }
+                    Err(error) => {
+                        exited = true;
+                        #[cfg(windows)]
+                        job.terminate();
+                        outcome = Some(Outcome::Failure(failure(CodeRunFailureKind::WorkerExit, format!("could not wait for process: {error}"))));
+                    }
+                },
                 _ = sleep_until(deadline) => outcome = Some(Outcome::Failure(failure(CodeRunFailureKind::Timeout, format!("wall-clock ceiling reached ({}ms)", self.inner.config.timeout.as_millis())))),
                 _ = cancelled(request.cancellation.clone()) => outcome = Some(Outcome::Failure(failure(CodeRunFailureKind::Abort, "run cancelled"))),
                 _ = runtime_cancel.cancelled() => outcome = Some(Outcome::Failure(failure(CodeRunFailureKind::Abort, "runtime disposed"))),
@@ -495,6 +545,13 @@ impl ProcessCodeRuntime {
                 "process exited before completing",
             )));
         }
+        #[cfg(windows)]
+        {
+            // The direct worker can exit while descendants still hold its pipes.
+            job.terminate();
+            let _ = child.wait().await;
+        }
+        #[cfg(not(windows))]
         if !exited {
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -1012,7 +1069,15 @@ async fn cancelled(token: Option<CancellationToken>) {
         None => pending::<()>().await,
     }
 }
-async fn reap(mut child: Child, ledger: Ledger, message: &str) -> CodeRunResult {
+async fn reap(
+    mut child: Child,
+    #[cfg(windows)] job: WindowsJob,
+    ledger: Ledger,
+    message: &str,
+) -> CodeRunResult {
+    #[cfg(windows)]
+    job.terminate();
+    #[cfg(not(windows))]
     let _ = child.kill().await;
     let _ = child.wait().await;
     ledger.failure(failure(CodeRunFailureKind::WorkerExit, message))
@@ -1151,3 +1216,88 @@ try:
  def captured(*a,sep=' ',end='\n',**k):emit({'type':'log','text':sep.join(map(str,a))+end.rstrip('\n')})
  env['print']=captured;body='\n'.join('    '+x for x in d['program'].splitlines()) or '    pass';exec(compile('async def __dsh_main__():\n'+body+'\n','<program>','exec'),env,env);v=asyncio.run(env['__dsh_main__']());emit({'type':'done','value':v} if valid(v) else {'type':'done','error':{'kind':'invalid-output','message':'program completion must be lossless JSON'}})
 except Exception as e:emit({'type':'done','error':{'kind':'exception','message':str(e)}})"#;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    async fn wait_for_child_pid(path: &std::path::Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(9);
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(path).and_then(|value| {
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }) {
+                if pid != 0 {
+                    return pid;
+                }
+            }
+            assert!(Instant::now() < deadline, "child did not publish its PID");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn open_live_process(pid: u32) -> windows_sys::Win32::Foundation::HANDLE {
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+        let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        assert!(
+            !process.is_null(),
+            "child {pid} was not running at readiness"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(process, 0) },
+            WAIT_TIMEOUT,
+            "child {pid} exited before consumer cleanup"
+        );
+        process
+    }
+
+    fn assert_process_exited(process: windows_sys::Win32::Foundation::HANDLE, pid: u32) {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::WaitForSingleObject,
+        };
+
+        let waited = unsafe { WaitForSingleObject(process, 10_000) };
+        unsafe { CloseHandle(process) };
+        assert_eq!(waited, WAIT_OBJECT_0, "consumer left child {pid} alive");
+    }
+
+    #[tokio::test]
+    async fn timeout_reaps_worker_descendants_before_returning() {
+        let root = std::env::temp_dir().join(format!(
+            "tessivum-code-runtime-job-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let ready = root.join("ready");
+        let descendant = format!(
+            "import os,pathlib,time;pathlib.Path({}).write_text(str(os.getpid()));time.sleep(300)",
+            serde_json::to_string(&ready.to_string_lossy()).unwrap()
+        );
+        let program = format!(
+            "import pathlib,subprocess,sys,time\nready=pathlib.Path({})\nsubprocess.Popen([sys.executable,'-c',{}])\ndeadline=time.monotonic()+8\nwhile True:\n    try:\n        if int(ready.read_text()) > 0:\n            break\n    except (FileNotFoundError,ValueError):\n        pass\n    if time.monotonic() >= deadline:\n        raise RuntimeError('descendant readiness timed out')\n    time.sleep(.01)\ntime.sleep(300)",
+            serde_json::to_string(&ready.to_string_lossy()).unwrap(),
+            serde_json::to_string(&descendant).unwrap(),
+        );
+        let mut config = ProcessCodeRuntimeConfig::python("python");
+        config.timeout = Duration::from_secs(10);
+        let runtime = ProcessCodeRuntime::new(config).unwrap();
+
+        let run = runtime.run(CodeRunRequest::new(program, Vec::new()));
+        tokio::pin!(run);
+        let pid = tokio::select! {
+            result = &mut run => panic!("worker ended before descendant readiness: {result:?}"),
+            pid = wait_for_child_pid(&ready) => pid,
+        };
+        let process = open_live_process(pid);
+        let result = run.await.unwrap();
+        assert_eq!(result.error.unwrap().kind, CodeRunFailureKind::Timeout);
+        assert_process_exited(process, pid);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

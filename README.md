@@ -173,6 +173,7 @@ Back up the data root before changing Alpha versions. Binary rollback does not d
 - Checksums detect corruption; they are not signatures. Alpha.23 binaries are not code-signed or notarized.
 - HTTP listeners remain loopback-only unless Remote Access is explicitly enabled with its separate authority checks.
 - Legacy Node plugins and pnpm subprocesses are trusted local code, not sandboxed extensions.
+- The Windows source ACL runner restricts writes, not reads, network access, or process visibility. It retains Everyone/logon-SID ambient grants for runtime compatibility; NTFS hard-link aliases share file permissions, so this is not complete path isolation. `danger-full-access` requires explicit approval. Windows releases remain unpublished.
 
 ## Reproducible benchmark
 

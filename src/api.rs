@@ -5782,16 +5782,25 @@ fn compat_upgrade(
     upgrade: WebSocketUpgrade,
     stream_kind: CompatStream,
 ) -> Response {
+    let frames = state.compat.frames.subscribe();
+    let notifications = state.host.subscribe();
+    let shutdown = state.socket_shutdown.subscribe();
     upgrade
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| compat_websocket(socket, state, stream_kind))
+        .on_upgrade(move |socket| {
+            compat_websocket(socket, state, stream_kind, frames, notifications, shutdown)
+        })
 }
 
-async fn compat_websocket(mut socket: WebSocket, state: ApiState, stream_kind: CompatStream) {
-    let mut frames = state.compat.frames.subscribe();
-    let mut notifications = state.host.subscribe();
-    let mut shutdown = state.socket_shutdown.subscribe();
+async fn compat_websocket(
+    mut socket: WebSocket,
+    state: ApiState,
+    stream_kind: CompatStream,
+    mut frames: broadcast::Receiver<CompatFrame>,
+    mut notifications: broadcast::Receiver<HostNotification>,
+    mut shutdown: broadcast::Receiver<()>,
+) {
     let mut replayed_approvals = BTreeSet::new();
     if stream_kind == CompatStream::Mux {
         if let Some(registry) = state.host.approval_registry() {
@@ -7347,15 +7356,23 @@ async fn websocket_upgrade(
         RequestAuthority::Remote(device) => Some(device.device_id),
         RequestAuthority::Local | RequestAuthority::RemotePublic => None,
     };
+    let notifications = state.host.subscribe();
+    let shutdown = state.socket_shutdown.subscribe();
     upgrade
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| websocket(socket, state, remote_device))
+        .on_upgrade(move |socket| websocket(socket, state, remote_device, notifications, shutdown))
 }
 
 type HostCall = Pin<Box<dyn Future<Output = (String, Result<Value, ApiError>)> + Send>>;
 
-async fn websocket(socket: WebSocket, state: ApiState, remote_device: Option<Uuid>) {
+async fn websocket(
+    socket: WebSocket,
+    state: ApiState,
+    remote_device: Option<Uuid>,
+    mut notifications: broadcast::Receiver<HostNotification>,
+    mut shutdown: broadcast::Receiver<()>,
+) {
     let (mut writer, mut reader) = socket.split();
     let (outgoing, mut queued) = mpsc::channel::<WsMessage>(MAX_SOCKET_QUEUE);
     let writer_task = tokio::spawn(async move {
@@ -7365,8 +7382,6 @@ async fn websocket(socket: WebSocket, state: ApiState, remote_device: Option<Uui
             }
         }
     });
-    let mut notifications = state.host.subscribe();
-    let mut shutdown = state.socket_shutdown.subscribe();
     let mut calls = FuturesUnordered::<HostCall>::new();
     let mut device_checks = tokio::time::interval(Duration::from_millis(250));
     device_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

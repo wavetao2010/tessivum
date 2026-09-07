@@ -520,6 +520,12 @@ CordisError {
 | Legacy Node | 可信旧代码 | 独立进程、OS sandbox、Bridge 输入限制 |
 | Browser | 非可信客户端 | exact bound loopback Host/Origin authority、RPC schema、approval generation/rpcId、redacted settings、write-only credentials、服务端状态权威 |
 
+Windows 工具继续使用 `bash` 协议，内部执行 PowerShell；持久 Shell 按 Session 串行保持状态。产品直接拥有的 Windows 子进程先 suspended spawn，再绑定 kill-on-close Job，最后 resume；自然退出、取消、超时与 Host shutdown 都清理后代。Legacy Node Bridge 保留 Core 自身的 close/dispose 和 Job 协议。
+
+Windows ACL runner 使用 write-restricted token：当前批准的 canonical write roots 各自具有稳定 capability SID，每次执行只携带当前 roots；private temp 使用独立 SID，正常撤销，异常遗留由同一用户的后续 runner 在跨 logon-session mutex 下按 owner marker 恢复。`read-only` 不授予 workspace 写 capability，只允许写本次 Session/命令的独占 private temp；`workspace-write` 另外授予当前批准 roots，`danger-full-access` 必须显式批准。此边界保留 Everyone/logon SID 的环境授权及 NTFS 硬链接别名的共享 DACL 语义，不保证完整路径隔离，也不隔离读取、网络或进程可见性。
+
+只读模式的 TEMP/TMP 指向同一个独占目录，默认 DACL 使用该目录的 private-temp SID，不增加公共 Everyone 写授权。允许临时写入使 PowerShell 启动策略探针能够正常运行；不会关闭或绕过机器现有的 AppLocker、WDAC 等系统策略，也不会因此授予项目、用户目录或兄弟 TEMP 的写 capability。
+
 ## 18. 架构验收不变量
 
 1. 卸载完成后没有该 Scope 拥有的资源。
