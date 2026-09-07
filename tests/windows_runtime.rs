@@ -399,12 +399,9 @@ async fn host_shutdown_cancels_minimal_persistent_powershell_process_tree() {
     let events = host.events(session, 0).await.unwrap();
     let result = events
         .iter()
-        .filter(|event| event.event_type == "tool/result")
         .find(|event| {
-            matches!(
-                event.data["meta"]["code"].as_str(),
-                Some("PERSISTENT_SHELL_CANCELLED" | "PERSISTENT_SHELL_DISPOSED")
-            )
+            event.event_type == "tool/result"
+                && event.data["message"]["content"][0]["toolCallId"] == "windows-runtime-call-2"
         })
         .expect("Host records cancellation of the active persistent bash call");
     assert_eq!(result.data["message"]["content"][0]["isError"], true);

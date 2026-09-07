@@ -1638,19 +1638,19 @@ command printf '\036TESSIVUM-SHELL:{nonce}:E:%s\037\n' "${variable}" >&2
 
 #[cfg(windows)]
 fn persistent_shell_frame(script: &str, nonce: &str) -> String {
-    let script = base64_encode(script.as_bytes());
     let status = format!("__tessivum_status_{nonce}");
     let succeeded = format!("__tessivum_succeeded_{nonce}");
     let block = format!("__tessivum_block_{nonce}");
     let marker = format!("__tessivum_marker_{nonce}");
+    let script = base64_encode(format!("{script}\n${succeeded} = $?").as_bytes());
     format!(
         r#"$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $global:LASTEXITCODE = $null
 ${status} = 0
+${succeeded} = $true
 try {{
 ${block} = [ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{script}')))
 . ${block}
-${succeeded} = $?
 if ($null -ne $LASTEXITCODE) {{ ${status} = [int]$LASTEXITCODE }} elseif (-not ${succeeded}) {{ ${status} = 1 }}
 }} catch {{
 [Console]::Error.WriteLine($_.Exception.Message)

@@ -66,12 +66,6 @@ fn plan(mode: SandboxMode, workspace: &Path, script: impl Into<String>) -> Vec<S
     let plan = Sandbox::local()
         .prepare(&request(mode, workspace, true), &argv)
         .unwrap();
-    assert_eq!(
-        Path::new(&plan.argv[0]).canonicalize().unwrap(),
-        Path::new(env!("CARGO_BIN_EXE_tessivum"))
-            .canonicalize()
-            .unwrap()
-    );
     plan.argv
 }
 

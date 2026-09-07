@@ -1103,9 +1103,9 @@ async fn run_windows_powershell(
 
     let script = format!(
         "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
-         $global:LASTEXITCODE = $null; try {{ & {{ {command} }}; $ok = $?; $code = $LASTEXITCODE }} \
-         catch {{ [Console]::Error.WriteLine($_); exit 1 }}; \
-         if ($null -ne $code) {{ exit $code }}; if (-not $ok) {{ exit 1 }}"
+         $global:LASTEXITCODE = $null; try {{ & {{ {command}\n; $ok = $?; $code = $LASTEXITCODE; \
+         if ($null -ne $code) {{ exit $code }}; if (-not $ok) {{ exit 1 }} }} }} \
+         catch {{ [Console]::Error.WriteLine($_); exit 1 }}"
     );
     let workspace = match lease {
         Some(lease) => lease

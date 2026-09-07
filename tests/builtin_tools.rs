@@ -1221,7 +1221,7 @@ async fn stale_workspace_retires_persistent_powershell() {
         BuiltinToolsConfig {
             enable_bash: true,
             cwd: root.path().to_path_buf(),
-            resolver: Some(Arc::new(SessionResourceResolver::new(registry))),
+            resolver: Some(Arc::new(SessionResourceResolver::new(registry.clone()))),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         },
     )
@@ -1238,8 +1238,14 @@ async fn stale_workspace_retires_persistent_powershell() {
         .await;
     assert!(!started.is_error, "{}", text(&started));
     let pid = fs::read_to_string(workspace.join("shell.pid")).unwrap();
-    fs::rename(&workspace, root.path().join("old-workspace")).unwrap();
-    fs::rename(&replacement, &workspace).unwrap();
+    let replacement_id = registry
+        .create(&replacement, None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    registry
+        .attach_session(&replacement_id, &session, None)
+        .unwrap();
 
     let stale = runtime
         .execute(
@@ -1251,6 +1257,7 @@ async fn stale_workspace_retires_persistent_powershell() {
     assert_eq!(code(&stale), "STALE_WORKSPACE_LEASE");
     assert_reaped(&pid).await;
     assert!(!workspace.join("should-not-run.txt").exists());
+    assert!(!replacement.join("should-not-run.txt").exists());
     shells.shutdown().await;
 }
 
