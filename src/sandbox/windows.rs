@@ -382,7 +382,7 @@ fn spawn_wait(token: HANDLE, argv: &[String], cwd: &Path, temp: &Path) -> io::Re
     let mut info = PROCESS_INFORMATION::default();
     let command_line = build_command_line(argv);
     let mut command = wide(OsStr::new(&command_line));
-    let cwd = wide(cwd.as_os_str());
+    let cwd = wide(crate::process_path(cwd).as_os_str());
     let environment = child_environment(temp);
     injected(3)?;
     let created = unsafe {

@@ -398,12 +398,12 @@ fn runner_job_kills_started_descendant_after_parent_exits() {
     let release = root.0.join("release-parent");
     let temp_file = root.0.join("descendant.temp");
     let descendant = format!(
-        "$held = [IO.File]::Open((Join-Path $env:TEMP 'held.txt'), [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); [IO.File]::WriteAllText({}, $env:TEMP); [IO.File]::WriteAllText({}, [string]$PID); Start-Sleep -Seconds 300",
+        "$ErrorActionPreference='Stop'; $held = [IO.File]::Open((Join-Path $env:TEMP 'held.txt'), [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); Set-Content -LiteralPath {} -Value $env:TEMP -NoNewline; Set-Content -LiteralPath {} -Value $PID -NoNewline; Start-Sleep -Seconds 300",
         ps(&temp_file),
         ps(&pid_file),
     );
     let script = format!(
-        "$child = Start-Process powershell.exe -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',{}) -PassThru; if ($child.HasExited) {{ exit 61 }}; while (-not (Test-Path -LiteralPath {})) {{ Start-Sleep -Milliseconds 10 }}",
+        "$child = Start-Process powershell.exe -NoNewWindow -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',{}) -PassThru; if ($child.HasExited) {{ exit 61 }}; while (-not (Test-Path -LiteralPath {})) {{ Start-Sleep -Milliseconds 10 }}",
         ps_text(&descendant),
         ps(&release),
     );
