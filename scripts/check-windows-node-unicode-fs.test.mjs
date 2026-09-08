@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
+  readlinkSync,
   readdirSync,
   rmSync,
 } from 'node:fs';
@@ -15,7 +18,6 @@ import * as guard from './check-windows-node-unicode-fs.mjs';
 
 const moduleUrl = new URL('./check-windows-node-unicode-fs.mjs', import.meta.url);
 const modulePath = fileURLToPath(moduleUrl);
-const portableNodePath = String.raw`C:\Users\Q\Documents\New project\.tools\node-v24.20.0-win-x64\node.exe`;
 const oldNodePath = String.raw`D:\Program Files\nodejs\node.exe`;
 const oldNodeVersionResult = spawnSync(oldNodePath, ['--version'], {
   encoding: 'utf8',
@@ -56,11 +58,58 @@ function assertDiagnosticFacts(text, version = '24.11.1', platform = 'win32') {
   assert.match(text, /https:\/\/github\.com\/nodejs\/node\/issues\/61067/);
 }
 
-function unicodeProbeEntries() {
-  return readdirSync(tmpdir(), { withFileTypes: true })
+function directoryEntryType(entry) {
+  if (entry.isDirectory()) return 'directory';
+  if (entry.isFile()) return 'file';
+  if (entry.isSymbolicLink()) return 'symbolic-link';
+  if (entry.isBlockDevice()) return 'block-device';
+  if (entry.isCharacterDevice()) return 'character-device';
+  if (entry.isFIFO()) return 'fifo';
+  if (entry.isSocket()) return 'socket';
+  return 'unknown';
+}
+
+function compareText(left, right) {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+function snapshotUnicodeProbeTrees() {
+  const root = tmpdir();
+  const snapshot = [];
+
+  function visit(entry, relativePath) {
+    const absolutePath = join(root, ...relativePath.split('/'));
+    const type = directoryEntryType(entry);
+    const record = { path: relativePath, type };
+
+    if (type === 'file') {
+      record.sha256 = createHash('sha256')
+        .update(readFileSync(absolutePath))
+        .digest('hex');
+    } else if (type === 'symbolic-link') {
+      record.target = readlinkSync(absolutePath);
+    }
+    snapshot.push(record);
+
+    if (type === 'directory') {
+      const children = readdirSync(absolutePath, { withFileTypes: true })
+        .sort((left, right) => compareText(left.name, right.name));
+      for (const child of children) {
+        visit(child, `${relativePath}/${child.name}`);
+      }
+    }
+  }
+
+  const ownedRoots = readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.name.startsWith('测试 路径-'))
-    .map((entry) => entry.name)
-    .sort();
+    .sort((left, right) => compareText(left.name, right.name));
+  for (const ownedRoot of ownedRoots) {
+    visit(ownedRoot, ownedRoot.name);
+  }
+
+  return snapshot.sort((left, right) => compareText(left.path, right.path));
 }
 
 const supportedVersionCases = [
@@ -109,9 +158,9 @@ test('rejects an affected Windows Node version with policy diagnostics', () => {
 test('affected Node CLI rejects before creating probe-owned paths', {
   skip: hasAffectedNode ? false : 'exact Node 24.11.1 runtime is unavailable',
 }, () => {
-  const before = unicodeProbeEntries();
+  const before = snapshotUnicodeProbeTrees();
   const result = spawnSync(oldNodePath, [modulePath], { encoding: 'utf8' });
-  const after = unicodeProbeEntries();
+  const after = snapshotUnicodeProbeTrees();
 
   assert.notEqual(result.status, 0);
   assertDiagnosticFacts(`${result.stdout}${result.stderr}`);
@@ -151,10 +200,10 @@ test('capable Node replaces and validates files under a Unicode path', {
   assert.equal(existsSync(parentDirectory), true);
 });
 
-test('portable Node CLI reports one concise success line', {
+test('capable Node CLI reports one concise success line', {
   skip: hasCapableCurrentNode ? false : 'current Node is outside supported ranges',
 }, () => {
-  const result = spawnSync(portableNodePath, [modulePath], { encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [modulePath], { encoding: 'utf8' });
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, '');
