@@ -24,7 +24,9 @@ use crate::{
         AgentModeId, AgentModeRegistry, ModePluginRuntime, ToolCapabilityId, ToolPresentation,
     },
     builtin_tools::PersistentShellSessions,
-    code_runtime::{register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE},
+    code_runtime::{
+        code_tool_description, register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE,
+    },
     compaction::{CompactionOutcome, CompactionService, CompactionTrigger},
     composition::{
         CompositionDescriptor, CompositionEntryReference, CompositionRegistry, CompositionRuntime,
@@ -343,6 +345,7 @@ struct SessionRuntimeSpec {
     composition: bool,
     prompt: ModePrompt,
     tools: ToolRuntime,
+    code_tools: Option<ToolRuntime>,
     compaction: Option<CompactionService>,
     skills: Option<(SkillRuntime, SkillSessionScopes)>,
     _tool_registrations: Vec<ToolRegistration>,
@@ -539,6 +542,8 @@ impl SessionRuntimeSpec {
             .native_tools
             .scoped(restrictions)
             .map_err(AgentError::Message)?;
+        let code_tools =
+            (presentation == ToolPresentation::Programmatic).then(|| native_tools.clone());
         let (tools, registrations) = match presentation {
             ToolPresentation::Direct => (native_tools, Vec::new()),
             ToolPresentation::Programmatic => {
@@ -565,6 +570,7 @@ impl SessionRuntimeSpec {
                 section: PromptSection::new(format!("agent-mode/{mode_id}"), 0, mode_prompt.text),
             },
             tools,
+            code_tools,
             compaction: compaction_enabled
                 .then(|| factory.compaction.clone())
                 .flatten(),
@@ -952,7 +958,15 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             }
         }
 
-        let tool_schemas = inner.runtime.tools.schemas();
+        let mut tool_schemas = inner.runtime.tools.schemas();
+        if let Some(code_tools) = &inner.runtime.code_tools {
+            if let Some(schema) = tool_schemas
+                .iter_mut()
+                .find(|schema| schema.name == "run_code")
+            {
+                schema.description = code_tool_description(code_tools);
+            }
+        }
         let (system, tools) = if inner.runtime.prompt.complete {
             (
                 Some(inner.runtime.prompt.section.text.clone()),

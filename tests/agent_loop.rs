@@ -1536,6 +1536,99 @@ async fn four_session_runtime_specs_are_isolated() {
 }
 
 #[tokio::test]
+async fn programmatic_catalog_tracks_visible_tool_contract_changes() {
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let llm = LlmRuntime::new();
+    let _provider = llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([
+                    text_turn("first"),
+                    text_turn("updated"),
+                    text_turn("removed"),
+                ]))),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let initial = json!({"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"],"additionalProperties":false});
+    let changed = json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer"}},"required":["file_path","offset"],"additionalProperties":false});
+    let registration = tools
+        .register(ToolDefinition::new(
+            "read",
+            "Read file content",
+            initial.clone(),
+            Echo,
+        ))
+        .unwrap();
+    let _hidden = tools
+        .register(ToolDefinition::new(
+            "write",
+            "hidden operation",
+            json!({"type":"object","properties":{}}),
+            Echo,
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(llm, SystemPrompt::new(), tools.clone()).with_code_runtime(ptc_runtime()),
+        ))
+        .unwrap();
+    let agent = registry
+        .create(
+            header_with_mode("live-catalog", "test-ptc"),
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    agent.followup(user("first")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    let replacements = tools
+        .replace(
+            &[registration],
+            vec![ToolDefinition::new(
+                "read",
+                "Read from an offset",
+                changed.clone(),
+                Echo,
+            )],
+        )
+        .unwrap();
+    agent.followup(user("updated")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    drop(replacements);
+    agent.followup(user("removed")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    {
+        let requests = requests.lock();
+        for (request, expected) in requests.iter().zip([Some(initial), Some(changed), None]) {
+            let schemas = request.tools.as_ref().unwrap();
+            assert_eq!(schemas.len(), 1);
+            assert_eq!(schemas[0].name, "run_code");
+            let catalog = schemas[0]
+                .description
+                .lines()
+                .find_map(|line| serde_json::from_str::<Vec<ToolSchema>>(line).ok())
+                .expect("model must receive the current nested tool schemas");
+            match expected {
+                Some(parameters) => {
+                    assert_eq!(catalog.len(), 1, "hidden tools must not enter the SDK");
+                    assert_eq!(catalog[0].name, "read");
+                    assert_eq!(catalog[0].parameters, parameters);
+                }
+                None => assert!(catalog.is_empty(), "removed tools must leave the SDK"),
+            }
+        }
+        assert_eq!(requests.len(), 3);
+    }
+    agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
 async fn mode_plugins_activate_before_agent_start_and_stop_with_the_session() {
     let live = Arc::new(AtomicUsize::new(0));
     let factory_live = Arc::clone(&live);

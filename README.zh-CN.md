@@ -13,7 +13,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 ## 当前状态
 
-`v0.1.0-alpha.23` 是预发布版本。它使用 `tessivum-core v0.1.6` 修订版 `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，兼容目标为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
+`v0.1.0-alpha.24` 是预发布版本。它使用 `tessivum-core v0.1.6` 修订版 `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，兼容目标为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
 
 当前已有：
 
@@ -31,10 +31,10 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 | 平台 | 架构 | 归档 | SHA-256 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-aarch64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-aarch64-apple-darwin.tar.gz.sha256) |
-| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-x86_64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-x86_64-apple-darwin.tar.gz.sha256) |
-| Linux（glibc） | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-aarch64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-aarch64-unknown-linux-gnu.tar.gz.sha256) |
-| Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.23/tessivum-0.1.0-alpha.23-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-aarch64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-aarch64-apple-darwin.tar.gz.sha256) |
+| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-x86_64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-x86_64-apple-darwin.tar.gz.sha256) |
+| Linux（glibc） | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-aarch64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.24/tessivum-0.1.0-alpha.24-x86_64-unknown-linux-gnu.tar.gz.sha256) |
 | Windows 原生 | x86_64/ARM64 | 暂未发布 | — |
 
 现有安装器**并非只能用于 macOS**：它会自动识别 macOS/Linux 的 x86_64 与 ARM64。Windows 原生版本尚未通过发布构建、归档、启动器、插件、Browser、升级和进程清理门槛。Windows 用户可以暂时在 WSL2 内运行 Linux 包，但这条路径尚未经过发布验证；Linux `.tar.gz` 不能直接作为 Windows 原生程序运行。
@@ -55,8 +55,8 @@ tsv --version
 安装器会选择正确的发布归档、验证 SHA-256、安装到 `~/.local/lib/tessivum`，并更新 `~/.local/bin` 下的启动器：
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.23/install.sh
-sh install.sh 0.1.0-alpha.23
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.24/install.sh
+sh install.sh 0.1.0-alpha.24
 export PATH="$HOME/.local/bin:$PATH"
 tessivum --version
 ```
@@ -65,12 +65,12 @@ tessivum --version
 
 ### 手动下载归档——macOS 或 Linux
 
-从 [Alpha.23 发布页](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.23)下载归档及相邻的 `.sha256` 文件，并从上面的四个 target 中选择一个。
+从 [Alpha.24 发布页](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.24)下载归档及相邻的 `.sha256` 文件，并从上面的四个 target 中选择一个。
 
 Linux 示例：
 
 ```bash
-version=0.1.0-alpha.23
+version=0.1.0-alpha.24
 target=x86_64-unknown-linux-gnu # ARM64 使用 aarch64-unknown-linux-gnu
 base="https://github.com/wavetao2010/tessivum/releases/download/v$version"
 curl -fLO "$base/tessivum-$version-$target.tar.gz"
@@ -158,7 +158,7 @@ brew upgrade tessivum
 brew uninstall tessivum
 
 # 无 sudo 安装
-sh install.sh 0.1.0-alpha.23
+sh install.sh 0.1.0-alpha.24
 sh install.sh --uninstall
 
 # 显式且具有破坏性的数据删除
@@ -170,14 +170,14 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"
 ## 安全与发布来源
 
 - 发布归档与第一方市场工件包含 SHA-256 校验和及来源元数据；
-- 校验和可以检测损坏，但不是签名；Alpha.23 二进制未进行代码签名或公证；
+- 校验和可以检测损坏，但不是签名；Alpha.24 二进制未进行代码签名或公证；
 - 除非显式启用带独立权限检查的远程访问，否则 HTTP listener 保持 loopback-only；
 - Legacy Node 插件和 pnpm 子进程是受信任的本地代码，不是沙箱扩展。
 - Windows 源码中的 ACL runner 只限制写入，不隔离读取、网络或进程可见性。为兼容运行时保留 Everyone/logon SID 的环境权限；NTFS 硬链接别名共享文件权限，因此不是完整的路径隔离。`danger-full-access` 必须显式批准；Windows 发行包仍未发布。
 
 ## 可复现 Benchmark
 
-公开的 Linux 30 样本结果显示，相比 TypeScript Cordis 4.0.1，tessivum-core 的 Scope 创建/销毁**快 24.05×**、Service 查找吞吐为 **20.53×**、Event 吞吐为 **25.42×**，1,000 个 Scope 存活时 PSS **低 17.15×**；同时也披露 Loader 更新路径**慢 40.05×**。
+保留的 Alpha.23 Linux 30 样本 Benchmark 结果显示，相比 TypeScript Cordis 4.0.1，tessivum-core 的 Scope 创建/销毁**快 24.05×**、Service 查找吞吐为 **20.53×**、Event 吞吐为 **25.42×**，1,000 个 Scope 存活时 PSS **低 17.15×**；同时也披露 Loader 更新路径**慢 40.05×**。
 
 四个真实 Chromium 产品单元均通过 **30/30**。与 DeepSeek Harness 相比，Tessivum Base 的 HTTP ready **快 5.83×**、空闲 Host 进程树 PSS **低 4.52×**；Compatibility 的空闲 PSS **低 1.63×**，但 HTTP ready **慢 9.31×**。
 
