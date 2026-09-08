@@ -163,7 +163,10 @@ function parseWindowsWorkflow(workflow) {
   const jobStart = windowsJobs[0];
   let jobEnd = lines.length;
   for (let index = jobStart + 1; index < visible.length; index += 1) {
-    if (workflowJobKey(visible[index]) !== null) {
+    const structural = visible[index];
+    const indent = structural.length - structural.trimStart().length;
+    if (workflowJobKey(structural) !== null
+        || (structural.trim() && indent === 0)) {
       jobEnd = index;
       break;
     }
@@ -700,6 +703,24 @@ jobs:
     () => parseWindowsWorkflowSteps(workflow),
     /jobs\.windows must define steps exactly once/,
   );
+});
+
+test('Windows CI parser stops at a following top-level workflow field', () => {
+  const workflow = `
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - run: echo windows
+concurrency:
+  group: ci
+`;
+
+  const parsed = parseWindowsWorkflow(workflow);
+  assert.deepEqual(parsed.jobUnconsumed, []);
+  assert.equal(parsed.steps.length, 1);
+  assert.deepEqual(parsed.steps[0].run, ['echo windows']);
 });
 
 test('Windows CI parser rejects folded run scalars', () => {

@@ -185,7 +185,10 @@ def parse_windows_workflow(
     job_start = windows_indices[0]
     job_end = len(lines)
     for index in range(job_start + 1, len(lines)):
-        if workflow_job_key(visible[index]) is not None:
+        structural = visible[index]
+        indent = len(structural) - len(structural.lstrip())
+        if (workflow_job_key(structural) is not None
+                or (structural.strip() and indent == 0)):
             job_end = index
             break
     job_lines = lines[job_start + 1:job_end]
@@ -409,6 +412,15 @@ def check_windows_ci_parser_self_checks(
   next-job:
     steps: []
 """
+    following_workflow_field = """jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - run: echo windows
+concurrency:
+  group: ci
+"""
     fixtures = (
         (decoy_workflow, "accepted decoy comments or block scalar content"),
         (inserted_workflow, "crossed into an inserted same-indent job"),
@@ -427,6 +439,13 @@ def check_windows_ci_parser_self_checks(
         quoted_boundary_error = str(error)
     check(quoted_boundary_error == "jobs.windows must define steps exactly once",
           "Windows CI parser crossed into a quoted following job", failures)
+    parsed_following_field = parse_windows_workflow(following_workflow_field)
+    check(parsed_following_field["jobUnconsumed"] == [],
+          "Windows CI parser included following workflow fields in windows job: "
+          f"{parsed_following_field['jobUnconsumed']!r}", failures)
+    check(len(parsed_following_field["steps"]) == 1
+          and parsed_following_field["steps"][0].get("run") == ["echo windows"],
+          "Windows CI parser included steps outside windows job", failures)
 
     semantic_variants = (
         ("disabled Windows job", "  windows:",
