@@ -142,6 +142,15 @@ test('accepts the portable Node 24.20.0 runtime', () => {
   assert.equal(guard.isSupportedWindowsNodeVersion('24.20.0'), true);
 });
 
+test('filesystem identity comparison preserves BigInt precision', () => {
+  const first = { dev: 9_007_199_254_740_992n, ino: 41n };
+  const second = { dev: 9_007_199_254_740_993n, ino: 41n };
+
+  assert.equal(Number(first.dev), Number(second.dev));
+  assert.equal(guard.isSameFilesystemIdentity(first, second), false);
+  assert.equal(guard.isSameFilesystemIdentity(first, { ...first }), true);
+});
+
 test('rejects an affected Windows Node version with policy diagnostics', () => {
   assert.deepEqual(guard.SUPPORTED_NODE_RANGES, [
     '>=22.19.0 <23.0.0',

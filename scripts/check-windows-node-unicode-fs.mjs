@@ -98,7 +98,7 @@ function writeContents(root, contents) {
 
 function inspectPath(path) {
   try {
-    return { status: 'present', stats: lstatSync(path) };
+    return { status: 'present', stats: lstatSync(path, { bigint: true }) };
   } catch (error) {
     if (error.code === 'ENOENT') {
       return { status: 'absent' };
@@ -107,7 +107,7 @@ function inspectPath(path) {
   }
 }
 
-function sameIdentity(left, right) {
+export function isSameFilesystemIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
@@ -134,7 +134,7 @@ function verifyDirectory(directory, expectedIdentity, expectedRealPath, ownedRoo
   }
 
   const identity = { dev: state.stats.dev, ino: state.stats.ino };
-  if (!sameIdentity(identity, expectedIdentity)) {
+  if (!isSameFilesystemIdentity(identity, expectedIdentity)) {
     throw new Error(`directory identity changed before cleanup: ${directory}`);
   }
   const realPath = realpathSync.native(directory);
@@ -157,7 +157,7 @@ function verifyUnlinkIdentity(path, expectedIdentity) {
     return false;
   }
   const identity = { dev: state.stats.dev, ino: state.stats.ino };
-  if (!sameIdentity(identity, expectedIdentity)) {
+  if (!isSameFilesystemIdentity(identity, expectedIdentity)) {
     throw new Error(`entry identity changed before unlink: ${path}`);
   }
   return true;
