@@ -137,17 +137,30 @@ async fn validates_strict_schema_boundaries_before_handler_dispatch() {
         .expect("strict subset registers");
     let context = ContextHandle::root();
 
-    for arguments in [
-        json!({}),
-        json!({"mode": "slow"}),
-        json!({"mode": "fast", "values": [1.5]}),
-        json!({"mode": "fast", "extra": true}),
+    for (arguments, path) in [
+        (json!({}), "$.mode"),
+        (json!({"mode": "slow"}), "$.mode"),
+        (json!({"mode": "fast", "values": [1.5]}), "$.values[0]"),
+        (json!({"mode": "fast", "extra": true}), "$.extra"),
     ] {
         let output = runtime
             .execute(call(&context, "s", "invalid"), "echo", arguments)
             .await;
         assert!(output.is_error);
         assert_eq!(code(&output), "INVALID_TOOL_ARGUMENTS");
+        let ContentBlock::Text { text } = &output.content[0] else {
+            panic!("validation failure must be readable by the model");
+        };
+        assert!(text.contains(path), "missing field location: {text}");
+        assert!(text.contains("echo"), "missing tool name: {text}");
+        let expected = text
+            .lines()
+            .find_map(|line| serde_json::from_str::<Value>(line).ok());
+        assert_eq!(
+            expected,
+            Some(parameters()),
+            "model cannot recover the argument contract"
+        );
     }
     let output = runtime
         .execute(
@@ -191,6 +204,13 @@ async fn access_scopes_only_narrow_and_ask_fails_closed() {
         .await;
     assert_eq!(code(&output), "TOOL_DENIED");
     assert!(denied.schemas().is_empty());
+    let denied_invalid = denied
+        .execute(call(&context, "s", "deny-invalid"), "echo", json!({}))
+        .await;
+    assert_eq!(code(&denied_invalid), "TOOL_DENIED");
+    assert!(!serde_json::to_string(&denied_invalid.content)
+        .unwrap()
+        .contains("mode"));
 
     let asking = runtime
         .scoped(ToolRestrictions::new().ask("echo"))

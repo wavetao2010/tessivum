@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.24 - 2026-09-08
 
 ### Added
 
@@ -36,6 +36,10 @@
   through a Windows junction.
 - Make multiline Windows CI steps stop on non-zero native-command exits instead
   of allowing later commands to mask the prerequisite failure.
+- Publish the current scoped native tool catalog and exact argument schemas to PTC
+  model requests, including tool replacement/removal and flat-name invocation guidance.
+- Include tool names, field paths, and expected schemas in argument errors for both
+  Standard and PTC calls; reject out-of-scope calls before exposing schema diagnostics.
 
 ## 0.1.0-alpha.23 - 2026-09-03
 

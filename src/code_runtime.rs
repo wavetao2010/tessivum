@@ -617,7 +617,7 @@ pub fn register_code_tool(
 ) -> Result<ToolRegistration, TessivumError> {
     tools.register(ToolDefinition::new(
         "run_code",
-        "Runs one JavaScript program. Use the global tools object for nested tool calls and return a lossless JSON value.",
+        code_tool_description(&dispatch_tools),
         json!({
             "type": "object",
             "properties": {
@@ -632,6 +632,30 @@ pub fn register_code_tool(
             tools: dispatch_tools,
         },
     ))
+}
+
+pub(crate) fn code_tool_description(tools: &ToolRuntime) -> String {
+    let catalog = tools
+        .schemas()
+        .into_iter()
+        .filter(|schema| schema.name != "run_code")
+        .collect::<Vec<_>>();
+    format!(
+        "{}\n{}",
+        concat!(
+            "Runs one JavaScript program. Call await tools[\"name\"](arguments) using the exact ",
+            "names and JSON Schemas below. The tools object is flat: dots in a name are literal ",
+            "(for example tools[\"jobs.list\"]), not nested namespaces. Function inspection does ",
+            "not expose parameter schemas. Do not invent names or arguments. ",
+            "Calls return an object with text and content plus tool-specific result fields; ",
+            "bash also exposes stdout.text. Failed calls reject with ToolError (toolName and message). ",
+            "Return a lossless JSON value explicitly. Console output is diagnostic metadata, ",
+            "not model-visible tool output. ",
+            "Use the reported field path and expected schema to correct invalid arguments.\n",
+            "Current tool catalog (JSON Schema):"
+        ),
+        serde_json::to_string(&catalog).expect("tool schemas serialize"),
+    )
 }
 
 struct RunCode {
