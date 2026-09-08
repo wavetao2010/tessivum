@@ -103,7 +103,7 @@ def workflow_job_key(line: str) -> str | None:
 
 
 def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
-    step: dict[str, object] = {"with": {}, "run": []}
+    step: dict[str, object] = {"with": {}, "run": [], "unconsumed": []}
     lines = ["        " + item_lines[0][8:], *item_lines[1:]]
     mode: str | None = None
     for raw_line in lines:
@@ -114,20 +114,26 @@ def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
                 step["run"].append(command)
             continue
         line = strip_yaml_comment(raw_line).strip()
+        if not line:
+            continue
         if mode == "with" and indent == 10:
             match = re.fullmatch(
                 r"(repository|ref|node-version|bun-version|version):\s*(.*)", line
             )
             if match:
                 step["with"][match.group(1)] = unquote(match.group(2))
+            else:
+                step["unconsumed"].append(raw_line)
             continue
         if indent != 8:
+            step["unconsumed"].append(raw_line)
             continue
         mode = None
         match = re.fullmatch(
             r"(['\"]?)(uses|name|with|run|if|continue-on-error)\1:\s*(.*)", line
         )
         if match is None:
+            step["unconsumed"].append(raw_line)
             continue
         _, key, value = match.groups()
         if key == "with":
@@ -251,13 +257,38 @@ def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -
         }}, "tessivum-core checkout"),
     )
     for index, (expected, label) in enumerate(expected_prefix):
+        if index in {1, 2}:
+            continue
         actual = steps[index] if len(steps) > index else {}
         check(all(actual.get(key) == value for key, value in expected.items()),
               f"Windows CI {label} changed or moved", failures)
-    for index, label in ((1, "setup-node"), (2, "Node prerequisite")):
+    protected_steps = (
+        (1, "setup-node", {
+            "uses": "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+            "with": {"node-version": "24.20.0"},
+            "run": [],
+            "unconsumed": [],
+        }),
+        (2, "Node prerequisite", {
+            "name": "Verify Windows Node filesystem prerequisite",
+            "with": {},
+            "run": [
+                "$ErrorActionPreference = 'Stop'",
+                "$PSNativeCommandUseErrorActionPreference = $true",
+                "node --test scripts/check-windows-node-unicode-fs.test.mjs",
+                "node scripts/check-windows-node-unicode-fs.mjs",
+            ],
+            "unconsumed": [],
+        }),
+    )
+    for index, label, expected in protected_steps:
         step = steps[index] if len(steps) > index else {}
-        check("if" not in step and "continue-on-error" not in step,
-              f"Windows CI {label} has bypass semantics", failures)
+        if "if" in step or "continue-on-error" in step:
+            failures.append(f"Windows CI {label} has bypass semantics")
+        elif step.get("unconsumed") != []:
+            failures.append(f"Windows CI {label} contains unconsumed syntax")
+        elif step != expected:
+            failures.append(f"Windows CI {label} changed or moved")
 
     later_requirements = (
         lambda step: step.get("uses")
@@ -365,6 +396,30 @@ def check_windows_ci_parser_self_checks(
          "      - name: Verify Windows Node filesystem prerequisite",
          "      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true",
          "Windows CI Node prerequisite has bypass semantics"),
+        ("setup-node explicit mapping if",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        ? if\n        : false",
+         "Windows CI setup-node contains unconsumed syntax"),
+        ("Node prerequisite explicit mapping continue-on-error",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        ? continue-on-error\n        : true",
+         "Windows CI Node prerequisite contains unconsumed syntax"),
+        ("setup-node shell",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        shell: pwsh",
+         "Windows CI setup-node contains unconsumed syntax"),
+        ("Node prerequisite env and NODE_OPTIONS",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        env:\n          NODE_OPTIONS: --no-addons",
+         "Windows CI Node prerequisite contains unconsumed syntax"),
+        ("Node prerequisite working-directory",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        working-directory: scripts",
+         "Windows CI Node prerequisite contains unconsumed syntax"),
+        ("setup-node unknown with input",
+         "          node-version: 24.20.0",
+         "          node-version: 24.20.0\n          cache: npm",
+         "Windows CI setup-node contains unconsumed syntax"),
         ("setup-node single-quoted if",
          "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
          "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        'if': false",

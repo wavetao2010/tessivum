@@ -196,7 +196,7 @@ function parseWindowsWorkflow(workflow) {
     const end = itemStarts[itemIndex + 1] ?? stepLines.length;
     const item = stepLines.slice(start, end);
     item[0] = `        ${item[0].slice(8)}`;
-    const step = { with: {}, run: [] };
+    const step = { with: {}, run: [], unconsumed: [] };
     let mode = null;
     for (const rawLine of item) {
       const indent = /^ */.exec(rawLine)[0].length;
@@ -206,15 +206,26 @@ function parseWindowsWorkflow(workflow) {
         continue;
       }
       const line = stripYamlComment(rawLine).trim();
+      if (!line) continue;
       if (mode === 'with' && indent === 10) {
         const match = /^(repository|ref|node-version|bun-version|version):\s*(.*)$/.exec(line);
-        if (match) step.with[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
+        if (match) {
+          step.with[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
+        } else {
+          step.unconsumed.push(rawLine);
+        }
         continue;
       }
-      if (indent !== 8) continue;
+      if (indent !== 8) {
+        step.unconsumed.push(rawLine);
+        continue;
+      }
       mode = null;
       const match = /^(['"]?)(uses|name|with|run|if|continue-on-error)\1:\s*(.*)$/.exec(line);
-      if (!match) continue;
+      if (!match) {
+        step.unconsumed.push(rawLine);
+        continue;
+      }
       const [, , key, rawValue] = match;
       const value = rawValue.replace(/^(['"])(.*)\1$/, '$2');
       if (key === 'with') mode = 'with';
@@ -246,22 +257,19 @@ function assertWindowsCiPrerequisiteOrder(workflow) {
     undefined,
     'Windows CI first step must not override the primary repository',
   );
-  assert.equal(
-    steps[1]?.uses,
-    'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
-    'Windows CI second step must be the pinned setup-node action',
-  );
-  assert.equal(steps[1]?.with['node-version'], '24.20.0');
-  assert.equal(steps[2]?.name, 'Verify Windows Node filesystem prerequisite');
-  assert.deepEqual(steps[2]?.run, [
+  const setupNode = steps[1];
+  const nodePrerequisite = steps[2];
+  assert.ok(setupNode, 'Windows CI second step must be the pinned setup-node action');
+  assert.ok(nodePrerequisite, 'Windows CI Node prerequisite must be present');
+  const prerequisiteCommands = [
     "$ErrorActionPreference = 'Stop'",
     '$PSNativeCommandUseErrorActionPreference = $true',
     'node --test scripts/check-windows-node-unicode-fs.test.mjs',
     'node scripts/check-windows-node-unicode-fs.mjs',
-  ]);
+  ];
   for (const [label, step] of [
-    ['setup-node', steps[1]],
-    ['Node prerequisite', steps[2]],
+    ['setup-node', setupNode],
+    ['Node prerequisite', nodePrerequisite],
   ]) {
     assert.equal(step?.if, undefined, `Windows CI ${label} must not have if`);
     assert.equal(
@@ -270,6 +278,28 @@ function assertWindowsCiPrerequisiteOrder(workflow) {
       `Windows CI ${label} must not continue on error`,
     );
   }
+  for (const [label, step] of [
+    ['setup-node', setupNode],
+    ['Node prerequisite', nodePrerequisite],
+  ]) {
+    if (!Array.isArray(step.unconsumed) || step.unconsumed.length !== 0) {
+      const error = new Error(`Windows CI ${label} contains unconsumed syntax`);
+      error.name = '';
+      throw error;
+    }
+  }
+  assert.deepEqual(setupNode, {
+    uses: 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    with: { 'node-version': '24.20.0' },
+    run: [],
+    unconsumed: [],
+  }, 'Windows CI setup-node changed or moved');
+  assert.deepEqual(nodePrerequisite, {
+    name: 'Verify Windows Node filesystem prerequisite',
+    with: {},
+    run: prerequisiteCommands,
+    unconsumed: [],
+  }, 'Windows CI Node prerequisite changed or moved');
 
   const externalRepositories = [
     ['deepseek-ai/deepseek-harness', '47f943859bef60e4160492346772ded9b24f765a'],
@@ -408,6 +438,42 @@ const windowsCiSemanticVariants = [
     '      - name: Verify Windows Node filesystem prerequisite',
     '      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true',
     /Windows CI Node prerequisite must not continue on error/,
+  ],
+  [
+    'setup-node with an explicit mapping if key',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        ? if\n        : false',
+    /^Windows CI setup-node contains unconsumed syntax$/,
+  ],
+  [
+    'the Node prerequisite with an explicit mapping continue-on-error key',
+    '      - name: Verify Windows Node filesystem prerequisite',
+    '      - name: Verify Windows Node filesystem prerequisite\n        ? continue-on-error\n        : true',
+    /^Windows CI Node prerequisite contains unconsumed syntax$/,
+  ],
+  [
+    'setup-node with shell',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        shell: pwsh',
+    /^Windows CI setup-node contains unconsumed syntax$/,
+  ],
+  [
+    'the Node prerequisite with env and NODE_OPTIONS',
+    '      - name: Verify Windows Node filesystem prerequisite',
+    '      - name: Verify Windows Node filesystem prerequisite\n        env:\n          NODE_OPTIONS: --no-addons',
+    /^Windows CI Node prerequisite contains unconsumed syntax$/,
+  ],
+  [
+    'the Node prerequisite with working-directory',
+    '      - name: Verify Windows Node filesystem prerequisite',
+    '      - name: Verify Windows Node filesystem prerequisite\n        working-directory: scripts',
+    /^Windows CI Node prerequisite contains unconsumed syntax$/,
+  ],
+  [
+    'setup-node with an unknown with input',
+    '          node-version: 24.20.0',
+    '          node-version: 24.20.0\n          cache: npm',
+    /^Windows CI setup-node contains unconsumed syntax$/,
   ],
   ...[
     [
