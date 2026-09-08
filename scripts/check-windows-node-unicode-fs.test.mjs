@@ -213,9 +213,9 @@ function parseWindowsWorkflow(workflow) {
       }
       if (indent !== 8) continue;
       mode = null;
-      const match = /^(uses|name|with|run|if|continue-on-error):\s*(.*)$/.exec(line);
+      const match = /^(['"]?)(uses|name|with|run|if|continue-on-error)\1:\s*(.*)$/.exec(line);
       if (!match) continue;
-      const [, key, rawValue] = match;
+      const [, , key, rawValue] = match;
       const value = rawValue.replace(/^(['"])(.*)\1$/, '$2');
       if (key === 'with') mode = 'with';
       else if (key === 'run') {
@@ -409,6 +409,35 @@ const windowsCiSemanticVariants = [
     '      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true',
     /Windows CI Node prerequisite must not continue on error/,
   ],
+  ...[
+    [
+      'setup-node',
+      '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+      /Windows CI setup-node must not have if/,
+      /Windows CI setup-node must not continue on error/,
+    ],
+    [
+      'the Node prerequisite',
+      '      - name: Verify Windows Node filesystem prerequisite',
+      /Windows CI Node prerequisite must not have if/,
+      /Windows CI Node prerequisite must not continue on error/,
+    ],
+  ].flatMap(([step, anchor, ifError, continueOnError]) => [
+    [`${step} with single-quoted if`, anchor, `${anchor}\n        'if': false`, ifError],
+    [`${step} with double-quoted if`, anchor, `${anchor}\n        "if": false`, ifError],
+    [
+      `${step} with single-quoted continue-on-error`,
+      anchor,
+      `${anchor}\n        'continue-on-error': true`,
+      continueOnError,
+    ],
+    [
+      `${step} with double-quoted continue-on-error`,
+      anchor,
+      `${anchor}\n        "continue-on-error": true`,
+      continueOnError,
+    ],
+  ]),
 ];
 
 for (const [

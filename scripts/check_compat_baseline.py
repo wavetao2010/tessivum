@@ -125,11 +125,11 @@ def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
             continue
         mode = None
         match = re.fullmatch(
-            r"(uses|name|with|run|if|continue-on-error):\s*(.*)", line
+            r"(['\"]?)(uses|name|with|run|if|continue-on-error)\1:\s*(.*)", line
         )
         if match is None:
             continue
-        key, value = match.groups()
+        _, key, value = match.groups()
         if key == "with":
             mode = "with"
         elif key == "run":
@@ -364,6 +364,38 @@ def check_windows_ci_parser_self_checks(
         ("Node prerequisite continue-on-error",
          "      - name: Verify Windows Node filesystem prerequisite",
          "      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true",
+         "Windows CI Node prerequisite has bypass semantics"),
+        ("setup-node single-quoted if",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        'if': false",
+         "Windows CI setup-node has bypass semantics"),
+        ("setup-node double-quoted if",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        "if": false',
+         "Windows CI setup-node has bypass semantics"),
+        ("setup-node single-quoted continue-on-error",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        'continue-on-error': true",
+         "Windows CI setup-node has bypass semantics"),
+        ("setup-node double-quoted continue-on-error",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        "continue-on-error": true',
+         "Windows CI setup-node has bypass semantics"),
+        ("Node prerequisite single-quoted if",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        'if': false",
+         "Windows CI Node prerequisite has bypass semantics"),
+        ("Node prerequisite double-quoted if",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         '      - name: Verify Windows Node filesystem prerequisite\n        "if": false',
+         "Windows CI Node prerequisite has bypass semantics"),
+        ("Node prerequisite single-quoted continue-on-error",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        'continue-on-error': true",
+         "Windows CI Node prerequisite has bypass semantics"),
+        ("Node prerequisite double-quoted continue-on-error",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         '      - name: Verify Windows Node filesystem prerequisite\n        "continue-on-error": true',
          "Windows CI Node prerequisite has bypass semantics"),
     )
     for label, current, replacement, expected_failure in semantic_variants:
