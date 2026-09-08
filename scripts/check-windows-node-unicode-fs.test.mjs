@@ -491,25 +491,25 @@ const windowsCiSemanticVariants = [
     'the Node prerequisite with an empty with block',
     '      - name: Verify Windows Node filesystem prerequisite',
     '      - name: Verify Windows Node filesystem prerequisite\n        with:',
-    /Windows CI Node prerequisite changed or moved/,
+    /^Windows CI Node prerequisite changed or moved$/,
   ],
   [
     'setup-node with an empty run block',
     '          node-version: 24.20.0',
     '          node-version: 24.20.0\n        run: |',
-    /Windows CI setup-node changed or moved/,
+    /^Windows CI setup-node changed or moved$/,
   ],
   [
     'setup-node with a duplicate same-value uses key',
     '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
     '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
-    /Windows CI setup-node changed or moved/,
+    /^Windows CI setup-node changed or moved$/,
   ],
   [
     'setup-node with a duplicate node-version input',
     '          node-version: 24.20.0',
     '          node-version: 24.20.0\n          node-version: 24.20.0',
-    /Windows CI setup-node changed or moved/,
+    /^Windows CI setup-node changed or moved$/,
   ],
   ...[
     [
@@ -556,7 +556,11 @@ for (const [
     const variant = replaceWorkflowOnce(workflow, current, replacement);
     assert.throws(
       () => assertWindowsCiPrerequisiteOrder(variant),
-      expectedError,
+      (error) => {
+        const [message] = error.message.split('\n');
+        assert.match(message, expectedError);
+        return true;
+      },
     );
   });
 }
