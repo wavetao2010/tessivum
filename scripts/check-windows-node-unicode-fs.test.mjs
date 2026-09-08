@@ -26,6 +26,14 @@ const oldNodePath = String.raw`D:\Program Files\nodejs\node.exe`;
 const oldNodeVersionResult = spawnSync(oldNodePath, ['--version'], {
   encoding: 'utf8',
 });
+const pwshResolution = spawnSync('pwsh', [
+  '-NoProfile',
+  '-Command',
+  '(Get-Command pwsh -ErrorAction Stop).Source',
+], { encoding: 'utf8' });
+const pwshPath = pwshResolution.status === 0
+  ? pwshResolution.stdout.trim()
+  : null;
 const hasAffectedNode = oldNodeVersionResult.status === 0
   && oldNodeVersionResult.stdout.trim() === 'v24.11.1';
 const hasCapableCurrentNode = guard.isSupportedWindowsNodeVersion(
@@ -188,9 +196,10 @@ function parseWindowsWorkflowSteps(workflow) {
       const [, key, rawValue] = match;
       const value = rawValue.replace(/^(['"])(.*)\1$/, '$2');
       if (key === 'with') mode = 'with';
-      else if (key === 'run' && /^[|>]/.test(value)) mode = 'run';
-      else if (key === 'run') step.run.push(value);
-      else step[key] = value;
+      else if (key === 'run') {
+        if (value === '|') mode = 'run';
+        else if (!/^[|>]/.test(value)) step.run.push(value);
+      } else step[key] = value;
     }
     return step;
   });
@@ -368,6 +377,20 @@ jobs:
   );
 });
 
+test('Windows CI parser rejects folded run scalars', () => {
+  const steps = parseWindowsWorkflowSteps(`
+jobs:
+  windows:
+    steps:
+      - run: >
+          node scripts/check-windows-node-unicode-fs.mjs
+  next-job:
+    steps: []
+`);
+
+  assert.deepEqual(steps[0].run, []);
+});
+
 test('Windows source guide gates external dependencies on Node support', () => {
   const guide = readFileSync(
     join(repoRoot, 'docs', 'WINDOWS_SOURCE_TEST.md'),
@@ -399,6 +422,29 @@ test('Windows source guide gates external dependencies on Node support', () => {
     !developerModeRead.includes('SilentlyContinue'),
     'Developer Mode registry read must not suppress unexpected errors',
   );
+  const earlyExecutableEvidence = sectionBetween(
+    mainScript,
+    '  $earlyCommands |',
+    '  @(\n    & $Git.Source --version',
+    'early executable evidence',
+  );
+  assertTokensInOrder(earlyExecutableEvidence, [
+    'ConvertTo-Json -Compress',
+    "Set-Content (Join-Path $Evidence 'executables.jsonl')",
+  ], 'early executable evidence');
+  assert.doesNotMatch(earlyExecutableEvidence, /Format-Table|Out-String/);
+
+  const pnpmExecutableEvidence = sectionBetween(
+    mainScript,
+    '  $Pnpm |',
+    '  & $Pnpm.Source --version',
+    'pnpm executable evidence',
+  );
+  assertTokensInOrder(pnpmExecutableEvidence, [
+    'ConvertTo-Json -Compress',
+    "Add-Content (Join-Path $Evidence 'executables.jsonl')",
+  ], 'pnpm executable evidence');
+  assert.doesNotMatch(pnpmExecutableEvidence, /Format-Table|Out-String/);
   assertTokensInOrder(mainScript, [
     '$Git = Get-Command git -ErrorAction Stop',
     '$Node = Get-Command node -ErrorAction Stop',
@@ -436,6 +482,47 @@ test('Windows source guide gates external dependencies on Node support', () => {
     pnpmInvocationIndex > probeIndex,
     'Windows source guide invokes pnpm before the Node filesystem probe',
   );
+});
+
+test('PowerShell executable evidence preserves a long Source exactly', {
+  skip: pwshPath ? false : 'pwsh is unavailable',
+}, () => {
+  const parentDirectory = createTestOwnedParent();
+  const evidencePath = join(parentDirectory, 'executables.jsonl');
+  const source = `C:\\Program Files\\${'x'.repeat(300)}\\tool.exe`;
+  const expected = { Name: 'synthetic-tool', Source: source, Version: '1.2.3.4' };
+  assert.ok(source.length >= 269);
+
+  const result = spawnSync(pwshPath, ['-NoProfile', '-Command', String.raw`
+    $command = [pscustomobject]@{
+      Name = $env:TEST_NAME
+      Source = $env:TEST_SOURCE
+      Version = [version] $env:TEST_VERSION
+    }
+    $command | ForEach-Object {
+      [pscustomobject]@{
+        Name = $_.Name
+        Source = $_.Source
+        Version = [string] $_.Version
+      } | ConvertTo-Json -Compress
+    } | Set-Content -LiteralPath $env:TEST_EVIDENCE_PATH
+  `], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      TEST_EVIDENCE_PATH: evidencePath,
+      TEST_NAME: expected.Name,
+      TEST_SOURCE: expected.Source,
+      TEST_VERSION: expected.Version,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const records = readFileSync(evidencePath, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(records, [expected]);
 });
 
 test('filesystem identity comparison preserves BigInt precision', () => {

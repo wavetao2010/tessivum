@@ -119,9 +119,13 @@ try {
     'developer-mode=off'
     "process-architecture=$($env:PROCESSOR_ARCHITECTURE)"
   ) | Set-Content (Join-Path $Evidence 'environment-gate.txt')
-  $earlyCommands | Select-Object Name, Source, Version |
-    Format-Table -AutoSize | Out-String |
-    Set-Content (Join-Path $Evidence 'executables.txt')
+  $earlyCommands | ForEach-Object {
+    [pscustomobject] @{
+      Name = $_.Name
+      Source = $_.Source
+      Version = [string] $_.Version
+    } | ConvertTo-Json -Compress
+  } | Set-Content (Join-Path $Evidence 'executables.jsonl')
   @(
     & $Git.Source --version
     & $Node.Source --version
@@ -175,9 +179,13 @@ try {
   $Evidence | Set-Content "$Repo\.ci\windows-source-evidence-root.txt"
 
   $Pnpm = Get-Command pnpm -ErrorAction Stop
-  $Pnpm | Select-Object Name, Source, Version |
-    Format-Table -AutoSize | Out-String |
-    Add-Content (Join-Path $Evidence 'executables.txt')
+  $Pnpm | ForEach-Object {
+    [pscustomobject] @{
+      Name = $_.Name
+      Source = $_.Source
+      Version = [string] $_.Version
+    } | ConvertTo-Json -Compress
+  } | Add-Content (Join-Path $Evidence 'executables.jsonl')
   & $Pnpm.Source --version |
     Tee-Object -FilePath (Join-Path $Evidence 'versions.txt') -Append
   if ((& $Bun.Source --version).Trim() -ne '1.4.0' -or

@@ -115,10 +115,11 @@ def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
         key, value = match.groups()
         if key == "with":
             mode = "with"
-        elif key == "run" and value.startswith(("|", ">")):
-            mode = "run"
         elif key == "run":
-            step["run"].append(unquote(value))
+            if value == "|":
+                mode = "run"
+            elif not value.startswith(("|", ">")):
+                step["run"].append(unquote(value))
         else:
             step[key] = unquote(value)
     return step
@@ -269,6 +270,14 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
   browser-e2e:
     steps: []
 """
+    folded_workflow = """jobs:
+  windows:
+    steps:
+      - run: >
+          node scripts/check-windows-node-unicode-fs.mjs
+  next-job:
+    steps: []
+"""
     fixtures = (
         (decoy_workflow, "accepted decoy comments or block scalar content"),
         (inserted_workflow, "crossed into an inserted same-indent job"),
@@ -277,6 +286,9 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
         fixture_failures: list[str] = []
         check_windows_ci_prerequisite_order(workflow, fixture_failures)
         check(bool(fixture_failures), f"Windows CI parser {message}", failures)
+    folded_steps = parse_windows_workflow_steps(folded_workflow)
+    check(folded_steps[0].get("run") == [],
+          "Windows CI parser accepted a folded run scalar", failures)
 
 
 def repo_head(repo: Path) -> str:
