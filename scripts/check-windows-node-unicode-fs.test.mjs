@@ -169,23 +169,52 @@ function parseWindowsWorkflow(workflow) {
     }
   }
   const jobLines = lines.slice(jobStart + 1, jobEnd);
+  const jobKeys = [];
+  const jobUnconsumed = [];
   const runsOnValues = jobLines
     .map((line) => /^    runs-on:\s*(.*)$/.exec(stripYamlComment(line)))
     .filter(Boolean)
     .map((match) => match[1].replace(/^(['"])(.*)\1$/, '$2'));
-  assert.equal(runsOnValues.length, 1, 'jobs.windows must contain runs-on');
-  const stepsIndex = jobLines.findIndex(
-    (line) => stripYamlComment(line).trimEnd() === '    steps:',
-  );
-  assert.notEqual(stepsIndex, -1, 'jobs.windows must contain steps');
+  const timeoutMinutesValues = jobLines
+    .map((line) => /^    timeout-minutes:\s*(.*)$/.exec(stripYamlComment(line)))
+    .filter(Boolean)
+    .map((match) => match[1].replace(/^(['"])(.*)\1$/, '$2'));
+  const stepsIndices = jobLines
+    .map((line, index) => (
+      stripYamlComment(line).trimEnd() === '    steps:' ? index : -1
+    ))
+    .filter((index) => index >= 0);
+  const stepsIndex = stepsIndices[0] ?? -1;
 
-  const stepLines = [];
-  for (const line of jobLines.slice(stepsIndex + 1)) {
-    const structural = stripYamlComment(line);
+  let stepBodyEnd = jobLines.length;
+  for (let index = stepsIndex + 1; stepsIndex >= 0 && index < jobLines.length; index += 1) {
+    const structural = stripYamlComment(jobLines[index]);
     const indent = structural.length - structural.trimStart().length;
-    if (structural.trim() && indent <= 4) break;
-    stepLines.push(line);
+    if (structural.trim() && indent <= 4) {
+      stepBodyEnd = index;
+      break;
+    }
   }
+  for (let index = 0; index < jobLines.length; index += 1) {
+    const rawLine = jobLines[index];
+    const structural = stripYamlComment(rawLine);
+    if (!structural.trim()) continue;
+    if (stepsIndex >= 0 && index > stepsIndex && index < stepBodyEnd) continue;
+    const match = /^    ([A-Za-z0-9_-]+):\s*(.*)$/.exec(structural);
+    if (match) {
+      jobKeys.push(match[1]);
+      if (!['runs-on', 'timeout-minutes', 'steps'].includes(match[1])) {
+        jobUnconsumed.push(rawLine);
+      }
+    } else {
+      jobUnconsumed.push(rawLine);
+    }
+  }
+
+  const stepLines = jobLines.slice(
+    stepsIndex + 1,
+    stepBodyEnd,
+  );
   const itemStarts = [];
   for (let index = 0; index < stepLines.length; index += 1) {
     if (/^ {6}-(?:\s|$)/.test(stripYamlComment(stepLines[index]))) {
@@ -244,16 +273,45 @@ function parseWindowsWorkflow(workflow) {
     }
     return step;
   });
-  return { runsOn: runsOnValues[0], steps };
+  return {
+    jobKeys,
+    jobUnconsumed,
+    runsOnValues,
+    timeoutMinutesValues,
+    stepsCount: stepsIndices.length,
+    steps,
+  };
 }
 
 function parseWindowsWorkflowSteps(workflow) {
-  return parseWindowsWorkflow(workflow).steps;
+  const parsed = parseWindowsWorkflow(workflow);
+  assert.equal(
+    parsed.stepsCount,
+    1,
+    'jobs.windows must define steps exactly once',
+  );
+  return parsed.steps;
 }
 
 function assertWindowsCiPrerequisiteOrder(workflow) {
-  const { runsOn, steps } = parseWindowsWorkflow(workflow);
-  assert.equal(runsOn, 'windows-2025', 'Windows CI runner must be windows-2025');
+  const parsed = parseWindowsWorkflow(workflow);
+  if (parsed.jobUnconsumed.length !== 0) {
+    const error = new Error('Windows CI windows job contains unconsumed syntax');
+    error.name = '';
+    throw error;
+  }
+  assert.deepEqual({
+    keys: parsed.jobKeys,
+    runsOn: parsed.runsOnValues,
+    timeoutMinutes: parsed.timeoutMinutesValues,
+    steps: parsed.stepsCount,
+  }, {
+    keys: ['runs-on', 'timeout-minutes', 'steps'],
+    runsOn: ['windows-2025'],
+    timeoutMinutes: ['60'],
+    steps: 1,
+  }, 'Windows CI windows job changed or moved');
+  const { steps } = parsed;
   const checkout = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
   assert.equal(
     steps[0]?.uses,
@@ -422,10 +480,22 @@ test('Windows CI gates external dependencies on the Node prerequisite', () => {
 
 const windowsCiSemanticVariants = [
   [
+    'a disabled Windows job',
+    '  windows:',
+    '  windows:\n    if: ${{ false }}',
+    /^Windows CI windows job contains unconsumed syntax$/,
+  ],
+  [
+    'a Windows job default shell override',
+    '  windows:',
+    '  windows:\n    defaults:\n      run:\n        shell: cmd /d /c "call {0} & exit /b 0"',
+    /^Windows CI windows job contains unconsumed syntax$/,
+  ],
+  [
     'a non-Windows runner',
     '    runs-on: windows-2025',
     '    runs-on: ubuntu-latest',
-    /Windows CI runner must be windows-2025/,
+    /^Windows CI windows job changed or moved$/,
   ],
   [
     'setup-node with if',
@@ -579,6 +649,7 @@ test('Windows CI parser rejects comments and unrelated block scalars', () => {
 jobs:
   windows:
     runs-on: windows-2025
+    timeout-minutes: 60
     # uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
     steps:
       - name: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
@@ -599,6 +670,7 @@ test('Windows CI parser stops at an inserted same-indent job', () => {
 jobs:
   windows:
     runs-on: windows-2025
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
   inserted-job:
@@ -626,7 +698,7 @@ jobs:
 
   assert.throws(
     () => parseWindowsWorkflowSteps(workflow),
-    /jobs\.windows must contain steps/,
+    /jobs\.windows must define steps exactly once/,
   );
 });
 

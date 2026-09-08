@@ -161,7 +161,7 @@ def unquote(value: str) -> str:
 
 def parse_windows_workflow(
     ci_workflow: str,
-) -> tuple[str, list[dict[str, object]]]:
+) -> dict[str, object]:
     lines = ci_workflow.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     visible = [strip_yaml_comment(line) for line in lines]
     jobs_indices = [
@@ -189,6 +189,8 @@ def parse_windows_workflow(
             job_end = index
             break
     job_lines = lines[job_start + 1:job_end]
+    job_keys: list[str] = []
+    job_unconsumed: list[str] = []
     runs_on_values = [
         unquote(match.group(1))
         for line in job_lines
@@ -196,22 +198,40 @@ def parse_windows_workflow(
             r"    runs-on:\s*(.*)", strip_yaml_comment(line)
         ))
     ]
-    if len(runs_on_values) != 1:
-        raise AssertionError("jobs.windows must define runs-on exactly once")
+    timeout_minutes_values = [
+        unquote(match.group(1))
+        for line in job_lines
+        if (match := re.fullmatch(
+            r"    timeout-minutes:\s*(.*)", strip_yaml_comment(line)
+        ))
+    ]
     steps_indices = [
         index for index, line in enumerate(job_lines)
         if strip_yaml_comment(line).rstrip() == "    steps:"
     ]
-    if len(steps_indices) != 1:
-        raise AssertionError("jobs.windows must define steps exactly once")
-
-    step_lines: list[str] = []
-    for line in job_lines[steps_indices[0] + 1:]:
-        structural = strip_yaml_comment(line)
+    steps_index = steps_indices[0] if steps_indices else -1
+    step_body_end = len(job_lines)
+    for index in range(steps_index + 1, len(job_lines)) if steps_index >= 0 else ():
+        structural = strip_yaml_comment(job_lines[index])
         indent = len(structural) - len(structural.lstrip())
         if structural.strip() and indent <= 4:
+            step_body_end = index
             break
-        step_lines.append(line)
+    for index, raw_line in enumerate(job_lines):
+        structural = strip_yaml_comment(raw_line)
+        if not structural.strip():
+            continue
+        if steps_index >= 0 and steps_index < index < step_body_end:
+            continue
+        match = re.fullmatch(r"    ([A-Za-z0-9_-]+):\s*(.*)", structural)
+        if match:
+            job_keys.append(match.group(1))
+            if match.group(1) not in {"runs-on", "timeout-minutes", "steps"}:
+                job_unconsumed.append(raw_line)
+        else:
+            job_unconsumed.append(raw_line)
+
+    step_lines = job_lines[steps_index + 1:step_body_end]
     item_starts = [
         index for index, line in enumerate(step_lines)
         if re.match(r"^ {6}-(?:\s|$)", strip_yaml_comment(line))
@@ -222,22 +242,43 @@ def parse_windows_workflow(
                                        else len(step_lines)])
         for item_index, start in enumerate(item_starts)
     ]
-    return runs_on_values[0], steps
+    return {
+        "jobKeys": job_keys,
+        "jobUnconsumed": job_unconsumed,
+        "runsOnValues": runs_on_values,
+        "timeoutMinutesValues": timeout_minutes_values,
+        "stepsCount": len(steps_indices),
+        "steps": steps,
+    }
 
 
 def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
-    return parse_windows_workflow(ci_workflow)[1]
+    parsed = parse_windows_workflow(ci_workflow)
+    if parsed["stepsCount"] != 1:
+        raise AssertionError("jobs.windows must define steps exactly once")
+    return parsed["steps"]
 
 
 def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -> None:
     try:
-        runs_on, steps = parse_windows_workflow(ci_workflow)
+        parsed = parse_windows_workflow(ci_workflow)
     except AssertionError as error:
         failures.append(f"Windows CI structure invalid: {error}")
         return
 
-    check(runs_on == "windows-2025",
-          "Windows CI runner is not windows-2025", failures)
+    if parsed["jobUnconsumed"]:
+        failures.append("Windows CI windows job contains unconsumed syntax")
+        return
+    canonical_job = {
+        "jobKeys": ["runs-on", "timeout-minutes", "steps"],
+        "runsOnValues": ["windows-2025"],
+        "timeoutMinutesValues": ["60"],
+        "stepsCount": 1,
+    }
+    if any(parsed[key] != value for key, value in canonical_job.items()):
+        failures.append("Windows CI windows job changed or moved")
+        return
+    steps = parsed["steps"]
 
     checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
     expected_prefix = (
@@ -331,6 +372,7 @@ def check_windows_ci_parser_self_checks(
     decoy_workflow = """jobs:
   windows:
     runs-on: windows-2025
+    timeout-minutes: 60
     # uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
     steps:
       - name: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
@@ -342,6 +384,7 @@ def check_windows_ci_parser_self_checks(
     inserted_workflow = """jobs:
   windows:
     runs-on: windows-2025
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
   inserted-job:
@@ -386,9 +429,16 @@ def check_windows_ci_parser_self_checks(
           "Windows CI parser crossed into a quoted following job", failures)
 
     semantic_variants = (
+        ("disabled Windows job", "  windows:",
+         "  windows:\n    if: ${{ false }}",
+         "Windows CI windows job contains unconsumed syntax"),
+        ("Windows job default shell override", "  windows:",
+         '  windows:\n    defaults:\n      run:\n'
+         '        shell: cmd /d /c "call {0} & exit /b 0"',
+         "Windows CI windows job contains unconsumed syntax"),
         ("non-Windows runner", "    runs-on: windows-2025",
          "    runs-on: ubuntu-latest",
-         "Windows CI runner is not windows-2025"),
+         "Windows CI windows job changed or moved"),
         ("setup-node if", "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
          "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        if: false",
          "Windows CI setup-node has bypass semantics"),
