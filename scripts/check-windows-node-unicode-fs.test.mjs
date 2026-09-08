@@ -21,6 +21,7 @@ import * as guard from './check-windows-node-unicode-fs.mjs';
 
 const moduleUrl = new URL('./check-windows-node-unicode-fs.mjs', import.meta.url);
 const modulePath = fileURLToPath(moduleUrl);
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const oldNodePath = String.raw`D:\Program Files\nodejs\node.exe`;
 const oldNodeVersionResult = spawnSync(oldNodePath, ['--version'], {
   encoding: 'utf8',
@@ -76,6 +77,27 @@ function compareText(left, right) {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
+}
+
+function sectionBetween(source, startToken, endToken, label) {
+  const start = source.indexOf(startToken);
+  assert.notEqual(start, -1, `${label}: missing start token: ${startToken}`);
+  const end = source.indexOf(endToken, start + startToken.length);
+  assert.notEqual(end, -1, `${label}: missing end token: ${endToken}`);
+  return source.slice(start, end);
+}
+
+function assertTokensInOrder(source, tokens, label) {
+  let previousIndex = -1;
+  for (const token of tokens) {
+    const index = source.indexOf(token, previousIndex + 1);
+    assert.notEqual(
+      index,
+      -1,
+      `${label}: missing or out-of-order token: ${token}`,
+    );
+    previousIndex = index;
+  }
 }
 
 function snapshotUnicodeProbeTrees(root) {
@@ -140,6 +162,74 @@ for (const [version, expected] of supportedVersionCases) {
 
 test('accepts the portable Node 24.20.0 runtime', () => {
   assert.equal(guard.isSupportedWindowsNodeVersion('24.20.0'), true);
+});
+
+test('Windows CI gates external dependencies on the Node prerequisite', () => {
+  const workflow = readFileSync(
+    join(repoRoot, '.github', 'workflows', 'ci.yml'),
+    'utf8',
+  );
+  const windowsJob = sectionBetween(
+    workflow,
+    '\n  windows:',
+    '\n  browser-e2e:',
+    'Windows CI job',
+  );
+
+  assertTokensInOrder(windowsJob, [
+    'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
+    'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    'node-version: 24.20.0',
+    'node --test scripts/check-windows-node-unicode-fs.test.mjs',
+    'node scripts/check-windows-node-unicode-fs.mjs',
+    'repository: deepseek-ai/deepseek-harness',
+    'repository: cordiverse/cordis',
+    'repository: wavetao2010/tessivum-core',
+    'dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5',
+    'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6',
+    'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1',
+    'name: Install pinned DeepSeek build dependencies',
+  ], 'Windows CI prerequisite order');
+});
+
+test('Windows source guide gates external dependencies on Node support', () => {
+  const guide = readFileSync(
+    join(repoRoot, 'docs', 'WINDOWS_SOURCE_TEST.md'),
+    'utf8',
+  );
+  assert.ok(guide.includes('>=22.19.0 <23.0.0'));
+  assert.ok(guide.includes('>=24.13.1 <25.0.0'));
+  assert.ok(guide.includes('Node 24.20.0'));
+
+  const mainScript = sectionBetween(
+    guide,
+    '```powershell\n#Requires -Version 7.4',
+    '\n```',
+    'Windows source guide main PowerShell block',
+  );
+  assertTokensInOrder(mainScript, [
+    '$Node = Get-Command node -ErrorAction Stop',
+    'git clone https://github.com/wavetao2010/tessivum.git $Repo',
+    '& $Node.Source --version',
+    '& $Node.Source scripts/check-windows-node-unicode-fs.mjs',
+    'git clone https://github.com/deepseek-ai/deepseek-harness.git',
+    'git clone https://github.com/cordiverse/cordis.git',
+    'git clone https://github.com/wavetao2010/tessivum-core.git',
+    '$Pnpm = Get-Command pnpm -ErrorAction Stop',
+    'pnpm --version',
+    'pnpm install --frozen-lockfile',
+  ], 'Windows source guide prerequisite order');
+
+  const probeIndex = mainScript.indexOf(
+    '& $Node.Source scripts/check-windows-node-unicode-fs.mjs',
+  );
+  const pnpmInvocationIndex = mainScript.search(
+    /^\s*(?:&\s+(?:\$Pnpm(?:\.Source)?|pnpm)|pnpm)\s+/m,
+  );
+  assert.ok(
+    pnpmInvocationIndex > probeIndex,
+    'Windows source guide invokes pnpm before the Node filesystem probe',
+  );
 });
 
 test('filesystem identity comparison preserves BigInt precision', () => {

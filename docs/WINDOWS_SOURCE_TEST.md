@@ -23,12 +23,17 @@ Chinese characters and a space. Do not use WSL, elevation, Developer Mode, disab
 software, global store/proxy changes, hand-edited `node_modules`, blind retries, or tool
 version changes as workarounds.
 
-Install Visual Studio 2022 Build Tools (**Desktop development with C++**), Git, PowerShell 7.4+,
-Node.js, Rust stable, and Python 3. Bun `1.4.0` and pnpm `11.7.0` remain fixed. The failed run
-used Windows 11 25H2 build 26200, PowerShell 7.6.4, Git 2.51.2.windows.1, Node 24.11.1,
-Rust/Cargo 1.94.0, Bun 1.4.0, pnpm 11.7.0, and Python 3.12.10. Record every actual version,
-resolved executable path, and difference; do not force or downgrade unrelated tools merely
-to reproduce those patch versions.
+Install Visual Studio 2022 Build Tools (**Desktop development with C++**),
+Git, PowerShell 7.4+, Rust stable, and Python 3. Node.js must be in one of
+these ranges: `>=22.19.0 <23.0.0` or `>=24.13.1 <25.0.0`. The Windows CI
+reference runtime is Node 24.20.0. Bun `1.4.0` and pnpm `11.7.0` remain
+fixed.
+
+The failed run used Windows 11 25H2 build 26200, PowerShell 7.6.4, Git
+2.51.2.windows.1, Node 24.11.1, Rust/Cargo 1.94.0, Bun 1.4.0, pnpm
+11.7.0, and Python 3.12.10. Record every actual version, resolved
+executable path, and difference. Do not force or downgrade unrelated
+tools merely to reproduce those patch versions.
 
 ## Command groups 1–15
 
@@ -42,6 +47,11 @@ Supply the current candidate commit, not the old report commit. The single `try`
 PowerShell native-command preference make any non-zero native exit terminate the script.
 Later groups are then `NOT RUN`, and the overall result is `FAIL`; an unrun required group is
 never a pass.
+
+The environment, Node version, and Node filesystem probe are prerequisites.
+If any prerequisite fails, stop before external checkouts or pnpm; Groups
+01-16 are `NOT RUN`. The script resolves Node before cloning Tessivum, but
+does not resolve or invoke pnpm until the probe passes.
 
 ```powershell
 #Requires -Version 7.4
@@ -67,34 +77,62 @@ try {
     throw 'Run as an ordinary user.'
   }
   $drive = ([IO.Path]::GetPathRoot($WorkRoot)).Substring(0, 1)
-  if ((Get-Volume -DriveLetter $drive).FileSystem -ne 'NTFS') { throw 'Test path is not on NTFS.' }
-  $developerMode = Get-ItemPropertyValue `
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' `
-    -Name AllowDevelopmentWithoutDevLicense -ErrorAction SilentlyContinue
-  if ($null -ne $developerMode -and [int]$developerMode -ne 0) { throw 'Developer Mode is on.' }
+  $fileSystem = (Get-Volume -DriveLetter $drive).FileSystem
+  if ($fileSystem -ne 'NTFS') { throw 'Test path is not on NTFS.' }
+  $developerModePath =
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+  $developerModeKey = Get-ItemProperty -Path $developerModePath `
+    -ErrorAction SilentlyContinue
+  $developerModeProperty = $null
+  if ($null -ne $developerModeKey) {
+    $developerModeProperty = $developerModeKey.PSObject.Properties |
+      Where-Object Name -EQ 'AllowDevelopmentWithoutDevLicense'
+  }
+  $developerMode = if ($null -eq $developerModeProperty) {
+    0
+  } else {
+    [int] $developerModeProperty.Value
+  }
+  if ($developerMode -ne 0) { throw 'Developer Mode is on.' }
   if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Run native x64 PowerShell.' }
 
-  rustup component add clippy rustfmt
-  rustup target add x86_64-pc-windows-msvc wasm32-unknown-unknown
+  $Node = Get-Command node -ErrorAction Stop
   Get-ComputerInfo WindowsProductName, WindowsVersion, OsBuildNumber, OsArchitecture |
     Format-List | Out-String | Set-Content (Join-Path $Evidence 'windows.txt')
-  Get-Command git, rustup, rustc, cargo, bun, pnpm, node, python, pwsh |
-    Select-Object Name, Source, Version | Format-Table -AutoSize | Out-String |
-    Set-Content (Join-Path $Evidence 'executables.txt')
   @(
-    & git --version; & rustc --version; & cargo --version; & bun --version;
-    & pnpm --version; & node --version; & python --version;
-    "PowerShell $($PSVersionTable.PSVersion)"
-  ) | Tee-Object -FilePath (Join-Path $Evidence 'versions.txt')
-  if ((& bun --version).Trim() -ne '1.4.0' -or (& pnpm --version).Trim() -ne '11.7.0') {
-    throw 'Bun must be 1.4.0 and pnpm must be 11.7.0.'
-  }
+    'ordinary-user=true'
+    "filesystem=$fileSystem"
+    'developer-mode=off'
+    "process-architecture=$($env:PROCESSOR_ARCHITECTURE)"
+  ) | Set-Content (Join-Path $Evidence 'environment-gate.txt')
+  $Node | Select-Object Name, Source, Version |
+    Format-Table -AutoSize | Out-String |
+    Set-Content (Join-Path $Evidence 'executables.txt')
 
   git clone https://github.com/wavetao2010/tessivum.git $Repo
   git -C $Repo checkout --detach $TessivumRevision
   $actual = (& git -C $Repo rev-parse HEAD).Trim().ToLowerInvariant()
   if ($actual -ne $TessivumRevision.ToLowerInvariant()) { throw "Checked out $actual." }
   $actual | Set-Content (Join-Path $Evidence 'tessivum-revision.txt')
+
+  $nodeVersion = (& $Node.Source --version).Trim()
+  $nodeMatch = [regex]::Match($nodeVersion, '^v(\d+)\.(\d+)\.(\d+)$')
+  if (-not $nodeMatch.Success) { throw "Invalid Node version: $nodeVersion" }
+  $nodeMajor = [int] $nodeMatch.Groups[1].Value
+  $nodeMinor = [int] $nodeMatch.Groups[2].Value
+  $nodePatch = [int] $nodeMatch.Groups[3].Value
+  $nodeSupported =
+    ($nodeMajor -eq 22 -and
+      ($nodeMinor -gt 19 -or ($nodeMinor -eq 19 -and $nodePatch -ge 0))) -or
+    ($nodeMajor -eq 24 -and
+      ($nodeMinor -gt 13 -or ($nodeMinor -eq 13 -and $nodePatch -ge 1)))
+  if (-not $nodeSupported) {
+    $supportedNodeRanges = '>=22.19.0 <23.0.0 or >=24.13.1 <25.0.0'
+    throw "Node $nodeVersion is outside $supportedNodeRanges."
+  }
+  "node $nodeVersion" | Set-Content (Join-Path $Evidence 'versions.txt')
+  Set-Location $Repo
+  & $Node.Source scripts/check-windows-node-unicode-fs.mjs
 
   New-Item -ItemType Directory -Force (Join-Path $Repo '.ci') | Out-Null
   git clone https://github.com/deepseek-ai/deepseek-harness.git "$Repo\.ci\deepseek-harness"
@@ -112,6 +150,23 @@ try {
   $env:CORDIS_VENDOR_ROOT = "$Repo\.ci\deepseek-harness\vendor"
   Remove-Item Env:TESSIVUM_REQUIRE_FILE_SYMLINKS -ErrorAction SilentlyContinue
   $Evidence | Set-Content "$Repo\.ci\windows-source-evidence-root.txt"
+
+  $Pnpm = Get-Command pnpm -ErrorAction Stop
+  $remainingCommands = Get-Command git, rustup, rustc, cargo, bun, python, pwsh
+  (@($Node, $Pnpm) + @($remainingCommands)) |
+    Select-Object Name, Source, Version | Format-Table -AutoSize | Out-String |
+    Set-Content (Join-Path $Evidence 'executables.txt')
+  @(
+    & git --version; & rustup --version; & rustc --version;
+    & cargo --version; & bun --version; & pnpm --version;
+    & python --version; "PowerShell $($PSVersionTable.PSVersion)"
+  ) | Tee-Object -FilePath (Join-Path $Evidence 'versions.txt') -Append
+  if ((& bun --version).Trim() -ne '1.4.0' -or
+      (& pnpm --version).Trim() -ne '11.7.0') {
+    throw 'Bun must be 1.4.0 and pnpm must be 11.7.0.'
+  }
+  rustup component add clippy rustfmt
+  rustup target add x86_64-pc-windows-msvc wasm32-unknown-unknown
 
   # 01: frozen clean install, real esbuild execution, installed-state second install.
   Set-Location $env:TESSIVUM_DEEPSEEK_SOURCE

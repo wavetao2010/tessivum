@@ -73,6 +73,49 @@ def check(condition: bool, message: str, failures: list[str]) -> None:
     if not condition:
         failures.append(message)
 
+
+def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -> None:
+    start_token = "\n  windows:"
+    end_token = "\n  browser-e2e:"
+    start = ci_workflow.find(start_token)
+    end = ci_workflow.find(end_token, start + len(start_token)) if start >= 0 else -1
+    check(start >= 0, "Windows CI job start marker is missing", failures)
+    check(end >= 0, "Windows CI job end marker is missing", failures)
+    if start < 0 or end < 0:
+        return
+
+    windows_job = ci_workflow[start:end]
+    cursor = 0
+    ordered_tokens = (
+        "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+        "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+        "node-version: 24.20.0",
+        "node --test scripts/check-windows-node-unicode-fs.test.mjs",
+        "node scripts/check-windows-node-unicode-fs.mjs",
+        "repository: deepseek-ai/deepseek-harness",
+        f"ref: {HARNESS_SHA}",
+        "repository: cordiverse/cordis",
+        f"ref: {CORDIS_SHA}",
+        "repository: wavetao2010/tessivum-core",
+        f"ref: {CORE_SHA}",
+        "dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5",
+        "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+        "bun-version: 1.4.0",
+        "pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
+        "version: 11.7.0",
+        "name: Install pinned DeepSeek build dependencies",
+        "pnpm install --frozen-lockfile",
+    )
+    for token in ordered_tokens:
+        index = windows_job.find(token, cursor)
+        if index < 0:
+            failures.append(
+                f"Windows CI prerequisite order missing or out of order: {token}"
+            )
+            return
+        cursor = index + len(token)
+
+
 def repo_head(repo: Path) -> str:
     head = (repo / ".git/HEAD").read_text(encoding="utf-8").strip()
     if head.startswith("ref: "):
@@ -105,6 +148,7 @@ def main() -> int:
           "tessivum-core package version changed", failures)
     ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     release_workflow = (PROJECT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    check_windows_ci_prerequisite_order(ci_workflow, failures)
     check(ci_workflow.count(f"ref: {CORE_SHA}") == 3,
           "CI tessivum-core checkout revision changed", failures)
     check(release_workflow.count(f"ref: {CORE_SHA}") == 1,

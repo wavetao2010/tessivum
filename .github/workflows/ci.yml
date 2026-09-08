@@ -118,6 +118,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.20.0
+
+      - name: Verify Windows Node filesystem prerequisite
+        run: |
+          node --test scripts/check-windows-node-unicode-fs.test.mjs
+          node scripts/check-windows-node-unicode-fs.mjs
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: deepseek-ai/deepseek-harness
