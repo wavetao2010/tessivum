@@ -3,11 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readlinkSync,
   readdirSync,
   rmSync,
+  symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -75,8 +78,7 @@ function compareText(left, right) {
   return 0;
 }
 
-function snapshotUnicodeProbeTrees() {
-  const root = tmpdir();
+function snapshotUnicodeProbeTrees(root) {
   const snapshot = [];
 
   function visit(entry, relativePath) {
@@ -158,13 +160,22 @@ test('rejects an affected Windows Node version with policy diagnostics', () => {
 test('affected Node CLI rejects before creating probe-owned paths', {
   skip: hasAffectedNode ? false : 'exact Node 24.11.1 runtime is unavailable',
 }, () => {
-  const before = snapshotUnicodeProbeTrees();
-  const result = spawnSync(oldNodePath, [modulePath], { encoding: 'utf8' });
-  const after = snapshotUnicodeProbeTrees();
+  const childTempRoot = createTestOwnedParent();
+  const before = snapshotUnicodeProbeTrees(childTempRoot);
+  const result = spawnSync(oldNodePath, [modulePath], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      TEMP: childTempRoot,
+      TMP: childTempRoot,
+    },
+  });
+  const after = snapshotUnicodeProbeTrees(childTempRoot);
 
   assert.notEqual(result.status, 0);
   assertDiagnosticFacts(`${result.stdout}${result.stderr}`);
   assert.deepEqual(after, before);
+  assert.equal(existsSync(childTempRoot), true);
 });
 
 test('stdin import does not execute the CLI', () => {
@@ -211,6 +222,143 @@ test('capable Node CLI reports one concise success line', {
   assert.match(result.stdout, /Windows Node Unicode filesystem probe passed/);
   assert.ok(result.stdout.includes(process.version));
   assert.ok(result.stdout.includes(process.platform));
+});
+
+test('does not claim cleanup when owned-path state is uncertain', () => {
+  const uncertainParent = join(tmpdir(), 'caller\0invalid');
+  let failure;
+
+  try {
+    guard.probeWindowsNodeUnicodeFilesystem({
+      parentDirectory: uncertainParent,
+    });
+    assert.fail('probe unexpectedly accepted a NUL-containing parent path');
+  } catch (error) {
+    failure = error;
+  }
+
+  assert.ok(failure instanceof AggregateError);
+  assert.equal(failure.operation, 'prepare-probe');
+  assert.equal(failure.cleanupComplete, false);
+  assert.equal(dirname(failure.ownedUnicodeParent), uncertainParent);
+  assert.ok(
+    [...failure.errors].some((error) => `${error.message}\n${error.details}`
+      .includes('ERR_INVALID_ARG_VALUE')),
+  );
+});
+
+test('classifies expected-file read failures as content validation', {
+  skip: process.platform === 'win32' && hasCapableCurrentNode
+    ? false
+    : 'requires Windows ACLs on a capable Node runtime',
+}, (t) => {
+  const parentDirectory = createTestOwnedParent();
+  const sentinelPath = join(parentDirectory, 'caller-sentinel.txt');
+  const identity = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
+  writeFileSync(sentinelPath, 'caller-owned\n');
+  const denyRead = spawnSync('icacls.exe', [
+    parentDirectory,
+    '/deny',
+    `${identity}:(OI)(IO)(RD)`,
+  ], { encoding: 'utf8' });
+  if (denyRead.status !== 0) {
+    t.skip(`could not establish test ACL: ${denyRead.stderr}`);
+    return;
+  }
+
+  let failure;
+  let restoreAcl;
+  try {
+    try {
+      guard.probeWindowsNodeUnicodeFilesystem({ parentDirectory });
+      assert.fail('probe unexpectedly read an ACL-protected stage file');
+    } catch (error) {
+      failure = error;
+    }
+  } finally {
+    restoreAcl = spawnSync('icacls.exe', [
+      parentDirectory,
+      '/remove:d',
+      identity,
+    ], { encoding: 'utf8' });
+  }
+
+  assert.equal(restoreAcl.status, 0, restoreAcl.stderr);
+  assert.equal(failure.operation, 'validate-content');
+  assert.equal(
+    failure.failingPath,
+    join(failure.testedPath, 'package.json'),
+  );
+  assert.match(failure.cause.code, /EACCES|EPERM/);
+  assert.ok(failure.details.includes(failure.failingPath));
+  assert.equal(failure.cleanupComplete, true);
+  assert.equal(existsSync(failure.ownedUnicodeParent), false);
+  assert.equal(readFileSync(sentinelPath, 'utf8'), 'caller-owned\n');
+  assert.equal(existsSync(parentDirectory), true);
+});
+
+test('rejects a junction pre-positioned at the probe-owned path', {
+  skip: process.platform === 'win32' ? false : 'requires Windows junctions',
+}, () => {
+  const parentDirectory = createTestOwnedParent();
+  const outsideDirectory = join(parentDirectory, 'outside-owned-test-area');
+  const sentinelPath = join(outsideDirectory, 'sibling-sentinel.txt');
+  const fixedUuid = '00000000-0000-4000-8000-000000000001';
+  const predictedOwnedPath = join(parentDirectory, `测试 路径-${fixedUuid}`);
+  mkdirSync(outsideDirectory);
+  writeFileSync(sentinelPath, 'outside-sentinel\n');
+  symlinkSync(outsideDirectory, predictedOwnedPath, 'junction');
+
+  const childScript = String.raw`
+    import assert from 'node:assert/strict';
+    import crypto from 'node:crypto';
+    import { existsSync, lstatSync, readFileSync } from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { join } from 'node:path';
+
+    const uuids = [
+      '00000000-0000-4000-8000-000000000001',
+      '00000000-0000-4000-8000-000000000002',
+    ];
+    crypto.randomUUID = () => uuids.shift();
+    syncBuiltinESMExports();
+    const guard = await import(process.env.TEST_MODULE_URL);
+    let failure;
+    try {
+      guard.probeWindowsNodeUnicodeFilesystem({
+        parentDirectory: process.env.TEST_PARENT_DIRECTORY,
+      });
+      assert.fail('probe unexpectedly accepted the pre-positioned junction');
+    } catch (error) {
+      failure = error;
+    }
+
+    assert.equal(failure.operation, 'prepare-probe');
+    assert.equal(lstatSync(process.env.TEST_OWNED_PATH).isSymbolicLink(), true);
+    assert.equal(
+      readFileSync(process.env.TEST_SENTINEL_PATH, 'utf8'),
+      'outside-sentinel\n',
+    );
+    assert.equal(
+      existsSync(join(process.env.TEST_OUTSIDE_DIRECTORY, 'probe-root')),
+      false,
+    );
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module'], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      TEST_MODULE_URL: moduleUrl.href,
+      TEST_PARENT_DIRECTORY: parentDirectory,
+      TEST_OWNED_PATH: predictedOwnedPath,
+      TEST_OUTSIDE_DIRECTORY: outsideDirectory,
+      TEST_SENTINEL_PATH: sentinelPath,
+    },
+    input: childScript,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
 });
 
 test('affected Node preserves failure and removes every probe-owned path', {
@@ -301,4 +449,25 @@ test('formats structured capability and aggregate cleanup failures', () => {
   assert.ok(aggregateText.includes(primary.message));
   assert.ok(aggregateText.includes(cleanup.message));
   assert.ok(aggregateText.includes(cleanup.details));
+});
+
+test('formats cyclic and repeated error references finitely', () => {
+  const repeated = new Error('repeated cleanup failure');
+  repeated.cause = repeated;
+  const aggregate = new AggregateError(
+    [repeated, repeated],
+    'cyclic aggregate failure',
+  );
+  Object.assign(aggregate, {
+    operation: 'cleanup-owned-path',
+    testedPath: join(tmpdir(), 'cycle-test', 'esbuild'),
+    cleanupComplete: false,
+  });
+
+  const formatted = guard.formatWindowsNodeUnicodeFilesystemError(aggregate);
+
+  assert.ok(formatted.includes('cyclic aggregate failure'));
+  assert.ok(formatted.includes('repeated cleanup failure'));
+  assert.ok(formatted.includes('[already reported]'));
+  assert.ok(formatted.length < 10_000);
 });

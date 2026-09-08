@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
-  existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   rmdirSync,
@@ -11,7 +12,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const SUPPORTED_NODE_RANGES = Object.freeze([
@@ -88,19 +96,120 @@ function writeContents(root, contents) {
   }
 }
 
-function removeBottomUp(directory) {
-  if (!existsSync(directory)) {
-    return;
+function inspectPath(path) {
+  try {
+    return { status: 'present', stats: lstatSync(path) };
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return { status: 'absent' };
+    }
+    return { status: 'unknown', error };
   }
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function pathIsWithin(root, candidate, allowRoot = true) {
+  const difference = relative(root, candidate);
+  if (difference === '') {
+    return allowRoot;
+  }
+  return difference !== '..'
+    && !difference.startsWith(`..${sep}`)
+    && !isAbsolute(difference);
+}
+
+function verifyDirectory(directory, expectedIdentity, expectedRealPath, ownedRoot) {
+  const state = inspectPath(directory);
+  if (state.status === 'unknown') {
+    throw state.error;
+  }
+  if (state.status === 'absent') {
+    throw new Error(`directory disappeared before cleanup: ${directory}`);
+  }
+  if (state.stats.isSymbolicLink() || !state.stats.isDirectory()) {
+    throw new Error(`refusing to traverse a non-directory or reparse alias: ${directory}`);
+  }
+
+  const identity = { dev: state.stats.dev, ino: state.stats.ino };
+  if (!sameIdentity(identity, expectedIdentity)) {
+    throw new Error(`directory identity changed before cleanup: ${directory}`);
+  }
+  const realPath = realpathSync.native(directory);
+  if (relative(expectedRealPath, realPath) !== '') {
+    throw new Error(`directory real path changed before cleanup: ${directory}`);
+  }
+  if (!pathIsWithin(ownedRoot, realPath)) {
+    throw new Error(`directory escaped the probe-owned root: ${directory}`);
+  }
+
+  return { identity, realPath };
+}
+
+function verifyUnlinkIdentity(path, expectedIdentity) {
+  const state = inspectPath(path);
+  if (state.status === 'unknown') {
+    throw state.error;
+  }
+  if (state.status === 'absent') {
+    return false;
+  }
+  const identity = { dev: state.stats.dev, ino: state.stats.ino };
+  if (!sameIdentity(identity, expectedIdentity)) {
+    throw new Error(`entry identity changed before unlink: ${path}`);
+  }
+  return true;
+}
+
+function removeBottomUp(directory, expectedIdentity, expectedRealPath, ownedRoot) {
+  verifyDirectory(
+    directory,
+    expectedIdentity,
+    expectedRealPath,
+    ownedRoot,
+  );
 
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const entryPath = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      removeBottomUp(entryPath);
+    if (!pathIsWithin(resolve(directory), resolve(entryPath), false)) {
+      throw new Error(`entry path escaped its parent directory: ${entryPath}`);
+    }
+    const entryState = inspectPath(entryPath);
+    if (entryState.status === 'unknown') {
+      throw entryState.error;
+    }
+    if (entryState.status === 'absent') {
+      continue;
+    }
+    const entryIdentity = {
+      dev: entryState.stats.dev,
+      ino: entryState.stats.ino,
+    };
+
+    if (entryState.stats.isSymbolicLink()) {
+      if (verifyUnlinkIdentity(entryPath, entryIdentity)) {
+        unlinkSync(entryPath);
+      }
+    } else if (entryState.stats.isDirectory()) {
+      const entryRealPath = realpathSync.native(entryPath);
+      if (!pathIsWithin(ownedRoot, entryRealPath, false)) {
+        throw new Error(`child directory escaped the probe-owned root: ${entryPath}`);
+      }
+      removeBottomUp(entryPath, entryIdentity, entryRealPath, ownedRoot);
     } else {
-      unlinkSync(entryPath);
+      if (verifyUnlinkIdentity(entryPath, entryIdentity)) {
+        unlinkSync(entryPath);
+      }
     }
   }
+  verifyDirectory(
+    directory,
+    expectedIdentity,
+    expectedRealPath,
+    ownedRoot,
+  );
   rmdirSync(directory);
 }
 
@@ -124,9 +233,40 @@ export function probeWindowsNodeUnicodeFilesystem({
     validatedContents: { ...STAGE_CONTENTS },
   };
   let primaryError;
+  let ownership;
 
   try {
-    mkdirSync(probeRoot, { recursive: true });
+    const callerRealPath = realpathSync.native(parentDirectory);
+    mkdirSync(ownedUnicodeParent);
+    const ownedParentState = inspectPath(ownedUnicodeParent);
+    if (ownedParentState.status === 'unknown') {
+      throw ownedParentState.error;
+    }
+    if (ownedParentState.status === 'absent'
+      || ownedParentState.stats.isSymbolicLink()
+      || !ownedParentState.stats.isDirectory()) {
+      throw new Error(`failed to establish an owned directory at ${ownedUnicodeParent}`);
+    }
+    const ownedRealPath = realpathSync.native(ownedUnicodeParent);
+    if (!pathIsWithin(callerRealPath, ownedRealPath, false)) {
+      throw new Error(`probe-owned directory escaped its caller parent: ${ownedUnicodeParent}`);
+    }
+    const ownedIdentity = {
+      dev: ownedParentState.stats.dev,
+      ino: ownedParentState.stats.ino,
+    };
+    verifyDirectory(
+      ownedUnicodeParent,
+      ownedIdentity,
+      ownedRealPath,
+      ownedRealPath,
+    );
+    ownership = {
+      identity: ownedIdentity,
+      realPath: ownedRealPath,
+    };
+
+    mkdirSync(probeRoot);
     writeContents(testedPath, {
       'package.json': '{"name":"probe-target"}\n',
       'bin/esbuild.exe': 'old-probe-binary\n',
@@ -144,7 +284,16 @@ export function probeWindowsNodeUnicodeFilesystem({
         error,
       );
     }
-    if (existsSync(testedPath)) {
+    const targetAfterRemoval = inspectPath(testedPath);
+    if (targetAfterRemoval.status === 'unknown') {
+      throw createFilesystemError(
+        'remove-target',
+        `lstatSync could not determine target state after rmSync (${targetAfterRemoval.error.code}): ${targetAfterRemoval.error.message}`,
+        paths,
+        targetAfterRemoval.error,
+      );
+    }
+    if (targetAfterRemoval.status === 'present') {
       throw createFilesystemError(
         'remove-target',
         `rmSync returned without throwing but ${testedPath} still exists (silent no-op)`,
@@ -162,7 +311,20 @@ export function probeWindowsNodeUnicodeFilesystem({
         error,
       );
     }
-    if (existsSync(stagePath) || !existsSync(testedPath)) {
+    const stageAfterRename = inspectPath(stagePath);
+    const targetAfterRename = inspectPath(testedPath);
+    const uncertainRenameState = [stageAfterRename, targetAfterRename]
+      .find((state) => state.status === 'unknown');
+    if (uncertainRenameState !== undefined) {
+      throw createFilesystemError(
+        'rename-stage',
+        `lstatSync could not determine rename state (${uncertainRenameState.error.code}): ${uncertainRenameState.error.message}`,
+        paths,
+        uncertainRenameState.error,
+      );
+    }
+    if (stageAfterRename.status !== 'absent'
+      || targetAfterRename.status !== 'present') {
       throw createFilesystemError(
         'rename-stage',
         'renameSync returned without producing the required target state',
@@ -172,13 +334,27 @@ export function probeWindowsNodeUnicodeFilesystem({
 
     for (const [relativePath, expectedContents] of Object.entries(STAGE_CONTENTS)) {
       const validatedPath = join(testedPath, ...relativePath.split('/'));
-      const actualContents = readFileSync(validatedPath);
+      let actualContents;
+      try {
+        actualContents = readFileSync(validatedPath);
+      } catch (error) {
+        const validationError = createFilesystemError(
+          'validate-content',
+          `readFileSync failed for ${validatedPath}: ${error.message}`,
+          paths,
+          error,
+        );
+        validationError.failingPath = validatedPath;
+        throw validationError;
+      }
       if (!actualContents.equals(Buffer.from(expectedContents, 'utf8'))) {
-        throw createFilesystemError(
+        const validationError = createFilesystemError(
           'validate-content',
           `unexpected contents in ${validatedPath}`,
           paths,
         );
+        validationError.failingPath = validatedPath;
+        throw validationError;
       }
     }
   } catch (error) {
@@ -193,27 +369,81 @@ export function probeWindowsNodeUnicodeFilesystem({
   }
 
   let cleanupError;
-  try {
-    rmSync(ownedUnicodeParent, { recursive: true, force: true });
-  } catch (error) {
-    cleanupError = createFilesystemError(
-      'cleanup-owned-path',
-      `rmSync threw while cleaning ${ownedUnicodeParent}: ${error.message}`,
-      paths,
-      error,
-    );
+  if (ownership === undefined) {
+    const unownedPathState = inspectPath(ownedUnicodeParent);
+    if (unownedPathState.status === 'present') {
+      cleanupError = createFilesystemError(
+        'cleanup-owned-path',
+        `refusing to clean ${ownedUnicodeParent} because ownership was not established`,
+        paths,
+      );
+    } else if (unownedPathState.status === 'unknown') {
+      cleanupError = createFilesystemError(
+        'cleanup-owned-path',
+        `lstatSync could not determine unowned path state (${unownedPathState.error.code}): ${unownedPathState.error.message}`,
+        paths,
+        unownedPathState.error,
+      );
+    }
+  } else {
+    try {
+      verifyDirectory(
+        ownedUnicodeParent,
+        ownership.identity,
+        ownership.realPath,
+        ownership.realPath,
+      );
+      rmSync(ownedUnicodeParent, { recursive: true, force: true });
+    } catch (error) {
+      cleanupError = createFilesystemError(
+        'cleanup-owned-path',
+        `normal cleanup failed for ${ownedUnicodeParent}: ${error.message}`,
+        paths,
+        error,
+      );
+    }
   }
-  if (existsSync(ownedUnicodeParent) && cleanupError === undefined) {
+  const ownedParentAfterRemoval = inspectPath(ownedUnicodeParent);
+  if (ownedParentAfterRemoval.status === 'present' && cleanupError === undefined) {
     cleanupError = createFilesystemError(
       'cleanup-owned-path',
       `rmSync returned without throwing but ${ownedUnicodeParent} still exists (silent no-op)`,
       paths,
     );
+  } else if (ownedParentAfterRemoval.status === 'unknown') {
+    const stateError = createFilesystemError(
+      'cleanup-owned-path',
+      `lstatSync could not determine cleanup state (${ownedParentAfterRemoval.error.code}): ${ownedParentAfterRemoval.error.message}`,
+      paths,
+      ownedParentAfterRemoval.error,
+    );
+    if (cleanupError === undefined) {
+      cleanupError = stateError;
+    } else {
+      const combinedCleanupError = new AggregateError(
+        [cleanupError, stateError],
+        `normal cleanup and cleanup-state inspection failed for ${ownedUnicodeParent}`,
+      );
+      combinedCleanupError.operation = 'cleanup-owned-path';
+      combinedCleanupError.testedPath = testedPath;
+      combinedCleanupError.probeRoot = probeRoot;
+      combinedCleanupError.ownedUnicodeParent = ownedUnicodeParent;
+      combinedCleanupError.stagePath = stagePath;
+      combinedCleanupError.details = `${cleanupError.details}\n${stateError.details}`;
+      cleanupError = combinedCleanupError;
+    }
   }
 
-  if (cleanupError !== undefined) {
+  if (cleanupError !== undefined
+    && ownership !== undefined
+    && ownedParentAfterRemoval.status === 'present') {
     try {
-      removeBottomUp(ownedUnicodeParent);
+      removeBottomUp(
+        ownedUnicodeParent,
+        ownership.identity,
+        ownership.realPath,
+        ownership.realPath,
+      );
     } catch (error) {
       const fallbackError = createFilesystemError(
         'cleanup-owned-path',
@@ -230,11 +460,24 @@ export function probeWindowsNodeUnicodeFilesystem({
       cleanupFailure.probeRoot = probeRoot;
       cleanupFailure.ownedUnicodeParent = ownedUnicodeParent;
       cleanupFailure.stagePath = stagePath;
+      cleanupFailure.details = `${cleanupError.details}\n${fallbackError.details}`;
       cleanupError = cleanupFailure;
     }
   }
 
-  const cleanupComplete = !existsSync(ownedUnicodeParent);
+  const finalOwnedParentState = inspectPath(ownedUnicodeParent);
+  const cleanupComplete = finalOwnedParentState.status === 'absent';
+  if (!cleanupComplete && cleanupError === undefined) {
+    const details = finalOwnedParentState.status === 'unknown'
+      ? `lstatSync could not determine final cleanup state (${finalOwnedParentState.error.code}): ${finalOwnedParentState.error.message}`
+      : `probe-owned path still exists after cleanup: ${ownedUnicodeParent}`;
+    cleanupError = createFilesystemError(
+      'cleanup-owned-path',
+      details,
+      paths,
+      finalOwnedParentState.error,
+    );
+  }
   if (primaryError !== undefined) {
     primaryError.cleanupComplete = cleanupComplete;
     if (!cleanupComplete) {
