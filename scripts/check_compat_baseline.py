@@ -103,7 +103,9 @@ def workflow_job_key(line: str) -> str | None:
 
 
 def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
-    step: dict[str, object] = {"with": {}, "run": [], "unconsumed": []}
+    step: dict[str, object] = {
+        "keys": [], "withKeys": [], "with": {}, "run": [], "unconsumed": [],
+    }
     lines = ["        " + item_lines[0][8:], *item_lines[1:]]
     mode: str | None = None
     for raw_line in lines:
@@ -121,6 +123,7 @@ def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
                 r"(repository|ref|node-version|bun-version|version):\s*(.*)", line
             )
             if match:
+                step["withKeys"].append(match.group(1))
                 step["with"][match.group(1)] = unquote(match.group(2))
             else:
                 step["unconsumed"].append(raw_line)
@@ -136,6 +139,7 @@ def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
             step["unconsumed"].append(raw_line)
             continue
         _, key, value = match.groups()
+        step["keys"].append(key)
         if key == "with":
             mode = "with"
         elif key == "run":
@@ -264,12 +268,16 @@ def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -
               f"Windows CI {label} changed or moved", failures)
     protected_steps = (
         (1, "setup-node", {
+            "keys": ["uses", "with"],
+            "withKeys": ["node-version"],
             "uses": "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
             "with": {"node-version": "24.20.0"},
             "run": [],
             "unconsumed": [],
         }),
         (2, "Node prerequisite", {
+            "keys": ["name", "run"],
+            "withKeys": [],
             "name": "Verify Windows Node filesystem prerequisite",
             "with": {},
             "run": [
@@ -420,6 +428,22 @@ def check_windows_ci_parser_self_checks(
          "          node-version: 24.20.0",
          "          node-version: 24.20.0\n          cache: npm",
          "Windows CI setup-node contains unconsumed syntax"),
+        ("Node prerequisite empty with block",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        with:",
+         "Windows CI Node prerequisite changed or moved"),
+        ("setup-node empty run block",
+         "          node-version: 24.20.0",
+         "          node-version: 24.20.0\n        run: |",
+         "Windows CI setup-node changed or moved"),
+        ("setup-node duplicate same-value uses key",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "Windows CI setup-node changed or moved"),
+        ("setup-node duplicate node-version input",
+         "          node-version: 24.20.0",
+         "          node-version: 24.20.0\n          node-version: 24.20.0",
+         "Windows CI setup-node changed or moved"),
         ("setup-node single-quoted if",
          "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
          "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        'if': false",

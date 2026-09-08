@@ -196,7 +196,13 @@ function parseWindowsWorkflow(workflow) {
     const end = itemStarts[itemIndex + 1] ?? stepLines.length;
     const item = stepLines.slice(start, end);
     item[0] = `        ${item[0].slice(8)}`;
-    const step = { with: {}, run: [], unconsumed: [] };
+    const step = {
+      keys: [],
+      withKeys: [],
+      with: {},
+      run: [],
+      unconsumed: [],
+    };
     let mode = null;
     for (const rawLine of item) {
       const indent = /^ */.exec(rawLine)[0].length;
@@ -210,6 +216,7 @@ function parseWindowsWorkflow(workflow) {
       if (mode === 'with' && indent === 10) {
         const match = /^(repository|ref|node-version|bun-version|version):\s*(.*)$/.exec(line);
         if (match) {
+          step.withKeys.push(match[1]);
           step.with[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
         } else {
           step.unconsumed.push(rawLine);
@@ -227,6 +234,7 @@ function parseWindowsWorkflow(workflow) {
         continue;
       }
       const [, , key, rawValue] = match;
+      step.keys.push(key);
       const value = rawValue.replace(/^(['"])(.*)\1$/, '$2');
       if (key === 'with') mode = 'with';
       else if (key === 'run') {
@@ -289,12 +297,16 @@ function assertWindowsCiPrerequisiteOrder(workflow) {
     }
   }
   assert.deepEqual(setupNode, {
+    keys: ['uses', 'with'],
+    withKeys: ['node-version'],
     uses: 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
     with: { 'node-version': '24.20.0' },
     run: [],
     unconsumed: [],
   }, 'Windows CI setup-node changed or moved');
   assert.deepEqual(nodePrerequisite, {
+    keys: ['name', 'run'],
+    withKeys: [],
     name: 'Verify Windows Node filesystem prerequisite',
     with: {},
     run: prerequisiteCommands,
@@ -474,6 +486,30 @@ const windowsCiSemanticVariants = [
     '          node-version: 24.20.0',
     '          node-version: 24.20.0\n          cache: npm',
     /^Windows CI setup-node contains unconsumed syntax$/,
+  ],
+  [
+    'the Node prerequisite with an empty with block',
+    '      - name: Verify Windows Node filesystem prerequisite',
+    '      - name: Verify Windows Node filesystem prerequisite\n        with:',
+    /Windows CI Node prerequisite changed or moved/,
+  ],
+  [
+    'setup-node with an empty run block',
+    '          node-version: 24.20.0',
+    '          node-version: 24.20.0\n        run: |',
+    /Windows CI setup-node changed or moved/,
+  ],
+  [
+    'setup-node with a duplicate same-value uses key',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    /Windows CI setup-node changed or moved/,
+  ],
+  [
+    'setup-node with a duplicate node-version input',
+    '          node-version: 24.20.0',
+    '          node-version: 24.20.0\n          node-version: 24.20.0',
+    /Windows CI setup-node changed or moved/,
   ],
   ...[
     [
