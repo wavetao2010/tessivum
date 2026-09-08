@@ -123,6 +123,11 @@ function stripYamlComment(value) {
   return value.trimEnd();
 }
 
+function workflowJobKey(line) {
+  const match = /^  (['"]?)([A-Za-z0-9_-]+)\1:\s*$/.exec(line);
+  return match?.[2] ?? null;
+}
+
 function parseWindowsWorkflowSteps(workflow) {
   const lines = workflow.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     .split('\n');
@@ -135,7 +140,7 @@ function parseWindowsWorkflowSteps(workflow) {
   const windowsJobs = [];
   for (let index = jobs[0] + 1; index < visible.length; index += 1) {
     if (visible[index].trim() && !visible[index].startsWith(' ')) break;
-    if (/^  windows:\s*$/.test(visible[index])) windowsJobs.push(index);
+    if (workflowJobKey(visible[index]) === 'windows') windowsJobs.push(index);
   }
   assert.equal(
     windowsJobs.length,
@@ -146,7 +151,7 @@ function parseWindowsWorkflowSteps(workflow) {
   const jobStart = windowsJobs[0];
   let jobEnd = lines.length;
   for (let index = jobStart + 1; index < visible.length; index += 1) {
-    if (/^  [A-Za-z0-9_-]+:\s*$/.test(visible[index])) {
+    if (workflowJobKey(visible[index]) !== null) {
       jobEnd = index;
       break;
     }
@@ -374,6 +379,22 @@ jobs:
   assert.throws(
     () => assertWindowsCiPrerequisiteOrder(workflow),
     /Windows CI second step/,
+  );
+});
+
+test('Windows CI parser stops at a quoted following job', () => {
+  const workflow = `
+jobs:
+  windows:
+    runs-on: windows-2025
+  'quoted-job':
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+`;
+
+  assert.throws(
+    () => parseWindowsWorkflowSteps(workflow),
+    /jobs\.windows must contain steps/,
   );
 });
 

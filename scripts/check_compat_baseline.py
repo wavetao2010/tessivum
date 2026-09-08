@@ -87,6 +87,11 @@ def strip_yaml_comment(value: str) -> str:
     return value.rstrip()
 
 
+def workflow_job_key(line: str) -> str | None:
+    match = re.fullmatch(r"  (['\"]?)([A-Za-z0-9_-]+)\1:\s*", line)
+    return match.group(2) if match else None
+
+
 def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
     step: dict[str, object] = {"with": {}, "run": []}
     lines = ["        " + item_lines[0][8:], *item_lines[1:]]
@@ -148,18 +153,15 @@ def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
         indent = len(line) - len(line.lstrip())
         if line.strip() and indent == 0:
             break
-        if indent == 2 and re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", line):
-            if line.strip() == "windows:":
-                windows_indices.append(index)
+        if indent == 2 and workflow_job_key(line) == "windows":
+            windows_indices.append(index)
     if len(windows_indices) != 1:
         raise AssertionError("workflow must define jobs.windows exactly once")
 
     job_start = windows_indices[0]
     job_end = len(lines)
     for index in range(job_start + 1, len(lines)):
-        if re.fullmatch(
-            r"  [A-Za-z0-9_-]+:\s*", visible[index]
-        ):
+        if workflow_job_key(visible[index]) is not None:
             job_end = index
             break
     job_lines = lines[job_start + 1:job_end]
@@ -270,6 +272,13 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
   browser-e2e:
     steps: []
 """
+    quoted_following_workflow = """jobs:
+  windows:
+    runs-on: windows-2025
+  'quoted-job':
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+"""
     folded_workflow = """jobs:
   windows:
     steps:
@@ -289,6 +298,13 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
     folded_steps = parse_windows_workflow_steps(folded_workflow)
     check(folded_steps[0].get("run") == [],
           "Windows CI parser accepted a folded run scalar", failures)
+    quoted_boundary_error = None
+    try:
+        parse_windows_workflow_steps(quoted_following_workflow)
+    except AssertionError as error:
+        quoted_boundary_error = str(error)
+    check(quoted_boundary_error == "jobs.windows must define steps exactly once",
+          "Windows CI parser crossed into a quoted following job", failures)
 
 
 def repo_head(repo: Path) -> str:
