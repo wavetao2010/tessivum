@@ -109,7 +109,14 @@ function assertTokensInOrder(source, tokens, label) {
 }
 
 function replaceWorkflowOnce(workflow, current, replacement) {
-  assert.ok(workflow.includes(current), `workflow fixture is missing: ${current}`);
+  const firstIndex = workflow.indexOf(current);
+  const lastIndex = workflow.lastIndexOf(current);
+  assert.notEqual(firstIndex, -1, `workflow fixture is missing: ${current}`);
+  assert.equal(
+    firstIndex,
+    lastIndex,
+    `workflow fixture must contain exactly one anchor: ${current}`,
+  );
   return workflow.replace(current, replacement);
 }
 
@@ -376,39 +383,61 @@ const windowsCiSemanticVariants = [
     'a non-Windows runner',
     '    runs-on: windows-2025',
     '    runs-on: ubuntu-latest',
+    /Windows CI runner must be windows-2025/,
   ],
   [
     'setup-node with if',
     '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
     '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        if: false',
+    /Windows CI setup-node must not have if/,
   ],
   [
     'setup-node with continue-on-error',
     '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
     '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        continue-on-error: true',
+    /Windows CI setup-node must not continue on error/,
   ],
   [
     'the Node prerequisite with if',
     '      - name: Verify Windows Node filesystem prerequisite',
     '      - name: Verify Windows Node filesystem prerequisite\n        if: false',
+    /Windows CI Node prerequisite must not have if/,
   ],
   [
     'the Node prerequisite with continue-on-error',
     '      - name: Verify Windows Node filesystem prerequisite',
     '      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true',
+    /Windows CI Node prerequisite must not continue on error/,
   ],
 ];
 
-for (const [label, current, replacement] of windowsCiSemanticVariants) {
+for (const [
+  label,
+  current,
+  replacement,
+  expectedError,
+] of windowsCiSemanticVariants) {
   test(`Windows CI rejects ${label}`, () => {
     const workflow = readFileSync(
       join(repoRoot, '.github', 'workflows', 'ci.yml'),
       'utf8',
     );
     const variant = replaceWorkflowOnce(workflow, current, replacement);
-    assert.throws(() => assertWindowsCiPrerequisiteOrder(variant));
+    assert.throws(
+      () => assertWindowsCiPrerequisiteOrder(variant),
+      expectedError,
+    );
   });
 }
+
+test('workflow mutation rejects an ambiguous prerequisite anchor', () => {
+  const anchor = '      - name: Verify Windows Node filesystem prerequisite';
+  const workflow = `      # decoy: ${anchor}\n${anchor}`;
+  assert.throws(
+    () => replaceWorkflowOnce(workflow, anchor, `${anchor}\n        if: false`),
+    /workflow fixture must contain exactly one anchor/,
+  );
+});
 
 test('Windows CI parser rejects comments and unrelated block scalars', () => {
   const workflow = `

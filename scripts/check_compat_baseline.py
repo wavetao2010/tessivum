@@ -74,6 +74,16 @@ def check(condition: bool, message: str, failures: list[str]) -> None:
         failures.append(message)
 
 
+def replace_workflow_once(workflow: str, current: str, replacement: str) -> str:
+    anchor_count = workflow.count(current)
+    if anchor_count != 1:
+        raise AssertionError(
+            "workflow fixture must contain exactly one anchor: "
+            f"{current} (found {anchor_count})"
+        )
+    return workflow.replace(current, replacement, 1)
+
+
 def strip_yaml_comment(value: str) -> str:
     quote: str | None = None
     for index, character in enumerate(value):
@@ -338,28 +348,52 @@ def check_windows_ci_parser_self_checks(
 
     semantic_variants = (
         ("non-Windows runner", "    runs-on: windows-2025",
-         "    runs-on: ubuntu-latest"),
+         "    runs-on: ubuntu-latest",
+         "Windows CI runner is not windows-2025"),
         ("setup-node if", "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
-         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        if: false"),
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        if: false",
+         "Windows CI setup-node has bypass semantics"),
         ("setup-node continue-on-error",
          "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
-         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        continue-on-error: true"),
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        continue-on-error: true",
+         "Windows CI setup-node has bypass semantics"),
         ("Node prerequisite if",
          "      - name: Verify Windows Node filesystem prerequisite",
-         "      - name: Verify Windows Node filesystem prerequisite\n        if: false"),
+         "      - name: Verify Windows Node filesystem prerequisite\n        if: false",
+         "Windows CI Node prerequisite has bypass semantics"),
         ("Node prerequisite continue-on-error",
          "      - name: Verify Windows Node filesystem prerequisite",
-         "      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true"),
+         "      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true",
+         "Windows CI Node prerequisite has bypass semantics"),
     )
-    for label, current, replacement in semantic_variants:
-        check(current in ci_workflow,
-              f"Windows CI semantic fixture missing for {label}", failures)
+    for label, current, replacement, expected_failure in semantic_variants:
         variant_failures: list[str] = []
         check_windows_ci_prerequisite_order(
-            ci_workflow.replace(current, replacement, 1), variant_failures
+            replace_workflow_once(ci_workflow, current, replacement),
+            variant_failures,
         )
-        check(bool(variant_failures),
-              f"Windows CI parser accepted {label}", failures)
+        check(variant_failures == [expected_failure],
+              f"Windows CI {label} mutation reported {variant_failures!r}, "
+              f"expected {[expected_failure]!r}", failures)
+
+    prerequisite_anchor = "      - name: Verify Windows Node filesystem prerequisite"
+    ambiguous_workflow = ci_workflow.replace(
+        prerequisite_anchor,
+        f"      # decoy: {prerequisite_anchor}\n{prerequisite_anchor}",
+        1,
+    )
+    ambiguous_error = None
+    try:
+        replace_workflow_once(
+            ambiguous_workflow,
+            prerequisite_anchor,
+            f"{prerequisite_anchor}\n        if: false",
+        )
+    except AssertionError as error:
+        ambiguous_error = str(error)
+    check(ambiguous_error is not None
+          and "must contain exactly one anchor" in ambiguous_error,
+          "Windows CI mutation accepted an ambiguous prerequisite anchor", failures)
 
 
 def repo_head(repo: Path) -> str:
