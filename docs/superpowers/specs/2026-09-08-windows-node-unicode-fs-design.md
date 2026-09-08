@@ -69,14 +69,20 @@ the acceptance requirement are Windows-specific.
 
 ## Runtime policy
 
-Windows source acceptance supports Node 22 LTS at version 22.19.0 or later and
-Node 24 LTS at version 24.13.1 or later. The development and Windows CI
-reference runtime is Node 24.20.0.
+Windows source acceptance supports exactly these Node LTS ranges:
 
-The behavioral probe is authoritative. A runtime inside a nominally supported
-range still fails the prerequisite if it cannot complete the filesystem
-operations. Conversely, the acceptance procedure does not use an undocumented
-version bypass to skip the probe.
+- `>=22.19.0 <23.0.0`;
+- `>=24.13.1 <25.0.0`.
+
+The development and Windows CI reference runtime is Node 24.20.0. Odd-numbered
+and future major versions are rejected until they are explicitly validated and
+the policy is updated. A numerically newer version does not gain implicit
+support.
+
+The version policy and behavioral probe are both mandatory gates. A runtime in
+a supported range still fails if it cannot complete the filesystem operations.
+A runtime outside the supported ranges fails even if the filesystem probe
+would pass. There is no undocumented version or behavior bypass.
 
 The local retest uses the official `node-v24.20.0-win-x64.zip` through
 process-local `PATH` precedence. Its archive SHA-256 is:
@@ -96,21 +102,25 @@ baseline, and the Windows acceptance procedure.
 
 ### Runtime probe
 
-Create `scripts/check-windows-node-unicode-fs.mjs`. The module exports a
-function that accepts an optional parent directory for tests and implements a
-CLI entry point for normal use.
+Create `scripts/check-windows-node-unicode-fs.mjs`. The module exports a pure
+version-range predicate, a filesystem probe that accepts an optional parent
+directory for tests, and a CLI entry point for normal use. The version parser
+uses `process.versions.node` and no package dependency.
 
 The probe performs these operations:
 
-1. Create a unique directory below a path component containing Chinese
+1. Reject a Node version outside `>=22.19.0 <23.0.0` and
+   `>=24.13.1 <25.0.0`.
+2. Create a unique directory below a path component containing Chinese
    characters and a space.
-2. Create a populated `target` directory and a populated sibling stage
+3. Create a populated `target` directory and a populated sibling stage
    directory whose name follows pnpm's `<name>_tmp_<pid>_<id>` shape.
-3. Call `fs.rmSync(target, { recursive: true, force: true })` once.
-4. Check that `target` no longer exists. Treat a silent no-op as a failure.
-5. Rename the stage directory to `target` once and check that the stage no
-   longer exists.
-6. Remove the full probe tree before returning.
+4. Call `fs.rmSync(target, { recursive: true, force: true })` once.
+5. Check that `target` no longer exists. Treat a silent no-op as a failure.
+6. Rename the stage directory to `target` once.
+7. Verify that the stage no longer exists and the target contains the expected
+   root file, `bin` file, and `lib` file with their original contents.
+8. Remove the full probe tree before returning.
 
 The probe must not retry either operation. Retrying could hide the behavior the
 acceptance gate exists to detect.
@@ -127,7 +137,7 @@ facts when the capability check fails:
 - `process.version` and `process.platform`;
 - the operation that failed or returned an invalid state;
 - the tested path;
-- the supported Windows Node LTS ranges;
+- both supported Windows Node LTS ranges;
 - `https://github.com/nodejs/node/issues/61067`.
 
 If fallback cleanup also fails, the error preserves both the primary probe
@@ -145,59 +155,87 @@ The test module covers these contracts:
 - A capable runtime completes removal and rename below a Chinese-and-space
   path and leaves no probe directory.
 - The CLI succeeds and prints the current Node version on a capable runtime.
+- The version predicate accepts the inclusive lower bounds, accepts later
+  patch/minor releases within Node 22 and 24, and rejects versions immediately
+  below each lower bound.
+- The version predicate rejects Node 20, Node 23, Node 25, and an unlisted
+  future major version even when their numeric versions exceed a lower bound.
+- The rename result contains every expected file with its original contents.
 - The source acceptance document names the supported LTS floors and invokes
   the probe before dependency installation.
-- The Windows CI job pins Node 24.20.0, runs the tests, and runs the probe
-  before the DeepSeek pnpm install.
+- The Windows CI job orders primary checkout, pinned Node setup, tests, and the
+  probe before external checkouts, pnpm setup, and the DeepSeek install.
 
 The local TDD cycle also runs the CLI under Node 24.11.1 as an expected-failure
-integration check. It must emit the targeted diagnostic and leave no probe
-directory. That execution is evidence for the rejection path, not a passing
-test-suite result.
+integration check. The CLI must reject its version before filesystem mutation,
+emit the targeted diagnostic, and leave no probe directory. A separate direct
+call to the exported filesystem probe under Node 24.11.1 must reproduce the
+silent removal failure, report it, and complete fallback cleanup. Those
+executions are rejection-path evidence, not passing test-suite results.
 
 ### Windows CI
 
-Modify `.github/workflows/ci.yml` only in the `windows` job. Add a commit-pinned
-`actions/setup-node` step for Node 24.20.0 before `pnpm/action-setup`. Add a
-runtime prerequisite step before the compatibility baselines and before the
-DeepSeek frozen install:
+Modify `.github/workflows/ci.yml` only in the `windows` job. Its relevant steps
+must have this exact order:
+
+1. Check out the primary Tessivum repository.
+2. Run
+   `actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38` with
+   `node-version: 24.20.0`.
+3. Run the Node tests and runtime probe.
+4. Check out the three pinned external repositories.
+5. Set up Rust, Bun, and pnpm 11.7.0.
+6. Run compatibility gates and the existing build and test steps.
+
+The runtime prerequisite step runs:
 
 ```powershell
 node --test scripts/check-windows-node-unicode-fs.test.mjs
 node scripts/check-windows-node-unicode-fs.mjs
 ```
 
-The job continues to pin pnpm 11.7.0 and Bun 1.4.0. The probe creates its own
-Unicode descendant, so it exercises the relevant behavior even though the
+The setup-node commit is the immutable commit currently referenced by the v6
+tag. The job continues to pin pnpm 11.7.0 and Bun 1.4.0. The probe creates its
+own Unicode descendant, so it exercises the relevant behavior even though the
 GitHub workspace path is normally ASCII.
 
 ### Compatibility baseline
 
-Extend `scripts/check_compat_baseline.py` to assert that the Windows workflow
-contains the Node 24.20.0 pin and invokes both the Node test and runtime probe
-before the pinned DeepSeek installation step. The check prevents a future CI
-edit from silently dropping the prerequisite.
+Extend `scripts/check_compat_baseline.py` to isolate the `windows` job and
+assert the ordered occurrence of primary checkout, the immutable setup-node
+commit, Node 24.20.0, the Node test, the runtime probe, the first external
+checkout, pnpm setup, and the pinned DeepSeek installation. The check prevents
+a future CI edit from moving pnpm or external dependency work ahead of the
+runtime prerequisite.
 
 The baseline check remains a source invariant. It does not replace execution
 of the Node test or the runtime probe.
 
 ### Windows acceptance procedure
 
-Update `docs/WINDOWS_SOURCE_TEST.md` to state the supported Windows Node LTS
-ranges and the Node 24.20.0 reference runtime. Record Node's resolved executable
-path and version as before.
+Update `docs/WINDOWS_SOURCE_TEST.md` to state both supported Windows Node LTS
+ranges and the Node 24.20.0 reference runtime. The procedure must use this
+order:
 
-After the exact candidate checkout is verified and before external dependency
-clones or pnpm installation, run:
+1. Record the environment and resolve the Node executable without invoking
+   pnpm.
+2. Clone and verify the exact primary Tessivum candidate.
+3. Invoke `node --version`, enforce the supported range, and run the runtime
+   probe from the primary checkout.
+4. Clone and verify the three pinned external dependencies.
+5. Invoke and verify pnpm 11.7.0, then continue to Group 01.
+
+The runtime probe command is:
 
 ```powershell
 node scripts/check-windows-node-unicode-fs.mjs
 ```
 
-A non-zero result is an environment prerequisite failure. Preserve its output,
-mark Groups 01-16 `NOT RUN`, and do not reinterpret it as an esbuild package
-failure. If the probe succeeds, continue to the existing clean Group 01
-installation without cleanup, retries, or configuration changes.
+A version rejection or non-zero probe result is an environment prerequisite
+failure. Preserve its output, mark Groups 01-16 `NOT RUN`, and do not invoke
+pnpm or reinterpret it as an esbuild package failure. If both gates succeed,
+continue to the existing clean Group 01 installation without cleanup, retries,
+or configuration changes.
 
 The procedure also replaces the Developer Mode registry lookup with a read-only
 query that represents a missing value as disabled without throwing inside the
@@ -209,9 +247,11 @@ gate failure without changing the registry.
 The acceptance flow becomes:
 
 ```text
-record tools and versions
+record environment and resolve Node
         |
 verify exact Tessivum candidate
+        |
+enforce Node LTS range
         |
 run Node Unicode filesystem probe
         |
@@ -219,7 +259,9 @@ run Node Unicode filesystem probe
         |
         +-- success --> clone pinned dependencies
                          |
-                         --> Group 01 frozen pnpm install
+                         --> verify pnpm 11.7.0
+                               |
+                               --> Group 01 frozen pnpm install
                                |
                                --> execute installed esbuild binaries
                                |
@@ -238,16 +280,19 @@ Implementation follows these red-green cycles:
 
 1. Add the Node test importing the not-yet-created probe and observe
    `ERR_MODULE_NOT_FOUND` under portable Node 24.20.0.
-2. Implement the minimal probe and observe the real-filesystem test pass under
-   Node 24.20.0.
-3. Add CI and documentation contract assertions and observe them fail because
+2. Implement and test the version predicate, including exact range boundaries
+   and rejection of unlisted major versions.
+3. Implement the minimal filesystem probe and observe the real-filesystem test
+   pass under Node 24.20.0.
+4. Add CI and documentation contract assertions and observe them fail because
    the runtime pin and invocations are absent.
-4. Modify CI, the compatibility baseline, and the acceptance document until
+5. Modify CI, the compatibility baseline, and the acceptance document until
    those assertions pass.
-5. Run the CLI under Node 24.11.1 and verify the expected targeted rejection and
-   complete cleanup.
-6. Run the CLI and test module under Node 24.20.0 and verify success.
-7. Run `python scripts/check_compat_baseline.py` with the exact pinned source
+6. Run the CLI under Node 24.11.1 and verify version rejection before mutation.
+7. Call the filesystem probe directly under Node 24.11.1 and verify the known
+   behavior failure plus fallback cleanup.
+8. Run the CLI and test module under Node 24.20.0 and verify success.
+9. Run `python scripts/check_compat_baseline.py` with the exact pinned source
    checkouts and verify the extended invariant.
 
 No production implementation is written before its failing test is observed.
