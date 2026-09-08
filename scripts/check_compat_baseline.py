@@ -74,46 +74,209 @@ def check(condition: bool, message: str, failures: list[str]) -> None:
         failures.append(message)
 
 
+def strip_yaml_comment(value: str) -> str:
+    quote: str | None = None
+    for index, character in enumerate(value):
+        if quote is None and character in {"'", '"'}:
+            quote = character
+        elif character == quote and (index == 0 or value[index - 1] != "\\"):
+            quote = None
+        elif (quote is None and character == "#"
+              and (index == 0 or value[index - 1].isspace())):
+            return value[:index].rstrip()
+    return value.rstrip()
+
+
+def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
+    step: dict[str, object] = {"with": {}, "run": []}
+    lines = ["        " + item_lines[0][8:], *item_lines[1:]]
+    mode: str | None = None
+    for raw_line in lines:
+        indent = len(raw_line) - len(raw_line.lstrip())
+        if mode == "run" and indent >= 10:
+            command = raw_line[10:].strip()
+            if command:
+                step["run"].append(command)
+            continue
+        line = strip_yaml_comment(raw_line).strip()
+        if mode == "with" and indent == 10:
+            match = re.fullmatch(
+                r"(repository|ref|node-version|bun-version|version):\s*(.*)", line
+            )
+            if match:
+                step["with"][match.group(1)] = unquote(match.group(2))
+            continue
+        if indent != 8:
+            continue
+        mode = None
+        match = re.fullmatch(r"(uses|name|with|run):\s*(.*)", line)
+        if match is None:
+            continue
+        key, value = match.groups()
+        if key == "with":
+            mode = "with"
+        elif key == "run" and value.startswith(("|", ">")):
+            mode = "run"
+        elif key == "run":
+            step["run"].append(unquote(value))
+        else:
+            step[key] = unquote(value)
+    return step
+
+
+def unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
+    lines = ci_workflow.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    visible = [strip_yaml_comment(line) for line in lines]
+    jobs_indices = [
+        index for index, line in enumerate(lines)
+        if visible[index] == "jobs:"
+    ]
+    if len(jobs_indices) != 1:
+        raise AssertionError("workflow must define jobs exactly once")
+
+    windows_indices: list[int] = []
+    for index in range(jobs_indices[0] + 1, len(lines)):
+        line = visible[index]
+        indent = len(line) - len(line.lstrip())
+        if line.strip() and indent == 0:
+            break
+        if indent == 2 and re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", line):
+            if line.strip() == "windows:":
+                windows_indices.append(index)
+    if len(windows_indices) != 1:
+        raise AssertionError("workflow must define jobs.windows exactly once")
+
+    job_start = windows_indices[0]
+    job_end = len(lines)
+    for index in range(job_start + 1, len(lines)):
+        if re.fullmatch(
+            r"  [A-Za-z0-9_-]+:\s*", visible[index]
+        ):
+            job_end = index
+            break
+    job_lines = lines[job_start + 1:job_end]
+    steps_indices = [
+        index for index, line in enumerate(job_lines)
+        if strip_yaml_comment(line).rstrip() == "    steps:"
+    ]
+    if len(steps_indices) != 1:
+        raise AssertionError("jobs.windows must define steps exactly once")
+
+    step_lines: list[str] = []
+    for line in job_lines[steps_indices[0] + 1:]:
+        structural = strip_yaml_comment(line)
+        indent = len(structural) - len(structural.lstrip())
+        if structural.strip() and indent <= 4:
+            break
+        step_lines.append(line)
+    item_starts = [
+        index for index, line in enumerate(step_lines)
+        if re.match(r"^ {6}-(?:\s|$)", strip_yaml_comment(line))
+    ]
+    return [
+        parse_workflow_step(step_lines[start:item_starts[item_index + 1]
+                                       if item_index + 1 < len(item_starts)
+                                       else len(step_lines)])
+        for item_index, start in enumerate(item_starts)
+    ]
+
+
 def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -> None:
-    start_token = "\n  windows:"
-    end_token = "\n  browser-e2e:"
-    start = ci_workflow.find(start_token)
-    end = ci_workflow.find(end_token, start + len(start_token)) if start >= 0 else -1
-    check(start >= 0, "Windows CI job start marker is missing", failures)
-    check(end >= 0, "Windows CI job end marker is missing", failures)
-    if start < 0 or end < 0:
+    try:
+        steps = parse_windows_workflow_steps(ci_workflow)
+    except AssertionError as error:
+        failures.append(f"Windows CI structure invalid: {error}")
         return
 
-    windows_job = ci_workflow[start:end]
-    cursor = 0
-    ordered_tokens = (
-        "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
-        "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
-        "node-version: 24.20.0",
-        "node --test scripts/check-windows-node-unicode-fs.test.mjs",
-        "node scripts/check-windows-node-unicode-fs.mjs",
-        "repository: deepseek-ai/deepseek-harness",
-        f"ref: {HARNESS_SHA}",
-        "repository: cordiverse/cordis",
-        f"ref: {CORDIS_SHA}",
-        "repository: wavetao2010/tessivum-core",
-        f"ref: {CORE_SHA}",
-        "dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5",
-        "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-        "bun-version: 1.4.0",
-        "pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
-        "version: 11.7.0",
-        "name: Install pinned DeepSeek build dependencies",
-        "pnpm install --frozen-lockfile",
+    checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+    expected_prefix = (
+        ({"uses": checkout, "with": {}}, "primary checkout"),
+        ({"uses": "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+          "with": {"node-version": "24.20.0"}}, "setup-node"),
+        ({"name": "Verify Windows Node filesystem prerequisite", "run": [
+            "$ErrorActionPreference = 'Stop'",
+            "$PSNativeCommandUseErrorActionPreference = $true",
+            "node --test scripts/check-windows-node-unicode-fs.test.mjs",
+            "node scripts/check-windows-node-unicode-fs.mjs",
+        ]}, "Node prerequisite commands"),
+        ({"uses": checkout, "with": {
+            "repository": "deepseek-ai/deepseek-harness", "ref": HARNESS_SHA,
+        }}, "DeepSeek checkout"),
+        ({"uses": checkout, "with": {
+            "repository": "cordiverse/cordis", "ref": CORDIS_SHA,
+        }}, "Cordis checkout"),
+        ({"uses": checkout, "with": {
+            "repository": "wavetao2010/tessivum-core", "ref": CORE_SHA,
+        }}, "tessivum-core checkout"),
     )
-    for token in ordered_tokens:
-        index = windows_job.find(token, cursor)
+    for index, (expected, label) in enumerate(expected_prefix):
+        actual = steps[index] if len(steps) > index else {}
+        check(all(actual.get(key) == value for key, value in expected.items()),
+              f"Windows CI {label} changed or moved", failures)
+
+    later_requirements = (
+        lambda step: step.get("uses")
+        == "dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5",
+        lambda step: step.get("uses")
+        == "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+        and isinstance(step.get("with"), dict)
+        and step["with"].get("bun-version") == "1.4.0",
+        lambda step: step.get("uses")
+        == "pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1"
+        and isinstance(step.get("with"), dict)
+        and step["with"].get("version") == "11.7.0",
+        lambda step: step.get("name") == "Install pinned DeepSeek build dependencies"
+        and step.get("run") == ["pnpm install --frozen-lockfile"],
+    )
+    cursor = 6
+    for requirement in later_requirements:
+        index = next(
+            (index for index in range(cursor, len(steps)) if requirement(steps[index])),
+            -1,
+        )
+        check(index >= 0, "Windows CI later prerequisite step missing or out of order",
+              failures)
         if index < 0:
-            failures.append(
-                f"Windows CI prerequisite order missing or out of order: {token}"
-            )
-            return
-        cursor = index + len(token)
+            break
+        cursor = index + 1
+
+
+def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
+    decoy_workflow = """jobs:
+  windows:
+    # uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+    steps:
+      - name: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
+        notes: |
+          uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+  browser-e2e:
+    steps: []
+"""
+    inserted_workflow = """jobs:
+  windows:
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+  inserted-job:
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+  browser-e2e:
+    steps: []
+"""
+    fixtures = (
+        (decoy_workflow, "accepted decoy comments or block scalar content"),
+        (inserted_workflow, "crossed into an inserted same-indent job"),
+    )
+    for workflow, message in fixtures:
+        fixture_failures: list[str] = []
+        check_windows_ci_prerequisite_order(workflow, fixture_failures)
+        check(bool(fixture_failures), f"Windows CI parser {message}", failures)
 
 
 def repo_head(repo: Path) -> str:
@@ -148,6 +311,7 @@ def main() -> int:
           "tessivum-core package version changed", failures)
     ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     release_workflow = (PROJECT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    check_windows_ci_parser_self_checks(failures)
     check_windows_ci_prerequisite_order(ci_workflow, failures)
     check(ci_workflow.count(f"ref: {CORE_SHA}") == 3,
           "CI tessivum-core checkout revision changed", failures)

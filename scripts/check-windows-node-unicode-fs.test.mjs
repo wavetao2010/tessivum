@@ -100,6 +100,164 @@ function assertTokensInOrder(source, tokens, label) {
   }
 }
 
+function stripYamlComment(value) {
+  let quote = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (!quote && (character === "'" || character === '"')) {
+      quote = character;
+    } else if (character === quote && value[index - 1] !== '\\') {
+      quote = null;
+    } else if (!quote && character === '#' && /(^|\s)/.test(value[index - 1] ?? '')) {
+      return value.slice(0, index).trimEnd();
+    }
+  }
+  return value.trimEnd();
+}
+
+function parseWindowsWorkflowSteps(workflow) {
+  const lines = workflow.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
+    .split('\n');
+  const visible = lines.map(stripYamlComment);
+  const jobs = visible
+    .map((line, index) => line === 'jobs:' ? index : -1)
+    .filter((index) => index >= 0);
+  assert.equal(jobs.length, 1, 'Windows CI workflow must define jobs once');
+
+  const windowsJobs = [];
+  for (let index = jobs[0] + 1; index < visible.length; index += 1) {
+    if (visible[index].trim() && !visible[index].startsWith(' ')) break;
+    if (/^  windows:\s*$/.test(visible[index])) windowsJobs.push(index);
+  }
+  assert.equal(
+    windowsJobs.length,
+    1,
+    'Windows CI workflow must define jobs.windows exactly once',
+  );
+
+  const jobStart = windowsJobs[0];
+  let jobEnd = lines.length;
+  for (let index = jobStart + 1; index < visible.length; index += 1) {
+    if (/^  [A-Za-z0-9_-]+:\s*$/.test(visible[index])) {
+      jobEnd = index;
+      break;
+    }
+  }
+  const jobLines = lines.slice(jobStart + 1, jobEnd);
+  const stepsIndex = jobLines.findIndex(
+    (line) => stripYamlComment(line).trimEnd() === '    steps:',
+  );
+  assert.notEqual(stepsIndex, -1, 'jobs.windows must contain steps');
+
+  const stepLines = [];
+  for (const line of jobLines.slice(stepsIndex + 1)) {
+    const structural = stripYamlComment(line);
+    const indent = structural.length - structural.trimStart().length;
+    if (structural.trim() && indent <= 4) break;
+    stepLines.push(line);
+  }
+  const itemStarts = [];
+  for (let index = 0; index < stepLines.length; index += 1) {
+    if (/^ {6}-(?:\s|$)/.test(stripYamlComment(stepLines[index]))) {
+      itemStarts.push(index);
+    }
+  }
+  return itemStarts.map((start, itemIndex) => {
+    const end = itemStarts[itemIndex + 1] ?? stepLines.length;
+    const item = stepLines.slice(start, end);
+    item[0] = `        ${item[0].slice(8)}`;
+    const step = { with: {}, run: [] };
+    let mode = null;
+    for (const rawLine of item) {
+      const indent = /^ */.exec(rawLine)[0].length;
+      if (mode === 'run' && indent >= 10) {
+        const command = rawLine.slice(10).trim();
+        if (command) step.run.push(command);
+        continue;
+      }
+      const line = stripYamlComment(rawLine).trim();
+      if (mode === 'with' && indent === 10) {
+        const match = /^(repository|ref|node-version|bun-version|version):\s*(.*)$/.exec(line);
+        if (match) step.with[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
+        continue;
+      }
+      if (indent !== 8) continue;
+      mode = null;
+      const match = /^(uses|name|with|run):\s*(.*)$/.exec(line);
+      if (!match) continue;
+      const [, key, rawValue] = match;
+      const value = rawValue.replace(/^(['"])(.*)\1$/, '$2');
+      if (key === 'with') mode = 'with';
+      else if (key === 'run' && /^[|>]/.test(value)) mode = 'run';
+      else if (key === 'run') step.run.push(value);
+      else step[key] = value;
+    }
+    return step;
+  });
+}
+
+function assertWindowsCiPrerequisiteOrder(workflow) {
+  const steps = parseWindowsWorkflowSteps(workflow);
+  const checkout = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
+  assert.equal(
+    steps[0]?.uses,
+    checkout,
+    'Windows CI first step must be the primary checkout',
+  );
+  assert.equal(
+    steps[0]?.with.repository,
+    undefined,
+    'Windows CI first step must not override the primary repository',
+  );
+  assert.equal(
+    steps[1]?.uses,
+    'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    'Windows CI second step must be the pinned setup-node action',
+  );
+  assert.equal(steps[1]?.with['node-version'], '24.20.0');
+  assert.equal(steps[2]?.name, 'Verify Windows Node filesystem prerequisite');
+  assert.deepEqual(steps[2]?.run, [
+    "$ErrorActionPreference = 'Stop'",
+    '$PSNativeCommandUseErrorActionPreference = $true',
+    'node --test scripts/check-windows-node-unicode-fs.test.mjs',
+    'node scripts/check-windows-node-unicode-fs.mjs',
+  ]);
+
+  const externalRepositories = [
+    ['deepseek-ai/deepseek-harness', '47f943859bef60e4160492346772ded9b24f765a'],
+    ['cordiverse/cordis', '8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4'],
+    ['wavetao2010/tessivum-core', '86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694'],
+  ];
+  for (const [offset, [repository, ref]] of externalRepositories.entries()) {
+    const step = steps[offset + 3];
+    assert.equal(step?.uses, checkout, `Windows CI external checkout ${offset + 1}`);
+    assert.equal(step?.with.repository, repository);
+    assert.equal(step?.with.ref, ref);
+  }
+
+  const laterRequirements = [
+    (step) => step.uses
+      === 'dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5',
+    (step) => step.uses
+      === 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'
+      && step.with['bun-version'] === '1.4.0',
+    (step) => step.uses
+      === 'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1'
+      && step.with.version === '11.7.0',
+    (step) => step.name === 'Install pinned DeepSeek build dependencies'
+      && step.run.length === 1
+      && step.run[0] === 'pnpm install --frozen-lockfile',
+  ];
+  let cursor = 6;
+  for (const requirement of laterRequirements) {
+    const index = steps.findIndex((step, stepIndex) => (
+      stepIndex >= cursor && requirement(step)
+    ));
+    assert.notEqual(index, -1, 'Windows CI later prerequisite step is missing');
+    cursor = index + 1;
+  }
+}
+
 function snapshotUnicodeProbeTrees(root) {
   const snapshot = [];
 
@@ -169,27 +327,45 @@ test('Windows CI gates external dependencies on the Node prerequisite', () => {
     join(repoRoot, '.github', 'workflows', 'ci.yml'),
     'utf8',
   );
-  const windowsJob = sectionBetween(
-    workflow,
-    '\n  windows:',
-    '\n  browser-e2e:',
-    'Windows CI job',
-  );
+  assertWindowsCiPrerequisiteOrder(workflow);
+});
 
-  assertTokensInOrder(windowsJob, [
-    'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
-    'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
-    'node-version: 24.20.0',
-    'node --test scripts/check-windows-node-unicode-fs.test.mjs',
-    'node scripts/check-windows-node-unicode-fs.mjs',
-    'repository: deepseek-ai/deepseek-harness',
-    'repository: cordiverse/cordis',
-    'repository: wavetao2010/tessivum-core',
-    'dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5',
-    'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6',
-    'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1',
-    'name: Install pinned DeepSeek build dependencies',
-  ], 'Windows CI prerequisite order');
+test('Windows CI parser rejects comments and unrelated block scalars', () => {
+  const workflow = `
+jobs:
+  windows:
+    # uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+    steps:
+      - name: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
+        notes: |
+          uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+  browser-e2e:
+    steps: []
+`;
+
+  assert.throws(
+    () => assertWindowsCiPrerequisiteOrder(workflow),
+    /Windows CI first step/,
+  );
+});
+
+test('Windows CI parser stops at an inserted same-indent job', () => {
+  const workflow = `
+jobs:
+  windows:
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+  inserted-job:
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+  browser-e2e:
+    steps: []
+`;
+
+  assert.throws(
+    () => assertWindowsCiPrerequisiteOrder(workflow),
+    /Windows CI second step/,
+  );
 });
 
 test('Windows source guide gates external dependencies on Node support', () => {
@@ -207,16 +383,46 @@ test('Windows source guide gates external dependencies on Node support', () => {
     '\n```',
     'Windows source guide main PowerShell block',
   );
+  const developerModeRead = sectionBetween(
+    mainScript,
+    '  $developerModePath =',
+    '  $developerModeProperty = $null',
+    'Developer Mode registry read',
+  );
+  assertTokensInOrder(developerModeRead, [
+    'try {',
+    'Get-ItemProperty -Path $developerModePath -ErrorAction Stop',
+    '} catch [System.Management.Automation.ItemNotFoundException] {',
+    '$developerModeKey = $null',
+  ], 'Developer Mode registry read');
+  assert.ok(
+    !developerModeRead.includes('SilentlyContinue'),
+    'Developer Mode registry read must not suppress unexpected errors',
+  );
   assertTokensInOrder(mainScript, [
+    '$Git = Get-Command git -ErrorAction Stop',
     '$Node = Get-Command node -ErrorAction Stop',
-    'git clone https://github.com/wavetao2010/tessivum.git $Repo',
+    '$Rustup = Get-Command rustup -ErrorAction Stop',
+    '$Rustc = Get-Command rustc -ErrorAction Stop',
+    '$Cargo = Get-Command cargo -ErrorAction Stop',
+    '$Bun = Get-Command bun -ErrorAction Stop',
+    '$Python = Get-Command python -ErrorAction Stop',
+    '$Pwsh = Get-Command pwsh -ErrorAction Stop',
+    '& $Git.Source --version',
     '& $Node.Source --version',
+    '& $Rustup.Source --version',
+    '& $Rustc.Source --version',
+    '& $Cargo.Source --version',
+    '& $Bun.Source --version',
+    '& $Python.Source --version',
+    '& $Pwsh.Source --version',
+    'git clone https://github.com/wavetao2010/tessivum.git $Repo',
     '& $Node.Source scripts/check-windows-node-unicode-fs.mjs',
     'git clone https://github.com/deepseek-ai/deepseek-harness.git',
     'git clone https://github.com/cordiverse/cordis.git',
     'git clone https://github.com/wavetao2010/tessivum-core.git',
     '$Pnpm = Get-Command pnpm -ErrorAction Stop',
-    'pnpm --version',
+    '& $Pnpm.Source --version',
     'pnpm install --frozen-lockfile',
   ], 'Windows source guide prerequisite order');
 

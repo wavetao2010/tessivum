@@ -81,8 +81,12 @@ try {
   if ($fileSystem -ne 'NTFS') { throw 'Test path is not on NTFS.' }
   $developerModePath =
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
-  $developerModeKey = Get-ItemProperty -Path $developerModePath `
-    -ErrorAction SilentlyContinue
+  try {
+    $developerModeKey =
+      Get-ItemProperty -Path $developerModePath -ErrorAction Stop
+  } catch [System.Management.Automation.ItemNotFoundException] {
+    $developerModeKey = $null
+  }
   $developerModeProperty = $null
   if ($null -ne $developerModeKey) {
     $developerModeProperty = $developerModeKey.PSObject.Properties |
@@ -96,7 +100,17 @@ try {
   if ($developerMode -ne 0) { throw 'Developer Mode is on.' }
   if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Run native x64 PowerShell.' }
 
+  $Git = Get-Command git -ErrorAction Stop
   $Node = Get-Command node -ErrorAction Stop
+  $Rustup = Get-Command rustup -ErrorAction Stop
+  $Rustc = Get-Command rustc -ErrorAction Stop
+  $Cargo = Get-Command cargo -ErrorAction Stop
+  $Bun = Get-Command bun -ErrorAction Stop
+  $Python = Get-Command python -ErrorAction Stop
+  $Pwsh = Get-Command pwsh -ErrorAction Stop
+  $earlyCommands = @(
+    $Git, $Node, $Rustup, $Rustc, $Cargo, $Bun, $Python, $Pwsh
+  )
   Get-ComputerInfo WindowsProductName, WindowsVersion, OsBuildNumber, OsArchitecture |
     Format-List | Out-String | Set-Content (Join-Path $Evidence 'windows.txt')
   @(
@@ -105,9 +119,19 @@ try {
     'developer-mode=off'
     "process-architecture=$($env:PROCESSOR_ARCHITECTURE)"
   ) | Set-Content (Join-Path $Evidence 'environment-gate.txt')
-  $Node | Select-Object Name, Source, Version |
+  $earlyCommands | Select-Object Name, Source, Version |
     Format-Table -AutoSize | Out-String |
     Set-Content (Join-Path $Evidence 'executables.txt')
+  @(
+    & $Git.Source --version
+    & $Node.Source --version
+    & $Rustup.Source --version
+    & $Rustc.Source --version
+    & $Cargo.Source --version
+    & $Bun.Source --version
+    & $Python.Source --version
+    & $Pwsh.Source --version
+  ) | Set-Content (Join-Path $Evidence 'versions.txt')
 
   git clone https://github.com/wavetao2010/tessivum.git $Repo
   git -C $Repo checkout --detach $TessivumRevision
@@ -130,7 +154,6 @@ try {
     $supportedNodeRanges = '>=22.19.0 <23.0.0 or >=24.13.1 <25.0.0'
     throw "Node $nodeVersion is outside $supportedNodeRanges."
   }
-  "node $nodeVersion" | Set-Content (Join-Path $Evidence 'versions.txt')
   Set-Location $Repo
   & $Node.Source scripts/check-windows-node-unicode-fs.mjs
 
@@ -152,17 +175,13 @@ try {
   $Evidence | Set-Content "$Repo\.ci\windows-source-evidence-root.txt"
 
   $Pnpm = Get-Command pnpm -ErrorAction Stop
-  $remainingCommands = Get-Command git, rustup, rustc, cargo, bun, python, pwsh
-  (@($Node, $Pnpm) + @($remainingCommands)) |
-    Select-Object Name, Source, Version | Format-Table -AutoSize | Out-String |
-    Set-Content (Join-Path $Evidence 'executables.txt')
-  @(
-    & git --version; & rustup --version; & rustc --version;
-    & cargo --version; & bun --version; & pnpm --version;
-    & python --version; "PowerShell $($PSVersionTable.PSVersion)"
-  ) | Tee-Object -FilePath (Join-Path $Evidence 'versions.txt') -Append
-  if ((& bun --version).Trim() -ne '1.4.0' -or
-      (& pnpm --version).Trim() -ne '11.7.0') {
+  $Pnpm | Select-Object Name, Source, Version |
+    Format-Table -AutoSize | Out-String |
+    Add-Content (Join-Path $Evidence 'executables.txt')
+  & $Pnpm.Source --version |
+    Tee-Object -FilePath (Join-Path $Evidence 'versions.txt') -Append
+  if ((& $Bun.Source --version).Trim() -ne '1.4.0' -or
+      (& $Pnpm.Source --version).Trim() -ne '11.7.0') {
     throw 'Bun must be 1.4.0 and pnpm must be 11.7.0.'
   }
   rustup component add clippy rustfmt

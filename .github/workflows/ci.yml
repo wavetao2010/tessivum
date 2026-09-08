@@ -124,6 +124,8 @@ jobs:
 
       - name: Verify Windows Node filesystem prerequisite
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           node --test scripts/check-windows-node-unicode-fs.test.mjs
           node scripts/check-windows-node-unicode-fs.mjs
 
