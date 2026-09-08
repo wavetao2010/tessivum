@@ -114,7 +114,9 @@ def parse_workflow_step(item_lines: list[str]) -> dict[str, object]:
         if indent != 8:
             continue
         mode = None
-        match = re.fullmatch(r"(uses|name|with|run):\s*(.*)", line)
+        match = re.fullmatch(
+            r"(uses|name|with|run|if|continue-on-error):\s*(.*)", line
+        )
         if match is None:
             continue
         key, value = match.groups()
@@ -137,7 +139,9 @@ def unquote(value: str) -> str:
     return value
 
 
-def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
+def parse_windows_workflow(
+    ci_workflow: str,
+) -> tuple[str, list[dict[str, object]]]:
     lines = ci_workflow.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     visible = [strip_yaml_comment(line) for line in lines]
     jobs_indices = [
@@ -165,6 +169,15 @@ def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
             job_end = index
             break
     job_lines = lines[job_start + 1:job_end]
+    runs_on_values = [
+        unquote(match.group(1))
+        for line in job_lines
+        if (match := re.fullmatch(
+            r"    runs-on:\s*(.*)", strip_yaml_comment(line)
+        ))
+    ]
+    if len(runs_on_values) != 1:
+        raise AssertionError("jobs.windows must define runs-on exactly once")
     steps_indices = [
         index for index, line in enumerate(job_lines)
         if strip_yaml_comment(line).rstrip() == "    steps:"
@@ -183,20 +196,28 @@ def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
         index for index, line in enumerate(step_lines)
         if re.match(r"^ {6}-(?:\s|$)", strip_yaml_comment(line))
     ]
-    return [
+    steps = [
         parse_workflow_step(step_lines[start:item_starts[item_index + 1]
                                        if item_index + 1 < len(item_starts)
                                        else len(step_lines)])
         for item_index, start in enumerate(item_starts)
     ]
+    return runs_on_values[0], steps
+
+
+def parse_windows_workflow_steps(ci_workflow: str) -> list[dict[str, object]]:
+    return parse_windows_workflow(ci_workflow)[1]
 
 
 def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -> None:
     try:
-        steps = parse_windows_workflow_steps(ci_workflow)
+        runs_on, steps = parse_windows_workflow(ci_workflow)
     except AssertionError as error:
         failures.append(f"Windows CI structure invalid: {error}")
         return
+
+    check(runs_on == "windows-2025",
+          "Windows CI runner is not windows-2025", failures)
 
     checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
     expected_prefix = (
@@ -223,6 +244,10 @@ def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -
         actual = steps[index] if len(steps) > index else {}
         check(all(actual.get(key) == value for key, value in expected.items()),
               f"Windows CI {label} changed or moved", failures)
+    for index, label in ((1, "setup-node"), (2, "Node prerequisite")):
+        step = steps[index] if len(steps) > index else {}
+        check("if" not in step and "continue-on-error" not in step,
+              f"Windows CI {label} has bypass semantics", failures)
 
     later_requirements = (
         lambda step: step.get("uses")
@@ -251,9 +276,12 @@ def check_windows_ci_prerequisite_order(ci_workflow: str, failures: list[str]) -
         cursor = index + 1
 
 
-def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
+def check_windows_ci_parser_self_checks(
+    ci_workflow: str, failures: list[str]
+) -> None:
     decoy_workflow = """jobs:
   windows:
+    runs-on: windows-2025
     # uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
     steps:
       - name: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
@@ -264,6 +292,7 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
 """
     inserted_workflow = """jobs:
   windows:
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
   inserted-job:
@@ -281,6 +310,7 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
 """
     folded_workflow = """jobs:
   windows:
+    runs-on: windows-2025
     steps:
       - run: >
           node scripts/check-windows-node-unicode-fs.mjs
@@ -305,6 +335,31 @@ def check_windows_ci_parser_self_checks(failures: list[str]) -> None:
         quoted_boundary_error = str(error)
     check(quoted_boundary_error == "jobs.windows must define steps exactly once",
           "Windows CI parser crossed into a quoted following job", failures)
+
+    semantic_variants = (
+        ("non-Windows runner", "    runs-on: windows-2025",
+         "    runs-on: ubuntu-latest"),
+        ("setup-node if", "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        if: false"),
+        ("setup-node continue-on-error",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+         "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        continue-on-error: true"),
+        ("Node prerequisite if",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        if: false"),
+        ("Node prerequisite continue-on-error",
+         "      - name: Verify Windows Node filesystem prerequisite",
+         "      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true"),
+    )
+    for label, current, replacement in semantic_variants:
+        check(current in ci_workflow,
+              f"Windows CI semantic fixture missing for {label}", failures)
+        variant_failures: list[str] = []
+        check_windows_ci_prerequisite_order(
+            ci_workflow.replace(current, replacement, 1), variant_failures
+        )
+        check(bool(variant_failures),
+              f"Windows CI parser accepted {label}", failures)
 
 
 def repo_head(repo: Path) -> str:
@@ -339,7 +394,7 @@ def main() -> int:
           "tessivum-core package version changed", failures)
     ci_workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     release_workflow = (PROJECT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    check_windows_ci_parser_self_checks(failures)
+    check_windows_ci_parser_self_checks(ci_workflow, failures)
     check_windows_ci_prerequisite_order(ci_workflow, failures)
     check(ci_workflow.count(f"ref: {CORE_SHA}") == 3,
           "CI tessivum-core checkout revision changed", failures)

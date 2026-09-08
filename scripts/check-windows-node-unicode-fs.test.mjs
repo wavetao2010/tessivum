@@ -108,6 +108,11 @@ function assertTokensInOrder(source, tokens, label) {
   }
 }
 
+function replaceWorkflowOnce(workflow, current, replacement) {
+  assert.ok(workflow.includes(current), `workflow fixture is missing: ${current}`);
+  return workflow.replace(current, replacement);
+}
+
 function stripYamlComment(value) {
   let quote = null;
   for (let index = 0; index < value.length; index += 1) {
@@ -128,7 +133,7 @@ function workflowJobKey(line) {
   return match?.[2] ?? null;
 }
 
-function parseWindowsWorkflowSteps(workflow) {
+function parseWindowsWorkflow(workflow) {
   const lines = workflow.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     .split('\n');
   const visible = lines.map(stripYamlComment);
@@ -157,6 +162,11 @@ function parseWindowsWorkflowSteps(workflow) {
     }
   }
   const jobLines = lines.slice(jobStart + 1, jobEnd);
+  const runsOnValues = jobLines
+    .map((line) => /^    runs-on:\s*(.*)$/.exec(stripYamlComment(line)))
+    .filter(Boolean)
+    .map((match) => match[1].replace(/^(['"])(.*)\1$/, '$2'));
+  assert.equal(runsOnValues.length, 1, 'jobs.windows must contain runs-on');
   const stepsIndex = jobLines.findIndex(
     (line) => stripYamlComment(line).trimEnd() === '    steps:',
   );
@@ -175,7 +185,7 @@ function parseWindowsWorkflowSteps(workflow) {
       itemStarts.push(index);
     }
   }
-  return itemStarts.map((start, itemIndex) => {
+  const steps = itemStarts.map((start, itemIndex) => {
     const end = itemStarts[itemIndex + 1] ?? stepLines.length;
     const item = stepLines.slice(start, end);
     item[0] = `        ${item[0].slice(8)}`;
@@ -196,7 +206,7 @@ function parseWindowsWorkflowSteps(workflow) {
       }
       if (indent !== 8) continue;
       mode = null;
-      const match = /^(uses|name|with|run):\s*(.*)$/.exec(line);
+      const match = /^(uses|name|with|run|if|continue-on-error):\s*(.*)$/.exec(line);
       if (!match) continue;
       const [, key, rawValue] = match;
       const value = rawValue.replace(/^(['"])(.*)\1$/, '$2');
@@ -208,10 +218,16 @@ function parseWindowsWorkflowSteps(workflow) {
     }
     return step;
   });
+  return { runsOn: runsOnValues[0], steps };
+}
+
+function parseWindowsWorkflowSteps(workflow) {
+  return parseWindowsWorkflow(workflow).steps;
 }
 
 function assertWindowsCiPrerequisiteOrder(workflow) {
-  const steps = parseWindowsWorkflowSteps(workflow);
+  const { runsOn, steps } = parseWindowsWorkflow(workflow);
+  assert.equal(runsOn, 'windows-2025', 'Windows CI runner must be windows-2025');
   const checkout = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
   assert.equal(
     steps[0]?.uses,
@@ -236,6 +252,17 @@ function assertWindowsCiPrerequisiteOrder(workflow) {
     'node --test scripts/check-windows-node-unicode-fs.test.mjs',
     'node scripts/check-windows-node-unicode-fs.mjs',
   ]);
+  for (const [label, step] of [
+    ['setup-node', steps[1]],
+    ['Node prerequisite', steps[2]],
+  ]) {
+    assert.equal(step?.if, undefined, `Windows CI ${label} must not have if`);
+    assert.equal(
+      step?.['continue-on-error'],
+      undefined,
+      `Windows CI ${label} must not continue on error`,
+    );
+  }
 
   const externalRepositories = [
     ['deepseek-ai/deepseek-harness', '47f943859bef60e4160492346772ded9b24f765a'],
@@ -344,10 +371,50 @@ test('Windows CI gates external dependencies on the Node prerequisite', () => {
   assertWindowsCiPrerequisiteOrder(workflow);
 });
 
+const windowsCiSemanticVariants = [
+  [
+    'a non-Windows runner',
+    '    runs-on: windows-2025',
+    '    runs-on: ubuntu-latest',
+  ],
+  [
+    'setup-node with if',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        if: false',
+  ],
+  [
+    'setup-node with continue-on-error',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+    '      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38\n        continue-on-error: true',
+  ],
+  [
+    'the Node prerequisite with if',
+    '      - name: Verify Windows Node filesystem prerequisite',
+    '      - name: Verify Windows Node filesystem prerequisite\n        if: false',
+  ],
+  [
+    'the Node prerequisite with continue-on-error',
+    '      - name: Verify Windows Node filesystem prerequisite',
+    '      - name: Verify Windows Node filesystem prerequisite\n        continue-on-error: true',
+  ],
+];
+
+for (const [label, current, replacement] of windowsCiSemanticVariants) {
+  test(`Windows CI rejects ${label}`, () => {
+    const workflow = readFileSync(
+      join(repoRoot, '.github', 'workflows', 'ci.yml'),
+      'utf8',
+    );
+    const variant = replaceWorkflowOnce(workflow, current, replacement);
+    assert.throws(() => assertWindowsCiPrerequisiteOrder(variant));
+  });
+}
+
 test('Windows CI parser rejects comments and unrelated block scalars', () => {
   const workflow = `
 jobs:
   windows:
+    runs-on: windows-2025
     # uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
     steps:
       - name: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
@@ -367,6 +434,7 @@ test('Windows CI parser stops at an inserted same-indent job', () => {
   const workflow = `
 jobs:
   windows:
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
   inserted-job:
@@ -402,6 +470,7 @@ test('Windows CI parser rejects folded run scalars', () => {
   const steps = parseWindowsWorkflowSteps(`
 jobs:
   windows:
+    runs-on: windows-2025
     steps:
       - run: >
           node scripts/check-windows-node-unicode-fs.mjs
