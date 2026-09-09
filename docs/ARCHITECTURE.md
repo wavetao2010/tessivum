@@ -78,6 +78,8 @@ Host shared services
 
 Mode 只授予受限视图，不复制共享服务，也不能扩大 WASM manifest 权限或 Legacy Bridge 服务面。同一 Host 的 Session 可以选择不同 Mode，且 Prompt、工具目录、Compaction、Skill roots 和临时插件资源不得相互泄漏。
 
+Standard 直接发布受限工具的 JSON Schema；PTC 外层仍只有 `run_code`，但每次模型请求都会在其说明中附上当前 Session 可见工具的名称、描述和原始参数 JSON Schema。注册替换或卸载后的目录随下一次请求刷新，不暴露被拒绝的工具。代码使用扁平的 `tools["name"](arguments)` 调用，名称中的点不代表嵌套命名空间。两种模式共用严格参数校验；失败文本包含工具名、字段路径和期望参数 Schema，便于模型纠错，而不是仅在 metadata 中保存定位信息。作用域拒绝先于参数校验，避免诊断泄漏不可见工具的 Schema。
+
 内置 Mode 由 Rust 静态规格定义；自定义 Mode 使用 `${data_dir}/modes/<id>/mode.toml`，并可由有序 CLI `--patch` 的 `agent-presets.default` 选择。Rust Agent Runtime 不执行上游 `agent.cordis.yml`，也不执行任意 Host/Client JavaScript。现有 npm/Cordis 包仍由 Legacy Node Host 加载，Browser `dsh.client` 仍由 Browser Cordis 加载；Mode 配置格式与插件 Runtime 是两条正交轴。
 
 冻结源 Web 使用的 `agentPreset.*`/`agentPreset` 仅存在于 `api.rs` 的 Browser Wire adapter。内部 Session、Agent、Registry 和持久新写入统一使用 `ModeId`/`agentMode`；旧内置 ID 只在持久数据迁移边界转换。`dynamicCordisRunner/*` 仅保留不可执行的有界兼容响应，不是 Composition 或 Agent Mode 的运行时入口。完整契约、删除项和验收矩阵见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)。
@@ -476,6 +478,12 @@ Browser 兼容构建直接使用上游 `apps/web/src/main.ts` 的薄入口、`@d
 - Node Bridge 设置全局和每插件在途上限；超过上限返回明确 overload 错误。
 - 流式通道使用有界队列；慢消费者触发背压、截断或取消，策略由具体协议声明。
 - 取消是状态转换，不是忽略 Promise；完成与取消竞争时必须规定 first-wins。
+- Harness 子代理继承父会话的 canonical workspace lease 和权限边界，不接受 cwd 覆盖；跨工作区或失效工作区的恢复请求必须拒绝。
+- 每棵根代理树最多委派到深度 4（根为 0）、同时占用 16 个 live/admitting 名额、累计接纳 128 次。初始化及失败清理仍占用名额；根日志持久化累计接纳，重建时排除种子前缀，不能依赖仍然存在的后代日志。
+- 初始化由 Registry/Provider 拥有的任务监管。取消或调用方丢弃 future 不得提前释放初始化预留、父级准入或树名额；成功接纳后不得再引入所有权移交前的等待点。关闭必须等待初始化生产者及 live runtime 的清理。
+- 父级清理的并发调用共享同一次结果，失败子代理保留以供后续重试。丢弃的清理 future 由后台任务继续监管，首个清理失败保留给后续观察者，不能用成功结果覆盖未观察的失败。
+- PTC `run_code` 的 60 秒期限包含前台工具等待；后台 job 拥有独立生命周期，单次 `jobs.wait` 超时不取消它。工具名是扁平键，带点的名称使用 `tools["jobs.list"]`，不是嵌套属性访问。
+- 子代理日志通过 `Session::append_next` 在写入门内分配序号；Unix 工作区文件与目录描述符在打开时原子设置 `O_CLOEXEC`，不向工具子进程继承。
 
 ## 15. 错误模型
 

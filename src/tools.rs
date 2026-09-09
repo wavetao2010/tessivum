@@ -658,50 +658,55 @@ impl ToolRuntime {
             (tool.definition.clone(), state.approval.clone())
         };
 
-        if let Err(error) = validate_instance(&definition.parameters, &arguments, "$") {
+        let access = self.access(name);
+        if access == ToolAccess::Deny {
+            return self.settle(
+                context,
+                ToolOutput::failure(
+                    "TOOL_DENIED",
+                    "tool is not visible in this scope",
+                    json!({"name": name}),
+                ),
+            );
+        }
+
+        if let Err(mut error) = validate_instance(&definition.parameters, &arguments, "$") {
+            error.message = format!(
+                "Invalid arguments for {name:?} at {}: {}.\nExpected arguments (JSON Schema):\n{}",
+                error.details["path"].as_str().unwrap_or("$"),
+                error.message,
+                definition.parameters,
+            );
             return self.settle(context, ToolOutput::handler_failure(error));
         }
 
-        match self.access(name) {
-            ToolAccess::Deny => {
+        if access == ToolAccess::Ask {
+            let approved = if let Some(approval) = approval {
+                approval
+                    .approve(&context, &definition.schema(), &arguments)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if context.cancellation.is_cancelled() {
+                return self.settle(
+                    context,
+                    ToolOutput::failure("CANCELLED", "tool call was cancelled", Value::Null),
+                );
+            }
+            if !approved {
                 return self.settle(
                     context,
                     ToolOutput::failure(
-                        "TOOL_DENIED",
-                        "tool is not visible in this scope",
+                        "TOOL_APPROVAL_DENIED",
+                        "tool call was not approved",
                         json!({"name": name}),
                     ),
                 );
             }
-            ToolAccess::Ask => {
-                let approved = if let Some(approval) = approval {
-                    approval
-                        .approve(&context, &definition.schema(), &arguments)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                if context.cancellation.is_cancelled() {
-                    return self.settle(
-                        context,
-                        ToolOutput::failure("CANCELLED", "tool call was cancelled", Value::Null),
-                    );
-                }
-                if !approved {
-                    return self.settle(
-                        context,
-                        ToolOutput::failure(
-                            "TOOL_APPROVAL_DENIED",
-                            "tool call was not approved",
-                            json!({"name": name}),
-                        ),
-                    );
-                }
-            }
-            ToolAccess::Allow => {}
         }
 
         let output = match definition.handler.run(context.clone(), arguments).await {

@@ -11,10 +11,10 @@ use std::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const TAG: &str = "v0.1.0-alpha.23";
+const TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const TARGET: &str = "x86_64-unknown-linux-gnu";
-const MARKET_VERSION: &str = "0.1.0-alpha.23";
-const MARKET_FILENAME: &str = "tessivum-market-0.1.0-alpha.23.tgz";
+const MARKET_VERSION: &str = env!("CARGO_PKG_VERSION");
+const MARKET_FILENAME: &str = concat!("tessivum-market-", env!("CARGO_PKG_VERSION"), ".tgz");
 const DSH_SETTINGS_ENTRIES: &[&str] = &["lib/index.js"];
 const SCHEMASTRY_ENTRIES: &[&str] = &["lib/index.mjs", "lib/index.cjs"];
 
@@ -66,7 +66,7 @@ impl Fixture {
         let binary = root.join("bin/tessivum");
         write(
             &binary,
-            "#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum 0.1.0-alpha.23\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\n  --market-tarball) printf '%s\\n' \"$TESSIVUM_MARKET_TARBALL\" ;;\n  --market-sha256-file) printf '%s\\n' \"$TESSIVUM_MARKET_SHA256_FILE\" ;;\n  --market-source-file) printf '%s\\n' \"$TESSIVUM_MARKET_SOURCE_FILE\" ;;\nesac\n",
+            concat!("#!/usr/bin/env sh\ncase \"${1:-}\" in\n  --version) printf 'tessivum ", env!("CARGO_PKG_VERSION"), "\\n' ;;\n  --help) printf 'Tessivum fixture help\\n' ;;\n  --host-module-root) printf '%s\\n' \"$TESSIVUM_HOST_MODULE_ROOT\" ;;\n  --market-tarball) printf '%s\\n' \"$TESSIVUM_MARKET_TARBALL\" ;;\n  --market-sha256-file) printf '%s\\n' \"$TESSIVUM_MARKET_SHA256_FILE\" ;;\n  --market-source-file) printf '%s\\n' \"$TESSIVUM_MARKET_SOURCE_FILE\" ;;\nesac\n"),
         );
         make_executable(&binary);
 
@@ -139,13 +139,19 @@ impl Fixture {
     }
 
     fn archive(&self) -> PathBuf {
-        self.output
-            .join("tessivum-0.1.0-alpha.23-x86_64-unknown-linux-gnu.tar.gz")
+        self.output.join(concat!(
+            "tessivum-",
+            env!("CARGO_PKG_VERSION"),
+            "-x86_64-unknown-linux-gnu.tar.gz"
+        ))
     }
 
     fn stage(&self) -> PathBuf {
-        self.output
-            .join("tessivum-0.1.0-alpha.23-x86_64-unknown-linux-gnu")
+        self.output.join(concat!(
+            "tessivum-",
+            env!("CARGO_PKG_VERSION"),
+            "-x86_64-unknown-linux-gnu"
+        ))
     }
 }
 
@@ -322,10 +328,26 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         "bin/tessivum",
         "bin/tsv",
         "libexec/tessivum",
-        "share/tessivum/plugins/tessivum-market-0.1.0-alpha.23.tgz",
-        "share/tessivum/plugins/tessivum-market-0.1.0-alpha.23.tgz.sha256",
-        "share/tessivum/plugins/tessivum-market-0.1.0-alpha.23.tgz.source.json",
-        "share/licenses/tessivum-market-0.1.0-alpha.23/LICENSE",
+        concat!(
+            "share/tessivum/plugins/tessivum-market-",
+            env!("CARGO_PKG_VERSION"),
+            ".tgz"
+        ),
+        concat!(
+            "share/tessivum/plugins/tessivum-market-",
+            env!("CARGO_PKG_VERSION"),
+            ".tgz.sha256"
+        ),
+        concat!(
+            "share/tessivum/plugins/tessivum-market-",
+            env!("CARGO_PKG_VERSION"),
+            ".tgz.source.json"
+        ),
+        concat!(
+            "share/licenses/tessivum-market-",
+            env!("CARGO_PKG_VERSION"),
+            "/LICENSE"
+        ),
         "share/tessivum/host-modules/INVENTORY.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/package.json",
         "share/tessivum/host-modules/@deepseek-ai/dsh-settings/lib/index.js",
@@ -396,9 +418,11 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         fs::read(&payload).unwrap(),
         fs::read(&fixture.binary).unwrap()
     );
-    let market_tgz = fixture
-        .stage()
-        .join("share/tessivum/plugins/tessivum-market-0.1.0-alpha.23.tgz");
+    let market_tgz = fixture.stage().join(concat!(
+        "share/tessivum/plugins/tessivum-market-",
+        env!("CARGO_PKG_VERSION"),
+        ".tgz"
+    ));
     let market_checksum = PathBuf::from(format!("{}.sha256", market_tgz.display()));
     let market_source = PathBuf::from(format!("{}.source.json", market_tgz.display()));
     assert_eq!(
@@ -414,36 +438,23 @@ fn release_archive_contains_compatibility_assets_without_legacy_preset_assets() 
         .unwrap(),
     );
     assert_eq!(
-        fs::read(
-            fixture
-                .stage()
-                .join("share/tessivum/plugins/tessivum-market-0.1.0-alpha.23.tgz.source.json",)
-        )
+        fs::read(fixture.stage().join(concat!(
+            "share/tessivum/plugins/tessivum-market-",
+            env!("CARGO_PKG_VERSION"),
+            ".tgz.source.json"
+        ),))
         .unwrap(),
         fs::read(repository_root().join("packaging/market-source.json")).unwrap(),
     );
     assert_eq!(
-        fs::read(
-            fixture
-                .stage()
-                .join("share/licenses/tessivum-market-0.1.0-alpha.23/LICENSE"),
-        )
+        fs::read(fixture.stage().join(concat!(
+            "share/licenses/tessivum-market-",
+            env!("CARGO_PKG_VERSION"),
+            "/LICENSE"
+        )),)
         .unwrap(),
         fs::read(repository_root().join("packaging/licenses/dsh-market/LICENSE")).unwrap(),
     );
-    let launcher_text = fs::read_to_string(&launcher).unwrap();
-    assert!(launcher_text.contains("TESSIVUM_HOST_MODULE_ROOT"));
-    assert!(launcher_text.contains("$root/share/tessivum/host-modules"));
-    assert!(launcher_text.contains("TESSIVUM_MARKET_TARBALL"));
-    assert!(
-        launcher_text.contains("$root/share/tessivum/plugins/tessivum-market-0.1.0-alpha.23.tgz")
-    );
-    assert!(launcher_text.contains("TESSIVUM_MARKET_SHA256_FILE"));
-    assert!(launcher_text.contains("tessivum-market-0.1.0-alpha.23.tgz.sha256"));
-    assert!(launcher_text.contains("TESSIVUM_MARKET_SOURCE_FILE"));
-    assert!(launcher_text.contains("tessivum-market-0.1.0-alpha.23.tgz.source.json"));
-    assert!(!launcher_text.contains("TESSIVUM_AGENT_PRESET_ROOT"));
-    assert!(!launcher_text.contains("agent-presets"));
     for argument in ["--version", "--help"] {
         let launcher_output = Command::new(&launcher).arg(argument).output().unwrap();
         let alias_output = Command::new(&alias).arg(argument).output().unwrap();

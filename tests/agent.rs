@@ -1,12 +1,13 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use serde_json::json;
 use tessivum::{
     agent::{
@@ -18,7 +19,10 @@ use tessivum::{
     protocol::{
         Message, SessionEvent, SessionHeader, SessionId, SurfaceOp, SESSION_FORMAT_VERSION,
     },
-    session::{MemorySessionPersistence, Session, SessionError, SessionPersistence, SessionStore},
+    session::{
+        MemorySessionPersistence, Session, SessionError, SessionInspection, SessionPersistence,
+        SessionStore,
+    },
 };
 use tessivum_core::{CancellationToken, ContextHandle};
 use tokio::sync::Notify;
@@ -79,8 +83,14 @@ struct FakeRuntime {
     disposals: AtomicUsize,
     blocked_idle: AtomicBool,
     fail_dispose: AtomicBool,
+    block_dispose: AtomicBool,
+    dispose_failures: AtomicUsize,
     idle_started: Notify,
     release_idle: Notify,
+    dispose_failed: Notify,
+    dispose_started: Notify,
+    release_dispose: Notify,
+    disposed: Notify,
 }
 
 #[async_trait]
@@ -105,9 +115,26 @@ impl AgentRuntime for FakeRuntime {
 
     async fn dispose(&self) -> Result<(), AgentError> {
         self.disposals.fetch_add(1, Ordering::AcqRel);
+        if self.block_dispose.swap(false, Ordering::AcqRel) {
+            self.dispose_started.notify_one();
+            self.release_dispose.notified().await;
+        }
+        if self
+            .dispose_failures
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |failures| {
+                failures.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.dispose_failed.notify_one();
+            return Err(AgentError::Runtime(
+                "fixture transient dispose failed".into(),
+            ));
+        }
         if self.fail_dispose.load(Ordering::Acquire) {
             return Err(AgentError::Runtime("fixture dispose failed".into()));
         }
+        self.disposed.notify_one();
         Ok(())
     }
 }
@@ -115,14 +142,25 @@ impl AgentRuntime for FakeRuntime {
 #[derive(Default)]
 struct FakeFactory {
     fail: AtomicBool,
+    block_next_create: AtomicBool,
     block_next_idle: AtomicBool,
+    next_dispose_failures: AtomicUsize,
+    block_next_dispose: AtomicBool,
     sessions: Mutex<Vec<SessionId>>,
     runtimes: Mutex<Vec<Arc<FakeRuntime>>>,
+    cancellations: Mutex<Vec<CancellationToken>>,
+    create_started: Notify,
+    release_create: Notify,
+    runtime_created: Notify,
 }
 
 impl FakeFactory {
     fn runtime(&self, index: usize) -> Arc<FakeRuntime> {
-        self.runtimes.lock().unwrap()[index].clone()
+        self.runtimes.lock()[index].clone()
+    }
+
+    fn cancellation(&self, index: usize) -> CancellationToken {
+        self.cancellations.lock()[index].clone()
     }
 }
 
@@ -133,19 +171,155 @@ impl AgentFactory for FakeFactory {
         session: Arc<Session>,
         _options: AgentOptions,
         _inbox: Inbox,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
-        self.sessions.lock().unwrap().push(session.id());
+        self.sessions.lock().push(session.id());
+        self.cancellations.lock().push(cancellation);
+        if self.block_next_create.swap(false, Ordering::AcqRel) {
+            self.create_started.notify_one();
+            self.release_create.notified().await;
+        }
         if self.fail.load(Ordering::Acquire) {
             return Err(AgentError::Runtime("setup failed".into()));
         }
         let runtime = Arc::new(FakeRuntime {
             blocked_idle: AtomicBool::new(self.block_next_idle.swap(false, Ordering::AcqRel)),
+            block_dispose: AtomicBool::new(self.block_next_dispose.swap(false, Ordering::AcqRel)),
+            dispose_failures: AtomicUsize::new(
+                self.next_dispose_failures.swap(0, Ordering::AcqRel),
+            ),
             ..Default::default()
         });
-        self.runtimes.lock().unwrap().push(Arc::clone(&runtime));
+        self.runtimes.lock().push(Arc::clone(&runtime));
+        self.runtime_created.notify_one();
         Ok(runtime)
     }
+}
+
+#[derive(Default)]
+struct GatedPersistence {
+    inner: MemorySessionPersistence,
+    block_create: AtomicBool,
+    block_load: AtomicBool,
+    operation_started: Notify,
+    release_operation: Notify,
+    operation_finished: Notify,
+}
+
+#[async_trait]
+impl SessionPersistence for GatedPersistence {
+    async fn create(
+        &self,
+        header: &SessionHeader,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        if self.block_create.swap(false, Ordering::AcqRel) {
+            self.operation_started.notify_one();
+            self.release_operation.notified().await;
+        }
+        let result = self.inner.create(header, cancellation).await;
+        self.operation_finished.notify_one();
+        result
+    }
+
+    async fn append(
+        &self,
+        session_id: &SessionId,
+        event: &SessionEvent,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.append(session_id, event, cancellation).await
+    }
+
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.create_seeded(header, events, cancellation).await
+    }
+
+    async fn load(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<SessionHeader>, SessionError> {
+        if self.block_load.swap(false, Ordering::AcqRel) {
+            self.operation_started.notify_one();
+            self.release_operation.notified().await;
+        }
+        let result = self.inner.load(session_id, cancellation).await;
+        self.operation_finished.notify_one();
+        result
+    }
+
+    async fn inspect(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<SessionInspection>, SessionError> {
+        self.inner.inspect(session_id, cancellation).await
+    }
+
+    async fn read_from(
+        &self,
+        session_id: &SessionId,
+        from_seq: u64,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
+        self.inner
+            .read_from(session_id, from_seq, cancellation)
+            .await
+    }
+
+    async fn flush(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.flush(session_id, cancellation).await
+    }
+
+    async fn list(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<SessionInspection>, SessionError> {
+        self.inner.list(cancellation).await
+    }
+}
+
+async fn release_abandoned_runtime(factory: &FakeFactory, index: usize) -> Arc<FakeRuntime> {
+    let created = factory.runtime_created.notified();
+    factory.release_create.notify_one();
+    created.await;
+    let runtime = factory.runtime(index);
+    if runtime.disposals.load(Ordering::Acquire) == 0 {
+        runtime.disposed.notified().await;
+    }
+    runtime
+}
+
+async fn create_or_resume_after_cleanup(
+    registry: &AgentRegistry,
+    id: &str,
+) -> tessivum::agent::AgentHandle {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match registry
+                .create_or_resume(header(id), options(), cancellation())
+                .await
+            {
+                Err(AgentError::Session(SessionError::DuplicateLive(_))) => {
+                    tokio::task::yield_now().await;
+                }
+                result => break result,
+            }
+        }
+    })
+    .await
+    .unwrap()
+    .unwrap()
 }
 
 fn registry() -> (AgentRegistry, Arc<FakeFactory>) {
@@ -177,9 +351,359 @@ async fn setup_failure_never_publishes_and_reuses_the_same_session_identity() {
         .unwrap();
     assert_eq!(handle.id(), handle.session().id());
     assert_eq!(
-        factory.sessions.lock().unwrap().as_slice(),
+        factory.sessions.lock().as_slice(),
         &[SessionId::from("rollback"), SessionId::from("rollback")]
     );
+    handle.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_pending_session_create_is_supervised_through_runtime_cleanup() {
+    let persistence = Arc::new(GatedPersistence::default());
+    persistence.block_create.store(true, Ordering::Release);
+    let registry = AgentRegistry::new(SessionStore::new(persistence.clone()));
+    let factory = Arc::new(FakeFactory::default());
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    let operation_started = persistence.operation_started.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry
+                .create(header("dropped-pending-create"), options(), cancellation())
+                .await
+        }
+    });
+    operation_started.await;
+    setup.abort();
+    assert!(setup.await.unwrap_err().is_cancelled());
+
+    let runtime_created = factory.runtime_created.notified();
+    persistence.release_operation.notify_one();
+    runtime_created.await;
+    let runtime = factory.runtime(0);
+    if runtime.disposals.load(Ordering::Acquire) == 0 {
+        runtime.disposed.notified().await;
+    }
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+    let replacement = create_or_resume_after_cleanup(&registry, "dropped-pending-create").await;
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_pending_restore_releases_its_reservation_after_restore_finishes() {
+    let persistence = Arc::new(GatedPersistence::default());
+    persistence
+        .inner
+        .create(&header("cancelled-pending-restore"), cancellation())
+        .await
+        .unwrap();
+    persistence.block_load.store(true, Ordering::Release);
+    let registry = AgentRegistry::new(SessionStore::new(persistence.clone()));
+    let factory = Arc::new(FakeFactory::default());
+    let _factory = registry.register_factory(factory).unwrap();
+    let setup_cancellation = cancellation();
+    let operation_started = persistence.operation_started.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        let setup_cancellation = setup_cancellation.clone();
+        async move {
+            registry
+                .resume(
+                    SessionId::from("cancelled-pending-restore"),
+                    options(),
+                    setup_cancellation,
+                )
+                .await
+        }
+    });
+    operation_started.await;
+    setup_cancellation.cancel();
+    let operation_finished = persistence.operation_finished.notified();
+    persistence.release_operation.notify_one();
+    operation_finished.await;
+    assert!(matches!(setup.await.unwrap(), Err(AgentError::Cancelled)));
+    let replacement = registry
+        .resume(
+            SessionId::from("cancelled-pending-restore"),
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_create_is_cleaned_before_the_same_session_can_restart() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    factory.block_next_create.store(true, Ordering::Release);
+    factory.next_dispose_failures.store(1, Ordering::Release);
+    let started = factory.create_started.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry
+                .create(header("dropped-create"), options(), cancellation())
+                .await
+        }
+    });
+    started.await;
+    setup.abort();
+    assert!(setup.await.unwrap_err().is_cancelled());
+    let runtime_created = factory.runtime_created.notified();
+    factory.release_create.notify_one();
+    runtime_created.await;
+    let runtime = factory.runtime(0);
+    runtime.dispose_failed.notified().await;
+    tokio::task::yield_now().await;
+    let cleanup_error = registry
+        .create_or_resume(header("dropped-create"), options(), cancellation())
+        .await;
+    assert!(matches!(
+        &cleanup_error,
+        Err(AgentError::Runtime(message)) if message == "fixture transient dispose failed"
+    ));
+    runtime.disposed.notified().await;
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 2);
+    assert!(registry.get(&SessionId::from("dropped-create")).is_none());
+    let replacement = create_or_resume_after_cleanup(&registry, "dropped-create").await;
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_resume_finishes_factory_cleanup_before_retry() {
+    let persistence = Arc::new(MemorySessionPersistence::new());
+    persistence
+        .create(&header("cancelled-resume"), cancellation())
+        .await
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(persistence));
+    let factory = Arc::new(FakeFactory::default());
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    factory.block_next_create.store(true, Ordering::Release);
+    let setup_cancellation = cancellation();
+    let started = factory.create_started.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        let setup_cancellation = setup_cancellation.clone();
+        async move {
+            registry
+                .resume(
+                    SessionId::from("cancelled-resume"),
+                    options(),
+                    setup_cancellation,
+                )
+                .await
+        }
+    });
+    started.await;
+    setup_cancellation.cancel();
+    let runtime = release_abandoned_runtime(&factory, 0).await;
+    assert!(matches!(setup.await.unwrap(), Err(AgentError::Cancelled)));
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+    let replacement = registry
+        .resume(
+            SessionId::from("cancelled-resume"),
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_after_ready_waits_for_abandoned_runtime_cleanup() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    factory.block_next_dispose.store(true, Ordering::Release);
+    let setup_cancellation = cancellation();
+    let runtime_created = factory.runtime_created.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        let setup_cancellation = setup_cancellation.clone();
+        async move {
+            registry
+                .create(
+                    header("cancelled-after-ready"),
+                    options(),
+                    setup_cancellation,
+                )
+                .await
+        }
+    });
+    runtime_created.await;
+    let runtime = factory.runtime(0);
+    let dispose_started = runtime.dispose_started.notified();
+    setup_cancellation.cancel();
+    dispose_started.await;
+
+    assert!(!setup.is_finished());
+    assert!(registry
+        .get(&SessionId::from("cancelled-after-ready"))
+        .is_none());
+    runtime.release_dispose.notify_one();
+    assert!(matches!(setup.await.unwrap(), Err(AgentError::Cancelled)));
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+
+    let replacement = registry
+        .create_or_resume(header("cancelled-after-ready"), options(), cancellation())
+        .await
+        .unwrap();
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_dispose_all_remains_a_barrier_for_pending_setup() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    factory.block_next_create.store(true, Ordering::Release);
+    factory.block_next_dispose.store(true, Ordering::Release);
+    let create_started = factory.create_started.notified();
+    let setup_cancellation = cancellation();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        let setup_cancellation = setup_cancellation.clone();
+        async move {
+            registry
+                .create(
+                    header("dispose-all-pending-setup"),
+                    options(),
+                    setup_cancellation,
+                )
+                .await
+        }
+    });
+    create_started.await;
+
+    let first_disposal = tokio::spawn({
+        let registry = registry.clone();
+        async move { registry.dispose_all().await }
+    });
+    while !setup_cancellation.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    assert!(!first_disposal.is_finished());
+    first_disposal.abort();
+    assert!(first_disposal.await.unwrap_err().is_cancelled());
+
+    let retry_disposal = tokio::spawn({
+        let registry = registry.clone();
+        async move { registry.dispose_all().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!retry_disposal.is_finished());
+
+    let runtime_created = factory.runtime_created.notified();
+    factory.release_create.notify_one();
+    runtime_created.await;
+    let runtime = factory.runtime(0);
+    runtime.dispose_started.notified().await;
+    assert!(!setup.is_finished());
+    assert!(!retry_disposal.is_finished());
+    assert!(registry
+        .get(&SessionId::from("dispose-all-pending-setup"))
+        .is_none());
+
+    runtime.release_dispose.notify_one();
+    retry_disposal.await.unwrap().unwrap();
+    assert!(matches!(setup.await.unwrap(), Err(AgentError::Cancelled)));
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+    assert!(registry.list().is_empty());
+
+    let replacement = registry
+        .create_or_resume(
+            header("dispose-all-pending-setup"),
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_create_or_resume_never_publishes_the_completed_factory() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    factory.block_next_create.store(true, Ordering::Release);
+    let started = factory.create_started.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry
+                .create_or_resume(
+                    header("dropped-create-or-resume"),
+                    options(),
+                    cancellation(),
+                )
+                .await
+        }
+    });
+    started.await;
+    setup.abort();
+    assert!(setup.await.unwrap_err().is_cancelled());
+
+    let runtime = release_abandoned_runtime(&factory, 0).await;
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+    assert!(registry
+        .get(&SessionId::from("dropped-create-or-resume"))
+        .is_none());
+    let replacement = create_or_resume_after_cleanup(&registry, "dropped-create-or-resume").await;
+    replacement.dispose().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_creation_never_orphans_an_accepted_runtime() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    let id = SessionId::from("accepted-ownership");
+    let mut creating = Box::pin(registry.create(header(id.as_str()), options(), cancellation()));
+    let result = poll_fn(|cx| {
+        let result = creating.as_mut().poll(cx);
+        if result.is_pending() && registry.get(&id).is_some() {
+            Poll::Ready(None)
+        } else {
+            result.map(Some)
+        }
+    })
+    .await;
+    drop(creating);
+
+    let runtime = factory.runtime(0);
+    if let Some(result) = result {
+        result.unwrap().dispose().await.unwrap();
+    } else {
+        tokio::time::timeout(Duration::from_secs(1), runtime.disposed.notified())
+            .await
+            .expect("abandoned accepted runtime must be disposed");
+    }
+    assert_eq!(runtime.disposals.load(Ordering::Acquire), 1);
+    assert!(registry.get(&id).is_none());
+}
+
+#[tokio::test]
+async fn accepted_runtime_does_not_inherit_setup_cancellation() {
+    let (registry, factory) = registry();
+    let _factory = registry.register_factory(factory.clone()).unwrap();
+    let setup_cancellation = cancellation();
+    let handle = registry
+        .create(
+            header("independent-runtime-cancellation"),
+            options(),
+            setup_cancellation.clone(),
+        )
+        .await
+        .unwrap();
+    setup_cancellation.cancel();
+
+    assert!(!factory.cancellation(0).is_cancelled());
     handle.dispose().await.unwrap();
 }
 

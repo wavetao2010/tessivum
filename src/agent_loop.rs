@@ -10,10 +10,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::{stream, StreamExt};
+use futures_util::{
+    future::{BoxFuture, FutureExt, Shared},
+    stream, StreamExt,
+};
 use serde_json::{json, Value};
 use tessivum_core::{CancellationToken, ContextHandle};
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::sync::Notify;
 
 use crate::{
     agent::{
@@ -24,7 +27,9 @@ use crate::{
         AgentModeId, AgentModeRegistry, ModePluginRuntime, ToolCapabilityId, ToolPresentation,
     },
     builtin_tools::PersistentShellSessions,
-    code_runtime::{register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE},
+    code_runtime::{
+        code_tool_description, register_code_tool, ProcessCodeRuntime, PTC_RUNTIME_UNAVAILABLE,
+    },
     compaction::{CompactionOutcome, CompactionService, CompactionTrigger},
     composition::{
         CompositionDescriptor, CompositionEntryReference, CompositionRegistry, CompositionRuntime,
@@ -267,8 +272,17 @@ impl AgentLoopFactory {
                 .activate_plugins(&runtime.plugins, &session.id())
                 .await
             {
-                let mut failures = vec![error.to_string()];
-                failures.extend(composition.dispose(&session.id()).await);
+                let mut failures = vec![format!("{error}: {}", error.details)];
+                loop {
+                    let cleanup = composition.dispose(&session.id()).await;
+                    if cleanup.is_empty() {
+                        break;
+                    }
+                    if failures.len() == 1 {
+                        failures.extend(cleanup);
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 if let Some(shells) = &persistent_shells {
                     shells.disable(&session.id()).await;
                 }
@@ -343,6 +357,7 @@ struct SessionRuntimeSpec {
     composition: bool,
     prompt: ModePrompt,
     tools: ToolRuntime,
+    code_tools: Option<ToolRuntime>,
     compaction: Option<CompactionService>,
     skills: Option<(SkillRuntime, SkillSessionScopes)>,
     _tool_registrations: Vec<ToolRegistration>,
@@ -377,7 +392,7 @@ impl CompositionSession {
     async fn dispose(&self, owner: &crate::SessionId) -> Vec<String> {
         if !self.registry_finished.load(Ordering::Acquire) {
             if let Err(error) = self.registry.dispose_session(owner).await {
-                return vec![error.to_string()];
+                return vec![format!("{error}: {}", error.details)];
             }
             self.registry_finished.store(true, Ordering::Release);
         }
@@ -539,6 +554,8 @@ impl SessionRuntimeSpec {
             .native_tools
             .scoped(restrictions)
             .map_err(AgentError::Message)?;
+        let code_tools =
+            (presentation == ToolPresentation::Programmatic).then(|| native_tools.clone());
         let (tools, registrations) = match presentation {
             ToolPresentation::Direct => (native_tools, Vec::new()),
             ToolPresentation::Programmatic => {
@@ -565,6 +582,7 @@ impl SessionRuntimeSpec {
                 section: PromptSection::new(format!("agent-mode/{mode_id}"), 0, mode_prompt.text),
             },
             tools,
+            code_tools,
             compaction: compaction_enabled
                 .then(|| factory.compaction.clone())
                 .flatten(),
@@ -667,11 +685,13 @@ struct Inner {
     state: Mutex<State>,
 }
 
+type WorkerCompletion = Shared<BoxFuture<'static, Result<(), String>>>;
+
 struct State {
     disposed: bool,
     wake_revision: u64,
     settled_revision: u64,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<WorkerCompletion>,
     last_error: Option<AgentError>,
     last_request_header: Option<Value>,
     next_request_header_reason: Option<&'static str>,
@@ -727,7 +747,10 @@ impl AgentLoop {
                 }),
             }),
         });
-        let worker = tokio::spawn(drive(Arc::clone(&inner)));
+        let worker = tokio::spawn(drive(Arc::clone(&inner)))
+            .map(|result| result.map_err(|error| format!("agent loop worker failed: {error}")))
+            .boxed()
+            .shared();
         lock(&inner.state).worker = Some(worker);
         Arc::new(Self { inner })
     }
@@ -785,12 +808,8 @@ impl AgentRuntime for AgentLoop {
     async fn dispose(&self) -> Result<(), AgentError> {
         let worker = {
             let mut state = lock(&self.inner.state);
-            if state.disposed {
-                None
-            } else {
-                state.disposed = true;
-                state.worker.take()
-            }
+            state.disposed = true;
+            state.worker.clone()
         };
         self.cancel(AgentCancelCause::Disposed);
         self.inner.cancellation.cancel();
@@ -799,7 +818,7 @@ impl AgentRuntime for AgentLoop {
         let mut failures = Vec::new();
         if let Some(worker) = worker {
             if let Err(error) = worker.await {
-                failures.push(format!("agent loop worker failed: {error}"));
+                failures.push(error);
             }
         }
         failures.extend(self.inner.resources.dispose(&self.inner.session.id()).await);
@@ -952,7 +971,15 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             }
         }
 
-        let tool_schemas = inner.runtime.tools.schemas();
+        let mut tool_schemas = inner.runtime.tools.schemas();
+        if let Some(code_tools) = &inner.runtime.code_tools {
+            if let Some(schema) = tool_schemas
+                .iter_mut()
+                .find(|schema| schema.name == "run_code")
+            {
+                schema.description = code_tool_description(code_tools);
+            }
+        }
         let (system, tools) = if inner.runtime.prompt.complete {
             (
                 Some(inner.runtime.prompt.section.text.clone()),

@@ -1007,7 +1007,7 @@ fn open_directory(path: &Path) -> io::Result<(File, FileIdentity)> {
         let fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         if fd < 0 {
@@ -1074,7 +1074,13 @@ fn open_no_follow(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<Fil
     use std::os::unix::ffi::OsStrExt;
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-    let fd = unsafe { libc::open(c_path.as_ptr(), flags, mode as libc::c_uint) };
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            flags | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
+    };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {

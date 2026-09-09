@@ -92,6 +92,13 @@ fn request(id: &str) -> SubagentStartRequest {
         initial_message: None,
     }
 }
+fn is_accepted_child_lifecycle_event(event: &SessionEvent) -> bool {
+    matches!(
+        event.event_type.as_str(),
+        "subagent/contained-start" | "subagent/contained-end"
+    ) || (event.event_type == "subagent/tree-creation"
+        && event.data.get("accepted").and_then(Value::as_bool) == Some(true))
+}
 
 struct Idle;
 
@@ -158,6 +165,32 @@ impl AgentFactory for Factory {
         _: Inbox,
         _: CancellationToken,
     ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        Ok(Arc::new(Idle))
+    }
+}
+struct GatedNativeFactory {
+    gated_id: Option<&'static str>,
+    open: AtomicBool,
+    starts: AtomicUsize,
+    release: Notify,
+}
+
+#[async_trait]
+impl AgentFactory for GatedNativeFactory {
+    async fn create(
+        &self,
+        session: Arc<tessivum::session::Session>,
+        _: AgentOptions,
+        _: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        let gated = session.header().origin == Some(SessionOrigin::Subagent)
+            && self.gated_id.map_or(true, |id| session.id().as_str() == id);
+        let released = self.release.notified();
+        if gated && !self.open.load(Ordering::Acquire) {
+            self.starts.fetch_add(1, Ordering::AcqRel);
+            released.await;
+        }
         Ok(Arc::new(Idle))
     }
 }
@@ -270,6 +303,36 @@ impl SubagentProvider for CountingProvider {
         cancellation: CancellationToken,
     ) -> Result<AgentHandle, SubagentError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
+        self.native.start(request, cancellation).await
+    }
+}
+
+struct GatedProvider {
+    native: NativeSubagentProvider,
+    calls: AtomicUsize,
+    open: AtomicBool,
+    release: Notify,
+}
+
+#[async_trait]
+impl SubagentProvider for GatedProvider {
+    fn capabilities(&self) -> BTreeSet<String> {
+        self.native.capabilities()
+    }
+
+    async fn start(
+        &self,
+        request: tessivum::subagent::ProviderStart,
+        cancellation: CancellationToken,
+    ) -> Result<AgentHandle, SubagentError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let released = self.release.notified();
+        if !self.open.load(Ordering::Acquire) {
+            tokio::select! {
+                _ = released => {}
+                _ = cancellation.cancelled() => return Err(SubagentError::CancelledBeforeAcceptance),
+            }
+        }
         self.native.start(request, cancellation).await
     }
 }
@@ -953,7 +1016,12 @@ async fn capability_preflight_happens_before_provider_or_events() {
         Err(SubagentError::CapabilityDenied { .. })
     ));
     assert_eq!(harness.provider.calls.load(Ordering::Acquire), 0);
-    assert!(harness.parent.session().events().is_empty());
+    assert!(!harness
+        .parent
+        .session()
+        .events()
+        .iter()
+        .any(is_accepted_child_lifecycle_event));
 }
 
 #[tokio::test]
@@ -987,6 +1055,7 @@ async fn parent_capability_is_generation_bound_and_child_control_is_opaque() {
         old_parent.start(request("stale"), cancellation()).await,
         Err(SubagentError::ParentRequired)
     ));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), 1);
     let replacement = Arc::new(
         harness
             .agents
@@ -1000,23 +1069,6 @@ async fn parent_capability_is_generation_bound_and_child_control_is_opaque() {
         .await
         .unwrap();
     fresh_child.dispose().await.unwrap();
-
-    let event_types = harness
-        .parent
-        .session()
-        .events()
-        .into_iter()
-        .map(|event| event.event_type)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        event_types,
-        [
-            "subagent/contained-start",
-            "subagent/contained-end",
-            "subagent/contained-start",
-            "subagent/contained-end",
-        ]
-    );
 }
 
 #[tokio::test]
@@ -1353,7 +1405,12 @@ async fn workspace_attach_failure_disposes_and_leaves_child_for_repair() {
         .registry
         .workspace_for_session("repair-child")
         .is_none());
-    assert!(harness.parent.session().events().is_empty());
+    assert!(!harness
+        .parent
+        .session()
+        .events()
+        .iter()
+        .any(is_accepted_child_lifecycle_event));
 
     let replacement = harness
         .registry
@@ -1438,7 +1495,16 @@ async fn precommit_initial_delivery_failure_disposes_without_contained_end() {
         parent.start(start, cancellation()).await,
         Err(SubagentError::Agent(AgentError::Runtime(_)))
     ));
-    assert!(harness.parent.session().events().is_empty());
+    assert!(harness
+        .agents
+        .get(&SessionId::from("delivery-fails"))
+        .is_none());
+    assert!(!harness
+        .parent
+        .session()
+        .events()
+        .iter()
+        .any(is_accepted_child_lifecycle_event));
 }
 
 struct BlockingIdle {
@@ -1836,7 +1902,7 @@ impl AgentRuntime for DisposeCountingRuntime {
     }
     async fn dispose(&self) -> Result<(), AgentError> {
         self.disposals.fetch_add(1, Ordering::AcqRel);
-        Err(AgentError::Runtime("late disposal failed".into()))
+        Ok(())
     }
 }
 
@@ -1861,6 +1927,8 @@ impl AgentFactory for DisposeCountingFactory {
 
 struct GatedStartPersistence {
     inner: MemorySessionPersistence,
+    event_type: &'static str,
+    child_id: Option<&'static str>,
     started: Arc<Notify>,
     release: Arc<Notify>,
 }
@@ -1890,7 +1958,16 @@ impl SessionPersistence for GatedStartPersistence {
         event: &SessionEvent,
         cancellation: CancellationToken,
     ) -> Result<(), SessionError> {
-        if event.event_type == "subagent/contained-start" {
+        if event.event_type == self.event_type
+            && self.child_id.is_none_or(|child_id| {
+                event
+                    .data
+                    .get("child")
+                    .and_then(|child| child.get("childSessionId"))
+                    .and_then(Value::as_str)
+                    == Some(child_id)
+            })
+        {
             self.started.notify_one();
             self.release.notified().await;
         }
@@ -1940,6 +2017,68 @@ impl SessionPersistence for GatedStartPersistence {
     }
 }
 
+#[tokio::test]
+async fn child_admission_sequences_behind_a_persisting_root_write() {
+    let write_started = Arc::new(Notify::new());
+    let release_write = Arc::new(Notify::new());
+    let persistence = Arc::new(GatedStartPersistence {
+        inner: MemorySessionPersistence::new(),
+        event_type: "test/root-write",
+        child_id: None,
+        started: write_started.clone(),
+        release: release_write.clone(),
+    });
+    let harness = setup_with(persistence, Arc::new(Factory)).await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let root = harness.parent.session();
+    let root_write = tokio::spawn({
+        let root = root.clone();
+        async move {
+            root.append(
+                SessionEvent {
+                    event_type: "test/root-write".into(),
+                    seq: root.next_seq().unwrap(),
+                    time: 0,
+                    data: Value::Null,
+                    ignorable: Some(true),
+                    source_event_seqs: None,
+                    surface_op: None,
+                },
+                cancellation(),
+            )
+            .await
+        }
+    });
+    write_started.notified().await;
+
+    let mut starting = Box::pin(parent.start(request("sequenced-child"), cancellation()));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut starting)
+            .await
+            .is_err()
+    );
+    release_write.notify_one();
+
+    root_write.await.unwrap().unwrap();
+    let (_, child) = starting.await.unwrap();
+    let events = root.events();
+    assert!(events
+        .iter()
+        .enumerate()
+        .all(|(seq, event)| event.seq == seq as u64));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| is_accepted_child_lifecycle_event(event))
+            .count(),
+        2
+    );
+
+    child.dispose().await.unwrap();
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
 struct LateAdmissionEngine {
     handle: Mutex<Option<oneshot::Sender<WorkflowRun>>>,
     result: Mutex<Option<oneshot::Sender<bool>>>,
@@ -1976,6 +2115,8 @@ async fn workflow_dispose_waits_for_late_child_admission_to_quiesce() {
     let release = Arc::new(Notify::new());
     let persistence = Arc::new(GatedStartPersistence {
         inner: MemorySessionPersistence::new(),
+        event_type: "subagent/contained-start",
+        child_id: Some("late-child"),
         started: started.clone(),
         release: release.clone(),
     });
@@ -2030,7 +2171,7 @@ async fn workflow_dispose_waits_for_late_child_admission_to_quiesce() {
     let second = joining.await.unwrap();
     assert_eq!(first, second);
     assert_eq!(child_disposals.load(Ordering::Acquire), 1);
-    assert_eq!(running.await.unwrap().status, WorkflowRunStatus::Error);
+    assert_eq!(running.await.unwrap().status, WorkflowRunStatus::Cancelled);
 }
 
 struct FailOneMember {
@@ -2256,4 +2397,1012 @@ fn native_workflow_rejects_incomplete_recordings() {
         r#"{"type":"tool/call","data":{"callId":"workflow-call","name":"workflow"}}"#,
     ))
     .is_err());
+}
+
+#[tokio::test]
+async fn recursive_start_rejects_depth_five_before_provider_side_effects() {
+    let harness = setup().await;
+    let mut parent_agent = harness.parent.clone();
+    let mut parents = Vec::new();
+    let mut activations = Vec::new();
+    for depth in 1..=4 {
+        let parent = harness.service.attach(parent_agent).unwrap();
+        let child_id = format!("depth-{depth}");
+        let (_, activation) = parent
+            .start(request(&child_id), cancellation())
+            .await
+            .unwrap();
+        parent_agent = Arc::new(harness.agents.get(&SessionId::from(child_id)).unwrap());
+        parents.push(parent);
+        activations.push(activation);
+    }
+
+    let deepest = harness.service.attach(parent_agent).unwrap();
+    let calls = harness.provider.calls.load(Ordering::Acquire);
+    assert!(matches!(
+        deepest.start(request("depth-5"), cancellation()).await,
+        Err(SubagentError::DelegationDepthLimit { limit: 4 })
+    ));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), calls);
+
+    harness.parent.dispose().await.unwrap();
+    drop((parents, activations));
+}
+
+#[tokio::test]
+async fn concurrent_tree_admissions_fail_fast_and_recover_dropped_or_disposed_slots() {
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());
+    let sessions = SessionStore::new(Arc::clone(&persistence));
+    let agents = AgentRegistry::new(sessions.clone());
+    std::mem::forget(agents.register_factory(Arc::new(Factory)).unwrap());
+    let provider = Arc::new(GatedProvider {
+        native: NativeSubagentProvider::new(agents.clone(), ["scout".into()]),
+        calls: AtomicUsize::new(0),
+        open: AtomicBool::new(false),
+        release: Notify::new(),
+    });
+    let service = SubagentService::new(agents.clone(), sessions.clone(), Arc::clone(&persistence));
+    std::mem::forget(service.register("native", provider.clone()).unwrap());
+    let second_service = SubagentService::new(agents.clone(), sessions, persistence);
+    std::mem::forget(second_service.register("native", provider.clone()).unwrap());
+    let parent_agent = Arc::new(
+        agents
+            .create(header("concurrent-parent", None), options(), cancellation())
+            .await
+            .unwrap(),
+    );
+    let parent = service.attach(parent_agent.clone()).unwrap();
+    let second_parent = second_service.attach(parent_agent.clone()).unwrap();
+    let mut starts = Vec::new();
+    for index in 0..16 {
+        let parent = if index % 2 == 0 {
+            parent.clone()
+        } else {
+            second_parent.clone()
+        };
+        starts.push(tokio::spawn(async move {
+            parent
+                .start(request(&format!("concurrent-{index}")), cancellation())
+                .await
+        }));
+    }
+    while provider.calls.load(Ordering::Acquire) != 16 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(matches!(
+        parent
+            .start(request("concurrent-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeConcurrencyLimit { limit: 16 })
+    ));
+    assert_eq!(provider.calls.load(Ordering::Acquire), 16);
+    let aborted = starts.pop().unwrap();
+    aborted.abort();
+    assert!(matches!(aborted.await, Err(error) if error.is_cancelled()));
+    let recovered_parent = parent.clone();
+    starts.push(tokio::spawn(async move {
+        recovered_parent
+            .start(request("concurrent-recovered-pending"), cancellation())
+            .await
+    }));
+    while provider.calls.load(Ordering::Acquire) != 17 {
+        tokio::task::yield_now().await;
+    }
+    provider.open.store(true, Ordering::Release);
+    provider.release.notify_waiters();
+
+    let mut activations = Vec::new();
+    for start in starts {
+        activations.push(start.await.unwrap().unwrap().1);
+    }
+    activations.pop().unwrap().dispose().await.unwrap();
+    let (_, replacement) = parent
+        .start(request("concurrent-replacement"), cancellation())
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::Acquire), 18);
+    replacement.dispose().await.unwrap();
+    parent.dispose().await;
+    second_parent.dispose().await;
+    parent_agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn cumulative_tree_quota_survives_disposal_and_reattached_capabilities() {
+    let harness = setup().await;
+    let first = harness.service.attach(harness.parent.clone()).unwrap();
+    let second_service = SubagentService::new(
+        harness.agents.clone(),
+        harness.sessions.clone(),
+        harness.persistence.clone(),
+    );
+    std::mem::forget(
+        second_service
+            .register("native", harness.provider.clone())
+            .unwrap(),
+    );
+    let second = second_service.attach(harness.parent.clone()).unwrap();
+    for index in 0..128 {
+        let parent = if index % 2 == 0 { &first } else { &second };
+        let (_, activation) = parent
+            .start(request(&format!("quota-{index}")), cancellation())
+            .await
+            .unwrap();
+        activation.dispose().await.unwrap();
+        if index == 0 {
+            assert!(parent
+                .start(request("quota-0"), cancellation())
+                .await
+                .is_err());
+        }
+    }
+
+    let resumed_service = SubagentService::new(
+        harness.agents.clone(),
+        harness.sessions.clone(),
+        harness.persistence.clone(),
+    );
+    std::mem::forget(
+        resumed_service
+            .register("native", harness.provider.clone())
+            .unwrap(),
+    );
+    let resumed = resumed_service.attach(harness.parent.clone()).unwrap();
+    assert!(matches!(
+        resumed
+            .start(request("quota-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeCreationLimit { limit: 128 })
+    ));
+    assert_eq!(harness.provider.calls.load(Ordering::Acquire), 129);
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_start_disposes_the_provider_agent_and_rolls_back_admission() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let persistence = Arc::new(GatedStartPersistence {
+        inner: MemorySessionPersistence::new(),
+        event_type: "subagent/contained-start",
+        child_id: Some("dropped-start"),
+        started: started.clone(),
+        release,
+    });
+    let disposals = Arc::new(AtomicUsize::new(0));
+    let harness = setup_with(
+        persistence,
+        Arc::new(DisposeCountingFactory {
+            disposals: disposals.clone(),
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let start_parent = parent.clone();
+    let starting = tokio::spawn(async move {
+        start_parent
+            .start(request("dropped-start"), cancellation())
+            .await
+    });
+    started.notified().await;
+    starting.abort();
+    while disposals.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(harness
+        .agents
+        .get(&SessionId::from("dropped-start"))
+        .is_none());
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_foreground_wait_disposes_only_its_activation_and_background_sibling_survives() {
+    let idle_started = Arc::new(Notify::new());
+    let release_idle = Arc::new(Notify::new());
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(BlockingIdleFactory {
+            idle_started: idle_started.clone(),
+            release_idle,
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let (_, foreground) = parent
+        .start(request("dropped-foreground"), cancellation())
+        .await
+        .unwrap();
+    let (_, background) = parent
+        .start(request("background-sibling"), cancellation())
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let foreground = foreground.clone();
+        async move { foreground.wait_for_idle().await }
+    });
+    idle_started.notified().await;
+    waiting.abort();
+    while harness
+        .agents
+        .get(&SessionId::from("dropped-foreground"))
+        .is_some()
+    {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(harness
+        .agents
+        .get(&SessionId::from("background-sibling"))
+        .is_some_and(|agent| !agent.is_disposed()));
+    background.dispose().await.unwrap();
+    assert!(harness
+        .agents
+        .get(&SessionId::from("background-sibling"))
+        .is_none());
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+struct FailOnceDisposeRuntime {
+    fail_once: bool,
+    attempts: Arc<AtomicUsize>,
+    first_failure_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+}
+
+#[async_trait]
+impl AgentRuntime for FailOnceDisposeRuntime {
+    fn status(&self) -> AgentStatus {
+        AgentStatus::Idle
+    }
+
+    async fn wake(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn when_idle(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn dispose(&self) -> Result<(), AgentError> {
+        if self.fail_once {
+            if self.attempts.load(Ordering::Acquire) == 0 {
+                if let Some((started, release)) = &self.first_failure_gate {
+                    started.notify_one();
+                    release.notified().await;
+                }
+            }
+            if self.attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                return Err(AgentError::Runtime("first disposal failed".into()));
+            }
+        }
+        Ok(())
+    }
+}
+
+struct FailOnceDisposeFactory {
+    attempts: Arc<AtomicUsize>,
+    first_failure_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+}
+
+#[async_trait]
+impl AgentFactory for FailOnceDisposeFactory {
+    async fn create(
+        &self,
+        session: Arc<tessivum::session::Session>,
+        _: AgentOptions,
+        _: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        Ok(Arc::new(FailOnceDisposeRuntime {
+            fail_once: session.id().as_str() != "parent",
+            attempts: self.attempts.clone(),
+            first_failure_gate: self.first_failure_gate.clone(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn disposal_failure_is_observable_and_retry_keeps_the_tree_slot_until_success() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(FailOnceDisposeFactory {
+            attempts: attempts.clone(),
+            first_failure_gate: None,
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let (_, child) = parent
+        .start(request("retry-dispose"), cancellation())
+        .await
+        .unwrap();
+
+    let failed = child.dispose().await.unwrap();
+    assert_eq!(failed.status, SubagentRunStatus::Error);
+    assert_eq!(failed.error.unwrap().code, "AGENT_DISPOSE_FAILED");
+    assert!(harness
+        .agents
+        .get(&SessionId::from("retry-dispose"))
+        .is_some());
+
+    let retried = child.dispose().await.unwrap();
+    assert_eq!(retried.status, SubagentRunStatus::Cancelled);
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    assert!(harness
+        .agents
+        .get(&SessionId::from("retry-dispose"))
+        .is_none());
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_child_cleanup_retries_without_erasing_its_first_failure() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let failure_started = Arc::new(Notify::new());
+    let release_failure = Arc::new(Notify::new());
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(FailOnceDisposeFactory {
+            attempts: attempts.clone(),
+            first_failure_gate: Some((failure_started.clone(), release_failure.clone())),
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let child = parent
+        .start(request("dropped-retry-dispose"), cancellation())
+        .await
+        .unwrap()
+        .1;
+
+    let dropped_child = child.clone();
+    let disposing = tokio::spawn(async move { dropped_child.dispose().await });
+    failure_started.notified().await;
+    disposing.abort();
+    assert!(matches!(disposing.await, Err(error) if error.is_cancelled()));
+    failure_started.notified().await;
+    let mut observing = Box::pin(child.dispose());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut observing)
+            .await
+            .is_err()
+    );
+    release_failure.notify_one();
+
+    let failure = observing.await.unwrap();
+    assert_eq!(failure.status, SubagentRunStatus::Error);
+    assert_eq!(failure.error.unwrap().code, "AGENT_DISPOSE_FAILED");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while harness
+            .agents
+            .get(&SessionId::from("dropped-retry-dispose"))
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop-owned cleanup retries without another disposal call");
+    assert_eq!(
+        child.dispose().await.unwrap().status,
+        SubagentRunStatus::Cancelled
+    );
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn parent_cleanup_waiters_share_failure_and_second_dispose_retries_retained_child() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let failure_started = Arc::new(Notify::new());
+    let release_failure = Arc::new(Notify::new());
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(FailOnceDisposeFactory {
+            attempts: attempts.clone(),
+            first_failure_gate: Some((failure_started.clone(), release_failure.clone())),
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    parent
+        .start(request("parent-retry-dispose"), cancellation())
+        .await
+        .unwrap();
+
+    let first_parent = parent.clone();
+    let first = tokio::spawn(async move { first_parent.dispose().await });
+    failure_started.notified().await;
+    let second_parent = parent.clone();
+    let (joining_tx, joining_rx) = oneshot::channel();
+    let second = tokio::spawn(async move {
+        joining_tx.send(()).unwrap();
+        second_parent.dispose().await
+    });
+    joining_rx.await.unwrap();
+    assert!(!second.is_finished());
+    first.abort();
+    assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+    release_failure.notify_one();
+
+    let failed = second.await.unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].status, SubagentRunStatus::Error);
+    assert_eq!(
+        failed[0].error.as_ref().unwrap().code,
+        "AGENT_DISPOSE_FAILED"
+    );
+    assert!(harness
+        .agents
+        .get(&SessionId::from("parent-retry-dispose"))
+        .is_some());
+    assert_eq!(attempts.load(Ordering::Acquire), 1);
+
+    let retry_parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let mut peers = Vec::new();
+    for index in 0..15 {
+        peers.push(
+            retry_parent
+                .start(
+                    request(&format!("parent-retry-peer-{index}")),
+                    cancellation(),
+                )
+                .await
+                .unwrap()
+                .1,
+        );
+    }
+    assert!(matches!(
+        retry_parent
+            .start(request("parent-retry-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeConcurrencyLimit { limit: 16 })
+    ));
+
+    let retried = parent.dispose().await;
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].status, SubagentRunStatus::Cancelled);
+    assert!(harness
+        .agents
+        .get(&SessionId::from("parent-retry-dispose"))
+        .is_none());
+    let replacement = retry_parent
+        .start(request("parent-retry-replacement"), cancellation())
+        .await
+        .unwrap()
+        .1;
+    replacement.dispose().await.unwrap();
+    for peer in peers {
+        peer.dispose().await.unwrap();
+    }
+    retry_parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+struct BlockingDisposeRuntime {
+    blocked: bool,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentRuntime for BlockingDisposeRuntime {
+    fn status(&self) -> AgentStatus {
+        AgentStatus::Idle
+    }
+
+    async fn wake(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn when_idle(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn dispose(&self) -> Result<(), AgentError> {
+        if self.blocked {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+struct BlockingDisposeFactory {
+    blocked_id: &'static str,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentFactory for BlockingDisposeFactory {
+    async fn create(
+        &self,
+        session: Arc<tessivum::session::Session>,
+        _: AgentOptions,
+        _: Inbox,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        Ok(Arc::new(BlockingDisposeRuntime {
+            blocked: session.id().as_str() == self.blocked_id,
+            started: self.started.clone(),
+            release: self.release.clone(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn dropped_disposal_future_keeps_its_slot_until_the_same_agent_is_cleaned_up() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let harness = setup_with(
+        Arc::new(MemorySessionPersistence::new()),
+        Arc::new(BlockingDisposeFactory {
+            blocked_id: "blocked-dispose",
+            started: started.clone(),
+            release: release.clone(),
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let (_, blocked) = parent
+        .start(request("blocked-dispose"), cancellation())
+        .await
+        .unwrap();
+    let disposing = tokio::spawn(async move { blocked.dispose().await });
+    started.notified().await;
+    disposing.abort();
+    assert!(matches!(disposing.await, Err(error) if error.is_cancelled()));
+    started.notified().await;
+
+    let mut children = Vec::new();
+    for index in 0..15 {
+        children.push(
+            parent
+                .start(request(&format!("blocked-peer-{index}")), cancellation())
+                .await
+                .unwrap()
+                .1,
+        );
+    }
+    assert!(matches!(
+        parent
+            .start(request("blocked-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeConcurrencyLimit { limit: 16 })
+    ));
+
+    release.notify_waiters();
+    while harness
+        .agents
+        .get(&SessionId::from("blocked-dispose"))
+        .is_some()
+    {
+        tokio::task::yield_now().await;
+    }
+    let replacement = parent
+        .start(request("blocked-replacement"), cancellation())
+        .await
+        .unwrap()
+        .1;
+    replacement.dispose().await.unwrap();
+    for child in children {
+        child.dispose().await.unwrap();
+    }
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_start_keeps_its_slot_until_provider_cleanup_finishes() {
+    let start_persisting = Arc::new(Notify::new());
+    let release_persistence = Arc::new(Notify::new());
+    let persistence = Arc::new(GatedStartPersistence {
+        inner: MemorySessionPersistence::new(),
+        event_type: "subagent/contained-start",
+        child_id: Some("cancelled-start"),
+        started: start_persisting.clone(),
+        release: release_persistence,
+    });
+    let dispose_started = Arc::new(Notify::new());
+    let release_dispose = Arc::new(Notify::new());
+    let harness = setup_with(
+        persistence,
+        Arc::new(BlockingDisposeFactory {
+            blocked_id: "cancelled-start",
+            started: dispose_started.clone(),
+            release: release_dispose.clone(),
+        }),
+    )
+    .await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let starting = tokio::spawn({
+        let parent = parent.clone();
+        async move {
+            parent
+                .start(request("cancelled-start"), cancellation())
+                .await
+        }
+    });
+    start_persisting.notified().await;
+    starting.abort();
+    assert!(matches!(starting.await, Err(error) if error.is_cancelled()));
+    dispose_started.notified().await;
+
+    let mut children = Vec::new();
+    for index in 0..15 {
+        children.push(
+            parent
+                .start(request(&format!("cancelled-peer-{index}")), cancellation())
+                .await
+                .unwrap()
+                .1,
+        );
+    }
+    assert!(matches!(
+        parent
+            .start(request("cancelled-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeConcurrencyLimit { limit: 16 })
+    ));
+
+    release_dispose.notify_waiters();
+    while harness
+        .agents
+        .get(&SessionId::from("cancelled-start"))
+        .is_some()
+    {
+        tokio::task::yield_now().await;
+    }
+    let replacement = parent
+        .start(request("cancelled-replacement"), cancellation())
+        .await
+        .unwrap()
+        .1;
+    replacement.dispose().await.unwrap();
+    for child in children {
+        child.dispose().await.unwrap();
+    }
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_native_factory_setups_hold_all_slots_and_parent_admissions() {
+    let factory = Arc::new(GatedNativeFactory {
+        gated_id: None,
+        open: AtomicBool::new(false),
+        starts: AtomicUsize::new(0),
+        release: Notify::new(),
+    });
+    let harness = setup_with(Arc::new(MemorySessionPersistence::new()), factory.clone()).await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let second_service = SubagentService::new(
+        harness.agents.clone(),
+        harness.sessions.clone(),
+        harness.persistence.clone(),
+    );
+    std::mem::forget(
+        second_service
+            .register("native", harness.provider.clone())
+            .unwrap(),
+    );
+    let retry_parent = second_service.attach(harness.parent.clone()).unwrap();
+
+    let mut cancellations = Vec::new();
+    let mut starts = Vec::new();
+    for index in 0..16 {
+        let parent = parent.clone();
+        let cancellation = cancellation();
+        cancellations.push(cancellation.clone());
+        starts.push(tokio::spawn(async move {
+            parent
+                .start(request(&format!("native-pending-{index}")), cancellation)
+                .await
+        }));
+    }
+    while factory.starts.load(Ordering::Acquire) != 16 {
+        tokio::task::yield_now().await;
+    }
+    for cancellation in cancellations {
+        cancellation.cancel();
+    }
+
+    assert!(matches!(
+        retry_parent
+            .start(request("native-pending-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeConcurrencyLimit { limit: 16 })
+    ));
+    assert_eq!(factory.starts.load(Ordering::Acquire), 16);
+    let disposing = tokio::spawn({
+        let parent = parent.clone();
+        async move { parent.dispose().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!disposing.is_finished());
+
+    factory.open.store(true, Ordering::Release);
+    factory.release.notify_waiters();
+    for start in starts {
+        assert!(matches!(
+            start.await.unwrap(),
+            Err(SubagentError::CancelledBeforeAcceptance)
+        ));
+    }
+    disposing.await.unwrap();
+
+    let mut retry = request("native-pending-0");
+    retry.resume = true;
+    let replacement = retry_parent.start(retry, cancellation()).await.unwrap().1;
+    replacement.dispose().await.unwrap();
+    retry_parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_cold_resume_holds_its_slot_until_native_factory_cleanup() {
+    let factory = Arc::new(GatedNativeFactory {
+        gated_id: Some("cold-resume-slot"),
+        open: AtomicBool::new(true),
+        starts: AtomicUsize::new(0),
+        release: Notify::new(),
+    });
+    let harness = setup_with(Arc::new(MemorySessionPersistence::new()), factory.clone()).await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    let mut child_request = request("cold-resume-slot");
+    child_request.mode = SubagentMode::Continuable;
+    parent
+        .start(child_request, cancellation())
+        .await
+        .unwrap()
+        .1
+        .dispose()
+        .await
+        .unwrap();
+
+    factory.open.store(false, Ordering::Release);
+    let prompt_cancellation = cancellation();
+    let prompting = tokio::spawn({
+        let service = harness.service.clone();
+        let prompt_cancellation = prompt_cancellation.clone();
+        async move {
+            service
+                .prompt(
+                    tessivum::subagent::SubagentPromptRequest {
+                        parent_session_id: SessionId::from("parent"),
+                        child_session_id: SessionId::from("cold-resume-slot"),
+                        mode: SubagentMode::Continuable,
+                        content: vec![ContentBlock::Text {
+                            text: "cancelled".into(),
+                        }],
+                        client_time_zone: None,
+                    },
+                    prompt_cancellation,
+                )
+                .await
+        }
+    });
+    while factory.starts.load(Ordering::Acquire) != 1 {
+        tokio::task::yield_now().await;
+    }
+    prompt_cancellation.cancel();
+
+    let mut peers = Vec::new();
+    for index in 0..15 {
+        peers.push(
+            parent
+                .start(
+                    request(&format!("cold-resume-peer-{index}")),
+                    cancellation(),
+                )
+                .await
+                .unwrap()
+                .1,
+        );
+    }
+    assert!(matches!(
+        parent
+            .start(request("cold-resume-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeConcurrencyLimit { limit: 16 })
+    ));
+    assert!(!prompting.is_finished());
+
+    factory.open.store(true, Ordering::Release);
+    factory.release.notify_waiters();
+    assert!(matches!(
+        prompting.await.unwrap(),
+        Err(SubagentError::Cancelled)
+    ));
+    harness
+        .service
+        .prompt(
+            tessivum::subagent::SubagentPromptRequest {
+                parent_session_id: SessionId::from("parent"),
+                child_session_id: SessionId::from("cold-resume-slot"),
+                mode: SubagentMode::Continuable,
+                content: vec![ContentBlock::Text {
+                    text: "retry".into(),
+                }],
+                client_time_zone: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    while harness
+        .agents
+        .get(&SessionId::from("cold-resume-slot"))
+        .is_some()
+    {
+        tokio::task::yield_now().await;
+    }
+    for peer in peers {
+        peer.dispose().await.unwrap();
+    }
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn root_creation_total_survives_deleted_retired_descendant_logs() {
+    let persistence = Arc::new(MemorySessionPersistence::new());
+    let harness = setup_with(persistence.clone(), Arc::new(Factory)).await;
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    for index in 0..2 {
+        let id = format!("deleted-quota-{index}");
+        let child = parent.start(request(&id), cancellation()).await.unwrap().1;
+        child.dispose().await.unwrap();
+        persistence
+            .delete(&SessionId::from(id), cancellation())
+            .await
+            .unwrap();
+    }
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
+
+    let persistence: Arc<dyn SessionPersistence> = persistence;
+    let sessions = SessionStore::new(Arc::clone(&persistence));
+    let agents = AgentRegistry::new(sessions.clone());
+    std::mem::forget(agents.register_factory(Arc::new(Factory)).unwrap());
+    let provider = Arc::new(CountingProvider {
+        native: NativeSubagentProvider::new(agents.clone(), ["scout".into()]),
+        calls: AtomicUsize::new(0),
+    });
+    let service = SubagentService::new(agents.clone(), sessions, persistence);
+    std::mem::forget(service.register("native", provider).unwrap());
+    let parent_agent = Arc::new(
+        agents
+            .resume(SessionId::from("parent"), options(), cancellation())
+            .await
+            .unwrap(),
+    );
+    let parent = service.attach(parent_agent.clone()).unwrap();
+    for index in 0..126 {
+        parent
+            .start(
+                request(&format!("post-delete-quota-{index}")),
+                cancellation(),
+            )
+            .await
+            .unwrap()
+            .1
+            .dispose()
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        parent
+            .start(request("post-delete-overflow"), cancellation())
+            .await,
+        Err(SubagentError::TreeCreationLimit { limit: 128 })
+    ));
+    parent.dispose().await;
+    parent_agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn seeded_new_root_does_not_inherit_the_source_tree_ledger() {
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());
+    let mut copied_ledger = Vec::with_capacity(129);
+    for seq in 0..=128 {
+        copied_ledger.push(SessionEvent {
+            event_type: "subagent/tree-creation".into(),
+            seq,
+            time: 0,
+            data: if seq == 0 {
+                json!({"baseline": 0})
+            } else {
+                json!({"accepted": true})
+            },
+            ignorable: Some(true),
+            source_event_seqs: None,
+            surface_op: None,
+        });
+    }
+    let mut root_header = header("seeded-new-root", None);
+    root_header.seed_length = Some(copied_ledger.len() as u64);
+    persistence
+        .create_seeded(&root_header, &copied_ledger, cancellation())
+        .await
+        .unwrap();
+
+    let sessions = SessionStore::new(Arc::clone(&persistence));
+    let agents = AgentRegistry::new(sessions.clone());
+    std::mem::forget(agents.register_factory(Arc::new(Factory)).unwrap());
+    let provider = Arc::new(CountingProvider {
+        native: NativeSubagentProvider::new(agents.clone(), ["scout".into()]),
+        calls: AtomicUsize::new(0),
+    });
+    let service = SubagentService::new(agents.clone(), sessions, persistence);
+    std::mem::forget(service.register("native", provider.clone()).unwrap());
+    let parent_agent = Arc::new(
+        agents
+            .resume(root_header.id, options(), cancellation())
+            .await
+            .unwrap(),
+    );
+    let parent = service.attach(parent_agent.clone()).unwrap();
+    let child = parent
+        .start(request("seeded-root-first-child"), cancellation())
+        .await
+        .unwrap()
+        .1;
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    child.dispose().await.unwrap();
+    parent.dispose().await;
+    parent_agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_reconstruction_ignores_contained_starts_copied_into_seed_history() {
+    let harness = setup().await;
+    let root = harness.parent.session();
+    let legacy_start = SessionEvent {
+        event_type: "subagent/contained-start".into(),
+        seq: root.next_seq().unwrap(),
+        time: 0,
+        data: Value::Null,
+        ignorable: Some(true),
+        source_event_seqs: None,
+        surface_op: None,
+    };
+    root.append(legacy_start.clone(), cancellation())
+        .await
+        .unwrap();
+    let mut seeded_header = header("seeded-history", Some("parent"));
+    seeded_header.seed_length = Some(1);
+    seeded_header.origin = Some(SessionOrigin::Subagent);
+    seeded_header.delegation_depth = Some(1);
+    harness
+        .sessions
+        .create_seeded(seeded_header, vec![legacy_start], cancellation())
+        .await
+        .unwrap();
+
+    let parent = harness.service.attach(harness.parent.clone()).unwrap();
+    for index in 0..127 {
+        parent
+            .start(request(&format!("seed-quota-{index}")), cancellation())
+            .await
+            .unwrap()
+            .1
+            .dispose()
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        parent.start(request("seed-overflow"), cancellation()).await,
+        Err(SubagentError::TreeCreationLimit { limit: 128 })
+    ));
+    parent.dispose().await;
+    harness.parent.dispose().await.unwrap();
 }

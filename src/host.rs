@@ -2969,8 +2969,12 @@ impl HostRuntime {
         let compaction_service = compaction.publish(&root)?;
         let tools_service = tools.publish(&root)?;
         let registry = AgentRegistry::new(sessions.clone());
-        let subagents =
-            SubagentService::new(registry.clone(), sessions.clone(), Arc::clone(&persistence));
+        let subagents = SubagentService::new_with_workspace_resolver(
+            registry.clone(),
+            sessions.clone(),
+            Arc::clone(&persistence),
+            (*resources).clone(),
+        );
         let subagent_tools = SubagentTools::install(&tools, subagents.clone())?;
         let subagent_delegation_tools =
             SubagentDelegationTools::install(&tools, subagents.clone(), Arc::clone(&job_owners))?;

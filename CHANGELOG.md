@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.25 - 2026-09-09
+
+### Fixed
+
+- Inherit canonical workspace access across native child agents without broadening permissions.
+- Enforce root-tree depth, live/admitting, and cumulative admission limits with a durable ledger that excludes seeded history and survives descendant-log deletion.
+- Retain startup, worker, and child-cleanup ownership across cancellation, dropped waiters, and disposal failures; preserve rollback diagnostics and retryable parent cleanup.
+- Keep PTC foreground cancellation separate from detached jobs and report exact flat tool binding names without dispatching unknown or hidden tools.
+- Allocate subagent event sequences inside the session write transaction.
+- Prevent Unix subprocesses from inheriting workspace lock and directory descriptors, allowing shutdown and immediate reopening while unrelated children remain alive.
+
+## 0.1.0-alpha.24 - 2026-09-08
 
 ### Added
 
@@ -36,6 +47,10 @@
   through a Windows junction.
 - Make multiline Windows CI steps stop on non-zero native-command exits instead
   of allowing later commands to mask the prerequisite failure.
+- Publish the current scoped native tool catalog and exact argument schemas to PTC
+  model requests, including tool replacement/removal and flat-name invocation guidance.
+- Include tool names, field paths, and expected schemas in argument errors for both
+  Standard and PTC calls; reject out-of-scope calls before exposing schema diagnostics.
 
 ## 0.1.0-alpha.23 - 2026-09-03
 
