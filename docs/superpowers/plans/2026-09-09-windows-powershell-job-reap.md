@@ -63,21 +63,24 @@ cancellation test. Use the existing `ToolRuntime`, `bash_config`, and
 `assert_reaped` helpers. Direct `Start-Process` is not suitable here because
 PowerShell retains that child's lifecycle until natural exit.
 
-Write a test-owned `normal-child.ps1` in the temporary workspace. It atomically
-writes its own `$PID` through `normal-child.pid.tmp` to `normal-child.pid`, then
-sleeps for 30 seconds. The root tool command must:
+Write a test-owned C# source file in the temporary workspace with one minimal
+P/Invoke wrapper around `CreateProcessW` and `CloseHandle`. The wrapper must:
 
-1. Invoke a short-lived `%ComSpec% /d /c start` command that launches the child
-   script through the built-in Windows PowerShell executable.
-2. Use `start "" /b` and redirect the background child's stdout and stderr to
-   workspace files so it retains neither root capture pipe.
-3. Poll only until `normal-child.pid` exists, then let the root PowerShell exit
-   normally without calling `Start-Process` or waiting for the grandchild.
+1. Start `%ComSpec% /d /c ping -n 30 127.0.0.1 >nul` directly from the root
+   PowerShell process.
+2. Pass `bInheritHandles = false` and `CREATE_NO_WINDOW` so the child retains
+   neither capture pipe nor a shared console wait.
+3. Use no breakaway flag, then close the returned process and thread handles and
+   return `dwProcessId`.
 
-After the tool output returns successfully, read the PID file and call the
-unchanged `assert_reaped` helper. The background grandchild must inherit the
-same Windows Job through the intermediate `cmd`; do not use WMI, CIM, scheduled
-tasks, or any creator outside the owned process tree.
+The root tool command compiles the test-owned wrapper with `Add-Type -Path`,
+writes only the returned PID to stdout, and exits normally. This is not an
+external process creator: the Job-owned PowerShell itself calls
+`CreateProcessW`, so the child inherits the same Job. Do not use `Start-Process`,
+`cmd /c start`, WMI, CIM, scheduled tasks, or breakaway flags.
+
+After the tool returns successfully, parse `text(&output)` as the PID and call
+the unchanged `assert_reaped` helper.
 
 - [ ] **Step 3: Run the new test and verify RED**
 
@@ -88,9 +91,9 @@ cargo test --jobs 1 --locked --test builtin_tools `
 ```
 
 Expected: exit 101 because the tool returns before the descendant is fully
-reaped. If the tool still waits for the 30-second child, stop and report the
-observed process tree instead of trying another creation mechanism. Do not
-shorten or extend `assert_reaped`.
+reaped. If it waits for the 30-second child or fails for P/Invoke compilation or
+spawn reasons, stop and report the evidence. Do not try another creation
+mechanism or shorten or extend `assert_reaped`.
 
 - [ ] **Step 4: Add the consuming async Windows Job fence**
 
