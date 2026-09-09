@@ -1,145 +1,248 @@
-# Windows PowerShell Job reap fence design
+# Windows PowerShell escaped-descendant reap fence design
 
-This design makes Windows PowerShell tool cleanup complete before Tessivum
-reports cancellation, disablement, shutdown, or normal command completion.
-It closes a process-tree cleanup race exposed after merging Alpha.25.
+This design makes Windows PowerShell cleanup wait for both Job members and
+descendants that escape Job membership under a nested host Job. It replaces an
+accounting-only fence disproved by pre-termination process evidence.
 
 ## Context
 
 The merged source at `a1495f33c7db1490b7705e67e18ae510666809d4`
-failed two existing Windows integration tests:
+failed these existing Windows integration tests individually:
 
 - `powershell_cancellation_reaps_its_descendant_tree`;
 - `persistent_powershell_cancel_disable_and_shutdown_reap_process_trees`.
 
-Each test also failed when run alone with one test thread. Tessivum returned a
-tool result, but the asserted descendant PowerShell process remained active
-for longer than the test's one-second observation window. Each process exited
-naturally about 0.2 to 0.3 seconds after the failed test command returned.
+Each test returned an API result while a PowerShell-created process remained
+active beyond the unchanged one-second observation window.
 
-`WindowsJob::terminate` calls `TerminateJobObject`, which initiates
-termination but does not wait for every Job process to exit. The code already
-has `WindowsJob::wait_for_exit`, which polls Job accounting until
-`ActiveProcesses` reaches zero. The affected cleanup paths do not call it.
+The first diagnosis found that `TerminateJobObject` is asynchronous and the
+affected callers do not use the existing `WindowsJob::wait_for_exit`. A direct
+accounting fence compiled, but it did not close the normal-completion RED.
+Pre-termination probes then established the missing ownership fact:
+
+- The root PowerShell process reported `IsProcessInJob == true`.
+- Its suspended direct `CreateProcessW` child reported
+  `IsProcessInJob == false` before executing any instruction.
+- The existing test's `Start-Process` child also reported false before
+  cancellation.
+- Adding `CREATE_BREAKAWAY_FROM_JOB` to the root prevented PowerShell from
+  starting in the current host and is not a usable repair.
+
+Job accounting cannot fence a process that is not a Job member. The cleanup
+boundary must retain the Job for normal members and explicitly own escaped
+descendants by their root-parent relationship.
 
 ## Goals
 
-The implementation must make the documented process-tree ownership contract
-true at the API boundary. A completed cleanup operation must imply that the
-owned Windows Job contains no active processes.
+The implementation must make a completed PowerShell cleanup operation imply
+that no process discovered in the owned root tree remains active.
 
 The change must provide these outcomes:
 
-- One-shot PowerShell cancellation waits for Job termination before returning
-  `CANCELLED`.
-- One-shot PowerShell completion terminates and fences unexpected descendants
-  before returning output.
-- Persistent-shell cancellation, disablement, shutdown, and stale retirement
-  complete only after the Job reaches zero active processes.
-- One-shot Job query failures and the existing 10-second timeout remain
-  observable as tool cleanup errors.
-- Persistent cleanup preserves an already-published first-cause error and
-  reports a cleanup error to an active command when no earlier result won.
-- Blocking Windows Job polling does not occupy a Tokio async worker.
+- One-shot cancellation reaps Job members and escaped descendants before
+  returning `CANCELLED`.
+- Normal one-shot completion reaps an escaped descendant before returning
+  output.
+- Persistent cancellation, timeout, disablement, shutdown, stale retirement,
+  and last-owner drop publish completion only after tree cleanup finishes.
+- Tree enumeration, process access, termination, Job query, wait, and Tokio
+  join failures remain observable cleanup errors where current APIs can carry
+  them.
+- Fixed-point scanning and process-handle waits do not occupy a Tokio worker.
 
 ## Non-goals
 
-This change does not extend the test timeout, add sleeps to tests, terminate
-unowned processes, alter Unix process-group handling, or change PowerShell
-command semantics. It does not redesign the subprocess service or modify the
-Alpha.25 Agent lifecycle changes.
+This change does not call `taskkill`, extend test timeouts, add sleeps to tests,
+kill processes based only on an unverified PID, alter Unix process groups, or
+change PowerShell command semantics. It does not change public persistent-shell
+return types, redesign the subprocess service, or modify Alpha.25 Agent logic.
 
-## Design
+This change is not a system-wide process monitor. After a root exits normally,
+Windows does not retain a queryable ancestry chain through every already-exited
+intermediate process. Normal-completion cleanup covers descendants whose current
+snapshot ancestry still reaches the stable root or an identity retained by an
+earlier snapshot; it does not claim to recover an adversarial orphan whose full
+ancestry disappeared before Tessivum could observe it.
 
-Add one asynchronous, consuming operation to the Windows Job owner in
-`src/subprocess.rs`. The operation calls `TerminateJobObject`, then executes
-the existing synchronous `wait_for_exit` poll through
-`tokio::task::spawn_blocking`. Consuming the Job keeps its handle alive for the
-entire fence and prevents a caller from accidentally reporting completion
-while retaining an unfenced owner.
+## Ownership model
 
-The operation maps a Tokio join failure to `std::io::Error`. It preserves the
-existing Job query error and 10-second timeout without converting either into
-success.
+Change `WindowsJob` from a bare Job handle to a private owner that also records
+the assigned root process ID and retained handles for escaped descendants.
+`spawn`, `spawn_std`, and `assign_raw` must produce the same owner; `assign_raw`
+calls `GetProcessId(process)` and fails with the last operating-system error if
+the result is zero. `spawn` and `spawn_std` obtain the root ID synchronously
+from the newly spawned process handle before returning. Callers keep that root
+process handle alive through the consuming fence; identity is never derived
+from `Child::id()` after a wait.
 
-Use the operation at both ownership boundaries:
+Retain descendants as `std::os::windows::io::OwnedHandle` values or an
+equivalent local RAII owner whose `Send` behavior follows the standard handle
+owner. Put the Job handle, root ID, and mutex-protected PID-deduplicated capture
+state behind a private `Arc`. The state also stores the first capture error. Do
+not store bare handles behind an unexplained `unsafe impl Send` or
+`unsafe impl Sync`.
 
-1. In one-shot `run_windows_powershell`, terminate the Job when cancellation
-   wins, finish waiting for the root process, then await the Job fence before
-   joining the stream-copy tasks or returning `CANCELLED`.
-2. In the normal one-shot completion path, fence the Job after the root process
-   exits and before joining the stream-copy tasks or returning its normalized
-   output.
-3. In `reap_persistent_shell`, take the owned Job and await the same fence
-   before joining its stream drainers or publishing `ProcessDone` through
-   `inner.complete`.
+Keep synchronous `terminate(&self)` limited to a fast, best-effort
+`TerminateJobObject` call. It performs no Toolhelp scan, takes no capture-state
+lock, and never waits. `Drop` may call only this fast operation.
 
-Persistent-shell cleanup remains centralized in `reap_persistent_shell`, so
-cancellation, disablement, shutdown, and stale-workspace retirement inherit
-the same completion guarantee.
+Add asynchronous `capture_and_terminate(&self)`. It clones the private `Arc`
+into `spawn_blocking`, takes one discovery snapshot, opens every currently
+traceable descendant regardless of Job membership, revalidates each identity
+with one fresh snapshot as described below, stores validated handles, records
+the first error without overwriting it, and calls `TerminateJobObject`.
+Job-member identities remain ancestry anchors because an intermediate member
+can create an escaped child before Job termination.
+
+The async operation returns its error to the caller and also leaves the first
+error in shared state for the consuming fence. A caller never returns directly
+from capture failure: it still waits for the root, runs the fence, and completes
+stream/lifecycle cleanup before surfacing the stored cleanup error.
+
+Repeated capture is idempotent. It may retain additional identities and
+deduplicates by PID while retained handles pin those identities. The operation
+does not run a fixed-point loop or wait; those bounded operations belong to the
+consuming fence.
+
+Add one consuming async cleanup method. It moves the owner into
+`tokio::task::spawn_blocking` and performs one bounded native cleanup operation:
+
+1. Reuse every handle retained by an earlier `terminate(&self)` call and take a
+   new Toolhelp process snapshot.
+2. Build parent relationships from
+   `PROCESSENTRY32W.th32ParentProcessID`.
+3. Find every process whose parent chain reaches the recorded root ID or a
+   retained descendant identity.
+4. Open each newly discovered PID with the minimum process rights needed to
+   query, terminate, and wait. Keep the handle open, then take another Toolhelp
+   snapshot and revalidate that the same PID is present and its current parent
+   chain still reaches the stable root or an already validated retained
+   identity.
+5. If the PID is absent from the verification snapshot, close the new handle and
+   treat that identity as exited. If the PID is present without owned ancestry,
+   close it without termination. A snapshot or access ambiguity is an error.
+6. Retain only revalidated handles. Call `TerminateJobObject` again, terminate
+   active retained descendants through their handles, and wait only until the
+   shared deadline.
+7. Resnapshot, validate, and retain newly discovered identities until one full
+   validation pass adds none. Then require all retained handles to be signaled
+   and Job accounting to report zero active processes.
+8. Take one final validation snapshot and require that it adds no identity
+   before returning success.
+
+The consuming blocking cleanup creates one `Instant` deadline at entry and
+reuses it for every snapshot pass, Job query, termination pass, and handle wait.
+It never restarts the deadline for a process or loop iteration. The earlier
+asynchronous capture performs one discovery and validation pass without waits;
+it records any failure for the consuming fence to return later.
+
+A failed snapshot, a process that remains present but cannot be opened, failed
+termination of an unsignaled handle, failed wait, or deadline expiry returns
+`std::io::Error`. `ERROR_ACCESS_DENIED` is not equivalent to process exit. A
+process disappearing before any handle is acquired counts as exited only after
+a fresh validated snapshot proves the PID absent.
+
+## PID safety
+
+Callers keep the Tokio or standard child object alive until the consuming tree
+fence returns. Its process handle prevents reuse of the recorded root ID during
+enumeration. Every descendant is opened before termination; subsequent actions
+use the retained handle, not a second lookup by PID.
+
+The helper never terminates a PID merely because its number appeared in an old
+snapshot. After opening a PID, it revalidates the current entry and ancestry in
+a fresh snapshot while the handle pins the opened identity. If the PID was
+reused between snapshots, the new ancestry check prevents termination. Any
+access ambiguity is an error, not permission to target an unrelated process.
+
+The pre-termination snapshot and fixed-point loop close the race where an
+escaped descendant creates another process while the root or another descendant
+is terminating. Retained handles keep known process identities stable across
+iterations.
+
+## Caller integration
+
+Use the consuming tree fence at each Windows PowerShell ownership boundary:
+
+1. In one-shot cancellation, await `capture_and_terminate` while the root is
+   live, request root termination, wait for the root process, then await the
+   consuming tree fence before joining stream tasks or returning `CANCELLED`.
+2. In normal one-shot completion, await the tree fence after the root wait and
+   before joining stream tasks or returning output.
+3. Add a persistent cleanup-request notification. `stop`, timeout, cancellation,
+   disposal, and last-owner `Drop` publish their existing first cause and signal
+   this request without scanning the process table. The reaper uses a biased
+   selection that prefers an already-ready cleanup request over root exit. When
+   the request wins while the root is live, it awaits `capture_and_terminate`
+   before waiting for root exit. It then takes the same owner and awaits the
+   consuming tree fence before stream drainers and `inner.complete`.
+
+Existing synchronous or drop-only `WindowsJob` callers retain fast best-effort
+Job termination only. Any caller that claims awaited process-tree cleanup must
+use asynchronous capture and the consuming fence. Unix paths remain
+byte-for-byte unchanged.
 
 ## Error handling
 
-The one-shot tool maps a failed Job fence through the existing `bash_error`
-path with a specific cleanup message. If the fence succeeds, the tool joins the
-stream-copy tasks normally. If the fence fails, it aborts and awaits both copy
-tasks before returning the cleanup error. This prevents a descendant that still
-holds a pipe from hiding the bounded fence error behind an unbounded stream
-join. The tool does not return the original success or cancellation result
-after the fence fails.
+The one-shot tool maps a failed tree fence through `bash_error` with a specific
+cleanup message. On fence failure it aborts and awaits both stream-copy tasks
+before returning the cleanup error. It does not return the original success or
+cancellation result after cleanup fails.
 
-Persistent-shell cleanup attempts to publish a stable
-`PERSISTENT_SHELL_CLEANUP` error through `fail_active` before publishing the
-generic `persistent_shell_closed` error. The command's existing
-first-result-wins behavior remains unchanged: a cancellation, disposal, or
-stream error that already won is not overwritten by a later Job fence error.
+Persistent cleanup attempts to publish `PERSISTENT_SHELL_CLEANUP` through
+`fail_active` before the generic closed-shell error. Existing first-result-wins
+behavior preserves cancellation, timeout, disposal, or stream errors that won
+earlier.
 
-If the persistent fence succeeds, the reaper joins both stream drainers before
-calling `inner.complete`. If it fails, the reaper aborts and awaits both
-drainers, attempts to publish `PERSISTENT_SHELL_CLEANUP`, and then calls
-`inner.complete` unconditionally. This releases `stop`, `disable`, `shutdown`,
-and other waiters even when a surviving process retains a pipe. The generic
-closed-shell error is published only after successful fencing, or after the
-cleanup-error attempt when no earlier command result won.
+After a persistent fence failure, the reaper aborts and awaits both drainers and
+reaches one single cleanup tail. That tail calls `inner.complete` after success,
+fence failure, drainer failure, join failure, cancellation, and a blocking-task
+panic converted from Tokio `JoinError`. This prevents lifecycle waiters from
+hanging. When no command is active, current `ProcessDone`, `disable`, and
+`shutdown` APIs cannot surface the cleanup error; that case remains an internal
+best-effort failure without expanding the public API.
 
-When no command is active, the current persistent lifecycle API cannot expose
-the Job fence error: `ProcessDone` contains exit and termination facts only,
-while `disable` and `shutdown` return `()`. This narrow repair therefore treats
-that case as a best-effort internal cleanup failure. Expanding `ProcessDone` or
-changing the public lifecycle methods to return `Result` is explicitly outside
-this change. A failed fence does not establish the zero-active-process
-guarantee, but it also cannot suppress completion notification.
+`Drop` remains best effort: it may call fast `TerminateJobObject`, but it never
+scans, locks capture state, waits, panics, or overwrites a stored error. The
+consuming method owns the wrapper and prevents a second fence by consuming
+`self`; its private `Arc` keeps the handle and retained identities alive through
+blocking work. `WindowsJob` must remain usable in existing `Send` futures
+without blanket unsafe trait implementations.
 
 ## TDD sequence
 
-The two existing integration tests are required RED evidence. They failed
-individually under `--test-threads=1`, so default test parallelism is not
-required to reproduce the race. A third focused test must establish RED for
-normal one-shot completion when the PowerShell root exits while its descendant
-is still active.
+The implementation follows these behavior-first steps:
 
-Implementation follows this sequence:
+1. Restore the two existing exact tests without temporary membership
+   instrumentation and reconfirm their process-not-reaped RED results.
+2. Keep one focused normal-completion test whose root is in a Job and whose
+   suspended direct child proves it escaped before the root returns. Run it
+   against unmodified production HEAD and require RED only at the unchanged reap
+   assertion before production edits.
+3. Add lower-level test coverage for descendant discovery and PID/handle error
+   behavior where it can be deterministic without test-only production hooks.
+4. Add the root ID to `WindowsJob` and implement the consuming native tree
+   fence.
+5. Integrate one-shot cancellation and normal completion before stream joins.
+6. Integrate persistent reaping before drainers and completion notification.
+7. Run all three exact tests, full `builtin_tools`, `windows_process`, and the
+   wider Windows Rust suite with one Cargo build job.
 
-1. Re-run both existing exact tests and preserve their process-not-reaped
-   failures.
-2. Add the normal one-shot descendant test, run it before production changes,
-   and require the same process-not-reaped RED.
-3. Add the minimal asynchronous consuming Job fence.
-4. Use it before stream joins in one-shot PowerShell cancellation and normal
-   completion, including abort-and-await handling for fence failure.
-5. Use it before stream joins and completion notification in persistent-shell
-   reaping, including abort-and-await handling for fence failure.
-6. Re-run all three exact tests and require exit 0.
-7. Run the full `builtin_tools` integration binary with one test thread and
-   with its default test scheduling.
-8. Run the wider Windows Rust suite with one Cargo build job.
+No test may extend the existing reap observation window or accept a process
+that exits only after natural command completion. The focused test must include
+a test-owned process-handle guard that terminates and waits for the
+intentionally leaked child on panic or failed assertion. Helper compilation,
+membership setup, timeout, or output-parsing failures are not valid RED
+evidence.
 
 ## Files
 
-The implementation surface is intentionally narrow:
+The expected implementation surface is intentionally narrow:
 
-- Modify `src/subprocess.rs` for the asynchronous Job fence and persistent
-  reaper use.
-- Modify `src/builtin_tools.rs` for one-shot PowerShell cleanup.
-- Modify `tests/builtin_tools.rs` only to add the focused normal-completion
-  descendant test; do not weaken its existing reap checks or timeout.
+- Modify `src/subprocess.rs` for root identity, Toolhelp discovery, stable
+  process handles, and persistent integration.
+- Modify `src/builtin_tools.rs` for one-shot tree fencing.
+- Modify `tests/builtin_tools.rs` for the focused normal-completion regression
+  and removal of temporary diagnostics.
+- Modify lower-level Windows process tests only when needed to express native
+  helper behavior without production test hooks.
