@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Weak,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 
 use crate::{
     agent::{AgentError, AgentHandle, AgentOptions, AgentRegistry, InboxTarget},
@@ -29,7 +29,9 @@ use crate::{
         AgentCancelCause, ContentBlock, Message, MessageId, MessageRole, MessageSource,
         SessionEvent, SessionHeader, SessionId, SessionOrigin, SurfaceOp, SESSION_FORMAT_VERSION,
     },
-    session::{Session, SessionError, SessionInspection, SessionPersistence, SessionStore},
+    session::{
+        RestoreMode, Session, SessionError, SessionInspection, SessionPersistence, SessionStore,
+    },
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
@@ -441,6 +443,12 @@ pub enum SubagentError {
     DuplicateProvider(String),
     #[error("start was cancelled before acceptance")]
     CancelledBeforeAcceptance,
+    #[error("subagent delegation depth limit {limit} reached; continue in an existing child or return to an ancestor")]
+    DelegationDepthLimit { limit: u64 },
+    #[error("subagent tree has {limit} live or admitting descendants; finish or dispose one before retrying")]
+    TreeConcurrencyLimit { limit: usize },
+    #[error("subagent tree creation limit {limit} reached for this root session; start a new root session to delegate again")]
+    TreeCreationLimit { limit: usize },
     #[error("resumed child does not name this direct parent")]
     ResumeParentMismatch,
     #[error("resumed child does not share this parent's workspace or cwd")]
@@ -487,6 +495,9 @@ impl SubagentError {
             Self::Cancelled
             | Self::CancelledBeforeAcceptance
             | Self::Agent(AgentError::Cancelled) => "CANCELLED",
+            Self::DelegationDepthLimit { .. } => "SUBAGENT_DEPTH_LIMIT",
+            Self::TreeConcurrencyLimit { .. } => "SUBAGENT_CONCURRENCY_LIMIT",
+            Self::TreeCreationLimit { .. } => "SUBAGENT_CREATION_LIMIT",
             Self::Agent(AgentError::Disposed) => "SUBAGENT_DELIVERY_UNAVAILABLE",
             Self::Agent(_) => "AGENT_BUSY",
             Self::Session(error) => error.code(),
@@ -1091,7 +1102,7 @@ fn subagent_tool_error(message: impl Into<String>) -> TessivumError {
 }
 
 fn subagent_error(error: SubagentError) -> TessivumError {
-    subagent_tool_error(error.to_string())
+    TessivumError::new(error.code(), error.to_string(), "subagent", Value::Null)
 }
 
 fn subagent_now() -> u64 {
@@ -1429,6 +1440,231 @@ impl SubagentTool {
     }
 }
 
+const MAX_DELEGATION_DEPTH: u64 = 4;
+const MAX_LIVE_TREE_DESCENDANTS: usize = 16;
+const MAX_TREE_CREATIONS: usize = 128;
+
+#[derive(Default)]
+struct TreeAdmissionCounts {
+    live_or_admitting: usize,
+    accepted_total: usize,
+    pending_creations: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct TreeAdmissionState {
+    counts: Mutex<TreeAdmissionCounts>,
+    initialized: AtomicBool,
+    initialize: AsyncMutex<()>,
+}
+
+impl TreeAdmissionState {
+    fn reserve(self: &Arc<Self>, count_creation: bool) -> Result<TreeAdmissionSlot, SubagentError> {
+        let mut counts = self.counts.lock();
+        if counts.live_or_admitting >= MAX_LIVE_TREE_DESCENDANTS {
+            return Err(SubagentError::TreeConcurrencyLimit {
+                limit: MAX_LIVE_TREE_DESCENDANTS,
+            });
+        }
+        if count_creation && counts.accepted_total + counts.pending_creations >= MAX_TREE_CREATIONS
+        {
+            return Err(SubagentError::TreeCreationLimit {
+                limit: MAX_TREE_CREATIONS,
+            });
+        }
+        counts.live_or_admitting += 1;
+        if count_creation {
+            counts.pending_creations += 1;
+        }
+        Ok(TreeAdmissionSlot {
+            state: Arc::clone(self),
+            count_creation,
+            committed: false,
+            released: false,
+        })
+    }
+}
+
+struct TreeAdmissionSlot {
+    state: Arc<TreeAdmissionState>,
+    count_creation: bool,
+    committed: bool,
+    released: bool,
+}
+
+impl TreeAdmissionSlot {
+    async fn commit(&mut self, root: &Session) -> Result<(), SubagentError> {
+        if !self.count_creation || self.committed {
+            return Ok(());
+        }
+        let _transaction = self.state.initialize.lock().await;
+        append_event(root, "subagent/tree-creation", json!({"accepted": true})).await?;
+        let mut counts = self.state.counts.lock();
+        counts.accepted_total += 1;
+        counts.pending_creations -= 1;
+        self.committed = true;
+        Ok(())
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let mut counts = self.state.counts.lock();
+        counts.live_or_admitting -= 1;
+        if self.count_creation && !self.committed {
+            counts.pending_creations -= 1;
+        }
+    }
+}
+
+impl Drop for TreeAdmissionSlot {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+struct CallCancellation {
+    token: CancellationToken,
+    armed: bool,
+}
+
+impl CallCancellation {
+    fn new() -> Self {
+        Self {
+            token: ContextHandle::root().scope().cancellation(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CallCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+struct PendingAgentCleanup {
+    agent: Option<AgentHandle>,
+    tree_slot: Option<TreeAdmissionSlot>,
+    admission: Option<SubagentAdmissionPermit>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl PendingAgentCleanup {
+    fn new(
+        agent: AgentHandle,
+        tree_slot: TreeAdmissionSlot,
+        admission: Option<SubagentAdmissionPermit>,
+    ) -> Self {
+        Self {
+            agent: Some(agent),
+            tree_slot: Some(tree_slot),
+            admission,
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+    fn agent(&self) -> &AgentHandle {
+        self.agent.as_ref().expect("pending agent is available")
+    }
+    async fn commit(&mut self, root: &Session) -> Result<(), SubagentError> {
+        self.tree_slot
+            .as_mut()
+            .expect("pending tree slot is available")
+            .commit(root)
+            .await
+    }
+
+    async fn dispose(&mut self) -> Result<(), AgentError> {
+        let Some(agent) = self.agent.as_ref() else {
+            return Ok(());
+        };
+        agent.cancel_including_idle(AgentCancelCause::Disposed, false);
+        agent.dispose().await?;
+        self.agent.take();
+        self.tree_slot.take();
+        self.admission.take();
+        Ok(())
+    }
+
+    fn take(&mut self) -> (AgentHandle, TreeAdmissionSlot) {
+        self.admission.take();
+        (
+            self.agent.take().expect("pending agent is available"),
+            self.tree_slot
+                .take()
+                .expect("pending tree slot is available"),
+        )
+    }
+}
+
+impl Drop for PendingAgentCleanup {
+    fn drop(&mut self) {
+        let Some(agent) = self.agent.take() else {
+            return;
+        };
+        let tree_slot = self.tree_slot.take();
+        let admission = self.admission.take();
+        agent.cancel_including_idle(AgentCancelCause::Disposed, false);
+        self.runtime.spawn(async move {
+            while agent.dispose().await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            drop((tree_slot, admission));
+        });
+    }
+}
+struct ProviderStartReady {
+    cleanup: Arc<Mutex<Option<PendingAgentCleanup>>>,
+    accepted: oneshot::Sender<()>,
+}
+
+struct ChildFutureCleanup {
+    state: Option<Arc<ChildState>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl ChildFutureCleanup {
+    fn new(state: Arc<ChildState>) -> Self {
+        Self {
+            state: Some(state),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.state = None;
+    }
+}
+
+impl Drop for ChildFutureCleanup {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            loop {
+                let result = state.dispose(true).await;
+                if !result
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "AGENT_DISPOSE_FAILED")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+    }
+}
+
 struct ParentAdmissions {
     closing: bool,
     pending: usize,
@@ -1436,23 +1672,61 @@ struct ParentAdmissions {
     late_children: Vec<SubagentActivation>,
 }
 
+#[derive(Default)]
+struct ParentCleanupAttempt {
+    result: Mutex<Option<Vec<SubagentRunResult>>>,
+    finished: Notify,
+}
+
+impl ParentCleanupAttempt {
+    async fn wait(&self) -> Vec<SubagentRunResult> {
+        loop {
+            let finished = self.finished.notified();
+            if let Some(result) = self.result.lock().clone() {
+                return result;
+            }
+            finished.await;
+        }
+    }
+
+    fn finish(&self, result: Vec<SubagentRunResult>) {
+        *self.result.lock() = Some(result);
+        self.finished.notify_waiters();
+    }
+}
+
+#[derive(Default)]
+struct ParentCleanup {
+    current: Option<Arc<ParentCleanupAttempt>>,
+    complete: bool,
+    results: Vec<SubagentRunResult>,
+}
+
+struct ParentCleanupOutcome {
+    results: Vec<SubagentRunResult>,
+    completed: Vec<SubagentRunResult>,
+    complete: bool,
+}
+
 struct SubagentParentState {
     service: Weak<SubagentInner>,
     parent: Arc<AgentHandle>,
     admissions: Mutex<ParentAdmissions>,
     quiesced: Notify,
-    cleanup_finished: Notify,
     watcher_closed: AtomicBool,
     watcher_closed_notify: Notify,
-    cleanup_started: AtomicBool,
-    cleanup_done: AtomicBool,
-    cleanup_results: Mutex<Vec<SubagentRunResult>>,
+    cleanup: Mutex<ParentCleanup>,
     runtime: tokio::runtime::Handle,
 }
 
+#[derive(Clone)]
 struct SubagentAdmissionPermit {
     state: Arc<SubagentParentState>,
-    released: bool,
+    pending: Option<Arc<PendingSubagentAdmission>>,
+}
+
+struct PendingSubagentAdmission {
+    state: Arc<SubagentParentState>,
 }
 
 impl SubagentAdmissionPermit {
@@ -1473,10 +1747,18 @@ impl SubagentAdmissionPermit {
     }
 
     fn release(&mut self) {
-        if self.released {
-            return;
-        }
-        self.released = true;
+        self.pending.take();
+    }
+}
+
+impl Drop for SubagentAdmissionPermit {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl Drop for PendingSubagentAdmission {
+    fn drop(&mut self) {
         let wake = {
             let mut admissions = self.state.admissions.lock();
             admissions.pending -= 1;
@@ -1485,12 +1767,6 @@ impl SubagentAdmissionPermit {
         if wake {
             self.state.quiesced.notify_waiters();
         }
-    }
-}
-
-impl Drop for SubagentAdmissionPermit {
-    fn drop(&mut self) {
-        self.release();
     }
 }
 
@@ -1568,12 +1844,12 @@ impl SubagentParent {
         let service = self.service()?;
         let (acceptance, activation) = service
             .start(
-                &self.state.parent,
                 request,
                 cancellation,
                 seed_events,
                 seed_parent_prefix,
                 allow_continuable_seed,
+                permit.clone(),
             )
             .await?;
         let admitted = permit.admit_or_queue(activation.clone());
@@ -1651,65 +1927,100 @@ impl SubagentParentState {
             return None;
         }
         admissions.pending += 1;
+        let state = Arc::clone(self);
         Some(SubagentAdmissionPermit {
-            state: Arc::clone(self),
-            released: false,
+            state: Arc::clone(&state),
+            pending: Some(Arc::new(PendingSubagentAdmission { state })),
         })
     }
 
-    fn begin_cleanup(self: &Arc<Self>) {
-        if self.cleanup_started.swap(true, Ordering::AcqRel) {
-            return;
+    fn begin_cleanup(self: &Arc<Self>) -> Option<Arc<ParentCleanupAttempt>> {
+        let mut cleanup = self.cleanup.lock();
+        if cleanup.complete {
+            return None;
         }
+        if let Some(attempt) = cleanup.current.as_ref() {
+            return Some(Arc::clone(attempt));
+        }
+        let retained_results = cleanup.results.clone();
+        let attempt = Arc::new(ParentCleanupAttempt::default());
+        cleanup.current = Some(Arc::clone(&attempt));
+        drop(cleanup);
+
         let state = Arc::clone(self);
+        let running_attempt = Arc::clone(&attempt);
         self.runtime.spawn(async move {
-            let results = cleanup_parent_children(Arc::clone(&state)).await;
-            *state.cleanup_results.lock() = results;
-            state.cleanup_done.store(true, Ordering::Release);
-            state.cleanup_finished.notify_waiters();
+            let outcome = cleanup_parent_children(Arc::clone(&state), retained_results).await;
+            let mut cleanup = state.cleanup.lock();
+            cleanup.results.extend(outcome.completed);
+            cleanup.complete = outcome.complete;
+            if cleanup
+                .current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &running_attempt))
+            {
+                cleanup.current = None;
+            }
+            drop(cleanup);
+            drop(state);
+            running_attempt.finish(outcome.results);
         });
+        Some(attempt)
     }
 
     async fn close_and_dispose(self: &Arc<Self>) -> Vec<SubagentRunResult> {
         self.close_watcher();
-        self.begin_cleanup();
-        loop {
-            let notified = self.cleanup_finished.notified();
-            if self.cleanup_done.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
+        match self.begin_cleanup() {
+            Some(attempt) => attempt.wait().await,
+            None => self.cleanup.lock().results.clone(),
         }
-        self.cleanup_results.lock().clone()
     }
 }
 
-async fn cleanup_parent_children(state: Arc<SubagentParentState>) -> Vec<SubagentRunResult> {
-    let children = {
+async fn cleanup_parent_children(
+    state: Arc<SubagentParentState>,
+    mut results: Vec<SubagentRunResult>,
+) -> ParentCleanupOutcome {
+    let mut children = {
         let mut admissions = state.admissions.lock();
         admissions.closing = true;
         std::mem::take(&mut admissions.children)
     };
-    let mut results = Vec::with_capacity(children.len());
-    for child in children {
-        if let Ok(result) = child.dispose().await {
+    let mut completed = Vec::with_capacity(children.len());
+    let mut failed = Vec::new();
+    // Existing children may hold resources needed by pending setup.
+    for wait_for_pending in [false, true] {
+        if wait_for_pending {
+            loop {
+                let notified = state.quiesced.notified();
+                if state.admissions.lock().pending == 0 {
+                    break;
+                }
+                notified.await;
+            }
+            children.extend(std::mem::take(&mut state.admissions.lock().late_children));
+        }
+        for child in children.drain(..) {
+            let result = child.state.dispose(false).await;
+            if result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "AGENT_DISPOSE_FAILED")
+            {
+                failed.push(child);
+            } else {
+                completed.push(result.clone());
+            }
             results.push(result);
         }
     }
-    loop {
-        let notified = state.quiesced.notified();
-        if state.admissions.lock().pending == 0 {
-            break;
-        }
-        notified.await;
+    let complete = failed.is_empty();
+    state.admissions.lock().children.extend(failed);
+    ParentCleanupOutcome {
+        results,
+        completed,
+        complete,
     }
-    let late_children = std::mem::take(&mut state.admissions.lock().late_children);
-    for child in late_children {
-        if let Ok(result) = child.dispose().await {
-            results.push(result);
-        }
-    }
-    results
 }
 struct ChildState {
     acceptance: SubagentAcceptance,
@@ -1718,6 +2029,8 @@ struct ChildState {
     agent: AsyncMutex<Option<Arc<AgentHandle>>>,
     operation: AsyncMutex<()>,
     terminal: Mutex<Option<SubagentRunResult>>,
+    cleanup_failure: Mutex<Option<SubagentRunResult>>,
+    tree_slot: Mutex<Option<TreeAdmissionSlot>>,
     service: Weak<SubagentInner>,
 }
 
@@ -1733,6 +2046,17 @@ struct ProviderState {
 }
 
 impl ChildState {
+    fn take_cleanup_failure(&self) -> Option<SubagentRunResult> {
+        self.cleanup_failure.lock().take()
+    }
+
+    fn record_cleanup_failure(&self, result: SubagentRunResult) {
+        let mut failure = self.cleanup_failure.lock();
+        if failure.is_none() {
+            *failure = Some(result);
+        }
+    }
+
     fn terminal(&self) -> Option<SubagentRunResult> {
         lock(&self.terminal).clone()
     }
@@ -1769,9 +2093,11 @@ impl ChildState {
         self.request_cancel(AgentCancelCause::Parent)
     }
 
-    async fn run(&self) -> Result<SubagentRunResult, SubagentError> {
+    async fn run(self: &Arc<Self>) -> Result<SubagentRunResult, SubagentError> {
+        let mut cleanup = ChildFutureCleanup::new(Arc::clone(self));
         let _operation = self.operation.lock().await;
         if self.terminal().is_some() {
+            cleanup.disarm();
             return Err(SubagentError::AlreadyRun);
         }
         // Keep the agent mutex free while the runtime calls arbitrary code so an
@@ -1783,44 +2109,65 @@ impl ChildState {
             Err(AgentError::Cancelled) => cancelled_result(),
             Err(error) => error_result("AGENT_RUNTIME_FAILED", error.to_string()),
         };
-        Ok(self.finish(result).await)
+        let result = self.finish(result).await;
+        cleanup.disarm();
+        Ok(result)
     }
 
     /// Waits for this turn without retiring a continuable child.
-    async fn wait_for_idle(&self) -> Result<SubagentRunResult, SubagentError> {
+    async fn wait_for_idle(self: &Arc<Self>) -> Result<SubagentRunResult, SubagentError> {
+        let mut cleanup = ChildFutureCleanup::new(Arc::clone(self));
         let _operation = self.operation.lock().await;
         if self.terminal().is_some() {
+            cleanup.disarm();
             return Err(SubagentError::AlreadyRun);
         }
         let agent = self.live_agent().await?;
-        Ok(match agent.when_idle().await {
+        let result = match agent.when_idle().await {
             Ok(()) if agent.cancellation().is_cancelled() => cancelled_result(),
             Ok(()) => completed_result(&agent.session()),
             Err(AgentError::Cancelled) => cancelled_result(),
             Err(error) => error_result("AGENT_RUNTIME_FAILED", error.to_string()),
-        })
+        };
+        cleanup.disarm();
+        Ok(result)
     }
 
-    async fn dispose(&self) -> SubagentRunResult {
+    async fn dispose(&self, retain_failure: bool) -> SubagentRunResult {
         self.request_cancel(AgentCancelCause::Disposed);
         let _operation = self.operation.lock().await;
-        if let Some(result) = self.terminal() {
-            return result;
+        if !retain_failure {
+            if let Some(result) = self.take_cleanup_failure() {
+                return result;
+            }
         }
-        self.finish(cancelled_result()).await
+        let result = match self.terminal() {
+            Some(result) => result,
+            None => self.finish(cancelled_result()).await,
+        };
+        if retain_failure
+            && result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "AGENT_DISPOSE_FAILED")
+        {
+            self.record_cleanup_failure(result.clone());
+        }
+        result
     }
 
     async fn finish(&self, mut result: SubagentRunResult) -> SubagentRunResult {
-        let agent = self.agent.lock().await.take();
+        let mut agent = self.agent.lock().await;
         if result.last_assistant_message.is_none() {
             result.last_assistant_message = agent
                 .as_ref()
                 .and_then(|agent| last_assistant_message(&agent.session()));
         }
-        if let Some(agent) = agent {
-            if let Err(error) = agent.dispose().await {
-                result = error_result("AGENT_DISPOSE_FAILED", error.to_string());
+        if let Some(live) = agent.as_ref() {
+            if let Err(error) = live.dispose().await {
+                return error_result("AGENT_DISPOSE_FAILED", error.to_string());
             }
+            agent.take();
         }
         if let Err(error) = append_event(
             &self.parent,
@@ -1841,6 +2188,7 @@ impl ChildState {
         if let Some(service) = self.service.upgrade() {
             lock(&service.children).remove(&self.acceptance.acceptance_id);
         }
+        lock(&self.tree_slot).take();
         result
     }
 }
@@ -1868,18 +2216,25 @@ impl SubagentActivation {
     pub async fn run(&self) -> Result<SubagentRunResult, SubagentError> {
         self.state.run().await
     }
+
     /// Waits for the current turn while retaining this continuable child.
     pub async fn wait_for_idle(&self) -> Result<SubagentRunResult, SubagentError> {
         self.state.wait_for_idle().await
     }
 
     pub async fn dispose(&self) -> Result<SubagentRunResult, SubagentError> {
-        Ok(self.state.dispose().await)
+        let mut cleanup = ChildFutureCleanup::new(Arc::clone(&self.state));
+        let result = self.state.dispose(false).await;
+        cleanup.disarm();
+        Ok(result)
     }
 
     pub(crate) async fn settle_replay(&self, result: SubagentRunResult) -> SubagentRunResult {
+        let mut cleanup = ChildFutureCleanup::new(Arc::clone(&self.state));
         let _operation = self.state.operation.lock().await;
-        self.state.finish(result).await
+        let result = self.state.finish(result).await;
+        cleanup.disarm();
+        result
     }
 }
 
@@ -1894,6 +2249,56 @@ struct ParentWorkspace {
     cwd: String,
 }
 
+struct RpcOwner {
+    agent: Arc<AgentHandle>,
+    _tree_slot: TreeAdmissionSlot,
+}
+
+struct RpcPromptCleanup {
+    service: Weak<SubagentInner>,
+    child: SessionId,
+    runtime: tokio::runtime::Handle,
+    armed: bool,
+}
+
+impl RpcPromptCleanup {
+    fn new(service: &Arc<SubagentInner>, child: SessionId, armed: bool) -> Self {
+        Self {
+            service: Arc::downgrade(service),
+            child,
+            runtime: tokio::runtime::Handle::current(),
+            armed,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RpcPromptCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let owner = self
+            .service
+            .upgrade()
+            .and_then(|service| lock(&service.rpc_owners).remove(&self.child));
+        if let Some(owner) = owner {
+            owner
+                .agent
+                .cancel_including_idle(AgentCancelCause::Disposed, false);
+            self.runtime.spawn(async move {
+                while owner.agent.dispose().await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                drop(owner);
+            });
+        }
+    }
+}
+
 struct SubagentInner {
     agents: AgentRegistry,
     sessions: SessionStore,
@@ -1902,7 +2307,7 @@ struct SubagentInner {
     providers: Arc<Mutex<ProviderState>>,
     children: Mutex<BTreeMap<u64, Arc<ChildState>>>,
     continuable_parents: Mutex<BTreeMap<SessionId, Weak<SubagentParentState>>>,
-    rpc_owners: Mutex<BTreeMap<SessionId, Arc<AgentHandle>>>,
+    rpc_owners: Mutex<BTreeMap<SessionId, RpcOwner>>,
     rpc_operations: Mutex<BTreeMap<SessionId, Arc<AsyncMutex<()>>>>,
     next_acceptance: AtomicU64,
 }
@@ -2055,12 +2460,9 @@ impl SubagentService {
                 late_children: Vec::new(),
             }),
             quiesced: Notify::new(),
-            cleanup_finished: Notify::new(),
             watcher_closed: AtomicBool::new(false),
             watcher_closed_notify: Notify::new(),
-            cleanup_started: AtomicBool::new(false),
-            cleanup_done: AtomicBool::new(false),
-            cleanup_results: Mutex::new(Vec::new()),
+            cleanup: Mutex::new(ParentCleanup::default()),
         });
         let cleanup = Arc::clone(&state);
         let cancellation = parent.cancellation();
@@ -2205,6 +2607,173 @@ impl SubagentInner {
             .filter(|live| Arc::ptr_eq(live, &attached))
             .ok_or(SubagentError::ParentRequired)
     }
+    async fn tree_admission(
+        &self,
+        parent: &Session,
+        cancellation: CancellationToken,
+    ) -> Result<(u64, Arc<TreeAdmissionState>, Arc<Session>), SubagentError> {
+        let mut header = parent.header();
+        let mut depth = 0;
+        let mut seen = BTreeSet::new();
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(SubagentError::CancelledBeforeAcceptance);
+            }
+            if header.origin != Some(SessionOrigin::Subagent) {
+                let root = header.id;
+                let admission = self.agents.subagent_tree_admission(&root);
+                let root_session = self
+                    .initialize_tree_admission(&root, &admission, cancellation.clone())
+                    .await?;
+                return Ok((depth, admission, root_session));
+            }
+            depth += 1;
+            if depth >= MAX_DELEGATION_DEPTH {
+                return Err(SubagentError::DelegationDepthLimit {
+                    limit: MAX_DELEGATION_DEPTH,
+                });
+            }
+            if !seen.insert(header.id) {
+                return Err(SubagentError::ParentRequired);
+            }
+            let parent_id = header.parent_session.ok_or(SubagentError::ParentRequired)?;
+            header = match self.sessions.get(&parent_id) {
+                Some(session) => session.header(),
+                None => self
+                    .persistence
+                    .load(&parent_id, cancellation.clone())
+                    .await?
+                    .ok_or(SubagentError::ParentRequired)?,
+            };
+        }
+    }
+
+    async fn initialize_tree_admission(
+        &self,
+        root: &SessionId,
+        admission: &TreeAdmissionState,
+        cancellation: CancellationToken,
+    ) -> Result<Arc<Session>, SubagentError> {
+        let _initialize = admission.initialize.lock().await;
+        let root_session = if let Some(session) = self.sessions.get(root) {
+            session
+        } else {
+            match self
+                .sessions
+                .restore(root, RestoreMode::Metadata, cancellation.clone())
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => self.sessions.get(root).ok_or(error)?,
+            }
+        };
+        let seed_length = root_session.header().seed_length.unwrap_or_default();
+        let events = root_session.events();
+        let baseline = events
+            .iter()
+            .filter(|event| {
+                event.seq >= seed_length && event.event_type == "subagent/tree-creation"
+            })
+            .filter_map(|event| event.data.get("baseline")?.as_u64())
+            .filter_map(|total| usize::try_from(total).ok())
+            .max();
+        let accepted_events = events
+            .iter()
+            .filter(|event| {
+                event.seq >= seed_length
+                    && event.event_type == "subagent/tree-creation"
+                    && event.data.get("accepted").and_then(Value::as_bool) == Some(true)
+            })
+            .count();
+        let accepted_total = match baseline {
+            Some(total) => total
+                .saturating_add(accepted_events)
+                .min(MAX_TREE_CREATIONS),
+            None => {
+                let total = self
+                    .legacy_tree_creations(root, cancellation)
+                    .await?
+                    .min(MAX_TREE_CREATIONS);
+                append_event(
+                    &root_session,
+                    "subagent/tree-creation",
+                    json!({"baseline": total}),
+                )
+                .await?;
+                total
+            }
+        };
+        let mut counts = admission.counts.lock();
+        counts.accepted_total = counts.accepted_total.max(accepted_total);
+        admission.initialized.store(true, Ordering::Release);
+        drop(counts);
+        Ok(root_session)
+    }
+
+    async fn legacy_tree_creations(
+        &self,
+        root: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<usize, SubagentError> {
+        let mut corpus = self
+            .persistence
+            .list(cancellation.clone())
+            .await?
+            .into_iter()
+            .map(|inspection| (inspection.header.id.clone(), inspection.header))
+            .collect::<BTreeMap<_, _>>();
+        for session in self.sessions.list() {
+            corpus.insert(session.id(), session.header());
+        }
+        let mut total = 0usize;
+        for (session_id, session_header) in &corpus {
+            if cancellation.is_cancelled() {
+                return Err(SubagentError::CancelledBeforeAcceptance);
+            }
+            let mut current = session_id;
+            let mut seen = BTreeSet::new();
+            let in_tree = loop {
+                if current == root {
+                    break true;
+                }
+                let Some(header) = corpus.get(current) else {
+                    break false;
+                };
+                if header.origin != Some(SessionOrigin::Subagent) || !seen.insert(current.clone()) {
+                    break false;
+                }
+                let Some(parent) = header.parent_session.as_ref() else {
+                    break false;
+                };
+                current = parent;
+            };
+            if !in_tree {
+                continue;
+            }
+            let events = match self.sessions.get(session_id) {
+                Some(session) => session.events(),
+                None => match self
+                    .persistence
+                    .read_from(session_id, 0, cancellation.clone())
+                    .await
+                {
+                    Ok(events) => events,
+                    Err(SessionError::NotFound(_)) => continue,
+                    Err(error) => return Err(error.into()),
+                },
+            };
+            let seed_length = session_header.seed_length.unwrap_or_default();
+            total = total.saturating_add(
+                events
+                    .iter()
+                    .filter(|event| {
+                        event.seq >= seed_length && event.event_type == "subagent/contained-start"
+                    })
+                    .count(),
+            );
+        }
+        Ok(total)
+    }
 
     fn rpc_operation(&self, child_session_id: &SessionId) -> Arc<AsyncMutex<()>> {
         lock(&self.rpc_operations)
@@ -2320,6 +2889,15 @@ impl SubagentInner {
                 crate::agent::AgentStatus::Idle => SubagentStatus::Idle,
             })
     }
+    fn tracked_child(&self, child_session_id: &SessionId) -> Option<Arc<ChildState>> {
+        lock(&self.children)
+            .values()
+            .find(|state| {
+                state.acceptance.descriptor.child_session_id == *child_session_id
+                    && state.terminal().is_none()
+            })
+            .cloned()
+    }
 
     async fn delete(
         &self,
@@ -2376,8 +2954,86 @@ impl SubagentInner {
         Ok(SubagentDeleteResult { deleted: true })
     }
 
+    async fn supervise_provider_start(
+        &self,
+        provider: Arc<dyn SubagentProvider>,
+        request: ProviderStart,
+        tree_slot: TreeAdmissionSlot,
+        cancellation: CancellationToken,
+        cancelled_before_acceptance: bool,
+        admission: Option<SubagentAdmissionPermit>,
+    ) -> Result<PendingAgentCleanup, SubagentError> {
+        let mut call_cancellation = CallCancellation::new();
+        let setup_cancellation = call_cancellation.token.clone();
+        let cleanup = Arc::new(Mutex::new(None));
+        let task_cleanup = Arc::clone(&cleanup);
+        let (sender, mut receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            match provider.start(request, setup_cancellation).await {
+                Ok(agent) => {
+                    *task_cleanup.lock() =
+                        Some(PendingAgentCleanup::new(agent, tree_slot, admission));
+                    let (accepted, acceptance) = oneshot::channel();
+                    if sender
+                        .send(Ok(ProviderStartReady {
+                            cleanup: Arc::clone(&task_cleanup),
+                            accepted,
+                        }))
+                        .is_err()
+                        || acceptance.await.is_err()
+                    {
+                        let pending = task_cleanup.lock().take();
+                        if let Some(mut cleanup) = pending {
+                            while cleanup.dispose().await.is_err() {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                }
+            }
+        });
+        let ready = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                call_cancellation.token.cancel();
+                drop(receiver);
+                let _ = task.await;
+                return Err(if cancelled_before_acceptance {
+                    SubagentError::CancelledBeforeAcceptance
+                } else {
+                    SubagentError::Cancelled
+                });
+            }
+            result = &mut receiver => result,
+        };
+        let ready = match ready {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(error)) => {
+                let _ = task.await;
+                call_cancellation.disarm();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = task.await;
+                return Err(SubagentError::DeliveryUnavailable);
+            }
+        };
+        let cleanup = ready
+            .cleanup
+            .lock()
+            .take()
+            .ok_or(SubagentError::DeliveryUnavailable)?;
+        let _ = ready.accepted.send(());
+        call_cancellation.disarm();
+        Ok(cleanup)
+    }
+
     async fn resume_continuable_child(
         &self,
+        parent: &Session,
         descriptor: SubagentDescriptor,
         header: SessionHeader,
         cancellation: CancellationToken,
@@ -2387,23 +3043,34 @@ impl SubagentInner {
         }
         let provider = self.select_provider(&descriptor)?;
         let child_session_id = descriptor.child_session_id.clone();
-        let owner = Arc::new(
-            provider
-                .start(
-                    ProviderStart {
-                        descriptor,
-                        header,
-                        resume: true,
-                    },
-                    cancellation,
-                )
-                .await?,
-        );
+        let (_, tree_admission, _) = self.tree_admission(parent, cancellation.clone()).await?;
+        let tree_slot = tree_admission.reserve(false)?;
+        let mut owner = self
+            .supervise_provider_start(
+                provider,
+                ProviderStart {
+                    descriptor,
+                    header,
+                    resume: true,
+                },
+                tree_slot,
+                cancellation,
+                false,
+                None,
+            )
+            .await?;
         let Some(child) = self.agents.get(&child_session_id) else {
-            let _ = owner.dispose().await;
+            owner.dispose().await?;
             return Err(SubagentError::DeliveryUnavailable);
         };
-        lock(&self.rpc_owners).insert(child_session_id, owner);
+        let (owner, tree_slot) = owner.take();
+        lock(&self.rpc_owners).insert(
+            child_session_id,
+            RpcOwner {
+                agent: Arc::new(owner),
+                _tree_slot: tree_slot,
+            },
+        );
         Ok(child)
     }
 
@@ -2634,32 +3301,57 @@ impl SubagentInner {
             .agents
             .get(&request.parent_session_id)
             .ok_or(SubagentError::ParentRequired)?;
-        self.require_live_parent(&parent)?;
-        let child = match self.agents.get(&request.child_session_id) {
-            Some(child) if !child.is_disposed() && child.cancel_options().is_none() => child,
+        let parent_session = self.require_live_parent(&parent)?;
+        let (child, resumed) = match self.agents.get(&request.child_session_id) {
+            Some(child) if !child.is_disposed() && child.cancel_options().is_none() => {
+                (child, false)
+            }
             Some(child) => {
                 tokio::select! {
                     result = child.when_idle() => result?,
                     _ = cancellation.cancelled() => return Err(SubagentError::Cancelled),
                 }
-                child.dispose().await?;
+                if let Some(state) = self.tracked_child(&request.child_session_id) {
+                    if let Some(error) = state
+                        .dispose(false)
+                        .await
+                        .error
+                        .filter(|error| error.code == "AGENT_DISPOSE_FAILED")
+                    {
+                        return Err(SubagentError::Protocol(TessivumError::new(
+                            error.code,
+                            error.message,
+                            "subagent",
+                            json!({"childSessionId": request.child_session_id}),
+                        )));
+                    }
+                } else {
+                    child.dispose().await?;
+                }
                 lock(&self.rpc_owners).remove(&request.child_session_id);
+                (
+                    self.resume_continuable_child(
+                        &parent_session,
+                        descriptor.ok_or(SubagentError::AlreadyRun)?,
+                        header,
+                        cancellation.clone(),
+                    )
+                    .await?,
+                    true,
+                )
+            }
+            None => (
                 self.resume_continuable_child(
+                    &parent_session,
                     descriptor.ok_or(SubagentError::AlreadyRun)?,
                     header,
                     cancellation.clone(),
                 )
-                .await?
-            }
-            None => {
-                self.resume_continuable_child(
-                    descriptor.ok_or(SubagentError::AlreadyRun)?,
-                    header,
-                    cancellation.clone(),
-                )
-                .await?
-            }
+                .await?,
+                true,
+            ),
         };
+        let mut resumed_cleanup = RpcPromptCleanup::new(self, child_session_id.clone(), resumed);
         let message_id = MessageId::random();
         let message = Message {
             id: message_id.clone(),
@@ -2700,12 +3392,32 @@ impl SubagentInner {
                 {
                     return;
                 }
-                lock(&inner.rpc_owners).remove(&child_session_id);
-                let _ = current.dispose().await;
+                let owner = lock(&inner.rpc_owners).remove(&child_session_id);
+                if let Some(state) = inner.tracked_child(&child_session_id) {
+                    while state
+                        .dispose(true)
+                        .await
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.code == "AGENT_DISPOSE_FAILED")
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } else if let Some(owner) = owner {
+                    while owner.agent.dispose().await.is_err() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    drop(owner);
+                } else {
+                    while current.dispose().await.is_err() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
             } else {
                 lock(&inner.rpc_owners).remove(&child_session_id);
             }
         });
+        resumed_cleanup.disarm();
         Ok(SubagentPromptResult { message_id })
     }
 
@@ -2769,18 +3481,21 @@ impl SubagentInner {
     /// contained-start commit; every earlier failure disposes it without an end.
     async fn start(
         self: &Arc<Self>,
-        parent_agent: &AgentHandle,
         request: SubagentStartRequest,
         cancellation: CancellationToken,
         provided_seed: Option<Vec<SessionEvent>>,
         seed_parent_prefix: bool,
         allow_continuable_seed: bool,
+        pending_admission: SubagentAdmissionPermit,
     ) -> Result<(SubagentAcceptance, SubagentActivation), SubagentError> {
-        let parent = self.require_live_parent(parent_agent)?;
+        let parent_agent = Arc::clone(&pending_admission.state.parent);
+        let parent = self.require_live_parent(&parent_agent)?;
         if request.cwd.is_some() {
             return Err(SubagentError::CwdOverrideUnsupported);
         }
         let descriptor = descriptor(&parent, &request)?;
+        let (parent_depth, tree_admission, tree_root) =
+            self.tree_admission(&parent, cancellation.clone()).await?;
         let workspace = self.parent_workspace(&parent)?;
         let cwd = workspace
             .as_ref()
@@ -2819,52 +3534,52 @@ impl SubagentInner {
                 .agent_mode
                 .clone()
                 .or_else(|| parent_header.agent_mode.clone()),
-            Some(
-                parent_header
-                    .delegation_depth
-                    .unwrap_or(0)
-                    .saturating_add(1),
-            ),
+            Some(parent_depth + 1),
         )?;
+        let tree_slot = tree_admission.reserve(true)?;
         if let Some(seed_events) = seed_events {
             self.sessions
                 .create_seeded(header.clone(), seed_events, cancellation.clone())
                 .await?;
         }
-        let agent = provider
-            .start(
+        let mut agent = self
+            .supervise_provider_start(
+                provider,
                 ProviderStart {
                     descriptor: descriptor.clone(),
                     header,
                     resume: request.resume || seeded,
                 },
+                tree_slot,
                 cancellation.clone(),
+                true,
+                Some(pending_admission),
             )
             .await?;
         if let Err(error) =
             self.attach_child_workspace(workspace.as_ref(), &descriptor.child_session_id)
         {
-            let _ = agent.dispose().await;
+            agent.dispose().await?;
             return Err(error.into());
         }
         if cancellation.is_cancelled() {
-            let _ = agent.dispose().await;
+            agent.dispose().await?;
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
         // A requested initial turn is part of admission. A delivery failure has
         // no durable start, so it must not manufacture a contained-end either.
         if let Some(message) = request.initial_message {
-            if let Err(error) = agent.followup(message).await {
-                let _ = agent.dispose().await;
+            if let Err(error) = agent.agent().followup(message).await {
+                agent.dispose().await?;
                 return Err(SubagentError::Agent(error));
             }
         }
         if cancellation.is_cancelled() {
-            let _ = agent.dispose().await;
+            agent.dispose().await?;
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
-        if self.require_live_parent(parent_agent).is_err() {
-            let _ = agent.dispose().await;
+        if self.require_live_parent(&parent_agent).is_err() {
+            agent.dispose().await?;
             return Err(SubagentError::ParentRequired);
         }
 
@@ -2883,16 +3598,23 @@ impl SubagentInner {
         )
         .await
         {
-            let _ = agent.dispose().await;
+            agent.dispose().await?;
             return Err(error);
         }
+        if let Err(error) = agent.commit(&tree_root).await {
+            agent.dispose().await?;
+            return Err(error);
+        }
+        let (agent, tree_slot) = agent.take();
         let state = Arc::new(ChildState {
             acceptance: acceptance.clone(),
             parent,
             cancellation: agent.cancellation(),
             agent: AsyncMutex::new(Some(Arc::new(agent))),
             operation: AsyncMutex::new(()),
+            cleanup_failure: Mutex::new(None),
             terminal: Mutex::new(None),
+            tree_slot: Mutex::new(Some(tree_slot)),
             service: Arc::downgrade(self),
         });
         lock(&self.children).insert(acceptance.acceptance_id, Arc::clone(&state));
@@ -3160,17 +3882,19 @@ async fn append_event(
     event_type: &str,
     data: Value,
 ) -> Result<(), SubagentError> {
-    let event = SessionEvent {
-        event_type: event_type.into(),
-        seq: parent.next_seq()?,
-        time: 0,
-        data,
-        ignorable: Some(true),
-        source_event_seqs: None,
-        surface_op: None,
-    };
     parent
-        .append(event, ContextHandle::root().scope().cancellation())
+        .append_next(
+            |seq| SessionEvent {
+                event_type: event_type.into(),
+                seq,
+                time: 0,
+                data,
+                ignorable: Some(true),
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            ContextHandle::root().scope().cancellation(),
+        )
         .await?;
     Ok(())
 }
@@ -3231,7 +3955,7 @@ mod delegation_tests {
 
     use crate::{
         agent::{AgentFactory, AgentRuntime, AgentStatus, Inbox},
-        jobs::{JobStart, JobStatus, LocalJobRegistry},
+        jobs::{JobError, JobStart, JobStatus, LocalJobRegistry},
         session::MemorySessionPersistence,
     };
 
@@ -3461,7 +4185,7 @@ mod delegation_tests {
     }
 
     #[tokio::test]
-    async fn killed_job_disposes_an_accepted_child_without_waiting_for_idle() {
+    async fn background_job_wait_timeout_preserves_child_and_kill_disposes_it() {
         let started = Arc::new(Notify::new());
         let disposals = Arc::new(AtomicUsize::new(0));
         let (service, parent_agent, agents) = setup(Arc::new(BlockingFactory {
@@ -3496,6 +4220,14 @@ mod delegation_tests {
             .unwrap();
 
         started.notified().await;
+        assert!(matches!(
+            owner
+                .wait(&job.id, Some(Duration::from_millis(1)), None)
+                .await,
+            Err(JobError::TimedOut)
+        ));
+        assert_eq!(disposals.load(Ordering::Acquire), 0);
+        assert!(agents.get(&child_id).is_some());
         owner.kill(&job.id).unwrap();
         assert_eq!(
             owner

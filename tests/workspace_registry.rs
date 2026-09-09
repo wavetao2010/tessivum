@@ -73,6 +73,32 @@ fn snapshot_fixture_is_exact_and_unknown_fields_are_rejected() {
     .is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn shutdown_releases_registry_lock_while_spawned_child_is_alive() {
+    use std::process::{Command, Stdio};
+
+    let root = TempDir::new("child-lock");
+    let data = root.path().join("data");
+    let registry = WorkspaceRegistry::open(&data, root.path(), Vec::new()).unwrap();
+    let mut child = Command::new("/bin/cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    registry.shutdown();
+    assert!(child.try_wait().unwrap().is_none());
+    let reopened = WorkspaceRegistry::open(&data, root.path(), Vec::new());
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    assert!(
+        reopened.is_ok(),
+        "shutdown must release the lock before child exit: {:?}",
+        reopened.err()
+    );
+}
+
 #[test]
 fn migration_groups_canonical_cwds_and_keeps_invalid_sessions_ungrouped() {
     let root = TempDir::new("migration");

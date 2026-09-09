@@ -3,9 +3,10 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, LazyLock, Mutex,
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -20,7 +21,9 @@ use tessivum::{
     composition::CompositionRegistry,
     legacy::ProductPackageResolver,
     llm::{LlmAdapter, LlmRetryPolicy, LlmRuntime, LlmStream, RecordedLlmAdapter},
-    session::{MemorySessionPersistence, SessionStore},
+    session::{
+        MemorySessionPersistence, SessionError, SessionInspection, SessionPersistence, SessionStore,
+    },
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     tools::{
         ToolApproval, ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext,
@@ -31,9 +34,10 @@ use tessivum::{
     ToolSchema,
 };
 use tessivum_core::{
-    CancellationToken, ContextHandle, LoaderError, LoaderFuture, LoaderRuntime, NativeConfigSchema,
-    NativePlugin, NativePluginDescriptor, NativePluginFuture, NativePluginRuntime, PackageResolver,
-    ResolvedPackage, RuntimeKind,
+    ActivationState, CancellationToken, ContextHandle, Entry, LoaderError, LoaderFuture,
+    LoaderRuntime, NativeConfigSchema, NativePlugin, NativePluginDescriptor, NativePluginError,
+    NativePluginFuture, NativePluginPhase, NativePluginRuntime, PackageResolver, ResolvedPackage,
+    RuntimeHandle, RuntimeKind,
 };
 
 fn cancellation() -> CancellationToken {
@@ -92,6 +96,13 @@ static TEST_MODES_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
         "schema = 1\nid = \"test-missing-plugin\"\nname = \"test-missing-plugin\"\ndescription = \"missing native plugin test\"\n\n[prompt]\ncomplete = false\ntext = \"Missing plugin mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n\n[[plugins]]\nid = \"missing\"\nruntime = \"native\"\nsource = \"missing-native\"\n",
     )
     .unwrap();
+    let directory = root.join("test-plugin-rollback");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("mode.toml"),
+        "schema = 1\nid = \"test-plugin-rollback\"\nname = \"test-plugin-rollback\"\ndescription = \"plugin rollback test\"\n\n[prompt]\ncomplete = false\ntext = \"Plugin rollback mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = []\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = false\n\n[[plugins]]\nid = \"active\"\nruntime = \"native\"\nsource = \"rollback-active-native\"\nconfig = { value = 7 }\n\n[[plugins]]\nid = \"failing\"\nruntime = \"native\"\nsource = \"rollback-failing-native\"\n",
+    )
+    .unwrap();
     root
 });
 
@@ -143,6 +154,88 @@ fn composition_registry() -> CompositionRegistry {
     .unwrap()
 }
 
+#[derive(Default)]
+struct TurnEndGatePersistence {
+    inner: MemorySessionPersistence,
+    block_turn_end: AtomicBool,
+    turn_end_started: tokio::sync::Notify,
+    release_turn_end: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl SessionPersistence for TurnEndGatePersistence {
+    async fn create(
+        &self,
+        header: &SessionHeader,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.create(header, cancellation).await
+    }
+
+    async fn append(
+        &self,
+        session_id: &SessionId,
+        event: &SessionEvent,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        if event.event_type == "turn/end" && self.block_turn_end.swap(false, Ordering::AcqRel) {
+            self.turn_end_started.notify_one();
+            self.release_turn_end.notified().await;
+        }
+        self.inner.append(session_id, event, cancellation).await
+    }
+
+    async fn create_seeded(
+        &self,
+        header: &SessionHeader,
+        events: &[SessionEvent],
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.create_seeded(header, events, cancellation).await
+    }
+
+    async fn load(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<SessionHeader>, SessionError> {
+        self.inner.load(session_id, cancellation).await
+    }
+
+    async fn inspect(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<Option<SessionInspection>, SessionError> {
+        self.inner.inspect(session_id, cancellation).await
+    }
+
+    async fn read_from(
+        &self,
+        session_id: &SessionId,
+        from_seq: u64,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
+        self.inner
+            .read_from(session_id, from_seq, cancellation)
+            .await
+    }
+
+    async fn flush(
+        &self,
+        session_id: &SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<(), SessionError> {
+        self.inner.flush(session_id, cancellation).await
+    }
+
+    async fn list(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<SessionInspection>, SessionError> {
+        self.inner.list(cancellation).await
+    }
+}
 struct LifecyclePlugin {
     live: Arc<AtomicUsize>,
 }
@@ -177,6 +270,174 @@ impl NativePlugin for LifecyclePlugin {
 
     fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
         self.live.fetch_sub(1, Ordering::AcqRel);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct GatedLifecyclePlugin {
+    live: Arc<AtomicUsize>,
+    block_next_start: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    stopped: Arc<tokio::sync::Notify>,
+}
+
+impl NativePlugin for GatedLifecyclePlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "gated-mode-lifecycle-fixture".into(),
+            version: "1".into(),
+            dependencies: Vec::new(),
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        assert_eq!(config["value"], 7);
+        self.live.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async move {
+            if self.block_next_start.swap(false, Ordering::AcqRel) {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        self.live.fetch_sub(1, Ordering::AcqRel);
+        self.stopped.notify_one();
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct RollbackRuntime {
+    inner: NativePluginRuntime,
+    fail_next_cleanup: Arc<AtomicBool>,
+    block_next_retry: Arc<AtomicBool>,
+    retry_started: Arc<tokio::sync::Notify>,
+    release_retry: Arc<tokio::sync::Notify>,
+}
+
+impl LoaderRuntime for RollbackRuntime {
+    fn kind(&self) -> RuntimeKind {
+        self.inner.kind()
+    }
+
+    fn instantiate<'a>(
+        &'a self,
+        package: ResolvedPackage,
+        entry: Entry,
+        context: ContextHandle,
+    ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>> {
+        Box::pin(async move {
+            let inner = self.inner.instantiate(package, entry, context).await?;
+            Ok(Box::new(RollbackHandle {
+                inner,
+                fail_next_cleanup: Arc::clone(&self.fail_next_cleanup),
+                block_next_retry: Arc::clone(&self.block_next_retry),
+                retry_started: Arc::clone(&self.retry_started),
+                release_retry: Arc::clone(&self.release_retry),
+                activated: false,
+            }) as Box<dyn RuntimeHandle>)
+        })
+    }
+}
+
+struct RollbackHandle {
+    inner: Box<dyn RuntimeHandle>,
+    fail_next_cleanup: Arc<AtomicBool>,
+    block_next_retry: Arc<AtomicBool>,
+    retry_started: Arc<tokio::sync::Notify>,
+    release_retry: Arc<tokio::sync::Notify>,
+    activated: bool,
+}
+
+impl RuntimeHandle for RollbackHandle {
+    fn activate<'a>(&'a mut self) -> LoaderFuture<'a, ()> {
+        Box::pin(async move {
+            self.inner.activate().await?;
+            self.activated = true;
+            Ok(())
+        })
+    }
+
+    fn activation<'a>(&'a mut self) -> LoaderFuture<'a, ActivationState> {
+        Box::pin(async move {
+            let state = self.inner.activation().await?;
+            self.activated = state == ActivationState::Active;
+            Ok(state)
+        })
+    }
+
+    fn dispose<'a>(&'a mut self) -> LoaderFuture<'a, ()> {
+        Box::pin(async move {
+            if self.activated && self.fail_next_cleanup.swap(false, Ordering::AcqRel) {
+                return Err(LoaderError::Validation(
+                    "fixture transient cleanup failure".into(),
+                ));
+            }
+            if self.activated && self.block_next_retry.swap(false, Ordering::AcqRel) {
+                self.retry_started.notify_one();
+                self.release_retry.notified().await;
+            }
+            self.inner.dispose().await
+        })
+    }
+}
+
+struct FailingStartPlugin {
+    fail_next_start: Arc<AtomicBool>,
+}
+
+impl NativePlugin for FailingStartPlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "failing-start-fixture".into(),
+            version: "1".into(),
+            dependencies: Vec::new(),
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async move {
+            if self.fail_next_start.swap(false, Ordering::AcqRel) {
+                Err(NativePluginError::plugin(
+                    NativePluginPhase::Start,
+                    "fixture activation failure",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -1678,6 +1939,286 @@ async fn mode_plugins_activate_before_agent_start_and_stop_with_the_session() {
         compositions.inspect(&session, None).await.unwrap_err().code,
         "COMPOSITION_SESSION_UNAVAILABLE"
     );
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_native_factory_setup_finishes_and_releases_attached_resources() {
+    let live = Arc::new(AtomicUsize::new(0));
+    let block_next_start = Arc::new(AtomicBool::new(true));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    let mut native = NativePluginRuntime::new();
+    native
+        .register("fixture-native", {
+            let live = Arc::clone(&live);
+            let block_next_start = Arc::clone(&block_next_start);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let stopped = Arc::clone(&stopped);
+            move || GatedLifecyclePlugin {
+                live: Arc::clone(&live),
+                block_next_start: Arc::clone(&block_next_start),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                stopped: Arc::clone(&stopped),
+            }
+        })
+        .unwrap();
+    let compositions = CompositionRegistry::new(
+        Arc::new(ProductPackageResolver::new().with_native_packages(["fixture-native".into()])),
+        [Arc::new(native) as Arc<dyn LoaderRuntime>],
+    )
+    .unwrap();
+    let root = ContextHandle::root();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(LlmRuntime::new(), SystemPrompt::new(), ToolRuntime::new())
+                .with_composition_registry(compositions)
+                .with_root_context(root.clone()),
+        ))
+        .unwrap();
+    let session = SessionId::from("dropped-native-setup");
+    let setup_started = started.notified();
+    let setup = tokio::spawn({
+        let registry = registry.clone();
+        let session = session.clone();
+        async move {
+            registry
+                .create(
+                    header_with_mode(session.as_str(), "test-native-plugin"),
+                    options(),
+                    cancellation(),
+                )
+                .await
+        }
+    });
+    setup_started.await;
+    assert_eq!(live.load(Ordering::Acquire), 1);
+    setup.abort();
+    assert!(setup.await.unwrap_err().is_cancelled());
+
+    let cleanup_finished = stopped.notified();
+    release.notify_one();
+    cleanup_finished.await;
+    assert_eq!(live.load(Ordering::Acquire), 0);
+    assert!(registry.get(&session).is_none());
+    let replacement = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match registry
+                .create_or_resume(
+                    header_with_mode(session.as_str(), "test-native-plugin"),
+                    options(),
+                    cancellation(),
+                )
+                .await
+            {
+                Err(AgentError::Session(tessivum::session::SessionError::DuplicateLive(_))) => {
+                    tokio::task::yield_now().await;
+                }
+                result => break result,
+            }
+        }
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 1);
+    replacement.dispose().await.unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 0);
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_dispose_keeps_the_worker_join_before_resource_cleanup() {
+    let live = Arc::new(AtomicUsize::new(0));
+    let factory_live = Arc::clone(&live);
+    let mut native = NativePluginRuntime::new();
+    native
+        .register("fixture-native", move || LifecyclePlugin {
+            live: Arc::clone(&factory_live),
+        })
+        .unwrap();
+    let compositions = CompositionRegistry::new(
+        Arc::new(ProductPackageResolver::new().with_native_packages(["fixture-native".into()])),
+        [Arc::new(native) as Arc<dyn LoaderRuntime>],
+    )
+    .unwrap();
+    let persistence = Arc::new(TurnEndGatePersistence::default());
+    persistence.block_turn_end.store(true, Ordering::Release);
+    let root = ContextHandle::root();
+    let registry = AgentRegistry::new(SessionStore::new(persistence.clone()));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(LlmRuntime::new(), SystemPrompt::new(), ToolRuntime::new())
+                .with_composition_registry(compositions.clone())
+                .with_root_context(root.clone()),
+        ))
+        .unwrap();
+    let session = SessionId::from("dropped-dispose-worker");
+    let agent = Arc::new(
+        registry
+            .create(
+                header_with_mode(session.as_str(), "test-native-plugin"),
+                options(),
+                cancellation(),
+            )
+            .await
+            .unwrap(),
+    );
+    let turn_end_started = persistence.turn_end_started.notified();
+    agent.followup(user("dispose")).await.unwrap();
+    turn_end_started.await;
+
+    let first_dispose = tokio::spawn({
+        let agent = Arc::clone(&agent);
+        async move { agent.dispose().await }
+    });
+    while agent.cancel_options().is_none() {
+        tokio::task::yield_now().await;
+    }
+    first_dispose.abort();
+    assert!(first_dispose.await.unwrap_err().is_cancelled());
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), agent.dispose())
+            .await
+            .is_err()
+    );
+    assert_eq!(live.load(Ordering::Acquire), 1);
+    persistence.release_turn_end.notify_one();
+    agent.dispose().await.unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 0);
+    assert!(registry.get(&session).is_none());
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_plugin_activation_retries_rollback_before_releasing_setup() {
+    let live = Arc::new(AtomicUsize::new(0));
+    let fail_next_cleanup = Arc::new(AtomicBool::new(true));
+    let block_next_retry = Arc::new(AtomicBool::new(true));
+    let retry_started = Arc::new(tokio::sync::Notify::new());
+    let release_retry = Arc::new(tokio::sync::Notify::new());
+    let fail_next_start = Arc::new(AtomicBool::new(true));
+    let mut native = NativePluginRuntime::new();
+    native
+        .register("rollback-active-native", {
+            let live = Arc::clone(&live);
+            move || LifecyclePlugin {
+                live: Arc::clone(&live),
+            }
+        })
+        .unwrap();
+    native
+        .register("rollback-failing-native", {
+            let fail_next_start = Arc::clone(&fail_next_start);
+            move || FailingStartPlugin {
+                fail_next_start: Arc::clone(&fail_next_start),
+            }
+        })
+        .unwrap();
+    let runtime = RollbackRuntime {
+        inner: native,
+        fail_next_cleanup: Arc::clone(&fail_next_cleanup),
+        block_next_retry: Arc::clone(&block_next_retry),
+        retry_started: Arc::clone(&retry_started),
+        release_retry: Arc::clone(&release_retry),
+    };
+    let compositions = CompositionRegistry::new(
+        Arc::new(ProductPackageResolver::new().with_native_packages([
+            "rollback-active-native".into(),
+            "rollback-failing-native".into(),
+        ])),
+        [Arc::new(runtime) as Arc<dyn LoaderRuntime>],
+    )
+    .unwrap();
+    let root = ContextHandle::root();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(LlmRuntime::new(), SystemPrompt::new(), ToolRuntime::new())
+                .with_composition_registry(compositions.clone())
+                .with_root_context(root.clone()),
+        ))
+        .unwrap();
+    let session = SessionId::from("failed-plugin-rollback");
+    let rollback_started = retry_started.notified();
+    let setup_cancellation = cancellation();
+    let mut setup = tokio::spawn({
+        let registry = registry.clone();
+        let session = session.clone();
+        let setup_cancellation = setup_cancellation.clone();
+        async move {
+            registry
+                .create(
+                    header_with_mode(session.as_str(), "test-plugin-rollback"),
+                    options(),
+                    setup_cancellation,
+                )
+                .await
+        }
+    });
+    tokio::select! {
+        _ = rollback_started => {},
+        result = &mut setup => panic!("setup ended before rollback retry: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            panic!("failed activation never reached the rollback retry");
+        }
+    }
+    setup_cancellation.cancel();
+
+    assert_eq!(live.load(Ordering::Acquire), 1);
+    assert!(!setup.is_finished());
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.create_or_resume(
+            header_with_mode(session.as_str(), "test-plugin-rollback"),
+            options(),
+            cancellation(),
+        ),
+    )
+    .await
+    .expect("same-ID create blocked instead of observing the retained reservation");
+    assert!(matches!(
+        duplicate,
+        Err(AgentError::Session(SessionError::DuplicateLive(id))) if id == session
+    ));
+
+    release_retry.notify_one();
+    let error = setup.await.unwrap().unwrap_err();
+    let AgentError::Message(error) = error else {
+        panic!("unexpected plugin activation error: {error:?}");
+    };
+    assert_eq!(error.code, "MODE_PLUGIN_ACTIVATION_FAILED");
+    let failures = error.details["failures"].as_array().unwrap();
+    assert!(failures.iter().any(|failure| failure
+        .as_str()
+        .unwrap()
+        .contains("fixture activation failure")));
+    assert!(failures.iter().any(|failure| failure
+        .as_str()
+        .unwrap()
+        .contains("fixture transient cleanup failure")));
+    assert_eq!(live.load(Ordering::Acquire), 0);
+    assert_eq!(
+        compositions.inspect(&session, None).await.unwrap_err().code,
+        "COMPOSITION_SESSION_UNAVAILABLE"
+    );
+
+    let replacement = registry
+        .create_or_resume(
+            header_with_mode(session.as_str(), "test-plugin-rollback"),
+            options(),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 1);
+    replacement.dispose().await.unwrap();
+    assert_eq!(live.load(Ordering::Acquire), 0);
     root.scope().dispose().await.unwrap();
 }
 

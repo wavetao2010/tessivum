@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard, Weak,
     },
+    time::Duration,
 };
 
 pub use crate::protocol::AgentCancelCause;
@@ -15,7 +16,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use tessivum_core::{CancellationToken, ContextHandle, CoreError, ServiceHandle, ServiceKey};
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 
 use crate::{
     agent_mode::AgentModeId,
@@ -826,13 +827,138 @@ struct LiveAgent {
 struct RegistryState {
     next_generation: u64,
     factory: Option<FactorySlot>,
-    starting: BTreeSet<SessionId>,
+    starting: BTreeMap<SessionId, StartingSetup>,
     live: BTreeMap<SessionId, LiveAgent>,
+    disposal: Option<Arc<RegistryDisposal>>,
+    subagent_tree_admissions: BTreeMap<SessionId, Arc<crate::subagent::TreeAdmissionState>>,
 }
 
 struct RegistryInner {
     sessions: SessionStore,
     state: Mutex<RegistryState>,
+}
+
+struct StartingSetup {
+    cancellation: CancellationToken,
+    completion: Arc<SetupCompletion>,
+    cleanup_error: Option<AgentError>,
+}
+
+#[derive(Default)]
+struct SetupCompletion {
+    finished: AtomicBool,
+    changed: Notify,
+}
+
+impl SetupCompletion {
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.finished.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn finish(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+}
+
+#[derive(Default)]
+struct RegistryDisposal {
+    result: Mutex<Option<Result<(), AgentError>>>,
+    changed: Notify,
+}
+
+impl RegistryDisposal {
+    async fn wait(&self) -> Result<(), AgentError> {
+        loop {
+            let changed = self.changed.notified();
+            if let Some(result) = lock(&self.result).clone() {
+                return result;
+            }
+            changed.await;
+        }
+    }
+
+    fn finish(&self, result: Result<(), AgentError>) {
+        *lock(&self.result) = Some(result);
+        self.changed.notify_waiters();
+    }
+}
+
+struct RegistryDisposalGuard {
+    registry: Weak<RegistryInner>,
+    disposal: Arc<RegistryDisposal>,
+    result: Option<Result<(), AgentError>>,
+}
+
+impl RegistryDisposalGuard {
+    fn finish(mut self, result: Result<(), AgentError>) {
+        self.result = Some(result);
+    }
+}
+
+impl Drop for RegistryDisposalGuard {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut state = lock(&registry.state);
+            if state
+                .disposal
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.disposal))
+            {
+                state.disposal = None;
+            }
+        }
+        self.disposal.finish(self.result.take().unwrap_or_else(|| {
+            Err(AgentError::Runtime(
+                "agent registry disposal ended before completion".into(),
+            ))
+        }));
+    }
+}
+
+struct SetupReservation {
+    registry: Weak<RegistryInner>,
+    session_id: SessionId,
+    completion: Arc<SetupCompletion>,
+}
+
+impl Drop for SetupReservation {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut state = lock(&registry.state);
+            if state
+                .starting
+                .get(&self.session_id)
+                .is_some_and(|starting| Arc::ptr_eq(&starting.completion, &self.completion))
+            {
+                state.starting.remove(&self.session_id);
+            }
+        }
+        self.completion.finish();
+    }
+}
+
+enum SetupKind {
+    Create(SessionHeader),
+    Resume(SessionId),
+    CreateOrResume(SessionHeader),
+}
+
+struct SetupReady {
+    session_id: SessionId,
+    session: Arc<Session>,
+    options: AgentOptions,
+    inbox: Inbox,
+    cancellation: CancellationToken,
+    runtime: Arc<dyn AgentRuntime>,
+    agent_mode: Option<AgentModeId>,
+    accepted: oneshot::Sender<()>,
 }
 
 /// Lifetime owner for the sole active agent factory registration.
@@ -958,26 +1084,12 @@ impl AgentRegistry {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
         let id = header.id.clone();
-        let factory = self.reserve(&id)?;
-        let session = match self
-            .inner
-            .sessions
-            .create(header, setup_cancellation.clone())
-            .await
-        {
-            Ok(session) => session,
-            Err(error) => {
-                self.unreserve(&id);
-                return Err(error.into());
-            }
-        };
-        let agent_mode = session.header().agent_mode;
-        self.finish_setup(
-            id,
-            session,
+        let (factory, reservation) = self.reserve(&id, &setup_cancellation)?;
+        self.supervise_setup(
+            SetupKind::Create(header),
             options,
             factory,
-            agent_mode,
+            reservation,
             setup_cancellation,
         )
         .await
@@ -992,29 +1104,12 @@ impl AgentRegistry {
     ) -> Result<AgentHandle, AgentError> {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
-        let factory = self.reserve(&session_id)?;
-        let session = match self.inner.sessions.get(&session_id) {
-            Some(session) => session,
-            None => match self
-                .inner
-                .sessions
-                .restore(&session_id, RestoreMode::Live, setup_cancellation.clone())
-                .await
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    self.unreserve(&session_id);
-                    return Err(error.into());
-                }
-            },
-        };
-        let agent_mode = session.header().agent_mode;
-        self.finish_setup(
-            session_id,
-            session,
+        let (factory, reservation) = self.reserve(&session_id, &setup_cancellation)?;
+        self.supervise_setup(
+            SetupKind::Resume(session_id),
             options,
             factory,
-            agent_mode,
+            reservation,
             setup_cancellation,
         )
         .await
@@ -1030,39 +1125,12 @@ impl AgentRegistry {
         options.validate()?;
         check_setup_cancellation(&setup_cancellation)?;
         let id = header.id.clone();
-        let factory = self.reserve(&id)?;
-        let session = match self.inner.sessions.get(&id) {
-            Some(session) => Ok(session),
-            None => match self
-                .inner
-                .sessions
-                .restore(&id, RestoreMode::Live, setup_cancellation.clone())
-                .await
-            {
-                Ok(session) => Ok(session),
-                Err(SessionError::NotFound(_)) => {
-                    self.inner
-                        .sessions
-                        .create(header, setup_cancellation.clone())
-                        .await
-                }
-                Err(error) => Err(error),
-            },
-        };
-        let session = match session {
-            Ok(session) => session,
-            Err(error) => {
-                self.unreserve(&id);
-                return Err(error.into());
-            }
-        };
-        let agent_mode = session.header().agent_mode;
-        self.finish_setup(
-            id,
-            session,
+        let (factory, reservation) = self.reserve(&id, &setup_cancellation)?;
+        self.supervise_setup(
+            SetupKind::CreateOrResume(header),
             options,
             factory,
-            agent_mode,
+            reservation,
             setup_cancellation,
         )
         .await
@@ -1125,23 +1193,70 @@ impl AgentRegistry {
             .count()
     }
 
-    /// Cancels and awaits every current runtime. All are awaited even if one fails.
+    /// Cancels and awaits every current setup and runtime. All are awaited even if one fails.
     pub async fn dispose_all(&self) -> Result<(), AgentError> {
-        let agents = lock(&self.inner.state)
+        let (disposal, start) = {
+            let mut state = lock(&self.inner.state);
+            match &state.disposal {
+                Some(disposal) => (Arc::clone(disposal), false),
+                None => {
+                    let disposal = Arc::new(RegistryDisposal::default());
+                    state.disposal = Some(Arc::clone(&disposal));
+                    (disposal, true)
+                }
+            }
+        };
+        if start {
+            let guard = RegistryDisposalGuard {
+                registry: Arc::downgrade(&self.inner),
+                disposal: Arc::clone(&disposal),
+                result: None,
+            };
+            let registry = self.clone();
+            tokio::spawn(async move {
+                guard.finish(Self::run_disposal(registry).await);
+            });
+        }
+        disposal.wait().await
+    }
+
+    async fn run_disposal(registry: Self) -> Result<(), AgentError> {
+        let setups = {
+            let state = lock(&registry.inner.state);
+            state
+                .starting
+                .values()
+                .map(|starting| {
+                    starting.cancellation.cancel();
+                    Arc::clone(&starting.completion)
+                })
+                .chain(
+                    state
+                        .live
+                        .values()
+                        .map(|live| Arc::clone(&live.inner.setup_completion)),
+                )
+                .collect::<Vec<_>>()
+        };
+        join_all(setups.into_iter().map(|completion| async move {
+            completion.wait().await;
+        }))
+        .await;
+
+        let agents = lock(&registry.inner.state)
             .live
             .values()
             .map(|live| Arc::clone(&live.inner))
             .collect::<Vec<_>>();
-        let results = join_all(
+        join_all(
             agents
                 .into_iter()
                 .map(|inner| async move { inner.dispose().await }),
         )
-        .await;
-        results
-            .into_iter()
-            .find_map(Result::err)
-            .map_or(Ok(()), Err)
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .map_or(Ok(()), Err)
     }
 
     /// Alias for [`Self::dispose_all`].
@@ -1149,61 +1264,245 @@ impl AgentRegistry {
         self.dispose_all().await
     }
 
-    fn reserve(&self, session_id: &SessionId) -> Result<Arc<dyn AgentFactory>, AgentError> {
+    pub(crate) fn subagent_tree_admission(
+        &self,
+        root: &SessionId,
+    ) -> Arc<crate::subagent::TreeAdmissionState> {
         let mut state = lock(&self.inner.state);
+        Arc::clone(
+            state
+                .subagent_tree_admissions
+                .entry(root.clone())
+                .or_insert_with(|| Arc::new(crate::subagent::TreeAdmissionState::default())),
+        )
+    }
+
+    fn reserve(
+        &self,
+        session_id: &SessionId,
+        setup_cancellation: &CancellationToken,
+    ) -> Result<(Arc<dyn AgentFactory>, SetupReservation), AgentError> {
+        let mut state = lock(&self.inner.state);
+        if state.disposal.is_some() {
+            return Err(AgentError::Disposed);
+        }
         let factory = state
             .factory
             .as_ref()
             .map(|slot| Arc::clone(&slot.factory))
             .ok_or(AgentError::FactoryNotRegistered)?;
-        if state.live.contains_key(session_id) || state.starting.contains(session_id) {
+        if state.live.contains_key(session_id) {
             return Err(AgentError::Session(SessionError::DuplicateLive(
                 session_id.clone(),
             )));
         }
-        state.starting.insert(session_id.clone());
-        Ok(factory)
+        if let Some(starting) = state.starting.get(session_id) {
+            return Err(starting.cleanup_error.clone().unwrap_or_else(|| {
+                AgentError::Session(SessionError::DuplicateLive(session_id.clone()))
+            }));
+        }
+        let completion = Arc::new(SetupCompletion::default());
+        state.starting.insert(
+            session_id.clone(),
+            StartingSetup {
+                cancellation: setup_cancellation.clone(),
+                completion: Arc::clone(&completion),
+                cleanup_error: None,
+            },
+        );
+        Ok((
+            factory,
+            SetupReservation {
+                registry: Arc::downgrade(&self.inner),
+                session_id: session_id.clone(),
+                completion,
+            },
+        ))
     }
 
-    fn unreserve(&self, session_id: &SessionId) {
-        lock(&self.inner.state).starting.remove(session_id);
-    }
-
-    async fn finish_setup(
+    async fn supervise_setup(
         &self,
-        session_id: SessionId,
-        session: Arc<Session>,
+        kind: SetupKind,
         options: AgentOptions,
         factory: Arc<dyn AgentFactory>,
-        agent_mode: Option<AgentModeId>,
+        reservation: SetupReservation,
         setup_cancellation: CancellationToken,
     ) -> Result<AgentHandle, AgentError> {
-        let inbox = Inbox::new();
-        for message in session.pending_next_turn_inbox()? {
-            inbox.send(message, InboxTarget::Followup, false)?;
-        }
-        let cancellation = ContextHandle::root().scope().cancellation();
-        let runtime = match factory
-            .create(
-                Arc::clone(&session),
-                options.clone(),
-                inbox.clone(),
-                cancellation.clone(),
-            )
-            .await
-        {
-            Ok(runtime) => runtime,
+        let completion = Arc::clone(&reservation.completion);
+        let (sender, receiver) = oneshot::channel();
+        let registry = self.clone();
+        let task_cancellation = setup_cancellation.clone();
+        tokio::spawn(async move {
+            Self::run_setup(registry, kind, options, factory, task_cancellation, sender).await;
+            drop(reservation);
+        });
+        let error = match receiver.await {
+            Ok(Ok(ready)) => {
+                tokio::task::yield_now().await;
+                match self.accept_setup(ready, &setup_cancellation, Arc::clone(&completion)) {
+                    Ok(agent) => return Ok(agent),
+                    Err(error) => error,
+                }
+            }
+            Ok(Err(error)) => error,
+            Err(_) => AgentError::SetupReservationLost,
+        };
+        completion.wait().await;
+        Err(error)
+    }
+
+    async fn run_setup(
+        registry: Self,
+        kind: SetupKind,
+        options: AgentOptions,
+        factory: Arc<dyn AgentFactory>,
+        setup_cancellation: CancellationToken,
+        sender: oneshot::Sender<Result<SetupReady, AgentError>>,
+    ) {
+        let mut sender = Some(sender);
+        let mut session_setup = Box::pin(registry.setup_session(kind, setup_cancellation.clone()));
+        let (session_result, cancelled) = tokio::select! {
+            biased;
+            _ = setup_cancellation.cancelled() => (None, true),
+            result = &mut session_setup => (Some(result), false),
+        };
+        let session_result = match session_result {
+            Some(result) => result,
+            None => session_setup.await,
+        };
+        let session = match session_result {
+            Ok(session) => session,
             Err(error) => {
-                self.unreserve(&session_id);
-                return Err(error);
+                let error = if cancelled {
+                    AgentError::Cancelled
+                } else {
+                    error.into()
+                };
+                let _ = sender.take().unwrap().send(Err(error));
+                return;
             }
         };
-        if setup_cancellation.is_cancelled() {
-            let _ = runtime.dispose().await;
-            self.unreserve(&session_id);
-            return Err(AgentError::Cancelled);
+        if cancelled || setup_cancellation.is_cancelled() {
+            let _ = sender.take().unwrap().send(Err(AgentError::Cancelled));
+            return;
         }
 
+        let inbox = Inbox::new();
+        let pending = match session.pending_next_turn_inbox() {
+            Ok(pending) => pending,
+            Err(error) => {
+                let _ = sender.take().unwrap().send(Err(error.into()));
+                return;
+            }
+        };
+        for message in pending {
+            if let Err(error) = inbox.send(message, InboxTarget::Followup, false) {
+                let _ = sender.take().unwrap().send(Err(error));
+                return;
+            }
+        }
+
+        let cancellation = ContextHandle::root().scope().cancellation();
+        let mut factory_setup = Box::pin(factory.create(
+            Arc::clone(&session),
+            options.clone(),
+            inbox.clone(),
+            cancellation.clone(),
+        ));
+        let (runtime_result, cancelled) = tokio::select! {
+            biased;
+            _ = setup_cancellation.cancelled() => (None, true),
+            result = &mut factory_setup => (Some(result), false),
+        };
+        let runtime_result = match runtime_result {
+            Some(result) => result,
+            None => factory_setup.await,
+        };
+        let runtime = match runtime_result {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = sender.take().unwrap().send(Err(error));
+                return;
+            }
+        };
+        if cancelled || setup_cancellation.is_cancelled() {
+            dispose_abandoned_runtime(&registry, &session.id(), runtime).await;
+            let _ = sender.take().unwrap().send(Err(AgentError::Cancelled));
+            return;
+        }
+
+        let session_id = session.id();
+        let (accepted, acceptance) = oneshot::channel();
+        let ready = SetupReady {
+            session_id: session_id.clone(),
+            agent_mode: session.header().agent_mode,
+            session,
+            options,
+            inbox,
+            cancellation,
+            runtime: Arc::clone(&runtime),
+            accepted,
+        };
+        if sender.take().unwrap().send(Ok(ready)).is_err() || acceptance.await.is_err() {
+            dispose_abandoned_runtime(&registry, &session_id, runtime).await;
+        }
+    }
+
+    async fn setup_session(
+        &self,
+        kind: SetupKind,
+        setup_cancellation: CancellationToken,
+    ) -> Result<Arc<Session>, SessionError> {
+        match kind {
+            SetupKind::Create(header) => {
+                self.inner.sessions.create(header, setup_cancellation).await
+            }
+            SetupKind::Resume(session_id) => match self.inner.sessions.get(&session_id) {
+                Some(session) => Ok(session),
+                None => {
+                    self.inner
+                        .sessions
+                        .restore(&session_id, RestoreMode::Live, setup_cancellation)
+                        .await
+                }
+            },
+            SetupKind::CreateOrResume(header) => {
+                let id = header.id.clone();
+                match self.inner.sessions.get(&id) {
+                    Some(session) => Ok(session),
+                    None => match self
+                        .inner
+                        .sessions
+                        .restore(&id, RestoreMode::Live, setup_cancellation.clone())
+                        .await
+                    {
+                        Ok(session) => Ok(session),
+                        Err(SessionError::NotFound(_)) => {
+                            self.inner.sessions.create(header, setup_cancellation).await
+                        }
+                        Err(error) => Err(error),
+                    },
+                }
+            }
+        }
+    }
+
+    fn accept_setup(
+        &self,
+        ready: SetupReady,
+        setup_cancellation: &CancellationToken,
+        completion: Arc<SetupCompletion>,
+    ) -> Result<AgentHandle, AgentError> {
+        let SetupReady {
+            session_id,
+            session,
+            options,
+            inbox,
+            cancellation,
+            runtime,
+            agent_mode,
+            accepted,
+        } = ready;
         let inner = Arc::new(AgentInner {
             id: session_id.clone(),
             agent_mode,
@@ -1212,6 +1511,7 @@ impl AgentRegistry {
             inbox,
             cancellation,
             runtime,
+            setup_completion: Arc::clone(&completion),
             state: Mutex::new(AgentState::default()),
             dispose_gate: AsyncMutex::new(()),
             registry: Arc::downgrade(&self.inner),
@@ -1219,24 +1519,33 @@ impl AgentRegistry {
         });
         let generation = {
             let mut state = lock(&self.inner.state);
-            if !state.starting.remove(&session_id) || state.live.contains_key(&session_id) {
-                None
-            } else {
-                let generation = next_generation(&mut state);
-                inner.generation.store(generation, Ordering::Release);
-                state.live.insert(
-                    session_id,
-                    LiveAgent {
-                        generation,
-                        inner: Arc::clone(&inner),
-                    },
-                );
-                Some(generation)
+            if setup_cancellation.is_cancelled() || state.disposal.is_some() {
+                return Err(AgentError::Cancelled);
             }
-        };
-        let Some(generation) = generation else {
-            let _ = inner.dispose().await;
-            return Err(AgentError::SetupReservationLost);
+            if !state
+                .starting
+                .get(&session_id)
+                .is_some_and(|starting| Arc::ptr_eq(&starting.completion, &completion))
+            {
+                return Err(AgentError::SetupReservationLost);
+            }
+            if state.live.contains_key(&session_id) {
+                return Err(AgentError::SetupReservationLost);
+            }
+            if accepted.send(()).is_err() {
+                return Err(AgentError::SetupReservationLost);
+            }
+            let generation = next_generation(&mut state);
+            inner.generation.store(generation, Ordering::Release);
+            state.live.insert(
+                session_id.clone(),
+                LiveAgent {
+                    generation,
+                    inner: Arc::clone(&inner),
+                },
+            );
+            state.starting.remove(&session_id);
+            generation
         };
         debug_assert_ne!(generation, 0);
         Ok(AgentHandle::own(inner))
@@ -1266,6 +1575,7 @@ struct AgentInner {
     inbox: Inbox,
     cancellation: CancellationToken,
     runtime: Arc<dyn AgentRuntime>,
+    setup_completion: Arc<SetupCompletion>,
     state: Mutex<AgentState>,
     dispose_gate: AsyncMutex<()>,
     registry: Weak<RegistryInner>,
@@ -1391,6 +1701,7 @@ impl AgentInner {
 
     async fn dispose(&self) -> Result<(), AgentError> {
         let _gate = self.dispose_gate.lock().await;
+        self.setup_completion.wait().await;
         let clear_inbox = {
             let mut state = lock(&self.state);
             if state.cleanup_complete {
@@ -1640,6 +1951,29 @@ impl Drop for AgentHandle {
                 cause: AgentCancelCause::Disposed,
                 keep_inbox: false,
             });
+        }
+    }
+}
+
+async fn dispose_abandoned_runtime(
+    registry: &AgentRegistry,
+    session_id: &SessionId,
+    runtime: Arc<dyn AgentRuntime>,
+) {
+    loop {
+        match runtime.dispose().await {
+            Ok(()) => {
+                if let Some(starting) = lock(&registry.inner.state).starting.get_mut(session_id) {
+                    starting.cleanup_error = None;
+                }
+                return;
+            }
+            Err(error) => {
+                if let Some(starting) = lock(&registry.inner.state).starting.get_mut(session_id) {
+                    starting.cleanup_error = Some(error);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
 }

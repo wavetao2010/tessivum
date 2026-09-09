@@ -1,20 +1,31 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tessivum::{
     code_runtime::{
-        CodeBindingNamespace, CodeRunFailureKind, CodeRunRequest, CodeRuntime, CodeRuntimeError,
-        JavaScriptRuntime, ProcessCodeRuntime, ProcessCodeRuntimeConfig, PTC_RUNTIME_UNAVAILABLE,
+        register_code_tool, CodeBindingNamespace, CodeRunFailureKind, CodeRunRequest, CodeRuntime,
+        CodeRuntimeError, JavaScriptRuntime, ProcessCodeRuntime, ProcessCodeRuntimeConfig,
+        PTC_RUNTIME_UNAVAILABLE,
     },
     invariants::{InvariantConfig, InvariantInstallerError, InvariantRegistry},
     telemetry::{
         TelemetryBackend, TelemetryChannel, TelemetryCoordinator, TelemetryError, TelemetryRecord,
         TelemetryRedactor, TelemetrySeverity, TelemetrySharing,
     },
-    SessionEvent, SessionId,
+    tools::{
+        ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRestrictions,
+        ToolRunContext, ToolRuntime,
+    },
+    ContentBlock, SessionEvent, SessionId, ToolCallId,
 };
-use tessivum_core::ContextHandle;
+use tessivum_core::{CancellationToken, ContextHandle};
 
 fn runtime(cap: usize) -> ProcessCodeRuntime {
     let mut config = ProcessCodeRuntimeConfig::ptc_javascript()
@@ -152,6 +163,259 @@ async fn process_runtime_resolves_success_exception_invalid_output_and_limit() {
     );
 }
 
+struct CountingOutput {
+    calls: Arc<AtomicUsize>,
+    value: Value,
+}
+
+#[async_trait]
+impl ToolHandler for CountingOutput {
+    async fn run(&self, _: ToolRunContext, _: Value) -> ToolHandlerResult {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        Ok(ToolOutput::new(Vec::new(), false, self.value.clone()))
+    }
+}
+
+fn tool_context(call: &str, cancellation: CancellationToken) -> ToolRunContext {
+    ToolRunContext {
+        session: SessionId::from("code-runtime-test"),
+        call: ToolCallId::from(call),
+        cancellation,
+    }
+}
+
+fn text_json(output: &ToolOutput) -> Value {
+    let ContentBlock::Text { text } = &output.content[0] else {
+        panic!("run_code must return text")
+    };
+    serde_json::from_str(text).expect("run_code JSON result")
+}
+
+#[tokio::test]
+async fn flat_tool_name_errors_recover_without_dispatching_hidden_or_unknown_tools() {
+    let native = ToolRuntime::new();
+    let visible_calls = Arc::new(AtomicUsize::new(0));
+    let hidden_calls = Arc::new(AtomicUsize::new(0));
+    let _visible = native
+        .register(ToolDefinition::new(
+            "jobs.list",
+            "list",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            CountingOutput {
+                calls: Arc::clone(&visible_calls),
+                value: json!({"listed": true}),
+            },
+        ))
+        .expect("visible tool");
+    let _hidden = native
+        .register(ToolDefinition::new(
+            "jobs.secret",
+            "hidden",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            CountingOutput {
+                calls: Arc::clone(&hidden_calls),
+                value: json!({"secret": true}),
+            },
+        ))
+        .expect("hidden tool");
+    let dispatch = native
+        .scoped(ToolRestrictions::new().deny("jobs.secret"))
+        .expect("restricted tools");
+    let tools = ToolRuntime::new();
+    let _run_code = register_code_tool(&tools, dispatch, runtime(4096)).expect("run_code");
+    let cancellation = ContextHandle::root().scope().cancellation();
+    let output = tools
+        .execute(
+            tool_context("flat-names", cancellation),
+            "run_code",
+            json!({
+                "description": "exercise flat bindings",
+                "code": r#"
+                    let nested, hidden, unknown;
+                    try { await tools.jobs.list({}); } catch (error) { nested = {name: error.name, toolName: error.toolName, message: error.message}; }
+                    const keys = Object.keys(tools);
+                    const valid = await tools["jobs.list"]({});
+                    try { await tools["jobs.secret"]({}); } catch (error) { hidden = {name: error.name, toolName: error.toolName, message: error.message}; }
+                    try { await tools.unknown({}); } catch (error) { unknown = {name: error.name, toolName: error.toolName, message: error.message}; }
+                    return {nested, hidden, unknown, keys, valid};
+                "#,
+            }),
+        )
+        .await;
+    assert!(!output.is_error);
+    let value = text_json(&output);
+    assert_eq!(value["nested"]["name"], "ToolError");
+    assert_eq!(value["nested"]["toolName"], "jobs");
+    assert!(value["nested"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("tools[\"jobs.list\"]")));
+    assert_eq!(value["valid"]["listed"], true);
+    assert_eq!(value["keys"], json!(["jobs.list"]));
+    assert_eq!(value["hidden"]["name"], "ToolError");
+    assert_eq!(value["unknown"]["name"], "ToolError");
+    assert_eq!(visible_calls.load(Ordering::Acquire), 1);
+    assert_eq!(hidden_calls.load(Ordering::Acquire), 0);
+    assert_eq!(output.meta["codeDispatches"].as_array().unwrap().len(), 2);
+}
+
+struct BlockingOutput {
+    tokens: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+    first_started: Arc<tokio::sync::Notify>,
+    second_started: Arc<tokio::sync::Notify>,
+    detached_started: Arc<tokio::sync::Notify>,
+    second_release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ToolHandler for BlockingOutput {
+    async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
+        let id = arguments["id"].as_str().expect("id").to_owned();
+        self.tokens
+            .lock()
+            .insert(id.clone(), context.cancellation.clone());
+        match id.as_str() {
+            "first" => {
+                self.first_started.notify_one();
+                context.cancellation.cancelled().await;
+                Ok(ToolOutput::new(Vec::new(), false, Value::Null))
+            }
+            "second" => {
+                self.second_started.notify_one();
+                tokio::select! {
+                    _ = context.cancellation.cancelled() => Ok(ToolOutput::new(Vec::new(), false, Value::Null)),
+                    _ = self.second_release.notified() => Ok(ToolOutput::new(Vec::new(), false, json!({"released": true}))),
+                }
+            }
+            "detached" => {
+                self.detached_started.notify_one();
+                context.cancellation.cancelled().await;
+                Ok(ToolOutput::new(Vec::new(), false, Value::Null))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_code_cancellation_is_confined_and_pending_dispatches_remain_actionable() {
+    let tokens = Arc::new(Mutex::new(BTreeMap::new()));
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let detached_started = Arc::new(tokio::sync::Notify::new());
+    let second_release = Arc::new(tokio::sync::Notify::new());
+    let native = ToolRuntime::new();
+    let _blocking = native
+        .register(ToolDefinition::new(
+            "block",
+            "block",
+            json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}),
+            BlockingOutput {
+                tokens: Arc::clone(&tokens),
+                first_started: Arc::clone(&first_started),
+                second_started: Arc::clone(&second_started),
+                detached_started: Arc::clone(&detached_started),
+                second_release: Arc::clone(&second_release),
+            },
+        ))
+        .expect("blocking tool");
+    let mut config = ProcessCodeRuntimeConfig::ptc_javascript()
+        .expect("Bun is required for PTC runtime tests; install a usable bun executable");
+    config.timeout = std::time::Duration::from_millis(300);
+    let tools = ToolRuntime::new();
+    let _run_code = register_code_tool(
+        &tools,
+        native,
+        ProcessCodeRuntime::new(config).expect("runtime"),
+    )
+    .expect("run_code");
+
+    let first_parent = ContextHandle::root().scope().cancellation();
+    let first = {
+        let tools = tools.clone();
+        let cancellation = first_parent.clone();
+        tokio::spawn(async move {
+            tools
+                .execute(
+                    tool_context("flat-cancel", cancellation),
+                    "run_code",
+                    json!({"description":"timeout", "code":"return await tools.block({id: 'first'});"}),
+                )
+                .await
+        })
+    };
+    first_started.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+
+    let second_parent = ContextHandle::root().scope().cancellation();
+    let second = {
+        let tools = tools.clone();
+        let cancellation = second_parent.clone();
+        tokio::spawn(async move {
+            tools
+                .execute(
+                    tool_context("later-run", cancellation),
+                    "run_code",
+                    json!({"description":"independent", "code":"return await tools.block({id: 'second'});"}),
+                )
+                .await
+        })
+    };
+    second_started.notified().await;
+
+    let first = first.await.expect("first run");
+    assert!(first.is_error);
+    let message = match &first.content[0] {
+        ContentBlock::Text { text } => text,
+        _ => panic!("timeout must be text"),
+    };
+    assert!(message.contains("flat-cancel:code:1"));
+    assert!(message.contains("cleanup may still be in progress"));
+    assert_eq!(
+        first.meta["codeDispatches"][1]["data"]["status"],
+        "cancellation-signalled"
+    );
+    assert!(!first_parent.is_cancelled());
+    assert!(!second_parent.is_cancelled());
+    assert!(tokens.lock()["first"].is_cancelled());
+    assert!(!tokens.lock()["second"].is_cancelled());
+
+    second_release.notify_one();
+    let second = second.await.expect("second run");
+    assert!(!second.is_error);
+    assert_eq!(text_json(&second)["released"], true);
+
+    let detached = {
+        let tools = tools.clone();
+        tokio::spawn(async move {
+            tools
+                .execute(
+                    tool_context(
+                        "completed-with-pending",
+                        ContextHandle::root().scope().cancellation(),
+                    ),
+                    "run_code",
+                    json!({
+                        "description":"return with pending call",
+                        "code":"tools.block({id: 'detached'}); await new Promise(resolve => setTimeout(resolve, 25)); return 'done';"
+                    }),
+                )
+                .await
+        })
+    };
+    detached_started.notified().await;
+    let detached = detached.await.expect("completed run");
+    assert!(!detached.is_error);
+    assert!(tokens.lock()["detached"].is_cancelled());
+    assert!(detached.meta["codeDispatches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["data"]["subCallId"] == "completed-with-pending:code:1"
+                && event["data"]["status"] == "cancellation-signalled"
+        }));
+}
+
 #[tokio::test]
 async fn process_runtime_timeout_abort_isolation_and_disposal() {
     let mut config = ProcessCodeRuntimeConfig::ptc_javascript()
@@ -215,6 +479,42 @@ async fn process_runtime_timeout_abort_isolation_and_disposal() {
         running.await.expect("join").error.expect("failure").kind,
         CodeRunFailureKind::Abort
     );
+}
+
+#[tokio::test]
+async fn dropped_process_run_releases_runtime_disposal() {
+    let runtime = runtime(1024);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let binding_started = Arc::clone(&started);
+    let running = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .run(CodeRunRequest::new(
+                    "return await tools.block({});",
+                    vec![
+                        CodeBindingNamespace::new("tools").function("block", move |_| {
+                            let started = Arc::clone(&binding_started);
+                            async move {
+                                started.notify_one();
+                                std::future::pending::<Result<Value, String>>().await
+                            }
+                        }),
+                    ],
+                ))
+                .await
+        })
+    };
+    started.notified().await;
+    running.abort();
+    assert!(running
+        .await
+        .expect_err("run must be dropped")
+        .is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(1), runtime.dispose())
+        .await
+        .expect("disposal must not remain busy")
+        .expect("dispose runtime");
 }
 
 #[derive(Default)]

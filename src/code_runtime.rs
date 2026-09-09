@@ -69,6 +69,10 @@ pub type CodeJsonValue = Value;
 #[async_trait]
 pub trait CodeBinding: Send + Sync {
     async fn call(&self, arguments: Value) -> Result<Value, String>;
+    /// Cancellation owned by one code run for in-flight binding work.
+    fn run_cancellation(&self) -> Option<CancellationToken> {
+        None
+    }
 }
 #[async_trait]
 impl<F, Fut> CodeBinding for F
@@ -357,6 +361,18 @@ struct Inner {
     live: Mutex<BTreeMap<u64, CancellationToken>>,
     dispose_gate: AsyncMutex<()>,
 }
+struct LiveRun {
+    inner: Arc<Inner>,
+    id: u64,
+    cancellation: CancellationToken,
+}
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        lock(&self.inner.live).remove(&self.id);
+    }
+}
+
 impl ProcessCodeRuntime {
     pub fn new(mut config: ProcessCodeRuntimeConfig) -> Result<Self, CodeRuntimeError> {
         config.validate()?;
@@ -373,19 +389,24 @@ impl ProcessCodeRuntime {
     pub fn publish(self, context: &ContextHandle) -> Result<ServiceHandle<Self>, CoreError> {
         context.provide(code_runtime_service_key(), self)
     }
-    fn reserve(&self) -> Result<(u64, CancellationToken), CodeRuntimeError> {
+    fn reserve(&self) -> Result<LiveRun, CodeRuntimeError> {
         if self.inner.disposed.load(Ordering::Acquire) {
             return Err(CodeRuntimeError::Disposed);
         }
         let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
-        let token = ContextHandle::root().scope().cancellation();
+        let cancellation = ContextHandle::root().scope().cancellation();
         let mut live = lock(&self.inner.live);
         if self.inner.disposed.load(Ordering::Acquire) {
             return Err(CodeRuntimeError::Disposed);
         }
-        live.insert(id, token.clone());
-        Ok((id, token))
+        live.insert(id, cancellation.clone());
+        Ok(LiveRun {
+            inner: Arc::clone(&self.inner),
+            id,
+            cancellation,
+        })
     }
+
     async fn execute(
         &self,
         request: CodeRunRequest,
@@ -497,6 +518,9 @@ impl ProcessCodeRuntime {
         let mut pending: FuturesUnordered<
             Pin<Box<dyn std::future::Future<Output = Reply> + Send>>,
         > = FuturesUnordered::new();
+        // Declared after `pending` so cancellation is signalled before its futures are dropped.
+        let binding_run = BindingRun(bindings.cancellations.clone());
+
         let deadline = Instant::now() + self.inner.config.timeout;
         while outcome.is_none() && !(exited && !output_open && !errors_open) {
             tokio::select! {
@@ -545,6 +569,8 @@ impl ProcessCodeRuntime {
                 "process exited before completing",
             )));
         }
+        binding_run.cancel();
+        drop(pending);
         #[cfg(windows)]
         {
             // The direct worker can exit while descendants still hold its pipes.
@@ -589,10 +615,10 @@ impl CodeRuntime for ProcessCodeRuntime {
     }
     async fn run(&self, request: CodeRunRequest) -> Result<CodeRunResult, CodeRuntimeError> {
         let bindings = bindings(request.bindings.clone())?;
-        let (id, token) = self.reserve()?;
-        let result = self.execute(request, bindings, token).await;
-        lock(&self.inner.live).remove(&id);
-        Ok(result)
+        let run = self.reserve()?;
+        Ok(self
+            .execute(request, bindings, run.cancellation.clone())
+            .await)
     }
 
     async fn dispose(&self) -> Result<(), CodeRuntimeError> {
@@ -643,10 +669,12 @@ pub(crate) fn code_tool_description(tools: &ToolRuntime) -> String {
     format!(
         "{}\n{}",
         concat!(
-            "Runs one JavaScript program. Call await tools[\"name\"](arguments) using the exact ",
+            "Runs one JavaScript program with a 60-second wall-clock ceiling, including tool waits. Call await tools[\"name\"](arguments) using the exact ",
             "names and JSON Schemas below. The tools object is flat: dots in a name are literal ",
             "(for example tools[\"jobs.list\"]), not nested namespaces. Function inspection does ",
             "not expose parameter schemas. Do not invent names or arguments. ",
+            "Long foreground calls consume the same run deadline; explicitly start background work ",
+            "when it must outlive run_code, and poll with a bounded await tools[\"jobs.wait\"]({jobId, timeoutMs}). ",
             "Calls return an object with text and content plus tool-specific result fields; ",
             "bash also exposes stdout.text. Failed calls reject with ToolError (toolName and message). ",
             "Return a lossless JSON value explicitly. Console output is diagnostic metadata, ",
@@ -671,6 +699,84 @@ struct DispatchBinding {
     parent_call_id: String,
     next: Arc<AtomicU64>,
     events: Arc<Mutex<Vec<Value>>>,
+    cancellation: CancellationToken,
+}
+
+struct DispatchCompletion {
+    events: Arc<Mutex<Vec<Value>>>,
+    root_call_id: String,
+    sub_call_id: String,
+    name: String,
+    arguments: Value,
+    armed: bool,
+}
+impl DispatchCompletion {
+    fn new(binding: &DispatchBinding, sub_call_id: String, arguments: Value) -> Self {
+        Self {
+            events: Arc::clone(&binding.events),
+            root_call_id: binding.parent_call_id.clone(),
+            sub_call_id,
+            name: binding.name.clone(),
+            arguments,
+            armed: true,
+        }
+    }
+
+    fn finish(mut self, output: &ToolOutput) {
+        self.armed = false;
+        let status = if output.meta["code"] == "CANCELLED" {
+            "cancelled"
+        } else {
+            "completed"
+        };
+        lock(&self.events).push(dispatch_event(
+            &self.root_call_id,
+            &self.sub_call_id,
+            &self.name,
+            &self.arguments,
+            output.is_error,
+            status,
+            serde_json::to_value(&output.content).expect("content blocks serialize"),
+        ));
+    }
+}
+impl Drop for DispatchCompletion {
+    fn drop(&mut self) {
+        if self.armed {
+            lock(&self.events).push(dispatch_event(
+                &self.root_call_id,
+                &self.sub_call_id,
+                &self.name,
+                &self.arguments,
+                true,
+                "cancellation-signalled",
+                Value::Array(Vec::new()),
+            ));
+        }
+    }
+}
+fn dispatch_event(
+    root_call_id: &str,
+    sub_call_id: &str,
+    name: &str,
+    arguments: &Value,
+    is_error: bool,
+    status: &str,
+    content: Value,
+) -> Value {
+    json!({
+        "type": "tool/code-dispatch",
+        "data": {
+            "rootCallId": root_call_id,
+            "parentCallId": root_call_id,
+            "subCallId": sub_call_id,
+            "name": name,
+            "arguments": arguments,
+            "isError": is_error,
+            "status": status,
+            "content": content,
+        }
+    })
 }
 
 #[async_trait]
@@ -679,6 +785,8 @@ impl CodeBinding for DispatchBinding {
         let index = self.next.fetch_add(1, Ordering::AcqRel);
         let sub_call_id = format!("{}:code:{index}", self.parent_call_id);
         let logged_arguments = arguments.clone();
+        let completion =
+            DispatchCompletion::new(self, sub_call_id.clone(), logged_arguments.clone());
         lock(&self.events).push(json!({
             "type": "tool/code-dispatch-start",
             "data": {
@@ -694,30 +802,23 @@ impl CodeBinding for DispatchBinding {
             .execute(
                 ToolRunContext {
                     session: self.context.session.clone(),
-                    call: ToolCallId::from(sub_call_id.clone()),
-                    cancellation: self.context.cancellation.clone(),
+                    call: ToolCallId::from(sub_call_id),
+                    cancellation: self.cancellation.clone(),
                 },
                 &self.name,
                 arguments,
             )
             .await;
-        lock(&self.events).push(json!({
-            "type": "tool/code-dispatch",
-            "data": {
-                "rootCallId": self.parent_call_id,
-                "parentCallId": self.parent_call_id,
-                "subCallId": sub_call_id,
-                "name": self.name,
-                "arguments": logged_arguments,
-                "isError": output.is_error,
-                "content": output.content,
-            }
-        }));
+        completion.finish(&output);
         if output.is_error {
             Err(tool_text(&output))
         } else {
             Ok(binding_value(&self.name, &output))
         }
+    }
+
+    fn run_cancellation(&self) -> Option<CancellationToken> {
+        Some(self.cancellation.clone())
     }
 }
 
@@ -738,6 +839,7 @@ impl ToolHandler for RunCode {
         let events = Arc::new(Mutex::new(Vec::new()));
         let next = Arc::new(AtomicU64::new(1));
         let parent_call_id = context.call.as_str().to_owned();
+        let run_cancellation = ContextHandle::root().scope().cancellation();
         let mut namespace = CodeBindingNamespace::new("tools").error_class(CodeBindingErrorClass {
             name: "ToolError".into(),
             member_name_property: "toolName".into(),
@@ -758,10 +860,11 @@ impl ToolHandler for RunCode {
                     parent_call_id: parent_call_id.clone(),
                     next: next.clone(),
                     events: events.clone(),
+                    cancellation: run_cancellation.clone(),
                 },
             );
         }
-        let result = self
+        let mut result = self
             .runtime
             .run(
                 CodeRunRequest::new(program, vec![namespace])
@@ -777,6 +880,23 @@ impl ToolHandler for RunCode {
                 )
             })?;
         let dispatches = lock(&events).clone();
+        let pending_ids = dispatches
+            .iter()
+            .filter(|event| event["data"]["status"] == "cancellation-signalled")
+            .filter_map(|event| event["data"]["subCallId"].as_str())
+            .collect::<Vec<_>>();
+        if !pending_ids.is_empty() {
+            if let Some(error) = result
+                .error
+                .as_mut()
+                .filter(|error| error.kind == CodeRunFailureKind::Timeout)
+            {
+                error.message.push_str(&format!(
+                    ". Pending tool calls were signalled for cancellation (cleanup may still be in progress): {}. Start explicit background work when it must outlive run_code; poll it with a bounded await tools[\"jobs.wait\"]({{jobId, timeoutMs}}). See codeDispatches for status",
+                    pending_ids.join(", ")
+                ));
+            }
+        }
         let metadata = json!({
             "codeDispatches": dispatches,
             "logs": result.logs,
@@ -837,11 +957,26 @@ fn binding_value(name: &str, output: &ToolOutput) -> Value {
 struct Bindings {
     names: BTreeMap<String, BTreeMap<String, Arc<dyn CodeBinding>>>,
     manifest: Vec<Value>,
+    cancellations: Vec<CancellationToken>,
+}
+struct BindingRun(Vec<CancellationToken>);
+impl BindingRun {
+    fn cancel(&self) {
+        for cancellation in &self.0 {
+            cancellation.cancel();
+        }
+    }
+}
+impl Drop for BindingRun {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 fn bindings(input: Vec<CodeBindingNamespace>) -> Result<Bindings, CodeRuntimeError> {
     let mut names = BTreeMap::new();
     let mut injected = BTreeSet::new();
     let mut manifest = Vec::new();
+    let mut cancellations = Vec::new();
     for namespace in input {
         identifier(&namespace.global, "binding global")?;
         if RESERVED_GLOBALS.contains(&namespace.global.as_str()) {
@@ -875,10 +1010,20 @@ fn bindings(input: Vec<CodeBindingNamespace>) -> Result<Bindings, CodeRuntimeErr
                 ));
             }
         }
+        cancellations.extend(
+            namespace
+                .functions
+                .values()
+                .filter_map(|binding| binding.run_cancellation()),
+        );
         manifest.push(json!({"global":namespace.global,"names":namespace.functions.keys().collect::<Vec<_>>(),"errorClass":namespace.error_class}));
         names.insert(namespace.global, namespace.functions);
     }
-    Ok(Bindings { names, manifest })
+    Ok(Bindings {
+        names,
+        manifest,
+        cancellations,
+    })
 }
 fn identifier(name: &str, label: &str) -> Result<(), CodeRuntimeError> {
     let mut chars = name.bytes();
@@ -1203,7 +1348,8 @@ const boot=rl.createInterface({input:process.stdin,crlfDelay:Infinity});boot.onc
  };
  const classes=new Map();for(const b of d.bindings)if(b.errorClass){const e=b.errorClass;classes.set(b.global,class extends Error{constructor(member,message){super(message);Object.defineProperty(this,'name',{value:e.name});Object.defineProperty(this,e.memberNameProperty,{value:member,enumerable:true})}})}
  const call=(g,m,a)=>{const E=classes.get(g);if(!valid(a))return Promise.reject(E?new E(m,'binding arguments must be lossless JSON'):new Error('binding arguments must be lossless JSON'));return new Promise((resolve,reject)=>{const id=n++;pending.set(id,{resolve,reject:e=>reject(E?new E(m,String(e.message||e)):e)});emit({type:'call',id,global:g,name:m,args:a})})};
- const ps=[],vs=[];for(const b of d.bindings){const o=Object.create(null);for(const m of b.names)Object.defineProperty(o,m,{enumerable:true,value:a=>call(b.global,m,a)});Object.freeze(o);ps.push(b.global);vs.push(o);if(b.errorClass){ps.push(b.errorClass.name);vs.push(classes.get(b.global))}}
+ const missing=(b,m)=>{const E=classes.get(b.global),candidates=b.names.filter(n=>n.startsWith(m+'.')).map(n=>`${b.global}[${JSON.stringify(n)}]`),message=candidates.length?`${b.global} is flat; use exact bracket access (${candidates.join(', ')}), not nested namespace access`:`unknown ${b.global} binding ${JSON.stringify(m)}; use an exact flat name and bracket access for names containing dots`;throw E?new E(m,message):new Error(message)};
+ const ps=[],vs=[];for(const b of d.bindings){const o=Object.create(null);for(const m of b.names)Object.defineProperty(o,m,{enumerable:true,value:a=>call(b.global,m,a)});Object.freeze(o);const p=new Proxy(o,{get:(target,m,receiver)=>typeof m!=='string'||Reflect.has(target,m)?Reflect.get(target,m,receiver):missing(b,m)});ps.push(b.global);vs.push(p);if(b.errorClass){ps.push(b.errorClass.name);vs.push(classes.get(b.global))}}
  const render=a=>a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '),console={log:(...a)=>emit({type:'log',text:render(a)}),info:(...a)=>emit({type:'log',text:render(a)}),warn:(...a)=>emit({type:'log',text:render(a)}),error:(...a)=>emit({type:'log',text:render(a)}),debug:(...a)=>emit({type:'log',text:render(a)})};
  const F=Object.getPrototypeOf(async function(){}).constructor,v=await new F(...ps,'console',`'use strict';\n${d.program}`)(...vs,console);if(v===undefined)emit({type:'done'});else if(valid(v))emit({type:'done',value:v});else emit({type:'done',error:{kind:'invalid-output',message:'program completion must be lossless JSON'}})
 }catch(e){emit({type:'done',error:{kind:'exception',message:String(e&&e.message||e)}})}});"#;

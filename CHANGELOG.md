@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.25 - 2026-09-09
+
+### Fixed
+
+- Inherit canonical workspace access across native child agents without broadening permissions.
+- Enforce root-tree depth, live/admitting, and cumulative admission limits with a durable ledger that excludes seeded history and survives descendant-log deletion.
+- Retain startup, worker, and child-cleanup ownership across cancellation, dropped waiters, and disposal failures; preserve rollback diagnostics and retryable parent cleanup.
+- Keep PTC foreground cancellation separate from detached jobs and report exact flat tool binding names without dispatching unknown or hidden tools.
+- Allocate subagent event sequences inside the session write transaction.
+- Prevent Unix subprocesses from inheriting workspace lock and directory descriptors, allowing shutdown and immediate reopening while unrelated children remain alive.
+
 ## 0.1.0-alpha.24 - 2026-09-08
 
 ### Added

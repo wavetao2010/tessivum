@@ -9,7 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tessivum::{
@@ -25,16 +25,16 @@ use tessivum::{
     llm::{LlmAdapter, LlmStream},
     persistence_jsonl::JsonlSessionPersistence,
     protocol::{
-        AgentCancelCause, ContentBlock, GenerateRequest, SessionEvent, SessionHeader,
-        SessionModelSelection, SessionPromptParams, SessionStatus, SurfaceOp, ToolCallId,
-        SESSION_FORMAT_VERSION,
+        AgentCancelCause, ContentBlock, FinishReason, GenerateRequest, MessageSource, SessionEvent,
+        SessionHeader, SessionModelSelection, SessionPromptParams, SessionStatus, StreamChunk,
+        SurfaceOp, ToolCallId, SESSION_FORMAT_VERSION,
     },
     session::SessionPersistence,
     settings::{
         Settings, SettingsError, SettingsEventKind, SettingsProvider, SettingsRegistration,
         AGENT_DEFAULT_MODEL_NAMESPACE, LLM_PI_AI_NAMESPACE,
     },
-    subagent::{SubagentHistoryRequest, SubagentMode},
+    subagent::{SubagentHistoryRequest, SubagentListEntry, SubagentMode, SubagentStatus},
     SessionId, TessivumError,
 };
 use tessivum_core::{
@@ -233,6 +233,279 @@ impl HostLlmAdapterFactory for BlockingFactory {
     }
 }
 
+struct BlockingStreamCancellationGuard {
+    cancellation: CancellationToken,
+    cancelled: Arc<AtomicUsize>,
+    notice: Arc<tokio::sync::Notify>,
+    observed: bool,
+}
+
+impl BlockingStreamCancellationGuard {
+    fn observe(&mut self) {
+        if !self.observed {
+            self.observed = true;
+            self.cancelled.fetch_add(1, Ordering::AcqRel);
+            self.notice.notify_one();
+        }
+    }
+}
+
+impl Drop for BlockingStreamCancellationGuard {
+    fn drop(&mut self) {
+        if self.cancellation.is_cancelled() {
+            self.observe();
+        }
+    }
+}
+
+struct HostedSubagentAdapter {
+    foreign_file: PathBuf,
+    completed_release: Arc<tokio::sync::Notify>,
+    completed_cancelled: Arc<AtomicUsize>,
+    killed_cancelled: Arc<AtomicUsize>,
+    killed_notice: Arc<tokio::sync::Notify>,
+    foreground_cancelled: Arc<AtomicUsize>,
+    foreground_notice: Arc<tokio::sync::Notify>,
+    foreground_resumed: Arc<AtomicUsize>,
+}
+
+impl HostedSubagentAdapter {
+    fn new(foreign_file: PathBuf) -> Self {
+        Self {
+            foreign_file,
+            completed_release: Arc::new(tokio::sync::Notify::new()),
+            completed_cancelled: Arc::new(AtomicUsize::new(0)),
+            killed_cancelled: Arc::new(AtomicUsize::new(0)),
+            killed_notice: Arc::new(tokio::sync::Notify::new()),
+            foreground_cancelled: Arc::new(AtomicUsize::new(0)),
+            foreground_notice: Arc::new(tokio::sync::Notify::new()),
+            foreground_resumed: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn blocking_stream(
+        cancellation: CancellationToken,
+        cancelled: Arc<AtomicUsize>,
+        notice: Arc<tokio::sync::Notify>,
+    ) -> LlmStream {
+        let wait_for_cancellation = cancellation.clone();
+        let mut guard = BlockingStreamCancellationGuard {
+            cancellation,
+            cancelled,
+            notice,
+            observed: false,
+        };
+        Box::pin(stream::once(async move {
+            wait_for_cancellation.cancelled().await;
+            guard.observe();
+            Err(TessivumError::new(
+                "CANCELLED",
+                "hosted fixture stream cancelled",
+                "test",
+                Value::Null,
+            ))
+        }))
+    }
+
+    fn released_stream(&self, cancellation: CancellationToken) -> LlmStream {
+        let release = Arc::clone(&self.completed_release);
+        let cancelled = Arc::clone(&self.completed_cancelled);
+        Box::pin(
+            stream::once(async move {
+                tokio::select! {
+                    _ = release.notified() => llm_text_turn("background-completed")
+                        .into_iter()
+                        .map(Ok)
+                        .collect::<Vec<_>>(),
+                    _ = cancellation.cancelled() => {
+                        cancelled.fetch_add(1, Ordering::AcqRel);
+                        vec![Err(TessivumError::new(
+                            "CANCELLED",
+                            "hosted background fixture cancelled",
+                            "test",
+                            Value::Null,
+                        ))]
+                    }
+                }
+            })
+            .flat_map(stream::iter),
+        )
+    }
+}
+
+struct HostedSubagentFactory(Arc<HostedSubagentAdapter>);
+
+impl HostLlmAdapterFactory for HostedSubagentFactory {
+    fn create(&self, _: &str, _: &str) -> Result<Arc<dyn LlmAdapter>, TessivumError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[async_trait]
+impl LlmAdapter for HostedSubagentAdapter {
+    async fn generate(
+        &self,
+        request: GenerateRequest,
+        cancellation: CancellationToken,
+    ) -> Result<LlmStream, TessivumError> {
+        let (prompt, after_tool) = latest_user_prompt(&request);
+        let chunks = match (prompt, after_tool) {
+            ("host-workspace-root", false) => llm_tool_turn(
+                "run_code",
+                json!({
+                    "description": "delegate through hosted PTC",
+                    "code": "return await tools.subagent({description: 'workspace child', prompt: 'host-workspace-child', run_in_background: false});"
+                }),
+            ),
+            ("host-workspace-child", false) => {
+                let foreign = serde_json::to_string(&self.foreign_file.to_string_lossy()).unwrap();
+                llm_tool_turn(
+                    "run_code",
+                    json!({
+                        "description": "read inherited workspace and delegate",
+                        "code": format!(
+                            "const own = await tools.read({{file_path:'owned.txt'}}); let foreignDenied = false; try {{ await tools.read({{file_path:{foreign}}}); }} catch (_) {{ foreignDenied = true; }} const nested = await tools.workflow({{script:\"phase('Run')\\nconst reply = await agent('host-workspace-grandchild')\\nreturn {{ reply }}\",meta:{{name:'workspace-grandchild'}}}}); return {{own:own.text,foreignDenied,nested:nested.text}};"
+                        )
+                    }),
+                )
+            }
+            ("host-workspace-grandchild", false) => {
+                let foreign = serde_json::to_string(&self.foreign_file.to_string_lossy()).unwrap();
+                llm_tool_turn(
+                    "run_code",
+                    json!({
+                        "description": "read nested inherited workspace",
+                        "code": format!(
+                            "const own = await tools.read({{file_path:'owned.txt'}}); let foreignDenied = false; try {{ await tools.read({{file_path:{foreign}}}); }} catch (_) {{ foreignDenied = true; }} return {{own:own.text,foreignDenied}};"
+                        )
+                    }),
+                )
+            }
+            ("host-timeout-root", false) => llm_tool_turn(
+                "run_code",
+                json!({
+                    "description": "exercise hosted cancellation ownership",
+                    "code": "const completed = await tools.subagent({description:'complete survivor',prompt:'host-background-completes',run_in_background:true}); const killed = await tools.subagent({description:'kill survivor',prompt:'host-background-kill',run_in_background:true}); try { await tools['jobs.wait']({jobId:completed.id,timeoutMs:10}); } catch (_) {} await tools.subagent({description:'foreground victim',prompt:'host-cancelled-foreground',run_in_background:false}); return {completed:completed.id,killed:killed.id};"
+                }),
+            ),
+            ("host-kill-background", false) => llm_tool_turn(
+                "run_code",
+                json!({
+                    "description": "kill surviving hosted background child",
+                    "code": "const jobs = JSON.parse((await tools['jobs.list']({})).text); const job = jobs.find(value => value.label.includes('kill survivor')); if (!job) throw new Error('kill survivor job missing'); return await tools['jobs.kill']({jobId:job.id});"
+                }),
+            ),
+            ("host-background-completes", false) => return Ok(self.released_stream(cancellation)),
+            ("host-background-kill", false) => {
+                return Ok(Self::blocking_stream(
+                    cancellation,
+                    Arc::clone(&self.killed_cancelled),
+                    Arc::clone(&self.killed_notice),
+                ));
+            }
+            ("host-cancelled-foreground", false) => llm_tool_turn(
+                "run_code",
+                json!({
+                    "description": "delegate blocked descendant through workflow",
+                    "code": "return await tools.workflow({script:\"phase('Run')\\nconst descendant = await agent('host-cancelled-descendant')\\nreturn { descendant }\",meta:{name:'foreground-descendant'}});"
+                }),
+            ),
+            ("host-cancelled-descendant", false) => {
+                return Ok(Self::blocking_stream(
+                    cancellation,
+                    Arc::clone(&self.foreground_cancelled),
+                    Arc::clone(&self.foreground_notice),
+                ));
+            }
+            ("host-workspace-root", true) => llm_text_turn("workspace-root-complete"),
+            ("host-workspace-child", true) => llm_text_turn("workspace-child-complete"),
+            ("host-workspace-grandchild", true) => llm_text_turn("workspace-grandchild-complete"),
+            ("host-timeout-root" | "host-kill-background", true) => {
+                llm_text_turn("hosted-timeout-step-complete")
+            }
+            ("host-cancelled-foreground", true) => {
+                self.foreground_resumed.fetch_add(1, Ordering::AcqRel);
+                llm_text_turn("unexpected-foreground-resume")
+            }
+            _ => llm_text_turn("hosted-fixture-idle"),
+        };
+        Ok(Box::pin(stream::iter(chunks.into_iter().map(Ok))))
+    }
+}
+
+fn latest_user_prompt(request: &GenerateRequest) -> (&str, bool) {
+    let Some((index, message)) = request
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| matches!(&message.source, MessageSource::User { .. }))
+    else {
+        return ("", false);
+    };
+    let prompt = message.content.iter().find_map(|block| match block {
+        ContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    let after_tool = request.messages[index + 1..].iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    });
+    (prompt.unwrap_or(""), after_tool)
+}
+
+fn llm_tool_turn(name: &str, arguments: Value) -> Vec<StreamChunk> {
+    let call_id = ToolCallId::from(format!("hosted-tool-{}", Uuid::new_v4().simple()));
+    let arguments = arguments.to_string();
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: "tool-call".into(),
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: call_id.clone(),
+            name: Some(name.into()),
+            arguments_delta: arguments.clone(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: call_id,
+                name: name.into(),
+                arguments,
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+            replay_state: None,
+        },
+    ]
+}
+
+fn llm_text_turn(text: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: "text".into(),
+        },
+        StreamChunk::TextDelta {
+            index: 0,
+            text: text.into(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::Text { text: text.into() },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::Stop,
+            replay_state: None,
+        },
+    ]
+}
+
 struct RetryDisposePlugin {
     fail_stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -284,6 +557,25 @@ fn config(root: &TempDir) -> HostConfig {
     config.provider = "cli-mock".into();
     config.model = "cli-mock".into();
     config.enable_trusted_bash = true;
+    config
+}
+
+fn hosted_subagent_config(root: &TempDir, adapter: Arc<HostedSubagentAdapter>) -> HostConfig {
+    let mode_root = root.path().join("test-modes");
+    let mode = mode_root.join("hosted-ptc");
+    fs::create_dir_all(&mode).unwrap();
+    fs::write(
+        mode.join("mode.toml"),
+        "schema = 1\nid = \"hosted-ptc\"\nname = \"Hosted PTC\"\ndescription = \"Host subagent integration fixture\"\n\n[prompt]\ncomplete = false\ntext = \"Use only the scripted tool call.\"\n\n[tools]\npresentation = \"programmatic\"\nenabled = [\"fs.read\", \"jobs.kill\", \"jobs.list\", \"jobs.wait\", \"subagent.spawn\", \"workflow.run\"]\n\n[capabilities]\nbun = true\nskills = false\nplanning = false\ncompaction = false\n",
+    )
+    .unwrap();
+    let mut config = HostConfig::new(root.path(), root.path().join("data"))
+        .with_agent_mode_root(mode_root, AgentModeTrust::User)
+        .with_include_user_mode_root(false)
+        .with_default_agent_mode(AgentModeId::new("hosted-ptc").unwrap())
+        .with_adapter_factory(Arc::new(HostedSubagentFactory(adapter)));
+    config.provider = "hosted-fixture".into();
+    config.model = "hosted-fixture".into();
     config
 }
 
@@ -439,6 +731,81 @@ async fn wait_for_event(host: &impl HostApi, session: SessionId) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("recorded prompt did not complete a turn");
+}
+
+async fn wait_for_turns(host: &impl HostApi, session: &SessionId, count: usize, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let turns = host
+                .events(session.clone(), 0)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "turn/end")
+                .count();
+            if turns >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("hosted turns complete");
+}
+
+async fn wait_for_job_status(host: &impl HostApi, session: &SessionId, label: &str, status: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if host
+                .events(session.clone(), 0)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event.event_type == "job/done"
+                        && event.data["job"]["label"]
+                            .as_str()
+                            .is_some_and(|value| value.contains(label))
+                        && event.data["job"]["status"].as_str() == Some(status)
+                })
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("hosted job reaches terminal status");
+}
+
+async fn child_with_label(
+    host: &impl HostApi,
+    parent: &SessionId,
+    entries: &[SubagentListEntry],
+    label: &str,
+) -> (SessionId, SubagentStatus) {
+    if let Some(child) = entries.iter().find_map(|entry| match entry {
+        SubagentListEntry::Child {
+            id,
+            status,
+            label: Some(value),
+            ..
+        } if value == label => Some((id.clone(), *status)),
+        _ => None,
+    }) {
+        return child;
+    }
+    let tool_results = host
+        .events(parent.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| (event.event_type == "tool/result").then_some(event.data))
+        .collect::<Vec<_>>();
+    panic!(
+        "missing hosted child {label}; parent tool/results: {}",
+        serde_json::to_string_pretty(&tool_results).unwrap()
+    );
 }
 
 #[test]
@@ -1435,6 +1802,232 @@ async fn host_persists_workspace_session_attachment_and_retries_ungrouped_blanks
         Some(default_workspace)
     );
     restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_ptc_subagents_inherit_workspace_and_deny_foreign_reads() {
+    let root = TempDir::new();
+    let foreign = TempDir::new();
+    fs::write(root.path().join("owned.txt"), "host-owned-marker").unwrap();
+    let foreign_file = foreign.path().join("secret.txt");
+    fs::write(&foreign_file, "foreign-workspace-marker").unwrap();
+    let adapter = Arc::new(HostedSubagentAdapter::new(foreign_file));
+    let runtime = HostRuntime::boot(hosted_subagent_config(&root, adapter))
+        .await
+        .unwrap();
+    let registry = runtime.workspace_registry().unwrap();
+    let canonical_root = root.path().canonicalize().unwrap();
+    let default_workspace = registry
+        .list()
+        .into_iter()
+        .find(|workspace| Path::new(&workspace.path) == canonical_root.as_path())
+        .unwrap()
+        .workspace_id;
+    let foreign_workspace = registry
+        .create(foreign.path(), None)
+        .unwrap()
+        .workspace
+        .workspace_id;
+    let root_session = SessionId::from("host-workspace-runtime");
+
+    runtime
+        .prompt(SessionPromptParams {
+            session_id: root_session.clone(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "host-workspace-root".into(),
+            }],
+            client_time_zone: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turns(&runtime, &root_session, 1, Duration::from_secs(20)).await;
+
+    let root_children = runtime.subagent_list(root_session.clone()).await.unwrap();
+    let (child, child_status) = child_with_label(
+        &runtime,
+        &root_session,
+        &root_children.entries,
+        "workspace child",
+    )
+    .await;
+    assert_eq!(child_status, SubagentStatus::Idle);
+    let child_children = runtime.subagent_list(child.clone()).await.unwrap();
+    let (grandchild, grandchild_status) = child_with_label(
+        &runtime,
+        &child,
+        &child_children.entries,
+        "host-workspace-grandchild",
+    )
+    .await;
+    assert_eq!(grandchild_status, SubagentStatus::Ready);
+    assert!(runtime
+        .events(child.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|event| event.event_type == "tool-workflow/agent-start"
+            && event.data["childId"].as_str() == Some(grandchild.as_str())));
+
+    for session in [&root_session, &child, &grandchild] {
+        assert_eq!(
+            registry
+                .workspace_for_session(session)
+                .unwrap()
+                .workspace_id,
+            default_workspace
+        );
+        assert_ne!(
+            registry
+                .workspace_for_session(session)
+                .unwrap()
+                .workspace_id,
+            foreign_workspace
+        );
+    }
+    for session in [&child, &grandchild] {
+        let result = runtime
+            .events(session.clone(), 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == "tool/result")
+            .unwrap();
+        assert_eq!(
+            result.data["meta"]["codeDispatches"][1]["data"]["isError"],
+            false
+        );
+        assert_eq!(
+            result.data["meta"]["codeDispatches"][3]["data"]["isError"],
+            true
+        );
+        let result = serde_json::to_string(&result.data).unwrap();
+        assert!(result.contains("host-owned-marker"));
+        assert!(!result.contains("foreign-workspace-marker"));
+    }
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_ptc_timeout_cancels_only_foreground_and_preserves_background_jobs() {
+    let root = TempDir::new();
+    let foreign = TempDir::new();
+    let adapter = Arc::new(HostedSubagentAdapter::new(
+        foreign.path().join("unused.txt"),
+    ));
+    let runtime = HostRuntime::boot(hosted_subagent_config(&root, Arc::clone(&adapter)))
+        .await
+        .unwrap();
+    let root_session = SessionId::from("host-timeout-runtime");
+
+    runtime
+        .prompt(SessionPromptParams {
+            session_id: root_session.clone(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "host-timeout-root".into(),
+            }],
+            client_time_zone: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(70),
+        adapter.foreground_notice.notified(),
+    )
+    .await
+    .expect("the real hosted run_code wall-clock limit cancels its foreground child");
+    wait_for_turns(&runtime, &root_session, 1, Duration::from_secs(10)).await;
+    assert_eq!(adapter.foreground_cancelled.load(Ordering::Acquire), 1);
+    assert_eq!(adapter.completed_cancelled.load(Ordering::Acquire), 0);
+    assert_eq!(adapter.killed_cancelled.load(Ordering::Acquire), 0);
+    assert_eq!(adapter.foreground_resumed.load(Ordering::Acquire), 0);
+
+    let children = runtime.subagent_list(root_session.clone()).await.unwrap();
+    let (foreground, foreground_status) = child_with_label(
+        &runtime,
+        &root_session,
+        &children.entries,
+        "foreground victim",
+    )
+    .await;
+    assert_eq!(foreground_status, SubagentStatus::Ready);
+    let descendants = runtime.subagent_list(foreground.clone()).await.unwrap();
+    let (descendant, descendant_status) = child_with_label(
+        &runtime,
+        &foreground,
+        &descendants.entries,
+        "host-cancelled-descendant",
+    )
+    .await;
+    assert_eq!(descendant_status, SubagentStatus::Ready);
+    assert!(runtime
+        .events(foreground.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|event| event.event_type == "tool-workflow/agent-start"
+            && event.data["childId"].as_str() == Some(descendant.as_str())));
+    assert_eq!(
+        child_with_label(
+            &runtime,
+            &root_session,
+            &children.entries,
+            "complete survivor",
+        )
+        .await
+        .1,
+        SubagentStatus::Running
+    );
+    assert_eq!(
+        child_with_label(&runtime, &root_session, &children.entries, "kill survivor",)
+            .await
+            .1,
+        SubagentStatus::Running
+    );
+
+    adapter.completed_release.notify_one();
+    wait_for_job_status(&runtime, &root_session, "complete survivor", "completed").await;
+    assert_eq!(adapter.completed_cancelled.load(Ordering::Acquire), 0);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if runtime.status(root_session.clone()).await.unwrap() == Some(SessionStatus::Idle) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("root becomes idle after background completion delivery");
+    let previous_turns = runtime
+        .events(root_session.clone(), 0)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| event.event_type == "turn/end")
+        .count();
+    runtime
+        .prompt(SessionPromptParams {
+            session_id: root_session.clone(),
+            content_blocks: vec![ContentBlock::Text {
+                text: "host-kill-background".into(),
+            }],
+            client_time_zone: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), adapter.killed_notice.notified())
+        .await
+        .expect("jobs.kill cancels the surviving background child");
+    wait_for_turns(
+        &runtime,
+        &root_session,
+        previous_turns + 1,
+        Duration::from_secs(10),
+    )
+    .await;
+    wait_for_job_status(&runtime, &root_session, "kill survivor", "killed").await;
+    assert_eq!(adapter.killed_cancelled.load(Ordering::Acquire), 1);
+    assert_eq!(adapter.completed_cancelled.load(Ordering::Acquire), 0);
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
