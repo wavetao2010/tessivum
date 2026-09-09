@@ -70,14 +70,24 @@ Extend `scripts/check-windows-node-unicode-fs.test.mjs` and
 `scripts/check_compat_baseline.py` with equivalent fail-closed checks. Each
 checker must isolate the Windows job and the executable PowerShell blocks in
 the source guide, enumerate actual Cargo command lines, and require the exact
-bounded forms.
+`--jobs 1` forms before any Cargo `--` argument separator.
 
-The checks must reject at least these mutations:
+Both the Node and Python checks must independently reject each of these
+mutations:
 
 - removing `--jobs 1` from one Windows CI Cargo command;
-- changing the value to a larger job count;
+- changing the value to `--jobs 2` or a larger job count;
+- replacing the exact form with a non-exact spelling such as `-j 1` or
+  `--jobs=1`;
 - leaving an unbounded Group 12 command in the source guide;
-- placing the required text only in a comment or unrelated workflow job.
+- placing the required command only in another workflow job;
+- placing the required command only in a YAML or PowerShell comment;
+- placing the required source-guide command only in a non-executable Markdown
+  fence such as `text`.
+
+A decoy cannot compensate for a missing, unbounded, or malformed command in the
+actual Windows job or executable PowerShell block. Each mutation must assert
+the expected failure from the checker under test, not merely any failure.
 
 The source contract supplements execution evidence. It does not claim that a
 text match proves memory behavior.
@@ -91,7 +101,9 @@ Implementation follows these red-green cycles:
 2. Add the equivalent Python baseline assertion and observe the same RED.
 3. Add source-guide assertions for Groups 10-12, 14-15, and 16 and observe
    their unbounded-command failures.
-4. Add focused mutations for a removed bound, a changed value, and a decoy.
+4. Add the full focused mutation matrix for a removed bound, larger value,
+   non-exact spelling, other-job decoy, comment decoy, and non-executable-fence
+   decoy in both contracts.
 5. Update only the Windows workflow and source guide commands.
 6. Run both Node runtimes, the exact-source Python baseline, and PowerShell AST
    validation.
