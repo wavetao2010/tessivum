@@ -37,7 +37,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 | Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.26/tessivum-0.1.0-alpha.26-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.26/tessivum-0.1.0-alpha.26-x86_64-unknown-linux-gnu.tar.gz.sha256) |
 | Windows 原生 | x86_64/ARM64 | 暂未发布 | — |
 
-以上为 Alpha.26 发行坐标；产物可用性等待发行工作流完成及下载验证。
+Alpha.26 已发布。四个平台归档与第一方市场包均已下载并通过 SHA-256 校验，四个原生发行 runner 的包内运行检查通过；macOS Apple Silicon 已实测全新安装、从 Alpha.25 升级，以及卸载后保留会话历史。
 
 现有安装器**并非只能用于 macOS**：它会自动识别 macOS/Linux 的 x86_64 与 ARM64。Windows 原生版本尚未通过发布构建、归档、启动器、插件、Browser、升级和进程清理门槛。Windows 用户可以暂时在 WSL2 内运行 Linux 包，但这条路径尚未经过发布验证；Linux `.tar.gz` 不能直接作为 Windows 原生程序运行。
 

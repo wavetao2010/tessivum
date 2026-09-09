@@ -82,6 +82,12 @@ test('navigation panes preserve the seeded search, trajectory, export, timeline,
   expect(fixtureUserPrompts(sourceSeed)).toEqual([PROMPT_TURN1, PROMPT_TURN2])
   const harness = await RustWebHarness.launch({
     name: 'navigation-panes-web-e2e', locale: 'en-US', viewport: { width: 1680, height: 1000 },
+    env: { OPENAI_MODEL: 'fixture', OPENAI_BASE_URL: 'http://127.0.0.1:1', TESSIVUM_LLM_AUTH: 'none' },
+    beforePage: async candidate => {
+      expect((await candidate.rpc('session.selectModel', {
+        sessionId: SEED_ID, provider: 'openai-responses', model: 'fixture',
+      })).ok).toBe(true)
+    },
     beforeStart: async candidate => {
       await mkdir(candidate.workspace, { recursive: true })
       await Promise.all([

@@ -20,6 +20,7 @@ test('slash suggestions expose every user-invocable skill and label model-hidden
   const harness = await RustWebHarness.launch({
     name: 'skill-invocation-policy-web-e2e',
     locale: 'en-US',
+    env: { OPENAI_MODEL: 'fixture', OPENAI_BASE_URL: 'http://127.0.0.1:1', TESSIVUM_LLM_AUTH: 'none' },
     beforeStart: async candidate => {
       for (const skill of SKILLS) {
         const directory = join(candidate.workspace, '.agents', 'skills', skill.name)

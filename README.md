@@ -37,7 +37,7 @@ Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exac
 | Linux (glibc) | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.26/tessivum-0.1.0-alpha.26-x86_64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.26/tessivum-0.1.0-alpha.26-x86_64-unknown-linux-gnu.tar.gz.sha256) |
 | Windows native | x86_64/ARM64 | Not published | — |
 
-These Alpha.26 coordinates are prepared for the release. Availability remains pending release-workflow completion and downloaded-artifact verification.
+Alpha.26 is published. All four archives and the first-party market package have been downloaded and SHA-256 verified; native package smoke checks passed on all four release runners. Fresh installation, upgrade from Alpha.25, and uninstall with retained session history were exercised on macOS Apple Silicon.
 
 The existing installer is **not macOS-only**: it detects both macOS and Linux on x86_64/ARM64. Native Windows has not passed the release build, archive, launcher, plugin, Browser, upgrade, or process-cleanup gates. Windows users can run the Linux package inside WSL2 as an unverified workaround; a Linux archive is not a native Windows executable.
 

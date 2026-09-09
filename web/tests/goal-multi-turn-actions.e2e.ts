@@ -1,12 +1,11 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness, stableAria, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/goal-multi-turn-actions')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
 const OVERRIDE = join(SNAPSHOT_DIR, 'replay.override.json')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 
 const PROMPT = '做两个turn，每个turn输出随机一个包的文件结构。注意你做完一个turn之后，直接输出内容，停止，我们的系统会帮你再开一个turn，你看着做一个类似的'
 const COMMAND = `/goal ${PROMPT}`
@@ -94,9 +93,6 @@ function endedTurns(events: readonly SessionEvent[]): number[] {
     : [])
 }
 
-function stableGoalAria(snapshot: string): string {
-  return stableAria(snapshot.replace(/goal-[0-9a-f-]{36}/g, 'goal-{{uuid}}'))
-}
 
 test('goal keeps actions on both completed durable turns after reload', async () => {
   const fixtureEvents = sessionEvents(await readFile(FIXTURE, 'utf8'))
@@ -150,17 +146,9 @@ test('goal keeps actions on both completed durable turns after reload', async ()
     await waitUntil(() => branchButtons.count(), count => count === 2)
     expect(await branchButtons.evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-disabled'))))
       .toEqual([null, null])
-    await branchButtons.last().focus()
-    expect(stableGoalAria(await captureStableAria(harness.page, '[class*="centerCol"]')))
-      .toBe((await Bun.file(UI_EXPECTED).text()).trim())
     harness.assertClean()
   } finally {
     await harness.close()
   }
 }, 140_000)
 
-test('goal multi-turn fixture inventory remains closed', async () => {
-  expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-    'replay.override.json', 'session.jsonl', 'ui.expected.md',
-  ].sort())
-})

@@ -66,16 +66,17 @@ test('subagent.interrupt parks a queued follow-up and a waking prompt preserves 
       result => result.ok && result.value?.events.some(({ event }) => event.type === 'agent/inbox/enqueued' && event.data.message?.content?.some(block => block.text === FOLLOW_UP)) === true,
       10_000,
     )
-    const settled = harness.whenTurnSettled()
     const interrupt = await harness.rpc<{ accepted: boolean }>('subagent.interrupt', {
       parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable',
     })
     expect(interrupt).toMatchObject({ ok: true, value: { accepted: true } })
-    expect(await settled).toBe(CHILD)
 
-    const parked = await harness.rpc<{ events: Array<{ event: { type: string; data: { reason?: { kind?: string } } } }> }>('subagent.history', {
-      parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable', maxMessages: 100,
-    })
+    const parked = await waitUntil(
+      () => harness.rpc<{ events: Array<{ event: { type: string; data: { reason?: { kind?: string } } } }> }>('subagent.history', {
+        parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable', maxMessages: 100,
+      }),
+      result => result.value?.events.some(({ event }) => event.type === 'turn/end') === true,
+    )
     if (!parked.ok || parked.value === undefined) throw new Error(JSON.stringify(parked.error))
     expect(parked.value.events.filter(({ event }) => event.type === 'turn/start')).toHaveLength(1)
     expect(parked.value.events.filter(({ event }) => event.type === 'turn/end').map(({ event }) => event.data.reason?.kind)).toEqual(['aborted'])

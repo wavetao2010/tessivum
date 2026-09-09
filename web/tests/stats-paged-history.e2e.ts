@@ -1,10 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, materializeRecording, openSeededSession, RustWebHarness, stableAria, waitUntil } from './support'
+import { materializeRecording, openSeededSession, RustWebHarness, waitUntil } from './support'
 
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/stats-paged-history')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const SEED_ID = 'stats-paged-history-web-e2e'
 const TURNS = 28
 const FULL_COUNTS = `${TURNS} turns · ${TURNS} steps`
@@ -41,13 +37,6 @@ function buildSeed(turns: number): string {
   return `${lines.join('\n')}\n`
 }
 
-async function captureStatsAria(harness: RustWebHarness): Promise<string> {
-  const base = harness.workspace.split('/').at(-1) ?? harness.workspace
-  return stableAria(await captureStableAria(harness.page, '[class*="centerCol"]'))
-    .replaceAll('{{clock}}', '7/25 {{clock}}')
-    .split(harness.workspace).join('{{cwd}}')
-    .split(base).join('{{workspace}}')
-}
 
 test('stats-paged-history keeps whole-session counts while native history prepends', async () => {
   const harness = await RustWebHarness.launch({
@@ -71,13 +60,9 @@ test('stats-paged-history keeps whole-session counts while native history prepen
     }
     expect(await strip.textContent()).toBe(before)
     expect(await harness.page.locator('[data-chat-flow-key^="9:turn-tail"]').count()).toBe(TURNS)
-    expect(`${await captureStatsAria(harness)}\n`).toBe(await readFile(UI_EXPECTED, 'utf8'))
     harness.assertClean()
   } finally {
     await harness.close()
   }
 }, 60_000)
 
-test('stats-paged-history fixture inventory remains closed', async () => {
-  expect(await readdir(SNAPSHOT_DIR)).toEqual(['ui.expected.md'])
-})

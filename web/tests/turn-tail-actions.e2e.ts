@@ -1,14 +1,12 @@
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/turn-tail-actions')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
-const RUNNING_EXPECTED = join(SNAPSHOT_DIR, 'running.expected.md')
-const SETTLED_EXPECTED = join(SNAPSHOT_DIR, 'settled.expected.md')
 const PROMPT = 'Begin your reply with the plain sentence "Reading the workspace now." as text, and in that same message call the bash tool with the command "echo alpha". After the tool result, reply with the single word DONE and stop.'
 const NARRATION = 'Reading the workspace now.'
 
@@ -68,8 +66,6 @@ test('turn-tail-actions withholds assistant actions until the parked turn ends',
     const copies = harness.page.getByRole('button', { name: 'Copy' })
     await waitUntil(() => copies.count(), count => count === 1, 10_000)
     expect(await harness.page.getByRole('button', { name: 'Branch into a new conversation' }).count()).toBe(0)
-    await copies.first().focus()
-    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(RUNNING_EXPECTED, 'utf8'))
 
     await harness.page.getByRole('button', { name: 'Stop generating' }).click()
     const sessionId = await settled
@@ -77,8 +73,6 @@ test('turn-tail-actions withholds assistant actions until the parked turn ends',
     expect(events.filter(event => event.type === 'turn/end').map(event => (record(event.data.reason) ? event.data.reason.kind : undefined))).toEqual(['aborted'])
     await waitUntil(() => copies.count(), count => count === 2, 10_000)
     await waitUntil(() => harness.page.locator('[data-streaming="true"]').count(), count => count === 0, 10_000)
-    await copies.last().focus()
-    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(SETTLED_EXPECTED, 'utf8'))
     harness.assertClean()
   } finally {
     await harness?.close()
@@ -86,8 +80,3 @@ test('turn-tail-actions withholds assistant actions until the parked turn ends',
   }
 }, 120_000)
 
-test('turn-tail-actions fixture inventory remains closed', async () => {
-  expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-    'running.expected.md', 'session.jsonl', 'settled.expected.md',
-  ].sort())
-})

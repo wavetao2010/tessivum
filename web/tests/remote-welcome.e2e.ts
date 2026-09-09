@@ -8,7 +8,6 @@ test('authorized remote startup stays usable across reload and device revocation
     locale: 'zh-CN',
     remoteAuthority: 'remote.localhost',
     viewport: { width: 320, height: 760 },
-    showWelcomeNotice: true,
   })
   try {
     const textarea = harness.page.locator('textarea').first()

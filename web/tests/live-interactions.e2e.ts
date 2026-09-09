@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/live-interactions')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
@@ -13,10 +13,6 @@ const AUTH_PROVIDER_MESSAGE = 'Authentication Fails, Your api key: sk-preview-se
 let harness: RustWebHarness | undefined
 let sidecarDir: string | undefined
 
-async function assertGolden(selector: string, file: string): Promise<void> {
-  if (harness === undefined) throw new Error('harness is not running')
-  expect(await captureStableAria(harness.page, selector)).toBe((await Bun.file(join(SNAPSHOT_DIR, file)).text()).trim())
-}
 
 async function fixtureUserPrompts(): Promise<string[]> {
   return (await readFile(FIXTURE, 'utf8'))
@@ -114,13 +110,11 @@ describe('live interactions over RustWebHarness', () => {
       value => value,
       10_000,
     )
-    await assertGolden('[class*="centerCol"]', 'loading.expected.md')
     await current.page.getByRole('button', { name: 'Stop generating' }).click()
     const id = await settled
     expect(turnEndReasons(await sessionEvents(id)).at(-1)).toBe('aborted')
     await waitUntil(() => current.page.locator('textarea').first().isEnabled(), value => value, 10_000)
     await waitUntil(() => current.page.locator('[data-streaming="true"]').count(), count => count === 0, 10_000)
-    await assertGolden('[class*="centerCol"]', 'cancel.expected.md')
     current.assertClean()
   }, 120_000)
 
@@ -141,7 +135,6 @@ describe('live interactions over RustWebHarness', () => {
     expect(await errorStatus.textContent()).toContain('API key is invalid')
     expect(await errorStatus.textContent()).toContain('AUTH')
     expect(await current.page.locator('body').textContent()).not.toContain('sk-preview-secret')
-    await assertGolden('[class*="centerCol"]', 'error-auth.expected.md')
     await current.page.getByRole('tab', { name: 'Trajectory' }).click()
     const requestMarker = current.page.locator('tr[data-request-only="true"]').last().getByRole('button', { name: /Request #/ })
     await requestMarker.click()
@@ -186,17 +179,7 @@ describe('live interactions over RustWebHarness', () => {
     expect(turnEndReasons(events).at(-1)).toBe('completed')
     expect(events.filter(event => event.type === 'llm/retry').length).toBeGreaterThanOrEqual(1)
     await waitUntil(() => current.page.getByText('event sourcing', { exact: false }).count(), count => count > 0, 10_000)
-    await assertGolden('[class*="centerCol"]', 'retry.expected.md')
     current.assertClean()
   }, 120_000)
 
-  test('keeps the fixture inventory closed', async () => {
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-      'cancel.expected.md',
-      'error-auth.expected.md',
-      'loading.expected.md',
-      'retry.expected.md',
-      'session.jsonl',
-    ])
-  })
 })

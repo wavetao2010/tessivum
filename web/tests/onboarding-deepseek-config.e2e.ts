@@ -7,8 +7,6 @@ test('fresh startup is vendor-neutral and model configuration remains opt-in', a
   const harness = await RustWebHarness.launch({
     name: 'neutral-startup-web-e2e',
     locale: 'zh-CN',
-    showWelcomeNotice: true,
-    preserveCredentialOnboarding: true,
     env: { ANTHROPIC_API_KEY: '', DEEPSEEK_API_KEY: '', OPENAI_API_KEY: '' },
   })
   try {

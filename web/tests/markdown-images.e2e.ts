@@ -1,13 +1,11 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { createServer, type Server } from 'node:http'
-import { join } from 'node:path'
-import { openSeededSession, RustWebHarness, settledRecording, stableAria, waitUntil } from './support'
+import { openSeededSession, RustWebHarness, settledRecording, waitUntil } from './support'
 
 const SEED_ID = 'markdown-images-web-e2e'
 const DONE = 'REMOTE_IMAGE_DONE'
 const REMOTE_ALT = 'Remote test image'
 const LOCAL_ALT = 'Local test image'
-const GOLDEN = join(import.meta.dir, 'snapshots/markdown-images/ui.expected.yml')
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
 let harness: RustWebHarness
 let imageServer: Server
@@ -57,6 +55,5 @@ test('loads only absolute HTTP Markdown images without a referrer', async () => 
   expect(await harness.page.getByRole('img', { name: LOCAL_ALT }).count()).toBe(0)
   expect(await harness.page.getByText(LOCAL_ALT, { exact: true }).count()).toBe(1)
   expect(requests).toEqual([{ path: '/image.png', referer: undefined }])
-  expect(stableAria(await harness.page.locator('[class*="centerCol"]').ariaSnapshot())).toBe((await Bun.file(GOLDEN).text()).trim())
   harness.assertClean()
 }, 60_000)

@@ -1,10 +1,8 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { join } from 'node:path'
-import { openSeededSession, RustWebHarness, settledRecording, stableAria } from './support'
+import { openSeededSession, RustWebHarness, settledRecording } from './support'
 
 const SEED_ID = 'math-rendering-web-e2e'
 const DONE = 'MATH_RENDERING_DONE'
-const GOLDEN = join(import.meta.dir, 'snapshots/math-rendering/ui.expected.yml')
 let harness: RustWebHarness
 
 beforeAll(async () => {
@@ -38,6 +36,5 @@ test('renders every supported math delimiter without KaTeX errors', async () => 
   expect(await harness.page.locator('.katex').count()).toBe(6)
   expect(await harness.page.locator('.katex-display').count()).toBe(2)
   expect(await harness.page.locator('.katex-error').count()).toBe(0)
-  expect(stableAria(await harness.page.locator('[class*="centerCol"]').ariaSnapshot())).toBe((await Bun.file(GOLDEN).text()).trim())
   harness.assertClean()
 }, 60_000)

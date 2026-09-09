@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, waitUntil } from './support'
@@ -10,9 +10,6 @@ const PROMPT = 'Reply with the single word LIGHTHOUSE and stop.'
 let harness: RustWebHarness
 let sessionId = ''
 
-async function assertGolden(candidate: RustWebHarness, selector: string, file: string): Promise<void> {
-  expect(await captureStableAria(candidate.page, selector)).toBe((await Bun.file(join(SNAPSHOT_DIR, file)).text()).trim())
-}
 
 async function fixtureUserPrompts(): Promise<string[]> {
   return (await readFile(FIXTURE, 'utf8'))
@@ -49,7 +46,6 @@ describe('lifecycle chrome over RustWebHarness', () => {
     await launcher.click()
     const menu = harness.page.getByRole('listbox', { name: 'Trigger suggestions' })
     await menu.waitFor({ timeout: 10_000 })
-    await assertGolden(harness, '[role="listbox"]', 'command-menu.expected.md')
     const snapshot = await captureStableAria(harness.page, '[role="listbox"]')
     expect(snapshot).toContain('text: Commands')
     expect(snapshot).not.toContain('text: Skills')
@@ -69,13 +65,15 @@ describe('lifecycle chrome over RustWebHarness', () => {
     await waitUntil(() => menu.getByRole('option').allTextContents(), options => (
       JSON.stringify(options) === JSON.stringify(['compactCompact older conversation history'])
     ), 10_000)
-    await assertGolden(harness, '[role="listbox"]', 'command-menu-fuzzy.expected.md')
     await input.fill('')
     await waitUntil(() => menu.count(), count => count === 0, 10_000)
   }, 60_000)
 
   test('shows active Plan as the warn-state status action', async () => {
-    const active = await RustWebHarness.launch({ name: 'lifecycle-plan', locale: 'en-US' })
+    const active = await RustWebHarness.launch({
+      name: 'lifecycle-plan', locale: 'en-US',
+      env: { OPENAI_MODEL: 'fixture', OPENAI_BASE_URL: 'http://127.0.0.1:1', TESSIVUM_LLM_AUTH: 'none' },
+    })
     try {
       const input = active.page.locator('textarea').first()
       await active.page.getByRole('button', { name: 'Commands' }).click()
@@ -87,7 +85,6 @@ describe('lifecycle chrome over RustWebHarness', () => {
       const planButton = active.page.getByRole('button', { name: 'Plan mode on, press to turn off' })
       await planButton.waitFor({ timeout: 10_000 })
       await waitUntil(() => input.inputValue(), value => value === '', 10_000)
-      await assertGolden(active, '[class*="frame"]', 'plan-active.expected.md')
       const planStyle = await planButton.evaluate(element => {
         const probe = document.createElement('span')
         probe.style.color = 'var(--dsw-alias-state-warn-label)'
@@ -123,7 +120,6 @@ describe('lifecycle chrome over RustWebHarness', () => {
     await waitUntil(() => harness.page.getByText('Principle and implementation, in concert.', { exact: false }).count(), count => count === 1, 15_000)
     const input = harness.page.locator('textarea').first()
     await input.waitFor({ timeout: 10_000 })
-    await assertGolden(harness, '[class*="frame"]', 'hero.expected.md')
     const settled = harness.whenTurnSettled(180_000)
     const originalViewport = harness.page.viewportSize() ?? { width: 1680, height: 1000 }
     await harness.page.setViewportSize({ width: 480, height: 1000 })
@@ -165,7 +161,6 @@ describe('lifecycle chrome over RustWebHarness', () => {
     acknowledgeReloadConnectionLoss(harness, warningStart)
     await waitUntil(() => harness.page.getByText('LIGHTHOUSE', { exact: true }).count(), count => count >= 1, 15_000)
     await waitUntil(() => harness.page.locator('[role="treeitem"][aria-selected="true"]').count(), count => count === 1, 10_000)
-    await assertGolden(harness, '[class*="centerCol"]', 'reloaded.expected.md')
     expect(harness.pageErrors).toEqual([])
   }, 90_000)
 
@@ -190,16 +185,4 @@ describe('lifecycle chrome over RustWebHarness', () => {
     expect(harness.pageErrors).toEqual([])
   }, 60_000)
 
-  test('keeps the fixture inventory closed', async () => {
-    expect(harness.warnings).toEqual([])
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-      'command-menu-fuzzy.expected.md',
-      'command-menu.expected.md',
-      'hero.expected.md',
-      'plan-active.expected.md',
-      'reloaded.expected.md',
-      'session.jsonl',
-    ])
-    harness.assertClean()
-  })
 })

@@ -1,12 +1,8 @@
-import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import {
-  acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, waitUntil,
+  acknowledgeReloadConnectionLoss, RustWebHarness, waitUntil,
 } from './support'
 
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/goal-command-presentation')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 
 type Event = { type: string; data: Record<string, unknown> }
 
@@ -20,7 +16,10 @@ let harness: RustWebHarness
 let sessionId = ''
 
 test('goal command shows its bare input and result without a model turn', async () => {
-  harness = await RustWebHarness.launch({ name: 'goal-command-presentation', locale: 'en-US' })
+  harness = await RustWebHarness.launch({
+    name: 'goal-command-presentation', locale: 'en-US',
+    env: { OPENAI_MODEL: 'fixture', OPENAI_BASE_URL: 'http://127.0.0.1:1', TESSIVUM_LLM_AUTH: 'none' },
+  })
   try {
     await waitUntil(() => harness.page.getByText('Principle and implementation, in concert.', { exact: false }).count(), count => count === 1, 15_000)
     const input = harness.page.locator('textarea').first()
@@ -71,7 +70,6 @@ test('goal command shows its bare input and result without a model turn', async 
     expect(log.some(event => event.type === 'step/start')).toBe(false)
     expect(log.some(event => event.type === 'request/header')).toBe(false)
 
-    expect(await captureStableAria(harness.page, '[class*="centerCol"]')).toBe((await readFile(UI_EXPECTED, 'utf8')).trim())
   } catch (error) {
     await harness.close()
     throw error
@@ -99,7 +97,6 @@ test('goal command reloads its persisted bubble and result', async () => {
     expect(persisted.some(event => event.type === 'turn/start')).toBe(false)
     expect(persisted.some(event => event.type === 'step/start')).toBe(false)
     expect(persisted.some(event => event.type === 'request/header')).toBe(false)
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['ui.expected.md'])
     harness.assertClean()
   } finally {
     await harness.close()

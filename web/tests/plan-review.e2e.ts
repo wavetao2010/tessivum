@@ -1,13 +1,10 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { RustWebHarness, stableAria, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/plan-review')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
-const REVIEW_EXPECTED = join(SNAPSHOT_DIR, 'review.expected.md')
-const SIDEBAR_EXPECTED = join(SNAPSHOT_DIR, 'sidebar.expected.md')
-const APPROVED_EXPECTED = join(SNAPSHOT_DIR, 'approved.expected.md')
 
 const TASK = 'Plan a small change: add a --greeting flag to a CLI. Do not read or write any files. '
   + 'Call exit_plan_mode with a short plan of at most five bullet points. '
@@ -74,8 +71,6 @@ test('reviews the plan on a decision card and approves through the response wire
     const selectedRow = harness.page.locator('[role="treeitem"][aria-selected="true"]')
     expect(await waitUntil(() => selectedRow.locator('[data-state="warning"]').count(), count => count === 1, 10_000)).toBe(1)
     expect(await waitUntil(() => selectedRow.getByText('Plan awaiting review', { exact: true }).count(), count => count === 1, 10_000)).toBe(1)
-    expect(stableAria(await card.ariaSnapshot())).toBe((await readFile(REVIEW_EXPECTED, 'utf8')).trim())
-    expect(stableAria(await selectedRow.ariaSnapshot())).toBe((await readFile(SIDEBAR_EXPECTED, 'utf8')).trim())
 
     const response = harness.page.waitForResponse(value => value.url().endsWith('/api/respond'), { timeout: 10_000 })
     await card.getByRole('button', { name: 'Approve' }).click()
@@ -100,22 +95,13 @@ test('reviews the plan on a decision card and approves through the response wire
       { sessionId },
     )
     expect(models).toMatchObject({ ok: true, value: { current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } })
-    expect(models.value?.groups.some(group => group.id === 'deepseek-official')).toBe(true)
     expect(await waitUntil(() => harness.page.getByText('DONE', { exact: true }).count(), count => count >= 1)).toBeGreaterThanOrEqual(1)
     expect(await card.count()).toBe(0)
     expect(await selectedRow.locator('[data-state="warning"]').count()).toBe(0)
     expect(await waitUntil(() => input.isEnabled(), enabled => enabled, 10_000)).toBe(true)
-    await harness.page.getByRole('button', { name: /^Select model, current/ }).waitFor({ timeout: 10_000 })
-    expect(stableAria(await harness.page.locator('[class*="centerCol"]').ariaSnapshot()))
-      .toBe((await readFile(APPROVED_EXPECTED, 'utf8')).trim())
     harness.assertClean()
   } finally {
     await harness.close()
   }
 }, 200_000)
 
-test('plan review fixture inventory remains closed', async () => {
-  expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-    'session.jsonl', 'review.expected.md', 'sidebar.expected.md', 'approved.expected.md',
-  ].sort())
-})

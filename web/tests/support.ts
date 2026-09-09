@@ -37,8 +37,6 @@ export interface RustWebOptions {
   locale?: string
   remoteAuthority?: string
   timeZoneId?: string
-  showWelcomeNotice?: boolean
-  preserveCredentialOnboarding?: boolean
   replayFixture?: string
   deepSeekSearch?: { baseURL: string; apiKeyEnv: string; apiKey?: string }
   replayRecording?: string | (() => string)
@@ -278,26 +276,7 @@ export class RustWebHarness {
         await harness.page.reload({ waitUntil: 'domcontentloaded' })
         await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
       }
-      if (options.showWelcomeNotice !== true) {
-        const declaration = harness.page.getByRole('dialog', { name: /Internal Testing Notice|内测声明/ })
-        try {
-          await declaration.waitFor({ timeout: 10_000 })
-          await declaration.getByRole('button', { name: /Continue|继续/ }).click()
-          await declaration.waitFor({ state: 'hidden', timeout: 15_000 })
-        } catch (error) {
-          if (await declaration.count() !== 0) throw error
-        }
-        if (options.preserveCredentialOnboarding !== true) {
-          const credential = harness.page.getByRole('dialog', { name: /Add an API Key to get started|添加一个 API Key 开始使用/i })
-          try {
-            await credential.waitFor({ timeout: 3_000 })
-            await credential.getByRole('button', { name: /Configure later|稍后配置/ }).click()
-            await credential.waitFor({ state: 'hidden', timeout: 15_000 })
-          } catch (error) {
-            if (await credential.count() !== 0) throw error
-          }
-        }
-      }
+      await waitUntil(() => harness.sessions(), sessions => sessions.some(session => session.blank), 15_000)
       return harness
     } catch (error) {
       await harness.close()
@@ -375,7 +354,7 @@ export class RustWebHarness {
         const candidates = (await this.sessions())
           .filter(item => !baseline.has(item.sessionId) || item.updatedAt > (baseline.get(item.sessionId) ?? 0))
           .sort((left, right) => right.updatedAt - left.updatedAt)
-        const settled = candidates.find(item => !item.running)
+        const settled = candidates.find(item => !item.blank && !item.running)
         if (settled !== undefined) return settled.sessionId
         await Bun.sleep(50)
       }

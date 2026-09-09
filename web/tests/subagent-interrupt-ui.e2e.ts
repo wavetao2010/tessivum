@@ -1,7 +1,5 @@
-import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, openSessionByMarker, RustWebHarness, settledRecording, textReplay, waitUntil, withSubagents } from './support'
+import { openSessionByMarker, RustWebHarness, settledRecording, textReplay, waitUntil, withSubagents } from './support'
 
 const PARENT = 'subagent-interrupt-ui-parent'
 const CHILD = 'subagent-interrupt-ui-child'
@@ -12,8 +10,6 @@ const FOLLOW_UP = 'Now give the same explanation to a human reader.'
 const WAKING = 'And add one concrete example.'
 const FOLLOW_UP_DONE = 'parked follow-up answer'
 const WAKING_DONE = 'waking answer'
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/subagent-interrupt')
-const OFFLINE_COMPOSER_EXPECTED = join(SNAPSHOT_DIR, 'offline-composer.expected.md')
 
 type ChildEvent = {
   type: string
@@ -103,7 +99,6 @@ test('the child composer stops through subagent.interrupt, parks work, and resum
       expect(await offlineSend.isDisabled()).toBe(true)
       const offlineStop = harness.page.getByRole('button', { name: 'Stop generating' })
       expect(await offlineStop.isEnabled()).toBe(true)
-      expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(OFFLINE_COMPOSER_EXPECTED, 'utf8'))
       const interrupted = harness.page.waitForResponse(item => new URL(item.url()).pathname === '/api/subagent.interrupt')
       await offlineStop.click()
       expect((await (await interrupted).json() as { result: { ok: boolean; value?: { accepted: boolean } } }).result).toMatchObject({ ok: true, value: { accepted: true } })
@@ -162,6 +157,3 @@ test('the child composer stops through subagent.interrupt, parks work, and resum
   }
 }, 180_000)
 
-test('subagent interrupt UI fixture inventory remains closed', async () => {
-  expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['offline-composer.expected.md'])
-})

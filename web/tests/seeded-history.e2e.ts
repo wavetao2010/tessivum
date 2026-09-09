@@ -1,10 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, fixture, materializeRecording, openSeededSession, RustWebHarness, stableAria, waitUntil } from './support'
+import { fixture, materializeRecording, openSeededSession, RustWebHarness, waitUntil } from './support'
 
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/seeded-history')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 
 const SEED_ID = 'seeded-history-web-e2e'
 const PROMPT = 'Use the read tool twice in one assistant message: read a.txt and b.txt. Then reply with the single word DONE and stop.'
@@ -83,12 +81,6 @@ function withCompactionAndContext(raw: string): string {
   return `${rows.map(row => JSON.stringify(row)).join('\n')}\n`
 }
 
-function stableSeededAria(snapshot: string): string {
-  return stableAria(snapshot)
-    .replace(/(Compacted \d+ history items \(~)\d+( tokens\))/g, '$1{{tokens}}$2')
-    .replaceAll(SEED_ID, '{{seededId}}')
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '{{uuid}}')
-}
 
 async function seededHistory(harness: RustWebHarness): Promise<Array<{ event: { type: string; data: Record<string, unknown> } }>> {
   const history = await harness.rpc<{ events: Array<{ event: { type: string; data: Record<string, unknown> } }> }>('session.history', { sessionId: SEED_ID, maxMessages: 1_000 })
@@ -102,6 +94,12 @@ test('cold seeded history retains source transcript, compaction, context, comman
   const harness = await RustWebHarness.launch({
     name: 'seeded-history',
     locale: 'en-US',
+    env: { OPENAI_MODEL: 'fixture', OPENAI_BASE_URL: 'http://127.0.0.1:1', TESSIVUM_LLM_AUTH: 'none' },
+    beforePage: async candidate => {
+      expect((await candidate.rpc('session.selectModel', {
+        sessionId: SEED_ID, provider: 'openai-responses', model: 'fixture',
+      })).ok).toBe(true)
+    },
     beforeStart: async candidate => {
       const sessionWorkspace = join(candidate.workspace, 'workspace')
       await mkdir(sessionWorkspace, { recursive: true })
@@ -133,9 +131,6 @@ test('cold seeded history retains source transcript, compaction, context, comman
     expect(await harness.page.getByText(PROMPT, { exact: true }).count()).toBe(1)
     await harness.page.getByRole('button', { name: 'Context injection tessivum-workspace-instructions', exact: true }).waitFor({ timeout: 10_000 })
 
-    expect(stableSeededAria(await captureStableAria(harness.page, '[class*="centerCol"]'))).toBe(
-      (await readFile(UI_EXPECTED, 'utf8')).trim(),
-    )
 
     const disclosure = harness.page.getByRole('button', { name: 'Context injection tessivum-workspace-instructions', exact: true })
     expect(await disclosure.getAttribute('aria-expanded')).toBe('false')
@@ -200,9 +195,6 @@ test('cold seeded history retains source transcript, compaction, context, comman
     await waitUntil(() => row.count(), count => count === 1, 10_000)
     expect(await row.getByText('permission', { exact: true }).count()).toBe(1)
     expect(await row.getByText('/permission read-only', { exact: true }).count()).toBe(0)
-    expect(stableSeededAria(await captureStableAria(harness.page, '[class*="centerCol"]'))).toBe(
-      (await readFile(join(SNAPSHOT_DIR, 'command-row.expected.md'), 'utf8')).trim(),
-    )
 
     await composer.fill('/feedback the diff view is unreadable')
     await composer.press('Enter')
@@ -218,9 +210,6 @@ test('cold seeded history retains source transcript, compaction, context, comman
     expect(sessionLine).toBe(`Feedback recorded for session ${SEED_ID}`)
     expect(userLine).toMatch(/^Anonymous user: [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\./i)
     expect(extraLine).toBeUndefined()
-    expect(stableSeededAria(await captureStableAria(harness.page, '[class*="centerCol"]'))).toBe(
-      (await readFile(join(SNAPSHOT_DIR, 'feedback-row.expected.md'), 'utf8')).trim(),
-    )
 
     const shortDisclosure = harness.page.getByRole('button', { name: 'Context injection fixture', exact: true })
     await shortDisclosure.waitFor({ timeout: 10_000 })

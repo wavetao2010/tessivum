@@ -7,7 +7,6 @@ test('a configured provider remains available without becoming an implicit selec
   const harness = await RustWebHarness.launch({
     name: 'neutral-configured-provider-web-e2e',
     locale: 'zh-CN',
-    preserveCredentialOnboarding: true,
     env: { ACME_API_KEY: 'fixture-acme', DEEPSEEK_API_KEY: '' },
     beforeStart: async candidate => {
       await mkdir(candidate.dataDir, { recursive: true })

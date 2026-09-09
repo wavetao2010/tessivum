@@ -14,7 +14,7 @@
 - Repair `dsh-better-sidebar@0.17.1` PTY handle/socket/timer ownership through a version- and checksum-scoped patch loaded from a verified profile-local copy, without modifying the original npm package in place.
 - Preserve continuable subagent follow-ups: ordinary-session model preflight no longer rejects addressed children whose inherited model is validated by the Host.
 
-Release scope: macOS and Linux on x86_64/ARM64. Native Windows remains a separate, unpublished workstream. Artifact availability is pending completion of the release workflow and downloaded-package verification.
+Published for macOS and Linux on x86_64/ARM64. All four archives and the market package passed downloaded SHA-256 verification; release-runner package smokes passed on all four targets. macOS Apple Silicon fresh install, Alpha.25 upgrade, and uninstall retained readable history. Native Windows remains a separate, unpublished workstream.
 
 ### Known limitation — local-only sidebar terminal
 

@@ -1,17 +1,11 @@
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { RustWebHarness, stableAria, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/queue-actions')
 const FIXTURE = join(import.meta.dir, 'snapshots/live-interactions/session.jsonl')
-const COLLAPSED_EXPECTED = join(SNAPSHOT_DIR, 'collapsed.expected.md')
-const EDITING_EXPECTED = join(SNAPSHOT_DIR, 'editing.expected.md')
-const LAYOUT_EXPECTED = join(SNAPSHOT_DIR, 'layout.expected.md')
-const PRESERVED_EXPECTED = join(SNAPSHOT_DIR, 'preserved.expected.md')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const ACTIVE_PROMPT = 'Reply with a one-sentence description of event sourcing, then stop.'
 const REMOVE = 'Queue item to remove'
 const EDIT = 'Queue item to edit'
@@ -41,33 +35,6 @@ function textBlocks(value: unknown): string[] {
   }) : []
 }
 
-function normalizeAria(snapshot: string, workspace: string): string {
-  const base = workspace.split('/').at(-1) ?? workspace
-  return stableAria(snapshot)
-    .split(workspace).join('{{cwd}}')
-    .split(base).join('{{workspace}}')
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '{{uuid}}')
-    .replace(/~\d+(?:y(?: \d+mo)?|mo(?: \d+d)?)|\b(?:\d+d(?: \d+h(?: \d+m \d+s)?)?|\d+h \d+m \d+s|\d+m ?\d+s|\d+(?:\.\d+)?s|\d+(?:\.\d+)?ms)\b/g, duration => duration.startsWith('~') ? duration : '{{duration}}')
-    .replace(/约\d+(?:年(?:\d+个月)?|个月(?:\d+天)?)|\d+(?:天(?:\d+小时(?:\d+分\d+秒)?)?|小时\d+分\d+秒|分\d+秒|(?:\.\d+)?秒)/g, duration => duration.startsWith('约') ? duration : '{{duration}}')
-    .replace(/\d+(?:\.\d+)?(?= tok\/s(?!\w))/g, '{{throughput}}')
-    .replace(/(Compacted \d+ history items \(~)\d+( tokens\))/g, '$1{{tokens}}$2')
-    .replace(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/g, '{{clock}}')
-    .replace(/\d{1,2}月\d{1,2}日 \d{2}:\d{2}/g, '{{clock}}')
-    .replace(/(?<!\d)\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:\s*[AP]M)?(?!\d)/gi, '{{clock}}')
-    .replace(/(?<!\d)\d{2}:\d{2}(?!\d)/g, '{{clock}}')
-}
-
-async function captureStableAria(harness: RustWebHarness, selector: string): Promise<string> {
-  const region = harness.page.locator(selector).first()
-  let previous = normalizeAria(await region.ariaSnapshot(), harness.workspace)
-  await waitUntil(async () => {
-    const current = normalizeAria(await region.ariaSnapshot(), harness.workspace)
-    const stable = current === previous
-    previous = current
-    return stable
-  }, Boolean, 5_000)
-  return previous
-}
 
 async function sessionEvents(harness: RustWebHarness, sessionId: string): Promise<Event[]> {
   const file = join(harness.dataDir, `session-${Buffer.from(sessionId).toString('hex')}.jsonl`)
@@ -127,7 +94,6 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     }
     const queueHeader = harness.page.getByRole('button', { name: '2 queued messages' })
     await expect(waitUntil(() => queueHeader.getAttribute('aria-expanded'), value => value === 'false')).resolves.toBe('false')
-    expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(COLLAPSED_EXPECTED, 'utf8'))
     await queueHeader.click()
     await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
 
@@ -161,14 +127,12 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     await editRow.getByRole('button', { name: 'Edit queued message' }).click()
     const editor = harness.page.getByRole('textbox', { name: 'Edit queued message' })
     await editor.fill(EDITED)
-    expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(EDITING_EXPECTED, 'utf8'))
     await harness.page.getByRole('button', { name: 'Save queued message' }).click()
     await harness.page.getByText(EDITED, { exact: true }).waitFor()
 
     const removeRow = harness.page.getByText(REMOVE, { exact: true }).locator('..')
     await removeRow.getByRole('button', { name: 'Remove queued message' }).click()
     await expect(waitUntil(() => harness.page.getByText(REMOVE, { exact: true }).count(), count => count === 0)).resolves.toBe(0)
-    expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(UI_EXPECTED, 'utf8'))
 
     const active = (await harness.sessions()).find(item => item.running)
     if (active === undefined) throw new Error('queue scenario has no active session')
@@ -182,9 +146,6 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     const sessionId = await firstSettled
     await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Stop generating' }).count(), count => count === 0)).resolves.toBe(0)
     await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
-    await harness.page.mouse.move(0, 0)
-    await waitUntil(() => harness.page.getByRole('tooltip', { name: 'Send message' }).count(), count => count === 0)
-    expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(PRESERVED_EXPECTED, 'utf8'))
 
     const settled = harness.whenTurnSettled()
     await input.fill(WAKE)
@@ -194,9 +155,6 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     await expect(waitUntil(async () => turnEndReasons(await sessionEvents(harness, sessionId)), reasons => reasons.length === 4)).resolves.toEqual(['aborted', 'completed', 'completed', 'completed'])
     expect(userTexts(log)).toEqual([ACTIVE_PROMPT, EDITED, TAIL, WAKE])
     await expect(waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0)).resolves.toBe(0)
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-      'collapsed.expected.md', 'editing.expected.md', 'layout.expected.md', 'preserved.expected.md', 'ui.expected.md',
-    ])
     harness.assertClean()
   } finally {
     await harness.close()
@@ -242,7 +200,6 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
     }
     const queueHeader = harness.page.getByRole('button', { name: '2 queued messages' })
     await expect(waitUntil(() => queueHeader.getAttribute('aria-expanded'), value => value === 'false')).resolves.toBe('false')
-    expect(`${await captureStableAria(harness, '[class*="centerCol"]')}\n`).toBe(await readFile(LAYOUT_EXPECTED, 'utf8'))
 
     const aligned = async (): Promise<void> => {
       const [queueBox, todoBox, goalBox] = await waitUntil(

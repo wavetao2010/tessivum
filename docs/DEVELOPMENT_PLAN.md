@@ -2,10 +2,10 @@
 
 > 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
 > 计划校准日期：2026-09-09
-> Tessivum 实现基线：`v0.1.0-alpha.26`（发布候选；发行流程中，等待构建工件验证）
+> Tessivum 实现基线：`v0.1.0-alpha.26`（已发布；四个 macOS/Linux 归档下载校验通过）
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
-> 当前版本：`v0.1.0-alpha.26`，原四项优化及历史分页、PTY 生命周期修复已完成源码验收；本地联合验收与已授权远程历史恢复通过。版本已进入发行流程，在四个 macOS/Linux 目标的构建工件完成下载验证前不宣称已发布。经用户确认，远程终端暂不支持，不再作为本版发布阻断项
+> 当前版本：`v0.1.0-alpha.26`，原四项优化及历史分页、PTY 生命周期修复已发布。本地联合验收与已授权远程历史恢复通过；四个平台发行 runner 的包内检查、全部发行包下载校验，以及 macOS Apple Silicon 新装、升级和卸载保留数据均通过。远程终端按用户确认暂不支持；Windows 不在本版发行范围内。
 
 ## 1. 文档集
 
@@ -146,11 +146,11 @@ flowchart LR
 
 阶段二不得在阶段一接口仍频繁破坏时开始大规模迁移。允许用一个最小 Headless 探针提前验证接口，但该探针不能变成第二套临时框架。
 
-### 4.1 当前版本：Alpha.26 产品优化与追加修复（发布候选，发行流程中）
+### 4.1 当前版本：Alpha.26 产品优化与追加修复（已发布）
 
 本节以已发布的 `v0.1.0-alpha.25` 为实现基线，记录 Alpha.26 原四项优化与后续两项用户报告修复的实施和验收。本文是本轮范围与验收的唯一计划入口，不另建重复优化清单；Phase 10 Windows 原生发行继续按独立计划推进，不因本轮规划而标记完成。
 
-本轮采用 Tessivum 自有产品默认值，不继续复制 DeepSeek 的首次配置与默认模型体验。这是对上游产品行为的有意差异，不放宽文件沙箱、凭据保护、附件校验或持久会话契约。后文 Alpha.6 等历史章节保留原实施记录；本轮涉及的默认选择规则以本节为准，仅适用于当前源码，不回写 Alpha.25 发布事实。
+本轮采用 Tessivum 自有产品默认值，不继续复制 DeepSeek 的首次配置与默认模型体验。这是对上游产品行为的有意差异，不放宽文件沙箱、凭据保护、附件校验或持久会话契约。后文 Alpha.6 等历史章节保留原实施记录；本轮涉及的默认选择规则以本节为准，对应 Alpha.26 发行行为，不回写 Alpha.25 发布事实。
 
 #### 4.1.1 文件工具路径与符号链接遍历修复
 
@@ -268,7 +268,7 @@ flowchart LR
 
 #### 4.1.8 追加修复的集成与发布顺序
 
-- [x] 两项修复在确认范围内联合验收并重新执行质量门槛；远程终端经用户确认暂不支持。Alpha.26 已进入版本发布流程，等待四个 macOS/Linux 目标的构建工件下载验证。
+- [x] 两项修复在确认范围内联合验收并完成 Alpha.26 发布与四个 macOS/Linux 归档下载校验；远程终端经用户确认暂不支持。
 
 验收范围：本地开启 `dsh-better-sidebar@0.17.1` 的固定修复版本，联合检查刷新、终端重连和历史恢复；已授权远程入口检查历史分页、选择恢复和既有授权边界。2026-09-09 用户确认沿用 Phase 8 §4.2 的 loopback-only 策略，暂不支持远程侧边栏终端；此前要求的远程终端联合验收移出 Alpha.26 范围，不以本地结果冒充远程终端通过。
 
@@ -280,6 +280,17 @@ flowchart LR
 - Web source audit/build/typecheck 与 240 个客户端测试文件通过：3,182 项。历史恢复、图片输入、中立首屏、已配置提供方和已授权远程首屏五个 Browser 场景通过。最终回归发现远程测试仍要求已移除的欢迎弹窗，已删除该旧断言，改验刷新前后直接编辑草稿，同时保留设备撤销与远程 shutdown 拒绝检查；该场景 16 项断言通过。没有重跑或重新宣称全部 69 项上游场景。
 - 版本准备前的固定兼容清单为 52/52 RPC、38 个 Web source package、73 个 E2E 入口（69 上游 + 4 第一方）；当时 Alpha.25 发布事实检查通过，Cargo 版本、标签、安装链接、发行产物及既有性能证据保持不变。
 - **远程终端暂不支持（非本版发布阻断项）**：已授权 Cloudflare Browser 请求 `/sidebar/bundle/terminal.js` 返回 `403 REMOTE_HOST_DENIED`，本地相同路由返回 JavaScript。这符合 Phase 8 既有策略：legacy plugin HTTP 路由及 WebSocket upgrade 仅限本机。用户确认本版维持此边界；未修改授权代码，也未验证远程终端可用。以后确需支持时，先定义受限资源和终端 WebSocket 的授权契约，再实施和单独验收。
+
+2026-09-09 发行验收：
+
+- `v0.1.0-alpha.26` 固定源码提交 `abec63c1ebba25910daea807667dc41f3782b3c0`；[四平台发行工作流](https://github.com/wavetao2010/tessivum/actions/runs/34356136115) 全部通过，GitHub prerelease 与第一方市场工件已发布。
+- 最终审查修复了子代理续聊被普通会话模型预检误拒绝的问题。既有 addressed-session 回归在修复前失败、修复后通过；固定上游干净归档正向应用补丁成功，240 文件 / 3,182 客户端测试及 Web audit/build/typecheck 再次通过。
+- 四个发行归档与市场包全部下载并通过相邻 SHA-256；Homebrew Formula 由下载归档重算验证并发布至 tap 提交 `1b02ae44259a34430544083c3d6ecb4d4afa0960`。四平台原生包运行检查来自发行 runner；本机另验证 Intel 包经 Rosetta 启动返回 Alpha.26。
+- 下载标签中的安装器，实测 macOS Apple Silicon 全新安装与 Alpha.25→Alpha.26 升级，两个 launcher 均返回 Alpha.26。升级后真实 Browser 和 `session.history` 均能读取旧对话；卸载只移除托管程序，历史 SHA-256 始终为 `92ac5272958f5827bce64d10c921cf99496c69dadd7c522d3840aa25dfba9494`，用户 marker 保留。
+- 下载包无 Key 首屏可直接编辑草稿，未选模型发送被拒绝且草稿保留；通过真实 Browser 交互与 DOM 读回确认。当前截图接口超时，未把该轮截图记作视觉证据。API Host shutdown 成功后进程正常退出；测试 supervisor 同时终止整棵进程树会提前关闭 Legacy bridge，该强制停止结果不冒充正常关闭通过。
+- [源码 CI](https://github.com/wavetao2010/tessivum/actions/runs/34356106437) 的第二次尝试中，Linux `verify` 与 Windows job 均为 `success`；整次 run 仍为 `cancelled`，原因是原 Browser job 超时取消，不能把 watcher 的非零退出码写成 Windows 失败，也不能把整次 CI 写成全绿。Windows 原生安装包与完整发行门槛仍未完成。
+- 发布后的 Browser 验收修正仅涉及测试与文档：移除固定旧品牌、隐式默认模型和无附件按钮的整页 ARIA 快照；命令夹具显式配置/选择模型，空认证路由继续按安全契约拒绝。共享脚手架等待初始空白会话就绪，回合等待器排除空白会话；子代理中断直接等待 addressed history 的结束事件。11 个相关场景文件复验通过，发布标签、产品源码和四平台归档未替换。
+- 最终本机完整 Browser 验收：`cd web && bun test ./tests/migrated.test.ts --timeout 3600000` 通过，耗时 593.26 秒，所有场景文件首次运行通过、没有触发重试；最终 `bun run typecheck` 亦通过。该证据属于发布后的测试契约修正，不把原已取消的 Browser CI job 改写成成功。
 
 ---
 
@@ -734,9 +745,9 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前实现基线为 `v0.1.0-alpha.26` 发布候选，发行流程进行中，等待四个 macOS/Linux 目标的构建工件完成下载验证；最近已发布且验证的实现基线仍为 `v0.1.0-alpha.25`。产品运行时固定 `tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充 Alpha.25 或 Alpha.26 的新测量。
+当前已发布实现基线为 `v0.1.0-alpha.26`，四个 macOS/Linux 归档已完成下载校验与发行 runner 包内运行检查。产品运行时固定 `tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充 Alpha.25 或 Alpha.26 的新测量。
 
-Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期已完成源码及本地验收，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项，详见第 4.1.6–4.1.8 节。当前确认范围的源码验收已完成；版本已进入发行流程，在构建工件验证完成前不宣称已发布。
+Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 
 ## 14.1 Alpha.9 发布记录
 
