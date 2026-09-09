@@ -596,6 +596,10 @@ fn dynamic_config(root: &TempDir) -> HostConfig {
                     ]
                 }
             }
+        },
+        "agent-default-model": {
+            "provider": "openai-responses",
+            "model": "alpha"
         }
     });
     config
@@ -2647,33 +2651,39 @@ async fn session_creation_is_serial_idempotent_and_conflict_safe() {
 }
 
 #[tokio::test]
-async fn dynamic_models_remain_live_after_eager_legacy_mode_migration() {
+async fn saved_model_survives_eager_legacy_mode_migration_and_default_changes() {
     let root = TempDir::new();
     let persistence = JsonlSessionPersistence::new(root.path().join("data"));
-    let context = ContextHandle::root();
-    persistence
-        .create(
-            &SessionHeader {
-                version: SESSION_FORMAT_VERSION,
-                id: SessionId::from("legacy-model"),
-                created_at: 1,
-                cwd: Some(
-                    root.path()
-                        .canonicalize()
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                parent_session: None,
-                seed_length: None,
-                origin: None,
-                delegation_depth: Some(0),
-                agent_mode: None,
-            },
-            context.scope().cancellation(),
-        )
-        .await
-        .unwrap();
+    persist_session(
+        &persistence,
+        SessionHeader {
+            version: SESSION_FORMAT_VERSION,
+            id: SessionId::from("legacy-model"),
+            created_at: 1,
+            cwd: Some(
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            parent_session: None,
+            seed_length: None,
+            origin: None,
+            delegation_depth: Some(0),
+            agent_mode: None,
+        },
+        [SessionEvent {
+            event_type: "session/model-selected".into(),
+            seq: 0,
+            time: 1,
+            data: json!({"provider": "openai-responses", "model": "alpha"}),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        }],
+    )
+    .await;
 
     let runtime = HostRuntime::boot(dynamic_config(&root)).await.unwrap();
     let handle = runtime.handle();
@@ -2693,9 +2703,9 @@ async fn dynamic_models_remain_live_after_eager_legacy_mode_migration() {
         .events(SessionId::from("legacy-model"), 0)
         .await
         .unwrap();
-    assert_eq!(migrated.len(), 1);
-    assert_eq!(migrated[0].event_type, "agent-mode/selected");
-    assert_eq!(migrated[0].data, json!({"agentMode": "standard"}));
+    assert_eq!(migrated.len(), 2);
+    assert_eq!(migrated[1].event_type, "agent-mode/selected");
+    assert_eq!(migrated[1].data, json!({"agentMode": "standard"}));
 
     let mut notifications = handle.subscribe();
     handle
@@ -2717,7 +2727,7 @@ async fn dynamic_models_remain_live_after_eager_legacy_mode_migration() {
             .current
             .unwrap()
             .model,
-        "beta"
+        "alpha"
     );
     assert_eq!(
         handle
@@ -2752,39 +2762,365 @@ async fn dynamic_models_remain_live_after_eager_legacy_mode_migration() {
 }
 
 #[tokio::test]
-async fn providerless_web_uses_first_configured_route_for_new_sessions() {
+async fn providerless_web_keeps_new_sessions_unselected() {
     let root = TempDir::new();
-    let mut config = dynamic_config(&root);
-    config.provider = "openai-responses".into();
-    config.model = "unconfigured".into();
-    let runtime = HostRuntime::boot(config).await.unwrap();
-    runtime
-        .handle()
-        .credentials()
-        .unwrap()
-        .set(
-            CredentialRef::new("TESSIVUM_DYNAMIC_TEST_KEY").unwrap(),
-            "test-key".into(),
-        )
+    let runtime = HostRuntime::boot(HostConfig::new(root.path(), root.path().join("data")))
         .await
         .unwrap();
     let session_id = SessionId::from("providerless-route");
 
     runtime.create_session(session_id.clone()).await.unwrap();
+    let before = runtime.events(session_id.clone(), 0).await.unwrap();
+    let models = runtime
+        .handle()
+        .session_models(session_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(models.current, None);
+    assert!(!models.routable);
+    assert!(models.groups.is_empty());
     assert_eq!(
         runtime
-            .handle()
-            .session_models(session_id)
+            .prompt(prompt(session_id.as_str()))
+            .await
+            .unwrap_err()
+            .code,
+        "MODEL_NOT_SELECTED"
+    );
+    let after = runtime.events(session_id, 0).await.unwrap();
+    assert_eq!(after, before);
+    assert!(!after
+        .iter()
+        .any(|event| event.event_type == "session/model-selected"
+            || event.event_type == "user/message"));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn configured_default_only_applies_when_a_session_is_created() {
+    let root = TempDir::new();
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.profile_patch = json!({"llm-pi-ai": {"providers": {"local": {
+        "displayName": "Local",
+        "auth": "none",
+        "baseURL": "http://127.0.0.1:1/v1",
+        "models": [{"id": "local-model", "input": ["text"]}]
+    }}}});
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    let existing = SessionId::from("before-default");
+    runtime.create_session(existing.clone()).await.unwrap();
+    runtime
+        .mutate_settings(
+            AGENT_DEFAULT_MODEL_NAMESPACE.into(),
+            HostSettingsMutation::Replace {
+                user: json!({"provider": "local", "model": "local-model"}),
+                expected_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .session_models(existing.clone())
             .await
             .unwrap()
             .current,
+        None
+    );
+    assert_eq!(
+        runtime
+            .prompt(prompt(existing.as_str()))
+            .await
+            .unwrap_err()
+            .code,
+        "MODEL_NOT_SELECTED"
+    );
+
+    let next = SessionId::from("after-default");
+    runtime.create_session(next.clone()).await.unwrap();
+    assert_eq!(
+        runtime
+            .session_models(next)
+            .await
+            .unwrap()
+            .current
+            .unwrap()
+            .model,
+        "local-model"
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_explicit_default_survives_restart_without_substitution() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(dynamic_config(&root)).await.unwrap();
+    runtime
+        .mutate_settings(
+            AGENT_DEFAULT_MODEL_NAMESPACE.into(),
+            HostSettingsMutation::Replace {
+                user: json!({"provider": "removed-provider", "model": "removed-model"}),
+                expected_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    let session = SessionId::from("stale-default");
+    runtime.create_session(session.clone()).await.unwrap();
+    let models = runtime.session_models(session.clone()).await.unwrap();
+    assert_eq!(
+        models.current,
         Some(SessionModelSelection {
-            provider: "openai-responses".into(),
-            model: "alpha".into(),
+            provider: "removed-provider".into(),
+            model: "removed-model".into(),
             reasoning_effort: None,
         })
     );
+    assert!(!models.routable);
+    assert_eq!(models.failures[0].code, "LLM_PROVIDER_NOT_FOUND");
     runtime.shutdown().await.unwrap();
+
+    let restarted = HostRuntime::boot(dynamic_config(&root)).await.unwrap();
+    let models = restarted.session_models(session).await.unwrap();
+    assert_eq!(models.current.unwrap().provider, "removed-provider");
+    assert!(!models.routable);
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_no_auth_route_and_live_cloud_credentials_are_routable() {
+    let local_root = TempDir::new();
+    let mut local = HostConfig::new(local_root.path(), local_root.path().join("data"));
+    local.profile_patch = json!({
+        "llm-pi-ai": {"providers": {"local": {
+            "displayName": "Local",
+            "auth": "none",
+            "baseURL": "http://127.0.0.1:1/v1",
+            "models": [{"id": "local-model", "input": ["text"]}]
+        }}},
+        "agent-default-model": {"provider": "local", "model": "local-model"}
+    });
+    let local = HostRuntime::boot(local).await.unwrap();
+    local
+        .create_session(SessionId::from("local-session"))
+        .await
+        .unwrap();
+    let local_models = local
+        .session_models(SessionId::from("local-session"))
+        .await
+        .unwrap();
+    assert!(local_models.routable);
+    assert!(local_models.groups[0].credential_configured);
+    local.shutdown().await.unwrap();
+
+    let cloud_root = TempDir::new();
+    let credential = format!("TESSIVUM_HOST_TEST_{}", Uuid::new_v4().simple());
+    let mut cloud_config = dynamic_config(&cloud_root);
+    cloud_config.profile_patch[LLM_PI_AI_NAMESPACE]["providers"]["openai-responses"]["apiKeyEnv"] =
+        json!(credential.clone());
+    let cloud = HostRuntime::boot(cloud_config).await.unwrap();
+    cloud
+        .create_session(SessionId::from("cloud-session"))
+        .await
+        .unwrap();
+    let cloud_models = cloud
+        .session_models(SessionId::from("cloud-session"))
+        .await
+        .unwrap();
+    let before = cloud
+        .events(SessionId::from("cloud-session"), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        cloud
+            .prompt(prompt("cloud-session"))
+            .await
+            .unwrap_err()
+            .code,
+        "MISSING_CREDENTIAL"
+    );
+    assert_eq!(
+        cloud
+            .events(SessionId::from("cloud-session"), 0)
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(!cloud_models.routable);
+    assert_eq!(cloud_models.failures[0].code, "MISSING_CREDENTIAL");
+    cloud
+        .handle()
+        .credentials()
+        .unwrap()
+        .set(
+            CredentialRef::new(credential).unwrap(),
+            "configured-key".into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        cloud
+            .session_models(SessionId::from("cloud-session"))
+            .await
+            .unwrap()
+            .routable
+    );
+    cloud.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn image_admission_preserves_input_and_blocks_incompatible_switches() {
+    let root = TempDir::new();
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.profile_patch = json!({
+        "llm-pi-ai": {"providers": {"local": {
+            "displayName": "Local",
+            "auth": "none",
+            "baseURL": "http://127.0.0.1:1/v1",
+            "models": [
+                {"id": "text", "input": ["text"]},
+                {"id": "vision", "input": ["text", "image"]}
+            ]
+        }}},
+        "agent-default-model": {"provider": "local", "model": "text"}
+    });
+    let restart_config = config.clone();
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    let session = SessionId::from("image-admission");
+    runtime.create_session(session.clone()).await.unwrap();
+    let image = runtime.upload_attachment(png(1, 1), None).await.unwrap();
+    let image_prompt = || SessionPromptParams {
+        session_id: session.clone(),
+        content_blocks: vec![ContentBlock::Image {
+            attachment: serde_json::to_value(&image).unwrap(),
+        }],
+        client_time_zone: None,
+    };
+
+    runtime
+        .select_model(session.clone(), "local".into(), "text".into(), None)
+        .await
+        .unwrap();
+    let before = runtime.events(session.clone(), 0).await.unwrap();
+    assert_eq!(
+        runtime.prompt(image_prompt()).await.unwrap_err().code,
+        "UNSUPPORTED_MODALITY"
+    );
+    assert_eq!(runtime.events(session.clone(), 0).await.unwrap(), before);
+
+    runtime
+        .select_model(session.clone(), "local".into(), "vision".into(), None)
+        .await
+        .unwrap();
+    runtime.prompt(image_prompt()).await.unwrap();
+    runtime.shutdown().await.unwrap();
+    let runtime = HostRuntime::boot(restart_config.clone()).await.unwrap();
+    assert_eq!(
+        runtime
+            .select_model(session.clone(), "local".into(), "text".into(), None)
+            .await
+            .unwrap_err()
+            .code,
+        "UNSUPPORTED_MODALITY"
+    );
+    assert!(runtime
+        .read_attachment(session.clone(), image.attachment_id)
+        .await
+        .is_ok());
+    assert_eq!(
+        runtime
+            .session_models(session)
+            .await
+            .unwrap()
+            .current
+            .unwrap()
+            .model,
+        "vision"
+    );
+    runtime.shutdown().await.unwrap();
+    let restarted = HostRuntime::boot(restart_config).await.unwrap();
+    let inherited = SessionId::from("image-default-after-restart");
+    restarted.create_session(inherited.clone()).await.unwrap();
+    assert_eq!(
+        restarted
+            .session_models(inherited)
+            .await
+            .unwrap()
+            .current
+            .unwrap()
+            .model,
+        "vision"
+    );
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_image_cannot_be_lost_by_a_busy_model_switch() {
+    let root = TempDir::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let accepted_signal = Arc::clone(&accepted);
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        accepted_signal.notify_one();
+        futures_util::future::pending::<()>().await;
+    });
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.profile_patch = json!({
+        "llm-pi-ai": {"providers": {"local": {
+            "displayName": "Local",
+            "auth": "none",
+            "baseURL": format!("http://{address}/v1"),
+            "models": [
+                {"id": "text", "input": ["text"]},
+                {"id": "vision", "input": ["text", "image"]}
+            ]
+        }}},
+        "agent-default-model": {"provider": "local", "model": "vision"}
+    });
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    let session = SessionId::from("queued-image-switch");
+    runtime.create_session(session.clone()).await.unwrap();
+    runtime.prompt(prompt(session.as_str())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), accepted.notified())
+        .await
+        .unwrap();
+    let image = runtime.upload_attachment(png(1, 1), None).await.unwrap();
+    runtime
+        .prompt(SessionPromptParams {
+            session_id: session.clone(),
+            content_blocks: vec![ContentBlock::Image {
+                attachment: serde_json::to_value(&image).unwrap(),
+            }],
+            client_time_zone: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .select_model(session.clone(), "local".into(), "text".into(), None)
+            .await
+            .unwrap_err()
+            .code,
+        "SESSION_BUSY"
+    );
+    assert_eq!(
+        runtime
+            .session_models(session.clone())
+            .await
+            .unwrap()
+            .current
+            .unwrap()
+            .model,
+        "vision"
+    );
+    assert!(runtime
+        .read_attachment(session, image.attachment_id)
+        .await
+        .is_ok());
+    runtime.shutdown().await.unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -2813,7 +3149,10 @@ async fn dynamic_route_notification_follows_committed_registration() {
         .await
         .unwrap();
     wait_for_models_changed(&mut notifications).await;
-    assert!(handle.provider_directory()[0].active);
+    assert!(handle
+        .provider_directory()
+        .iter()
+        .any(|entry| entry.route.id == "openai-responses" && entry.active));
     assert_eq!(
         handle.model_groups("openai-responses")[0].models[0].id,
         "beta"

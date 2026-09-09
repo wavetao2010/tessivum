@@ -263,6 +263,7 @@ impl ProviderSnapshot {
         Self::with_optional_key(route, model, Some(api_key.into()))
     }
 
+    /// Captures an explicitly unauthenticated route/model snapshot.
     pub fn without_key(
         route: ResponsesRoute,
         model: ResponsesModel,
@@ -379,11 +380,8 @@ impl ResponsesRouteResolver for StaticResponsesRouteResolver {
                 json!({"provider": provider}),
             ));
         }
-        ProviderSnapshot::new(
-            self.route.clone(),
-            ResponsesModel::new(model),
-            self.api_key.clone(),
-        )
+        let model = ResponsesModel::new(model);
+        ProviderSnapshot::new(self.route.clone(), model, self.api_key.clone())
     }
 }
 
@@ -428,6 +426,25 @@ impl OpenAiResponsesAdapter {
         route.validate()?;
         let api_key = api_key.trim().to_owned();
         Self::with_resolver(StaticResponsesRouteResolver { route, api_key }).build_client()
+    }
+
+    /// Creates a text-only adapter for an explicitly unauthenticated endpoint.
+    pub fn new_without_key(base_url: &str) -> Result<Self, TessivumError> {
+        let route = ResponsesRoute::new(
+            DEFAULT_ROUTE_ID,
+            DEFAULT_ROUTE_ID,
+            base_url.trim(),
+            "",
+            Vec::new(),
+        );
+        route.validate()?;
+        Self::with_resolver(move |provider: &str, model: &str| {
+            let snapshot =
+                ProviderSnapshot::without_key(route.clone(), ResponsesModel::new(model))?;
+            snapshot.validate_request(provider, model)?;
+            Ok(snapshot)
+        })
+        .build_client()
     }
 
     /// Builds an adapter that resolves a fresh route/model snapshot per request.
@@ -502,22 +519,6 @@ impl OpenAiResponsesAdapter {
         tool_names: &ToolNames,
         cancellation: CancellationToken,
     ) -> Result<Response, TessivumError> {
-        let api_key = snapshot.api_key().ok_or_else(|| {
-            adapter_error(
-                "MISSING_CREDENTIAL",
-                "the OpenAI Responses route credential is not configured",
-                json!({"route": snapshot.route.id}),
-            )
-        })?;
-        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| {
-                adapter_error(
-                    "INVALID_CREDENTIAL",
-                    "the OpenAI Responses route credential cannot be sent in an HTTP header",
-                    Value::Null,
-                )
-            })?;
-        authorization.set_sensitive(true);
         let endpoint = snapshot.endpoint()?;
         let body = request_body(
             request,
@@ -526,13 +527,39 @@ impl OpenAiResponsesAdapter {
             self.attachment_store.as_deref(),
         )
         .await?;
-        let pending = self
+        let mut pending = self
             .client
             .post(endpoint.clone())
-            .header(header::AUTHORIZATION, authorization)
             .header(header::ACCEPT, "text/event-stream")
-            .json(&body)
-            .send();
+            .json(&body);
+        if snapshot.route.credential_ref.is_empty() {
+            if snapshot.api_key().is_some() {
+                return Err(adapter_error(
+                    "INVALID_CREDENTIAL",
+                    "an unauthenticated OpenAI Responses route must not resolve a credential",
+                    json!({"route": snapshot.route.id}),
+                ));
+            }
+        } else {
+            let api_key = snapshot.api_key().ok_or_else(|| {
+                adapter_error(
+                    "MISSING_CREDENTIAL",
+                    "the OpenAI Responses route credential is not configured",
+                    json!({"route": snapshot.route.id}),
+                )
+            })?;
+            let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|_| {
+                    adapter_error(
+                        "INVALID_CREDENTIAL",
+                        "the OpenAI Responses route credential cannot be sent in an HTTP header",
+                        Value::Null,
+                    )
+                })?;
+            authorization.set_sensitive(true);
+            pending = pending.header(header::AUTHORIZATION, authorization);
+        }
+        let pending = pending.send();
         let response = tokio::select! {
             _ = cancellation.cancelled() => return Err(cancelled_error()),
             response = pending => response.map_err(|error| adapter_error(

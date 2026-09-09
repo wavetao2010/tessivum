@@ -28,19 +28,19 @@ const PRESETS: [PermissionPreset; 3] = [
         name: "read-only",
         sandbox: SandboxMode::ReadOnly,
         approval: ApprovalPolicy::Ask,
-        description: "Read files without modifying the workspace; broader writes require approval.",
+        description: "Keep sandbox-enforced writes read-only; supported workspace-write escalations require approval.",
     },
     PermissionPreset {
         name: "workspace-write",
         sandbox: SandboxMode::WorkspaceWrite,
         approval: ApprovalPolicy::Ask,
-        description: "Write inside the workspace and permitted temporary directories; wider retries require approval.",
+        description: "Allow sandboxed commands to write in the workspace and permitted temporary directories; capability file tools stay workspace-confined.",
     },
     PermissionPreset {
         name: "danger-full-access",
         sandbox: SandboxMode::DangerFullAccess,
         approval: ApprovalPolicy::Never,
-        description: "Full file access without approval prompts.",
+        description: "Run commands without sandbox confinement or approval prompts; capability file tools stay workspace-confined.",
     },
 ];
 
@@ -137,17 +137,24 @@ pub(crate) fn fold(events: &[SessionEvent]) -> PermissionKnobs {
 /// Renders the current durable policy as the model-visible runtime snapshot.
 pub(crate) fn runtime_context(events: &[SessionEvent], workspace: Option<&str>) -> String {
     let state = fold(events);
+    let workspace = workspace.map_or_else(
+        || "Session workspace: unavailable.".to_owned(),
+        |workspace| {
+            format!(
+                "Session workspace: {}.",
+                serde_json::to_string(workspace).expect("workspace path serializes")
+            )
+        },
+    );
     let policy = match state.sandbox.unwrap_or(SandboxMode::WorkspaceWrite) {
-        SandboxMode::ReadOnly => "Current DSH file policy: read-only. Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.".to_owned(),
-        SandboxMode::WorkspaceWrite => format!(
-            "Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: {}. Some platform temporary areas may also be writable.",
-            serde_json::to_string(workspace.unwrap_or(".")).expect("workspace path serializes"),
-        ),
-        SandboxMode::DangerFullAccess => "Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.".to_owned(),
+        SandboxMode::ReadOnly => "Standing Tessivum sandbox policy: read-only. Sandbox-enforced operations cannot modify files without an approved workspace-write escalation. Do not refuse a required workspace modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.",
+        SandboxMode::WorkspaceWrite => "Standing Tessivum sandbox policy: workspace-write. Sandbox-enforced operations may modify files in the session workspace and permitted temporary directories.",
+        SandboxMode::DangerFullAccess => "Standing Tessivum sandbox policy: danger-full-access. Sandbox-enforced commands may access files outside the session workspace.",
     };
+    let file_tools = "Tessivum's `read`, `write`, `edit`, `read_image`, `glob`, and `grep` file tools accept workspace-relative paths and validated absolute paths contained in the session workspace. These capability file tools remain workspace-confined in every sandbox mode, including danger-full-access.";
     let approval = match state.approval.unwrap_or(ApprovalPolicy::Ask) {
-        ApprovalPolicy::Ask => "Approval policy: ask. Operations that require approval may ask through the configured answerers; without an available answerer, the request fails closed.",
-        ApprovalPolicy::Never => "Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`).",
+        ApprovalPolicy::Ask => "Approval policy: ask. Operations that support escalation may ask through the configured answerers; without an available answerer, the request fails closed.",
+        ApprovalPolicy::Never => "Approval policy: never. Actions that require approval are rejected automatically; do not request sandbox escalation (do not set `sandbox_permissions`).",
     };
     let time_zone = events.iter().rev().find_map(|event| {
         (event.event_type == "user/message")
@@ -158,7 +165,7 @@ pub(crate) fn runtime_context(events: &[SessionEvent], workspace: Option<&str>) 
         || "Browser time zone for this request: unavailable. Ask the user to clarify otherwise-unqualified dates and times.".to_owned(),
         |time_zone| format!("Browser time zone for this request: {time_zone}. Interpret otherwise-unqualified dates and times in this zone."),
     );
-    format!("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n{policy}\n\n{approval}\n\n{browser_time}")
+    format!("Current Tessivum runtime context. This authoritative snapshot supersedes earlier runtime-context snapshots.\n\n{workspace}\n\n{policy}\n\n{file_tools}\n\n{approval}\n\n{browser_time}")
 }
 
 /// Applies the three durable permission facts. Malformed or unknown values do

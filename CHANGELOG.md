@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.0-alpha.26 - 2026-09-09
+
+### Fixed
+
+- Accept verified workspace-contained absolute paths alongside relative paths in native Read, Write, Edit, Read Image, Glob, and Grep. Preserve capability and workspace-lease checks; inspect final symlinks without following them during traversal, and reject unresolved outward-link probes.
+- Publish native runtime snapshots as `tessivum/runtime-context`, with actual workspace, sandbox and approval policies; refresh changed context without duplicating unchanged snapshots or rewriting legacy history.
+- Permit unselected sessions and vendor-neutral startup without a Key dialog or implicit provider/model fallback. Preserve explicit defaults and saved selections; reject invalid sends before committing input.
+- Keep image drafts available before model/key configuration, expose the file picker and declared model capabilities, preserve drafts on rejection, and reject incompatible active-history or queued-image model changes.
+- Persist explicit whole-provider configuration when saving a credential. Support explicit `auth: none` routes and CLI `TESSIVUM_LLM_AUTH=none` without sending an Authorization header; cloud authentication remains required.
+- Clear superseded draft validation notices when a valid submission is committed.
+- Recover large session lists through stable, snapshot-bound pagination under the unchanged 64 KiB response budget. Keep navigation summaries separate from on-demand projections; preserve selection and explicit retry state across loading failures and reconnects.
+- Repair `dsh-better-sidebar@0.17.1` PTY handle/socket/timer ownership through a version- and checksum-scoped patch loaded from a verified profile-local copy, without modifying the original npm package in place.
+- Preserve continuable subagent follow-ups: ordinary-session model preflight no longer rejects addressed children whose inherited model is validated by the Host.
+
+Release scope: macOS and Linux on x86_64/ARM64. Native Windows remains a separate, unpublished workstream. Artifact availability is pending completion of the release workflow and downloaded-package verification.
+
+### Known limitation — local-only sidebar terminal
+
+- Local history/terminal integration and authorized remote history recovery pass. Authorized remote requests for `/sidebar/bundle/terminal.js` still return `403 REMOTE_HOST_DENIED`: the existing policy restricts legacy plugin routes to local access.
+- By user-approved scope, Alpha.26 does not support remote sidebar terminals; this is a known limitation, not a release blocker. Keep the existing local-only legacy HTTP/WebSocket policy. Remote terminal support requires a separately designed authorization contract and verification; no authorization code was broadened. See Development Plan §§4.1.6–4.1.8.
+
 ## 0.1.0-alpha.25 - 2026-09-09
 
 ### Fixed

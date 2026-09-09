@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
-import { acknowledgeReloadConnectionLoss, RustWebHarness, waitUntil } from './support'
+import { acknowledgeReloadConnectionLoss, RustWebHarness } from './support'
 
 
-test('remote welcome advances process-locally and returns after reload', async () => {
+test('authorized remote startup stays usable across reload and device revocation', async () => {
   const harness = await RustWebHarness.launch({
     name: 'remote-welcome',
     locale: 'zh-CN',
@@ -11,16 +11,10 @@ test('remote welcome advances process-locally and returns after reload', async (
     showWelcomeNotice: true,
   })
   try {
-    const welcome = harness.page.getByRole('dialog', { name: '内测声明' })
-    await welcome.waitFor({ timeout: 15_000 })
-    expect(await harness.page.locator('#root').evaluate(root => (root as HTMLElement).inert)).toBe(true)
-
-    await welcome.getByRole('button', { name: '继续' }).click()
-    await welcome.waitFor({ state: 'detached', timeout: 15_000 })
-    await waitUntil(
-      () => harness.page.locator('#root').evaluate(root => (root as HTMLElement).inert),
-      inert => !inert,
-    )
+    const textarea = harness.page.locator('textarea').first()
+    await textarea.waitFor({ timeout: 15_000 })
+    await textarea.fill('Remote draft without onboarding')
+    expect(await textarea.inputValue()).toBe('Remote draft without onboarding')
 
     const openSidebar = harness.page.getByRole('button', { name: /打开侧边栏|Open sidebar/ })
     if (await openSidebar.count() !== 0) await openSidebar.click()
@@ -30,14 +24,14 @@ test('remote welcome advances process-locally and returns after reload', async (
     const settings = harness.page.getByRole('dialog', { name: '设置' })
     await settings.getByRole('button', { name: '模型', exact: true }).click()
     await settings.getByRole('heading', { name: '模型', exact: true }).waitFor()
-    expect(await settings.getByText('DeepSeek', { exact: true }).count()).toBe(1)
     await settings.getByRole('button', { name: '关闭', exact: true }).click()
 
     const warningStart = harness.warnings.length
     await harness.page.reload({ waitUntil: 'load' })
     acknowledgeReloadConnectionLoss(harness, warningStart)
-    await welcome.waitFor({ timeout: 15_000 })
-    expect(await harness.page.locator('#root').evaluate(root => (root as HTMLElement).inert)).toBe(true)
+    await textarea.waitFor({ timeout: 15_000 })
+    await textarea.fill('Remote draft after reload')
+    expect(await textarea.inputValue()).toBe('Remote draft after reload')
     harness.assertClean()
     const deviceErrors: string[] = []
     const deviceWarnings: string[] = []

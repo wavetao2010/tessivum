@@ -30,22 +30,125 @@ fn root() -> PathBuf {
 }
 
 #[tokio::test]
-async fn filesystem_follows_symlinks_but_lstat_does_not() {
+async fn filesystem_follows_confined_symlinks_but_lstat_never_follows_final_links() {
+    let outside = root();
     let root = root();
     std::fs::write(root.join("real"), "one\r\ntwo\rthree").unwrap();
+    std::fs::write(outside.join("secret"), "outside").unwrap();
     std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret"), root.join("outward")).unwrap();
+    std::os::unix::fs::symlink("missing", root.join("dangling")).unwrap();
     let fs = Filesystem::new(&root);
     let link = fs.target("link").unwrap();
-    assert_eq!(
-        fs.lstat(&link).await.unwrap().kind,
-        tessivum::filesystem::FsNodeKind::Symlink
-    );
+    for name in ["link", "outward", "dangling"] {
+        assert_eq!(
+            fs.lstat(&fs.target(name).unwrap()).await.unwrap().kind,
+            tessivum::filesystem::FsNodeKind::Symlink
+        );
+    }
     assert_eq!(fs.read_text(&link, 64).await.unwrap(), "one\ntwo\nthree");
+    assert_eq!(
+        fs.read_text(&fs.target("outward").unwrap(), 64)
+            .await
+            .unwrap_err()
+            .code,
+        "FS_SANDBOX_DENIED"
+    );
+    assert_eq!(
+        fs.read_text(&fs.target("dangling").unwrap(), 64)
+            .await
+            .unwrap_err()
+            .code,
+        "FS_NOT_FOUND"
+    );
     assert!(fs.contains(root.join("real")).await);
     assert_eq!(
         fs.process_path(&link).await.unwrap(),
         std::fs::canonicalize(root.join("real")).unwrap()
     );
+}
+
+#[tokio::test]
+async fn filesystem_tool_target_accepts_both_path_forms_and_denies_escapes() {
+    let outside = root();
+    let root = root();
+    std::fs::write(root.join("same.txt"), "same").unwrap();
+    std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("outside-link")).unwrap();
+    let fs = Filesystem::new(&root);
+
+    assert_eq!(
+        fs.read_text(&fs.tool_target("same.txt").await.unwrap(), 64)
+            .await
+            .unwrap(),
+        fs.read_text(&fs.tool_target(root.join("same.txt")).await.unwrap(), 64)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        fs.target(root.join("same.txt")).unwrap_err().code,
+        "FS_SANDBOX_DENIED"
+    );
+    fs.write_text(
+        &fs.tool_target(root.join("new.txt")).await.unwrap(),
+        "new",
+        FsWriteGuard::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("new.txt")).unwrap(),
+        "new"
+    );
+
+    for denied in [
+        fs.tool_target("../escape.txt").await.unwrap_err(),
+        fs.tool_target(outside.join("secret.txt"))
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(denied.code, "FS_SANDBOX_DENIED");
+    }
+    let denied = fs.tool_target("outside-link/new.txt").await.unwrap_err();
+    assert_eq!(denied.code, "FS_SANDBOX_DENIED");
+    assert!(!denied
+        .details
+        .to_string()
+        .contains(&outside.display().to_string()));
+}
+
+#[tokio::test]
+async fn filesystem_tool_target_preserves_native_paths_and_hides_outward_state() {
+    let workspace = root();
+    let outside = root();
+    std::fs::create_dir_all(workspace.join("deep/child")).unwrap();
+    std::fs::write(workspace.join("file.txt"), "workspace").unwrap();
+    std::fs::write(workspace.join("deep/file.txt"), "native").unwrap();
+    std::os::unix::fs::symlink("deep/child", workspace.join("link")).unwrap();
+    std::os::unix::fs::symlink(&outside, workspace.join("out")).unwrap();
+    let fs = Filesystem::new(&workspace);
+
+    let native = fs.tool_target("link/../file.txt").await.unwrap();
+    assert_eq!(fs.read_text(&native, 64).await.unwrap(), "native");
+    fs.write_text(&native, "updated", FsWriteGuard::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("file.txt")).unwrap(),
+        "workspace"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("deep/file.txt")).unwrap(),
+        "updated"
+    );
+
+    std::fs::create_dir(outside.join("probe")).unwrap();
+    let present = fs.tool_target("out/probe/missing.txt").await.unwrap_err();
+    assert!(!outside.join("probe/missing.txt").exists());
+    std::fs::remove_dir(outside.join("probe")).unwrap();
+    let absent = fs.tool_target("out/probe/missing.txt").await.unwrap_err();
+    assert_eq!(present.code, "FS_SANDBOX_DENIED");
+    assert_eq!(absent.code, present.code);
 }
 
 #[tokio::test]

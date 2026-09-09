@@ -254,11 +254,16 @@ impl ResponsesRouteResolver for DynamicRouteResolver {
                 Value::Null,
             )
         })?;
-        let api_key = resolve_credential_sync(Arc::clone(&self.credentials), credential_ref)?;
-        match api_key {
-            Some(api_key) => ProviderSnapshot::new(route, model_descriptor, api_key),
-            None => ProviderSnapshot::without_key(route, model_descriptor),
-        }
+        let api_key = resolve_credential_sync(Arc::clone(&self.credentials), credential_ref)?
+            .ok_or_else(|| {
+                model_error(
+                    "MISSING_CREDENTIAL",
+                    "provider credential is not configured",
+                    &route.id,
+                    Some(&model_descriptor.id),
+                )
+            })?;
+        ProviderSnapshot::new(route, model_descriptor, api_key)
     }
 }
 
@@ -532,8 +537,8 @@ fn default_deepseek_route() -> ResponsesRoute {
 }
 
 fn credential_configured(credentials: &Arc<Credentials>, reference: &str) -> bool {
-    !reference.is_empty()
-        && CredentialRef::new(reference.to_owned())
+    reference.is_empty()
+        || CredentialRef::new(reference.to_owned())
             .ok()
             .and_then(|reference| resolve_credential_sync(Arc::clone(credentials), reference).ok())
             .flatten()
@@ -1321,6 +1326,13 @@ pub struct HostSessionInfo {
     pub blank: bool,
 }
 
+/// List-only session data, including the sole projection needed by navigation.
+#[derive(Clone, Debug)]
+pub struct HostSessionSummary {
+    pub session: HostSessionInfo,
+    pub title: Option<HostSessionProjection>,
+}
+
 /// One browser-visible semantic session search hit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostSessionSearchHit {
@@ -1660,6 +1672,22 @@ pub trait HostApi: Send + Sync {
     }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         Ok(Vec::new())
+    }
+    async fn list_session_summaries(&self) -> Result<Vec<HostSessionSummary>, TessivumError> {
+        let mut summaries = Vec::new();
+        for session in self.list_sessions().await? {
+            let events = self.events(session.session_id.clone(), 0).await?;
+            let title = match session_title_projection(&events) {
+                Some(title) => Some(title),
+                None => self
+                    .session_projections(session.session_id.clone())
+                    .await?
+                    .into_iter()
+                    .find(|projection| projection.key == "title" && projection.value.is_string()),
+            };
+            summaries.push(HostSessionSummary { session, title });
+        }
+        Ok(summaries)
     }
     async fn search_sessions(
         &self,
@@ -2681,19 +2709,12 @@ impl HostRuntime {
             .get(LLM_PI_AI_NAMESPACE)
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let llm_settings_applies = if config.adapter_factory.is_none()
-            && config.recorded_replay.is_none()
-            && (config.provider != "recorded"
-                || config.model != "recorded"
-                || settings_base
-                    .get("providers")
-                    .and_then(Value::as_object)
-                    .is_some_and(|providers| !providers.is_empty()))
-        {
-            SettingsApplies::Live
-        } else {
-            SettingsApplies::Restart
-        };
+        let llm_settings_applies =
+            if config.adapter_factory.is_none() && config.recorded_replay.is_none() {
+                SettingsApplies::Live
+            } else {
+                SettingsApplies::Restart
+            };
         settings
             .register(openai_settings_registration(
                 settings_base,
@@ -2705,6 +2726,9 @@ impl HostRuntime {
             .get(LLM_DEEPSEEK_NAMESPACE)
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let legacy_deepseek_declared = deepseek_base
+            .as_object()
+            .is_some_and(|settings| !settings.is_empty());
         settings
             .register(deepseek_settings_registration(
                 deepseek_base,
@@ -2717,7 +2741,7 @@ impl HostRuntime {
             .cloned()
             .unwrap_or_else(|| json!({}));
         settings
-            .register(default_model_registration(&config, default_base))
+            .register(default_model_registration(default_base))
             .await
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         for (namespace, field, choices, default) in [
@@ -2813,28 +2837,37 @@ impl HostRuntime {
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let mut initial_routes = parse_routes(&route_snapshot.value, route_snapshot.revision)
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-        let deepseek_snapshot = settings
-            .get(LLM_DEEPSEEK_NAMESPACE)
-            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-        let deepseek_route =
-            parse_deepseek_route(&deepseek_snapshot.value, deepseek_snapshot.revision)
+        let legacy_deepseek_declared = legacy_deepseek_declared
+            || settings
+                .user(LLM_DEEPSEEK_NAMESPACE)
+                .ok()
+                .is_some_and(|value| {
+                    value
+                        .as_object()
+                        .is_some_and(|settings| !settings.is_empty())
+                });
+        if legacy_deepseek_declared {
+            let deepseek_snapshot = settings
+                .get(LLM_DEEPSEEK_NAMESPACE)
                 .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-        initial_routes.retry_policies.insert(
-            DEEPSEEK_PROVIDER.into(),
-            LlmRetryPolicy::resolve(None).expect("default retry policy is valid"),
-        );
-        initial_routes
-            .routes
-            .insert(DEEPSEEK_PROVIDER.into(), deepseek_route);
+            let deepseek_route =
+                parse_deepseek_route(&deepseek_snapshot.value, deepseek_snapshot.revision)
+                    .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+            initial_routes.retry_policies.insert(
+                DEEPSEEK_PROVIDER.into(),
+                LlmRetryPolicy::resolve(None).expect("default retry policy is valid"),
+            );
+            initial_routes
+                .routes
+                .insert(DEEPSEEK_PROVIDER.into(), deepseek_route);
+        }
         let route_map = Arc::new(initial_routes.routes);
         let retry_policies = Arc::new(initial_routes.retry_policies);
         let route_resolver = Arc::new(DynamicRouteResolver {
             routes: Arc::new(Mutex::new(Arc::clone(&route_map))),
             credentials: Arc::clone(&credentials),
         });
-        let dynamic_routes = config.adapter_factory.is_none()
-            && config.recorded_replay.is_none()
-            && (config.provider != "recorded" || config.model != "recorded");
+        let dynamic_routes = config.adapter_factory.is_none() && config.recorded_replay.is_none();
         let persistence: Arc<dyn SessionPersistence> =
             Arc::new(JsonlSessionPersistence::new(&data_dir));
         let session_inspections = persistence.list(cancellation.clone()).await?;
@@ -3678,10 +3711,8 @@ impl HostHandle {
                      namespace: &str,
                      settings_path: Vec<String>,
                      declared: bool| HostProviderDirectoryEntry {
-            credential_configured: credential_configured(
-                &self.inner.credentials,
-                &route.credential_ref,
-            ),
+            credential_configured: active(&route.id)
+                && credential_configured(&self.inner.credentials, &route.credential_ref),
             active: active(&route.id),
             route,
             namespace: namespace.into(),
@@ -3690,18 +3721,16 @@ impl HostHandle {
         };
         let mut entries =
             Vec::with_capacity(BUILTIN_PI_AI_PROVIDERS.len() + state.routes.len() + 1);
-        if active(DEEPSEEK_PROVIDER) {
-            entries.push(entry(
-                state
-                    .routes
-                    .get(DEEPSEEK_PROVIDER)
-                    .cloned()
-                    .unwrap_or_else(default_deepseek_route),
-                LLM_DEEPSEEK_NAMESPACE,
-                Vec::new(),
-                false,
-            ));
-        }
+        entries.push(entry(
+            state
+                .routes
+                .get(DEEPSEEK_PROVIDER)
+                .cloned()
+                .unwrap_or_else(default_deepseek_route),
+            LLM_DEEPSEEK_NAMESPACE,
+            Vec::new(),
+            false,
+        ));
         for provider in BUILTIN_PI_AI_PROVIDERS {
             entries.push(entry(
                 state
@@ -3828,13 +3857,8 @@ impl HostHandle {
                 .read_from(&session_id, 0, self.inner.cancellation.clone())
                 .await?
         };
-        let current = latest_model_selection(&events).or_else(|| {
-            Some(if self.inner.dynamic_routes {
-                self.initial_selection()
-            } else {
-                self.config_selection()
-            })
-        });
+        let current = latest_model_selection(&events)
+            .or_else(|| (!self.inner.dynamic_routes).then(|| self.config_selection()));
         let groups = {
             let state = lock(&self.inner.route_state);
             state
@@ -3898,13 +3922,18 @@ impl HostHandle {
                     .await?
             }
         };
-        if let Some(agent) = self.inner.registry.get(&session_id) {
-            if agent.status() == AgentStatus::Running {
-                return Err(HostError::invalid(
-                    "SESSION_BUSY",
-                    "cannot select a model while the session is running",
-                ));
-            }
+        let agent = self.inner.registry.get(&session_id);
+        if agent
+            .as_ref()
+            .is_some_and(|agent| agent.status() == AgentStatus::Running)
+        {
+            return Err(HostError::invalid(
+                "SESSION_BUSY",
+                "cannot select a model while the session is running",
+            ));
+        }
+        self.validate_model_inputs(&selection, Some(&session), agent.as_ref(), &[])?;
+        if let Some(agent) = agent {
             self.inner.approvals.cancel_session(&session_id);
             let _ = self
                 .inner
@@ -3953,45 +3982,10 @@ impl HostHandle {
         }
     }
 
-    fn initial_selection(&self) -> SessionModelSelection {
+    fn initial_selection(&self) -> Option<SessionModelSelection> {
         let state = lock(&self.inner.route_state);
-        if let Some(selection) = self.default_selection() {
-            let declared = state
-                .routes
-                .get(&selection.provider)
-                .is_some_and(|route| route.models.iter().any(|model| model.id == selection.model));
-            let explicit = self
-                .inner
-                .settings
-                .user(AGENT_DEFAULT_MODEL_NAMESPACE)
-                .ok()
-                .and_then(|value| serde_json::from_value::<SessionModelSelection>(value).ok())
-                .is_some_and(|value| value == selection);
-            if !self.inner.dynamic_routes || declared || explicit {
-                return selection_with_default_effort(state.routes.as_ref(), selection);
-            }
-        }
-        let selection = state
-            .routes
-            .get(&self.inner.config.provider)
-            .and_then(|route| {
-                route.models.first().map(|model| SessionModelSelection {
-                    provider: route.id.clone(),
-                    model: model.id.clone(),
-                    reasoning_effort: None,
-                })
-            })
-            .or_else(|| {
-                state.routes.values().find_map(|route| {
-                    route.models.first().map(|model| SessionModelSelection {
-                        provider: route.id.clone(),
-                        model: model.id.clone(),
-                        reasoning_effort: None,
-                    })
-                })
-            })
-            .unwrap_or_else(|| self.config_selection());
-        selection_with_default_effort(state.routes.as_ref(), selection)
+        self.default_selection()
+            .map(|selection| selection_with_default_effort(state.routes.as_ref(), selection))
     }
 
     async fn append_model_selection(
@@ -4088,54 +4082,34 @@ impl HostHandle {
         if !self.inner.dynamic_routes {
             return Ok(self.config_selection());
         }
-        let session = if let Some(session) = self.inner.sessions.get(session_id) {
-            session
-        } else {
-            let events = self
-                .inner
-                .persistence
-                .read_from(session_id, 0, self.inner.cancellation.clone())
-                .await?;
-            if let Some(selection) = latest_model_selection(&events) {
-                let selection = {
-                    let state = lock(&self.inner.route_state);
-                    selection_with_default_effort(state.routes.as_ref(), selection)
-                };
-                self.validate_selection(&selection)?;
-                return Ok(selection);
-            }
-            if events.is_empty()
-                && self
-                    .inner
+        let (events, exists) = if let Some(session) = self.inner.sessions.get(session_id) {
+            (session.events(), true)
+        } else if self
+            .inner
+            .persistence
+            .inspect(session_id, self.inner.cancellation.clone())
+            .await?
+            .is_some()
+        {
+            (
+                self.inner
                     .persistence
-                    .inspect(session_id, self.inner.cancellation.clone())
-                    .await?
-                    .is_none()
-            {
-                let selection = self.initial_selection();
-                self.validate_selection(&selection)?;
-                return Ok(selection);
-            }
-            self.inner
-                .sessions
-                .restore(
-                    session_id,
-                    crate::session::RestoreMode::Live,
-                    self.inner.cancellation.clone(),
-                )
-                .await?
+                    .read_from(session_id, 0, self.inner.cancellation.clone())
+                    .await?,
+                true,
+            )
+        } else {
+            (Vec::new(), false)
         };
-        if let Some(selection) = latest_model_selection(&session.events()) {
-            let selection = {
-                let state = lock(&self.inner.route_state);
-                selection_with_default_effort(state.routes.as_ref(), selection)
-            };
-            self.validate_selection(&selection)?;
-            return Ok(selection);
-        }
-        let selection = self.initial_selection();
+        let selection = latest_model_selection(&events)
+            .or_else(|| (!exists).then(|| self.initial_selection()).flatten())
+            .ok_or_else(|| {
+                HostError::invalid(
+                    "MODEL_NOT_SELECTED",
+                    "select a configured model before sending",
+                )
+            })?;
         self.validate_selection(&selection)?;
-        self.append_model_selection(&session, &selection).await?;
         Ok(selection)
     }
 
@@ -4146,9 +4120,9 @@ impl HostHandle {
     ) -> bool {
         let state = lock(&self.inner.route_state);
         let Some(route) = state.routes.get(&selection.provider) else {
-            if selection.provider == self.inner.config.provider
+            if !self.inner.dynamic_routes
+                && selection.provider == self.inner.config.provider
                 && selection.model == self.inner.config.model
-                && (!self.inner.dynamic_routes || state.routes.is_empty())
             {
                 return true;
             }
@@ -4215,6 +4189,64 @@ impl HostHandle {
                 )
             });
             Err(HostError::invalid(failure.code, failure.message))
+        }
+    }
+
+    fn validate_model_inputs(
+        &self,
+        selection: &SessionModelSelection,
+        session: Option<&Session>,
+        agent: Option<&AgentHandle>,
+        additional: &[ContentBlock],
+    ) -> Result<(), HostError> {
+        if !self.inner.dynamic_routes {
+            return Ok(());
+        }
+        let history_has_image = session
+            .map(Session::derive_messages)
+            .is_some_and(|messages| messages.iter().any(message_has_image));
+        let queue_has_image = if let Some(agent) = agent {
+            agent
+                .inbox()
+                .pending()
+                .iter()
+                .any(|(_, message)| message_has_image(message))
+        } else if let Some(session) = session {
+            session
+                .pending_next_turn_inbox()?
+                .iter()
+                .any(message_has_image)
+        } else {
+            false
+        };
+        if !blocks_have_image(additional) && !history_has_image && !queue_has_image {
+            return Ok(());
+        }
+        let supports_image = {
+            let state = lock(&self.inner.route_state);
+            state
+                .routes
+                .get(&selection.provider)
+                .and_then(|route| {
+                    route
+                        .models
+                        .iter()
+                        .find(|model| model.id == selection.model)
+                })
+                .is_some_and(|model| {
+                    model
+                        .input
+                        .iter()
+                        .any(|input| input == RESPONSES_IMAGE_MODALITY)
+                })
+        };
+        if supports_image {
+            Ok(())
+        } else {
+            Err(HostError::invalid(
+                "UNSUPPORTED_MODALITY",
+                "the selected model does not support image input in the effective session context",
+            ))
         }
     }
     pub fn attachment_limits(&self) -> AttachmentLimits {
@@ -4311,47 +4343,6 @@ impl HostHandle {
             }
         }
 
-        if self.inner.dynamic_routes {
-            let events = if let Some(session) = self.inner.sessions.get(&params.session_id) {
-                session.events()
-            } else {
-                self.inner
-                    .persistence
-                    .read_from(&params.session_id, 0, self.inner.cancellation.clone())
-                    .await?
-            };
-            let selection =
-                latest_model_selection(&events).or_else(|| Some(self.initial_selection()));
-            let supports_image = selection
-                .as_ref()
-                .and_then(|selection| {
-                    let state = lock(&self.inner.route_state);
-                    state.routes.get(&selection.provider).and_then(|route| {
-                        route
-                            .models
-                            .iter()
-                            .find(|model| model.id == selection.model)
-                            .cloned()
-                    })
-                })
-                .is_some_and(|model| {
-                    let input = if model.input.is_empty() {
-                        &[RESPONSES_TEXT_MODALITY.to_owned()][..]
-                    } else {
-                        &model.input
-                    };
-                    input
-                        .iter()
-                        .any(|modality| modality == RESPONSES_IMAGE_MODALITY)
-                });
-            if !supports_image {
-                return Err(HostError::invalid(
-                    "UNSUPPORTED_MODALITY",
-                    "the selected model does not support image input",
-                ));
-            }
-        }
-
         for plan in &plans {
             if let ImagePlan::Reference(reference) = plan {
                 self.inner.attachments.read_ref(reference).await?;
@@ -4416,6 +4407,74 @@ impl HostHandle {
                 version: env!("CARGO_PKG_VERSION").into(),
             },
         })
+    }
+
+    async fn list_session_summaries_inner(&self) -> Result<Vec<HostSessionSummary>, HostError> {
+        let sessions = self
+            .inner
+            .persistence
+            .list(self.inner.cancellation.clone())
+            .await?;
+        let mut listed = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            self.inner
+                .workspace_registry
+                .recognize_session(&session.header.id)?;
+            // ponytail: fold list metadata from the one history read; add a persistence index only if profiling requires it.
+            let events = self
+                .inner
+                .persistence
+                .read_from(&session.header.id, 0, self.inner.cancellation.clone())
+                .await?;
+            let updated_at = events
+                .iter()
+                .rev()
+                .find(|event| event.event_type == "user/message")
+                .map_or(session.header.created_at, |event| event.time);
+            let agent_mode = Some(
+                selected_agent_mode_from(
+                    &events,
+                    session.header.agent_mode.clone(),
+                    &current_default_agent_mode(&self.inner).map_err(mode_error)?,
+                )
+                .map_err(mode_error)?,
+            );
+            let title = match session_title_projection(&events) {
+                Some(title) => Some(title),
+                None => self
+                    .inner
+                    .projections
+                    .snapshot(&session.header.id, "title")
+                    .ok()
+                    .filter(|projection| projection.view.is_string())
+                    .map(|projection| HostSessionProjection {
+                        key: projection.key,
+                        value: projection.view,
+                        seq: projection.as_of_seq,
+                    }),
+            };
+            listed.push(HostSessionSummary {
+                session: HostSessionInfo {
+                    workspace_id: self
+                        .inner
+                        .workspace_registry
+                        .workspace_for_session(&session.header.id)
+                        .map(|workspace| workspace.workspace_id),
+                    session_id: session.header.id.clone(),
+                    created_at: session.header.created_at,
+                    updated_at,
+                    running: self.session_running(&session.header.id),
+                    cwd: session.header.cwd,
+                    parent_session: session.header.parent_session,
+                    origin: session.header.origin,
+                    agent_mode,
+                    event_count: session.event_count,
+                    blank: !has_model_visible_work(&events),
+                },
+                title,
+            });
+        }
+        Ok(listed)
     }
 
     async fn search_sessions_inner(
@@ -4726,7 +4785,7 @@ impl HostHandle {
         let selection = if self.inner.dynamic_routes {
             self.initial_selection()
         } else {
-            self.config_selection()
+            Some(self.config_selection())
         };
         let agent_mode = Some(current_default_agent_mode(&self.inner).map_err(mode_error)?);
         let session = self
@@ -4747,7 +4806,9 @@ impl HostHandle {
                 self.inner.cancellation.clone(),
             )
             .await?;
-        self.append_model_selection(&session, &selection).await?;
+        if let Some(selection) = &selection {
+            self.append_model_selection(&session, selection).await?;
+        }
         self.pin_initial_permission(&session).await?;
 
         self.inner
@@ -4850,10 +4911,45 @@ impl HostHandle {
         steer: bool,
     ) -> Result<SessionPromptResult, HostError> {
         let _admission = self.admit()?;
+        validate_session(&params.session_id)?;
+        self.selection_for_session(&params.session_id).await?;
         let params = self.normalize_prompt_inner(params).await?;
         validate_prompt(&params)?;
         let (agent, session, mut commits, message_id, was_running) = {
             let _setup = self.inner.setup.lock().await;
+            let session = match self.inner.sessions.get(&params.session_id) {
+                Some(session) => Some(session),
+                None => {
+                    if self
+                        .inner
+                        .persistence
+                        .inspect(&params.session_id, self.inner.cancellation.clone())
+                        .await?
+                        .is_some()
+                    {
+                        Some(
+                            self.inner
+                                .sessions
+                                .restore(
+                                    &params.session_id,
+                                    RestoreMode::Live,
+                                    self.inner.cancellation.clone(),
+                                )
+                                .await?,
+                        )
+                    } else {
+                        None
+                    }
+                }
+            };
+            let selection = self.selection_for_session(&params.session_id).await?;
+            let existing_agent = self.inner.registry.get(&params.session_id);
+            self.validate_model_inputs(
+                &selection,
+                session.as_deref(),
+                existing_agent.as_ref(),
+                &params.content_blocks,
+            )?;
             let agent = self.ensure_agent_under_setup(&params.session_id).await?;
             let session = agent.session();
             let commits = session.subscribe();
@@ -6656,8 +6752,20 @@ impl HostApi for HostHandle {
         let snapshots = match self.inner.projections.snapshots(&session, None) {
             Ok(snapshots) => snapshots,
             Err(crate::projection::ProjectionError::NotAttached { .. }) => {
-                let Some(live) = self.inner.sessions.get(&session) else {
-                    return Ok(Vec::new());
+                let _setup = self.inner.setup.lock().await;
+                let live = match self.inner.sessions.get(&session) {
+                    Some(live) => live,
+                    None => self
+                        .inner
+                        .sessions
+                        .restore(
+                            &session,
+                            RestoreMode::Metadata,
+                            self.inner.cancellation.clone(),
+                        )
+                        .await
+                        .map_err(HostError::from)
+                        .map_err(HostError::wire)?,
                 };
                 self.inner.projections.attach(live).map_err(|error| {
                     TessivumError::new(error.code(), error.to_string(), "projection", Value::Null)
@@ -6826,57 +6934,18 @@ impl HostApi for HostHandle {
             .map_err(HostError::wire)
     }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
-        let sessions = self
-            .inner
-            .persistence
-            .list(self.inner.cancellation.clone())
+        Ok(self
+            .list_session_summaries_inner()
             .await
-            .map_err(HostError::from)
-            .map_err(HostError::wire)?;
-        let mut listed = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            self.inner
-                .workspace_registry
-                .recognize_session(&session.header.id)
-                .map_err(HostError::from)
-                .map_err(HostError::wire)?;
-            // ponytail: fold activity and mode events on list; add a persistence index if large histories make this measurable.
-            let events = self
-                .inner
-                .persistence
-                .read_from(&session.header.id, 0, self.inner.cancellation.clone())
-                .await
-                .map_err(HostError::from)
-                .map_err(HostError::wire)?;
-            let updated_at = events
-                .iter()
-                .rev()
-                .find(|event| event.event_type == "user/message")
-                .map_or(session.header.created_at, |event| event.time);
-            let agent_mode = Some(selected_agent_mode_from(
-                &events,
-                session.header.agent_mode.clone(),
-                &current_default_agent_mode(&self.inner)?,
-            )?);
-            listed.push(HostSessionInfo {
-                workspace_id: self
-                    .inner
-                    .workspace_registry
-                    .workspace_for_session(&session.header.id)
-                    .map(|workspace| workspace.workspace_id),
-                session_id: session.header.id.clone(),
-                created_at: session.header.created_at,
-                updated_at,
-                running: self.session_running(&session.header.id),
-                cwd: session.header.cwd,
-                parent_session: session.header.parent_session,
-                origin: session.header.origin,
-                agent_mode,
-                event_count: session.event_count,
-                blank: !has_model_visible_work(&events),
-            });
-        }
-        Ok(listed)
+            .map_err(HostError::wire)?
+            .into_iter()
+            .map(|summary| summary.session)
+            .collect())
+    }
+    async fn list_session_summaries(&self) -> Result<Vec<HostSessionSummary>, TessivumError> {
+        self.list_session_summaries_inner()
+            .await
+            .map_err(HostError::wire)
     }
     async fn search_sessions(
         &self,
@@ -7126,6 +7195,12 @@ impl HostApi for HostRuntime {
     ) -> Result<Vec<SessionEvent>, TessivumError> {
         self.handle.events(session, from_seq).await
     }
+    async fn session_projections(
+        &self,
+        session: SessionId,
+    ) -> Result<Vec<HostSessionProjection>, TessivumError> {
+        self.handle.session_projections(session).await
+    }
     async fn status(&self, session: SessionId) -> Result<Option<SessionStatus>, TessivumError> {
         self.handle.status(session).await
     }
@@ -7228,6 +7303,9 @@ impl HostApi for HostRuntime {
     }
     async fn list_sessions(&self) -> Result<Vec<HostSessionInfo>, TessivumError> {
         self.handle.list_sessions().await
+    }
+    async fn list_session_summaries(&self) -> Result<Vec<HostSessionSummary>, TessivumError> {
+        self.handle.list_session_summaries().await
     }
     async fn search_sessions(
         &self,
@@ -7601,6 +7679,11 @@ async fn mutate_settings_inner(
     namespace: String,
     mutation: HostSettingsMutation,
 ) -> Result<SettingsSnapshot, SettingsError> {
+    let _setup = if namespace == AGENT_DEFAULT_MODEL_NAMESPACE {
+        Some(inner.setup.lock().await)
+    } else {
+        None
+    };
     let routed = inner.dynamic_routes
         && matches!(
             namespace.as_str(),
@@ -7679,19 +7762,35 @@ async fn apply_route_settings_locked(inner: &Arc<HostInner>) -> Result<(), HostE
         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
     let mut candidate = parse_routes(&pi_snapshot.value, pi_snapshot.revision)
         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-    let deepseek_snapshot = inner
-        .settings
+    let legacy_deepseek_declared = inner
+        .profile
         .get(LLM_DEEPSEEK_NAMESPACE)
-        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
-    candidate.routes.insert(
-        DEEPSEEK_PROVIDER.into(),
-        parse_deepseek_route(&deepseek_snapshot.value, deepseek_snapshot.revision)
-            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
-    );
-    candidate.retry_policies.insert(
-        DEEPSEEK_PROVIDER.into(),
-        LlmRetryPolicy::resolve(None).expect("default retry policy is valid"),
-    );
+        .and_then(Value::as_object)
+        .is_some_and(|settings| !settings.is_empty())
+        || inner
+            .settings
+            .user(LLM_DEEPSEEK_NAMESPACE)
+            .ok()
+            .is_some_and(|value| {
+                value
+                    .as_object()
+                    .is_some_and(|settings| !settings.is_empty())
+            });
+    if legacy_deepseek_declared {
+        let deepseek_snapshot = inner
+            .settings
+            .get(LLM_DEEPSEEK_NAMESPACE)
+            .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        candidate.routes.insert(
+            DEEPSEEK_PROVIDER.into(),
+            parse_deepseek_route(&deepseek_snapshot.value, deepseek_snapshot.revision)
+                .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?,
+        );
+        candidate.retry_policies.insert(
+            DEEPSEEK_PROVIDER.into(),
+            LlmRetryPolicy::resolve(None).expect("default retry policy is valid"),
+        );
+    }
     let candidate_routes = Arc::new(candidate.routes);
     let candidate_retry_policies = Arc::new(candidate.retry_policies);
     let (old_routes, old_retry_policies, mut old_registrations) = {
@@ -7784,6 +7883,8 @@ struct RawOpenAiRoute {
     base_url: Option<String>,
     #[serde(default, alias = "credentialRef")]
     api_key_env: Option<String>,
+    #[serde(default)]
+    auth: Option<String>,
     #[serde(default)]
     models: Vec<RawOpenAiModel>,
     #[serde(default)]
@@ -7992,7 +8093,43 @@ fn parse_routes(value: &Value, revision: u64) -> Result<ParsedRoutes, TessivumEr
         } else {
             parse_models(raw_route.models)?
         };
-        let credential_ref = raw_route.api_key_env.unwrap_or_default();
+        let credential_ref = raw_route.api_key_env.unwrap_or_default().trim().to_owned();
+        match raw_route.auth.as_deref() {
+            None | Some("api-key") if !credential_ref.is_empty() => {}
+            Some("none") if credential_ref.is_empty() => {}
+            None => {
+                return Err(TessivumError::new(
+                    "INVALID_OPENAI_ROUTE_SETTINGS",
+                    "credential-free provider routes must explicitly set auth to none",
+                    "host",
+                    json!({"provider": id}),
+                ));
+            }
+            Some("api-key") => {
+                return Err(TessivumError::new(
+                    "INVALID_OPENAI_ROUTE_SETTINGS",
+                    "api-key provider routes require apiKeyEnv",
+                    "host",
+                    json!({"provider": id}),
+                ));
+            }
+            Some("none") => {
+                return Err(TessivumError::new(
+                    "INVALID_OPENAI_ROUTE_SETTINGS",
+                    "auth none provider routes must not declare apiKeyEnv",
+                    "host",
+                    json!({"provider": id}),
+                ));
+            }
+            Some(_) => {
+                return Err(TessivumError::new(
+                    "INVALID_OPENAI_ROUTE_SETTINGS",
+                    "provider route auth must be api-key or none",
+                    "host",
+                    json!({"provider": id}),
+                ));
+            }
+        }
         if !credential_ref.is_empty() {
             let credential = CredentialRef::new(credential_ref.clone()).map_err(|_error| {
                 TessivumError::new(
@@ -8198,6 +8335,9 @@ fn openai_settings_registration(base: Value, applies: SettingsApplies) -> Settin
                 "22": {"type": "string", "meta": {}},
                 "23": {"type": "array", "meta": {"default": []}, "inner": 15},
                 "29": {"type": "boolean", "meta": {"default": false}},
+                "45": {"type": "const", "meta": {"required": true}, "value": "api-key"},
+                "46": {"type": "const", "meta": {"required": true}, "value": "none"},
+                "47": {"type": "union", "meta": {}, "list": [45, 46]},
                 "24": {
                     "type": "object",
                     "meta": {"default": {}},
@@ -8208,6 +8348,7 @@ fn openai_settings_registration(base: Value, applies: SettingsApplies) -> Settin
                         "baseURL": 22,
                         "models": 23,
                         "retryPolicy": 42,
+                        "auth": 47,
                         "enabled": 29
                     }
                 },
@@ -8380,14 +8521,25 @@ fn web_search_settings_registration(base: Value) -> SettingsRegistration {
     }))
 }
 
-fn default_model_registration(config: &HostConfig, base: Value) -> SettingsRegistration {
+fn default_model_registration(base: Value) -> SettingsRegistration {
     SettingsRegistration::new(
         AGENT_DEFAULT_MODEL_NAMESPACE,
-        json!({"type":"object","required":["provider","model"],"additionalProperties":false}),
-        json!({"provider":config.provider,"model":config.model}),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "reasoningEffort": {"type": "string"}
+            }
+        }),
+        json!({}),
         base,
     )
     .with_validator(Arc::new(|value| {
+        if value.as_object().is_some_and(Map::is_empty) {
+            return Ok(());
+        }
         let selection: SessionModelSelection =
             serde_json::from_value(value.clone()).map_err(|error| {
                 TessivumError::new(
@@ -8455,12 +8607,13 @@ fn choice_settings_registration(
 
 fn latest_model_selection(events: &[SessionEvent]) -> Option<SessionModelSelection> {
     events.iter().rev().find_map(|event| {
-        (event.event_type == "session/model-selected")
-            .then(|| serde_json::from_value(event.data.clone()).ok())
-            .flatten()
+        if event.event_type != "session/model-selected" {
+            return None;
+        }
+        let selection: SessionModelSelection = serde_json::from_value(event.data.clone()).ok()?;
+        selection.validate().ok().map(|()| selection)
     })
 }
-
 fn selection_with_default_effort(
     routes: &BTreeMap<String, ResponsesRoute>,
     mut selection: SessionModelSelection,
@@ -8479,6 +8632,20 @@ fn selection_with_default_effort(
     selection
 }
 
+fn blocks_have_image(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        ContentBlock::Image { .. } => true,
+        ContentBlock::ToolResult { content, .. } => blocks_have_image(content),
+        ContentBlock::Text { .. }
+        | ContentBlock::Reasoning { .. }
+        | ContentBlock::ToolCall { .. } => false,
+    })
+}
+
+fn message_has_image(message: &Message) -> bool {
+    blocks_have_image(&message.content)
+}
+
 fn has_model_visible_work(events: &[SessionEvent]) -> bool {
     events.iter().any(|event| {
         matches!(
@@ -8490,6 +8657,18 @@ fn has_model_visible_work(events: &[SessionEvent]) -> bool {
                 | "tool/call"
                 | "tool/result"
         )
+    })
+}
+fn session_title_projection(events: &[SessionEvent]) -> Option<HostSessionProjection> {
+    events.iter().rev().find_map(|event| {
+        (event.event_type == "session/title")
+            .then(|| event.data.get("title").filter(|title| title.is_string()))
+            .flatten()
+            .map(|title| HostSessionProjection {
+                key: "title".into(),
+                value: title.clone(),
+                seq: Some(event.seq),
+            })
     })
 }
 

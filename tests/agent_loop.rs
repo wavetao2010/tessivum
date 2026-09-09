@@ -529,6 +529,20 @@ impl ToolHandler for Echo {
     }
 }
 
+struct GatedEcho {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ToolHandler for GatedEcho {
+    async fn run(&self, context: ToolRunContext, arguments: Value) -> ToolHandlerResult {
+        self.started.notify_one();
+        self.release.notified().await;
+        Echo.run(context, arguments).await
+    }
+}
+
 struct BlockingTool;
 
 #[async_trait]
@@ -1086,6 +1100,181 @@ async fn preloaded_request_header_makes_first_runtime_header_resume() {
             },
             "reason": "resume"
         })
+    );
+    agent.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn restored_legacy_runtime_context_gets_native_snapshots_only_when_state_changes() {
+    let persistence = Arc::new(MemorySessionPersistence::new());
+    let writer = SessionStore::new(persistence.clone());
+    let mut restored_header = header_with_mode("legacy-runtime-context", "test-read");
+    restored_header.cwd = Some("/workspace/project".into());
+    let session = writer
+        .create(restored_header, cancellation())
+        .await
+        .unwrap();
+    session
+        .append(
+            SessionEvent {
+                event_type: "user/message".into(),
+                seq: 0,
+                time: 7,
+                data: json!({
+                    "id": "legacy-context",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "legacy runtime context"}],
+                    "source": {
+                        "kind": "plugin",
+                        "plugin": "@deepseek-ai/dsh-system-prompt"
+                    }
+                }),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: Some(SurfaceOp::Append),
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let history = session.events();
+    let history_bytes = serde_json::to_vec(&history).unwrap();
+    drop(session);
+    drop(writer);
+
+    let llm = LlmRuntime::new();
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let tool_started = Arc::new(tokio::sync::Notify::new());
+    let tool_release = Arc::new(tokio::sync::Notify::new());
+    let adapter = RecordingAdapter {
+        requests: Arc::clone(&requests),
+        streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([
+            text_turn("first"),
+            text_turn("second"),
+            tool_turn(),
+            text_turn("changed"),
+        ]))),
+    };
+    let _provider = llm.register("test", Arc::new(adapter)).unwrap();
+    let tools = ToolRuntime::new();
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "read",
+            "reads",
+            json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
+            GatedEcho {
+                started: Arc::clone(&tool_started),
+                release: Arc::clone(&tool_release),
+            },
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(persistence));
+    let _factory = registry
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), tools)))
+        .unwrap();
+    let agent = registry
+        .resume(
+            SessionId::from("legacy-runtime-context"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "deterministic".into(),
+                reasoning_effort: None,
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let user_at = |id: &str| Message {
+        id: id.into(),
+        role: MessageRole::User,
+        content: vec![ContentBlock::Text { text: id.into() }],
+        source: MessageSource::User {
+            client_time_zone: Some("Asia/Shanghai".into()),
+        },
+    };
+    let native_contexts = || {
+        agent
+            .session()
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "user/message"
+                    && event.data["source"]["plugin"] == "tessivum/runtime-context"
+            })
+            .collect::<Vec<_>>()
+    };
+
+    agent.followup(user_at("first-user")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    let first = native_contexts();
+    assert_eq!(first.len(), 1);
+    let first_text = first[0].data["content"][0]["text"].as_str().unwrap();
+    assert!(first_text.contains("Session workspace: \"/workspace/project\"."));
+    assert!(first_text.contains("Standing Tessivum sandbox policy: workspace-write."));
+    assert!(first_text.contains("Approval policy: ask."));
+    assert!(first_text.contains("Browser time zone for this request: Asia/Shanghai."));
+
+    agent.followup(user_at("second-user")).await.unwrap();
+    agent.when_idle().await.unwrap();
+    assert_eq!(native_contexts().len(), 1);
+
+    agent.followup(user_at("third-user")).await.unwrap();
+    tool_started.notified().await;
+    for (event_type, data) in [
+        ("sandbox/mode", json!({"mode": "danger-full-access"})),
+        ("approval/policy", json!({"policy": "never"})),
+    ] {
+        agent
+            .session()
+            .append_next(
+                |seq| SessionEvent {
+                    event_type: event_type.into(),
+                    seq,
+                    time: 8,
+                    data,
+                    ignorable: None,
+                    source_event_seqs: None,
+                    surface_op: None,
+                },
+                cancellation(),
+            )
+            .await
+            .unwrap();
+    }
+    tool_release.notify_one();
+    agent.when_idle().await.unwrap();
+    let contexts = native_contexts();
+    assert_eq!(contexts.len(), 2);
+    let changed = contexts[1].data["content"][0]["text"].as_str().unwrap();
+    assert!(changed.contains("Standing Tessivum sandbox policy: danger-full-access."));
+    assert!(changed.contains("Approval policy: never."));
+    assert_ne!(contexts[0].data["id"], contexts[1].data["id"]);
+    {
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 4);
+        let next_context = requests[3]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            matches!(&message.source, MessageSource::Plugin { plugin, .. } if plugin == "tessivum/runtime-context")
+        })
+        .unwrap();
+        assert!(matches!(
+            next_context.content.as_slice(),
+            [ContentBlock::Text { text }] if text == changed
+        ));
+    }
+
+    let events = agent.session().events();
+    assert_eq!(
+        serde_json::to_vec(&events[..history.len()]).unwrap(),
+        history_bytes
+    );
+    assert_eq!(
+        events[0].data["source"]["plugin"],
+        "@deepseek-ai/dsh-system-prompt"
     );
     agent.dispose().await.unwrap();
 }

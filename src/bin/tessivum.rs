@@ -854,25 +854,28 @@ async fn boot_host(
             config.model = model;
         }
     } else if let Some(deployment) = deployment_from_env()? {
-        config.provider = deployment.provider.clone();
-        config.model = deployment.model.clone();
+        let api_key_env = match deployment.auth {
+            LlmAuth::ApiKey => "OPENAI_API_KEY",
+            LlmAuth::None => "",
+        };
         config.profile_patch = serde_json::json!({
             "llm-pi-ai": {
                 "providers": {
-                    deployment.provider: {
+                    deployment.provider.clone(): {
                         "displayName": "OpenAI Responses",
                         "api": "openai-responses",
+                        "auth": deployment.auth.as_str(),
                         "baseURL": deployment.base_url,
-                        "apiKeyEnv": "OPENAI_API_KEY",
-                        "models": [{"id": deployment.model, "input": ["text"]}]
+                        "apiKeyEnv": api_key_env,
+                        "models": [{"id": deployment.model.clone(), "input": deployment.input}]
                     }
                 }
+            },
+            "agent-default-model": {
+                "provider": deployment.provider,
+                "model": deployment.model,
             }
         });
-    } else {
-        // Web/SDK start providerless; settings can install the first live route.
-        config.provider = "openai-responses".into();
-        config.model = "unconfigured".into();
     }
     configure_host_plugins(&mut config)
         .map_err(|error| Diagnostic::runtime("PLUGIN_PROFILE_FAILED", error))?;
@@ -899,30 +902,79 @@ async fn boot_host(
         .map_err(|error| Diagnostic::runtime(error.code().to_owned(), error))
 }
 
+#[derive(Clone, Copy)]
+enum LlmAuth {
+    ApiKey,
+    None,
+}
+
+impl LlmAuth {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiKey => "api-key",
+            Self::None => "none",
+        }
+    }
+}
+
 struct Deployment {
     provider: String,
     model: String,
     base_url: String,
+    auth: LlmAuth,
+    input: Vec<String>,
 }
 
 fn deployment_from_env() -> Result<Option<Deployment>, Diagnostic> {
+    let auth = llm_auth_from_env()?;
+    let input = llm_input_from_env()?;
     let Some(model) = environment("OPENAI_MODEL")? else {
         return Ok(None);
     };
-    if model.trim().is_empty() {
+    let model = model.trim();
+    if model.is_empty() {
         return Err(Diagnostic::usage("OPENAI_MODEL must not be empty"));
     }
     let provider =
         environment("TESSIVUM_LLM_PROVIDER")?.unwrap_or_else(|| "openai-responses".into());
-    if provider.trim().is_empty() {
+    let provider = provider.trim();
+    if provider.is_empty() {
         return Err(Diagnostic::usage("TESSIVUM_LLM_PROVIDER must not be empty"));
     }
     Ok(Some(Deployment {
-        provider,
-        model,
+        provider: provider.into(),
+        model: model.into(),
         base_url: environment("OPENAI_BASE_URL")?
             .unwrap_or_else(|| "https://api.openai.com/v1".into()),
+        auth,
+        input,
     }))
+}
+
+fn llm_auth_from_env() -> Result<LlmAuth, Diagnostic> {
+    match environment("TESSIVUM_LLM_AUTH")?.as_deref() {
+        None | Some("api-key") => Ok(LlmAuth::ApiKey),
+        Some("none") => Ok(LlmAuth::None),
+        Some(_) => Err(Diagnostic::usage(
+            "TESSIVUM_LLM_AUTH must be api-key or none",
+        )),
+    }
+}
+
+fn llm_input_from_env() -> Result<Vec<String>, Diagnostic> {
+    let Some(input) = environment("TESSIVUM_LLM_INPUT")? else {
+        return Ok(vec!["text".into()]);
+    };
+    input
+        .split(',')
+        .map(str::trim)
+        .map(|modality| match modality {
+            "text" | "image" => Ok(modality.to_owned()),
+            _ => Err(Diagnostic::usage(
+                "TESSIVUM_LLM_INPUT must be a comma-separated list containing only text or image",
+            )),
+        })
+        .collect()
 }
 
 fn live_adapter(provider: &str) -> Result<Arc<dyn LlmAdapter>, Diagnostic> {
@@ -935,12 +987,19 @@ fn live_adapter(provider: &str) -> Result<Arc<dyn LlmAdapter>, Diagnostic> {
 }
 
 fn openai_adapter_from_env() -> Result<Arc<dyn LlmAdapter>, Diagnostic> {
-    let api_key = environment("OPENAI_API_KEY")?
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| Diagnostic::usage("OPENAI_API_KEY is required"))?;
+    let auth = llm_auth_from_env()?;
     let base_url =
         environment("OPENAI_BASE_URL")?.unwrap_or_else(|| "https://api.openai.com/v1".into());
-    OpenAiResponsesAdapter::new(&base_url, &api_key)
+    let adapter = match auth {
+        LlmAuth::ApiKey => {
+            let api_key = environment("OPENAI_API_KEY")?
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| Diagnostic::usage("OPENAI_API_KEY is required"))?;
+            OpenAiResponsesAdapter::new(&base_url, &api_key)
+        }
+        LlmAuth::None => OpenAiResponsesAdapter::new_without_key(&base_url),
+    };
+    adapter
         .map(|adapter| Arc::new(adapter) as Arc<dyn LlmAdapter>)
         .map_err(|error| Diagnostic::usage(error.to_string()))
 }

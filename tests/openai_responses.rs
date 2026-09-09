@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 use axum::{
     body::Body,
@@ -10,6 +7,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tessivum::{
     attachments::{AttachmentInput, AttachmentStore},
@@ -34,15 +32,15 @@ async fn responses(
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response<Body> {
-    state.requests.lock().unwrap().push(request);
-    state.authorizations.lock().unwrap().push(
+    state.requests.lock().push(request);
+    state.authorizations.lock().push(
         headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned(),
     );
-    let call = state.requests.lock().unwrap().len();
+    let call = state.requests.lock().len();
     let events = if call == 1 {
         vec![
             json!({"type":"response.created","response":{"id":"resp_1"}}),
@@ -210,7 +208,7 @@ async fn responses_materializes_durable_images_in_order_and_tool_output_arrays()
         )
         .await
         .unwrap();
-    let requests = state.requests.lock().unwrap();
+    let requests = state.requests.lock();
     let first_content = requests[0]["input"][0]["content"].as_array().unwrap();
     assert_eq!(
         first_content[0],
@@ -336,7 +334,7 @@ async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_rel
         }]
     );
 
-    let requests = state.requests.lock().unwrap();
+    let requests = state.requests.lock();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["model"], json!("relay-codex"));
     assert_eq!(requests[0]["stream"], json!(true));
@@ -366,10 +364,51 @@ async fn native_responses_streams_tools_and_replays_encrypted_reasoning_to_a_rel
             && item["output"] == "/workspace"
     }));
     assert_eq!(
-        *state.authorizations.lock().unwrap(),
+        *state.authorizations.lock(),
         vec!["Bearer relay-key", "Bearer relay-key"]
     );
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn explicit_no_auth_route_omits_authorization() {
+    let state = Arc::new(RelayState::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(Arc::clone(&state));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let model = ResponsesModel::new("relay-codex");
+    let route = ResponsesRoute::new(
+        "openai-responses",
+        "Local",
+        format!("http://{address}/v1"),
+        "",
+        vec![model.clone()],
+    );
+    let adapter = Arc::new(OpenAiResponsesAdapter::with_resolver(
+        move |provider: &str, model_id: &str| {
+            assert_eq!(provider, route.id);
+            assert_eq!(model_id, model.id);
+            ProviderSnapshot::without_key(route.clone(), model.clone())
+        },
+    ));
+    let runtime = LlmRuntime::new();
+    let _registration = runtime
+        .register("openai-responses", adapter)
+        .expect("provider registers");
+    let mut prompt = request(vec![user("local")], None);
+    prompt.reasoning_effort = None;
+
+    runtime
+        .complete(prompt, ContextHandle::root().scope().cancellation())
+        .await
+        .unwrap();
+    assert_eq!(*state.authorizations.lock(), vec![""]);
     server.abort();
 }
 

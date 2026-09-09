@@ -295,6 +295,158 @@ fn bundle_order_controls_entries_and_duplicate_guard_avoids_a_second_active_moun
         .all(|entry| entry.options.name.as_deref() != Some("inactive")));
 }
 
+#[cfg(unix)]
+#[test]
+fn pinned_sidebar_repair_is_repeatable_and_keeps_the_installed_package_untouched() {
+    let temp = TempDir::new();
+    let profile = sidebar_profile(&temp, "0.17.1", &sidebar_upstream_source());
+    let installed = profile.join("node_modules/dsh-better-sidebar/lib/index.js");
+    let before = fs::read(&installed).unwrap();
+
+    load_plugin_entries(&profile).unwrap().unwrap();
+    load_plugin_entries(&profile).unwrap().unwrap();
+
+    assert_eq!(fs::read(&installed).unwrap(), before);
+    let repairs = fs::read_dir(sidebar_dependency_root(&profile))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tessivum-dsh-better-sidebar-0.17.1-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(repairs.len(), 1);
+    let repaired = repairs[0].path();
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(fs::read(repaired.join("lib/index.js")).unwrap())
+        ),
+        "638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1"
+    );
+    assert_eq!(
+        fs::read(repaired.join("lib/client-terminal.js")).unwrap(),
+        b"terminal chunk\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sidebar_repair_rejects_changed_pinned_source_and_ignores_other_versions() {
+    let changed = TempDir::new();
+    let changed_profile = sidebar_profile(&changed, "0.17.1", b"changed source\n");
+    let error = match load_plugin_entries(&changed_profile) {
+        Ok(_) => panic!("changed pinned sidebar source was accepted"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("PLUGIN_FIXED_PATCH_INVALID"));
+    assert!(error.contains("unexpected sha256"));
+    assert!(!fs::read_dir(sidebar_dependency_root(&changed_profile))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tessivum-")));
+
+    let other = TempDir::new();
+    let other_profile = sidebar_profile(&other, "0.17.2", b"other version\n");
+    load_plugin_entries(&other_profile).unwrap().unwrap();
+    assert!(!fs::read_dir(sidebar_dependency_root(&other_profile))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tessivum-")));
+}
+
+#[cfg(unix)]
+fn sidebar_profile(temp: &TempDir, version: &str, source: &[u8]) -> PathBuf {
+    let profile = temp.0.join("plugins");
+    fs::create_dir_all(profile.join("node_modules")).unwrap();
+    write_json(
+        &profile.join("package.json"),
+        json!({
+            "name": "test-profile",
+            "private": true,
+            "dependencies": {"carrier": "1.0.0", "dsh-better-sidebar": version},
+            "dsh": {"profile": {"bundles": ["carrier"]}}
+        }),
+    );
+    write_bundle(
+        &profile,
+        "carrier",
+        false,
+        "- insert:\n    - id: better-sidebar\n      name: dsh-better-sidebar\n",
+    );
+    let dependency_root = sidebar_dependency_root(&profile);
+    let root = dependency_root.join("dsh-better-sidebar");
+    fs::create_dir_all(root.join("lib")).unwrap();
+    fs::create_dir_all(dependency_root.join("node-pty")).unwrap();
+    write_json(
+        &dependency_root.join("node-pty/package.json"),
+        json!({"name": "node-pty", "version": "1.1.0"}),
+    );
+    std::os::unix::fs::symlink(
+        ".pnpm/dsh-better-sidebar@0.17.1/node_modules/dsh-better-sidebar",
+        profile.join("node_modules/dsh-better-sidebar"),
+    )
+    .unwrap();
+    write_json(
+        &root.join("package.json"),
+        json!({
+            "name": "dsh-better-sidebar",
+            "version": version,
+            "type": "module",
+            "main": "./lib/index.js",
+            "dependencies": {"ws": "^8", "schemastery": "^3"},
+            "peerDependencies": {
+                "@deepseek-ai/dsh-settings": "*",
+                "@deepseek-ai/dsh-tools": "*",
+                "@deepseek-ai/dsh-llm": "*",
+                "@deepseek-ai/dsh-subagent": "*"
+            }
+        }),
+    );
+    fs::write(root.join("lib/index.js"), source).unwrap();
+    for chunk in ["terminal", "editor", "mermaid"] {
+        fs::write(
+            root.join(format!("lib/client-{chunk}.js")),
+            format!("{chunk} chunk\n"),
+        )
+        .unwrap();
+    }
+    profile
+}
+
+#[cfg(unix)]
+fn sidebar_dependency_root(profile: &Path) -> PathBuf {
+    profile.join("node_modules/.pnpm/dsh-better-sidebar@0.17.1/node_modules")
+}
+
+#[cfg(unix)]
+fn sidebar_upstream_source() -> Vec<u8> {
+    let patch = include_str!("../packaging/patches/dsh-better-sidebar-0.17.1.patch");
+    let mut source = String::new();
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if line.starts_with("@@ -") {
+            in_hunk = true;
+        } else if in_hunk && matches!(line.as_bytes().first(), Some(b' ') | Some(b'-')) {
+            source.push_str(&line[1..]);
+            source.push('\n');
+        }
+    }
+    assert_eq!(
+        format!("{:x}", Sha256::digest(source.as_bytes())),
+        "69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad"
+    );
+    source.into_bytes()
+}
+
 fn write_package(profile: &Path, name: &str, extra: serde_json::Value) {
     let root = profile.join("node_modules").join(name);
     fs::create_dir_all(root.join("lib")).unwrap();

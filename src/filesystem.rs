@@ -195,6 +195,136 @@ impl Filesystem {
         })
     }
 
+    /// Converts a tool-supplied workspace-relative or in-root absolute path to
+    /// an opaque target. Existing path components are resolved before the
+    /// target is admitted; a missing final component is admitted only when its
+    /// existing parent resolves inside this capability's root.
+    pub async fn tool_target(&self, path: impl AsRef<Path>) -> Result<FsTarget, TessivumError> {
+        let requested = path.as_ref();
+        if requested.as_os_str().is_empty() {
+            return Err(fs_error(
+                "FS_INVALID_PATH",
+                "filesystem tool path must not be empty",
+                json!({"path": requested.display().to_string()}),
+            ));
+        }
+
+        let root = self.canonical_root().await?;
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.root.join(requested)
+        };
+        let candidate_error = match fs::canonicalize(&candidate).await {
+            Ok(resolved) => {
+                self.ensure_contained_from(&root, &resolved)?;
+                let metadata = fs::symlink_metadata(&candidate)
+                    .await
+                    .map_err(|error| io_error("lstat tool path", &candidate, error))?;
+                let path = if metadata.file_type().is_symlink() {
+                    let parent = candidate.parent().ok_or_else(|| {
+                        fs_error(
+                            "FS_INVALID_PATH",
+                            "filesystem tool path has no parent directory",
+                            json!({"path": requested.display().to_string()}),
+                        )
+                    })?;
+                    let parent = fs::canonicalize(parent)
+                        .await
+                        .map_err(|error| io_error("resolve tool path parent", parent, error))?;
+                    if parent.starts_with(&root) {
+                        parent.join(candidate.file_name().ok_or_else(|| {
+                            fs_error(
+                                "FS_INVALID_PATH",
+                                "filesystem tool path has no final component",
+                                json!({"path": requested.display().to_string()}),
+                            )
+                        })?)
+                    } else {
+                        resolved
+                    }
+                } else {
+                    resolved
+                };
+                return Ok(FsTarget { path });
+            }
+            Err(error) => error,
+        };
+
+        let parent = candidate.parent().ok_or_else(|| {
+            fs_error(
+                "FS_INVALID_PATH",
+                "filesystem tool path has no parent directory",
+                json!({"path": requested.display().to_string()}),
+            )
+        })?;
+        let mut ancestor = parent;
+        let mut parent_error = None;
+        let mut unresolved_symlink = false;
+        let resolved_parent = loop {
+            match fs::canonicalize(ancestor).await {
+                Ok(resolved) => {
+                    self.ensure_contained_from(&root, &resolved)?;
+                    if ancestor != parent {
+                        if unresolved_symlink {
+                            return Err(fs_error(
+                                "FS_SANDBOX_DENIED",
+                                "filesystem tool path traverses an unresolved symlink",
+                                json!({"path": requested.display().to_string()}),
+                            ));
+                        }
+                        let error = parent_error.unwrap_or(candidate_error);
+                        return Err(if error.kind() == std::io::ErrorKind::NotFound {
+                            fs_error(
+                                "FS_NOT_FOUND",
+                                "filesystem tool path parent does not exist",
+                                json!({"path": requested.display().to_string()}),
+                            )
+                        } else {
+                            io_error("resolve tool path parent", parent, error)
+                        });
+                    }
+                    break resolved;
+                }
+                Err(error) => {
+                    unresolved_symlink |= fs::symlink_metadata(ancestor)
+                        .await
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+                    parent_error.get_or_insert(error);
+                    let Some(next) = ancestor.parent() else {
+                        return Err(io_error("resolve tool path", &candidate, candidate_error));
+                    };
+                    ancestor = next;
+                }
+            }
+        };
+
+        if candidate_error.kind() != std::io::ErrorKind::NotFound {
+            return Err(io_error("resolve tool path", &candidate, candidate_error));
+        }
+        let name = candidate.file_name().ok_or_else(|| {
+            fs_error(
+                "FS_INVALID_PATH",
+                "filesystem tool path has no final component",
+                json!({"path": requested.display().to_string()}),
+            )
+        })?;
+        let path = resolved_parent.join(name);
+        match fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(fs_error(
+                    "FS_SANDBOX_DENIED",
+                    "filesystem tool path is an unresolved final symlink",
+                    json!({"path": requested.display().to_string()}),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("lstat tool path", &path, error)),
+        }
+        Ok(FsTarget { path })
+    }
+
     /// Resolves a target through all symlinks and returns its canonical target.
     pub async fn resolve(&self, target: &FsTarget) -> Result<FsTarget, TessivumError> {
         let path = fs::canonicalize(&target.path)
@@ -221,10 +351,32 @@ impl Filesystem {
 
     /// Observes the target itself without following its final symlink.
     pub async fn lstat(&self, target: &FsTarget) -> Result<FsMetadata, TessivumError> {
-        self.write_path(target).await?;
-        let metadata = fs::symlink_metadata(&target.path)
+        let root = self.canonical_root().await?;
+        let path = if target.path == self.root || target.path == root {
+            root
+        } else {
+            let parent = target.path.parent().ok_or_else(|| {
+                fs_error(
+                    "FS_SANDBOX_DENIED",
+                    "filesystem target has no parent directory",
+                    json!({"path": target.display()}),
+                )
+            })?;
+            let parent = fs::canonicalize(parent)
+                .await
+                .map_err(|error| io_error("resolve lstat parent", parent, error))?;
+            self.ensure_contained_from(&root, &parent)?;
+            parent.join(target.path.file_name().ok_or_else(|| {
+                fs_error(
+                    "FS_SANDBOX_DENIED",
+                    "filesystem target has no final component",
+                    json!({"path": target.display()}),
+                )
+            })?)
+        };
+        let metadata = fs::symlink_metadata(&path)
             .await
-            .map_err(|error| io_error("lstat", &target.path, error))?;
+            .map_err(|error| io_error("lstat", &path, error))?;
         let kind = if metadata.file_type().is_symlink() {
             FsNodeKind::Symlink
         } else if metadata.is_file() {
@@ -578,13 +730,6 @@ impl Filesystem {
     /// Gives a write target an existing canonical parent and follows an
     /// existing final symlink. This blocks escapes through either route.
     async fn write_path(&self, target: &FsTarget) -> Result<PathBuf, TessivumError> {
-        if !target.path.starts_with(&self.root) {
-            return Err(fs_error(
-                "FS_SANDBOX_DENIED",
-                "filesystem target belongs to another capability root",
-                json!({"path": target.display()}),
-            ));
-        }
         match fs::canonicalize(&target.path).await {
             Ok(path) => {
                 self.ensure_contained(&path).await?;
@@ -615,17 +760,25 @@ impl Filesystem {
         }
     }
 
-    async fn ensure_contained(&self, path: &Path) -> Result<(), TessivumError> {
-        let root = fs::canonicalize(&self.root)
+    async fn canonical_root(&self) -> Result<PathBuf, TessivumError> {
+        fs::canonicalize(&self.root)
             .await
-            .map_err(|error| io_error("resolve filesystem root", &self.root, error))?;
-        if path.starts_with(&root) {
+            .map_err(|error| io_error("resolve filesystem root", &self.root, error))
+    }
+
+    async fn ensure_contained(&self, path: &Path) -> Result<(), TessivumError> {
+        let root = self.canonical_root().await?;
+        self.ensure_contained_from(&root, path)
+    }
+
+    fn ensure_contained_from(&self, root: &Path, path: &Path) -> Result<(), TessivumError> {
+        if path.starts_with(root) {
             Ok(())
         } else {
             Err(fs_error(
                 "FS_SANDBOX_DENIED",
                 "filesystem target resolves outside the capability root",
-                json!({"path": path.display().to_string(), "root": root.display().to_string()}),
+                serde_json::Value::Null,
             ))
         }
     }

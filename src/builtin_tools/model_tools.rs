@@ -37,6 +37,8 @@ const WEB_FETCH_MAX_OUTPUT_CHARS: usize = 200_000;
 const WEB_FETCH_TRUNCATION_FOOTER: &str =
     "\n\n(Content truncated. Fetch a more specific URL or section for the full text.)";
 const VCS_DIRECTORIES: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+const WORKSPACE_PATH_DESCRIPTION: &str =
+    "Workspace-relative path or absolute path inside the current workspace.";
 
 #[derive(Clone)]
 struct FileTools {
@@ -62,7 +64,17 @@ impl FileTools {
             Some(lease) => lease
                 .validate_current()
                 .map_err(|error| workspace_error(context, error))?,
-            None => self.cwd.clone(),
+            None => std::fs::canonicalize(&self.cwd).map_err(|error| {
+                tool_error(
+                    match error.kind() {
+                        std::io::ErrorKind::NotFound => "FS_NOT_FOUND",
+                        std::io::ErrorKind::PermissionDenied => "FS_PERMISSION_DENIED",
+                        _ => "FS_IO_ERROR",
+                    },
+                    "cannot resolve tool workspace",
+                    json!({"path": self.cwd, "error": error.to_string()}),
+                )
+            })?,
         };
         Ok((Filesystem::new(&root), root, lease))
     }
@@ -172,7 +184,7 @@ pub(super) fn register(
     Ok(vec![
         runtime.register(ToolDefinition::new(
             "read",
-            "Read a UTF-8 text file and return line-numbered content.",
+            "Read a UTF-8 text file. Paths may be workspace-relative or absolute within the current workspace.",
             read_schema(),
             ReadFile {
                 files: files.clone(),
@@ -180,7 +192,7 @@ pub(super) fn register(
         ))?,
         runtime.register(ToolDefinition::new(
             "write",
-            "Create or fully replace a UTF-8 text file.",
+            "Create or fully replace a UTF-8 text file inside the current workspace using a relative or in-workspace absolute path.",
             write_schema(),
             WriteFile {
                 files: files.clone(),
@@ -188,7 +200,7 @@ pub(super) fn register(
         ))?,
         runtime.register(ToolDefinition::new(
             "edit",
-            "Edit an existing UTF-8 text file by replacing literal text.",
+            "Edit a UTF-8 text file inside the current workspace using a relative or in-workspace absolute path.",
             edit_schema(),
             EditFile {
                 files: files.clone(),
@@ -196,7 +208,7 @@ pub(super) fn register(
         ))?,
         runtime.register(ToolDefinition::new(
             "str_replace_editor",
-            "Edit an existing UTF-8 text file by replacing literal text.",
+            "Edit a UTF-8 text file inside the current workspace using a relative or in-workspace absolute path.",
             edit_schema(),
             EditFile {
                 files: files.clone(),
@@ -204,7 +216,7 @@ pub(super) fn register(
         ))?,
         runtime.register(ToolDefinition::new(
             "read_image",
-            "Read a PNG/JPEG/WebP/GIF file and return the image itself.",
+            "Read a PNG/JPEG/WebP/GIF file from a relative or in-workspace absolute path and return the image itself.",
             image_schema(),
             ReadImage {
                 files: files.clone(),
@@ -213,7 +225,7 @@ pub(super) fn register(
         ))?,
         runtime.register(ToolDefinition::new(
             "glob",
-            "Find workspace files whose paths match a glob pattern.",
+            "Find files below a relative or in-workspace absolute path whose workspace-relative paths match a glob pattern.",
             glob_schema(),
             GlobFiles {
                 files: files.clone(),
@@ -221,7 +233,7 @@ pub(super) fn register(
         ))?,
         runtime.register(ToolDefinition::new(
             "grep",
-            "Search workspace file contents with a regular expression.",
+            "Search file contents below a relative or in-workspace absolute path with a regular expression.",
             grep_schema(),
             GrepFiles { files },
         ))?,
@@ -241,27 +253,27 @@ pub(super) fn register(
 }
 
 fn read_schema() -> Value {
-    json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["file_path"],"additionalProperties":false})
+    json!({"type":"object","properties":{"file_path":{"type":"string","description":WORKSPACE_PATH_DESCRIPTION},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["file_path"],"additionalProperties":false})
 }
 
 fn write_schema() -> Value {
-    json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"},"sandbox_permissions":{"type":"string","enum":["workspace-write","danger-full-access"]},"justification":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false})
+    json!({"type":"object","properties":{"file_path":{"type":"string","description":WORKSPACE_PATH_DESCRIPTION},"content":{"type":"string"},"sandbox_permissions":{"type":"string","enum":["workspace-write","danger-full-access"]},"justification":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false})
 }
 
 fn edit_schema() -> Value {
-    json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"},"sandbox_permissions":{"type":"string","enum":["workspace-write","danger-full-access"]},"justification":{"type":"string"}},"required":["file_path","old_string","new_string"],"additionalProperties":false})
+    json!({"type":"object","properties":{"file_path":{"type":"string","description":WORKSPACE_PATH_DESCRIPTION},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"},"sandbox_permissions":{"type":"string","enum":["workspace-write","danger-full-access"]},"justification":{"type":"string"}},"required":["file_path","old_string","new_string"],"additionalProperties":false})
 }
 
 fn image_schema() -> Value {
-    json!({"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"],"additionalProperties":false})
+    json!({"type":"object","properties":{"file_path":{"type":"string","description":WORKSPACE_PATH_DESCRIPTION}},"required":["file_path"],"additionalProperties":false})
 }
 
 fn glob_schema() -> Value {
-    json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false})
+    json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","description":WORKSPACE_PATH_DESCRIPTION}},"required":["pattern"],"additionalProperties":false})
 }
 
 fn grep_schema() -> Value {
-    json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"include":{"type":"string"}},"required":["pattern"],"additionalProperties":false})
+    json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","description":WORKSPACE_PATH_DESCRIPTION},"include":{"type":"string"}},"required":["pattern"],"additionalProperties":false})
 }
 
 fn web_search_schema() -> Value {
@@ -290,7 +302,7 @@ impl ToolHandler for ReadFile {
         }
         check_cancelled(&context.cancellation)?;
         let (filesystem, root, lease) = self.files.filesystem(&context)?;
-        let target = filesystem.target(path)?;
+        let target = filesystem.tool_target(path).await?;
         let text = filesystem
             .read_text(&target, MAX_SEARCH_FILE_BYTES)
             .await
@@ -391,7 +403,7 @@ impl ToolHandler for WriteFile {
             .await?;
         check_cancelled(&context.cancellation)?;
         let (filesystem, root, lease) = self.files.filesystem(&context)?;
-        let target = filesystem.target(path)?;
+        let target = filesystem.tool_target(path).await?;
         let outcome = filesystem
             .write_text_outcome(&target, content, FsWriteGuard::default())
             .await?;
@@ -447,7 +459,7 @@ impl ToolHandler for EditFile {
             .await?;
         check_cancelled(&context.cancellation)?;
         let (filesystem, root, lease) = self.files.filesystem(&context)?;
-        let target = filesystem.target(path)?;
+        let target = filesystem.tool_target(path).await?;
         let outcome = filesystem
             .edit_text_outcome_all(&target, FsLiteralEdit::new(old, new), replace_all)
             .await?;
@@ -493,7 +505,7 @@ impl ToolHandler for ReadImage {
         }
         check_cancelled(&context.cancellation)?;
         let (filesystem, root, lease) = self.files.filesystem(&context)?;
-        let target = filesystem.target(path)?;
+        let target = filesystem.tool_target(path).await?;
         let byte_cap = self
             .attachments
             .limits()
@@ -562,7 +574,7 @@ impl ToolHandler for GlobFiles {
         }
         let expression = glob_regex(pattern)?;
         let (filesystem, root, lease) = self.files.filesystem(&context)?;
-        let target = filesystem.target(path.unwrap_or("."))?;
+        let target = filesystem.tool_target(path.unwrap_or(".")).await?;
         let files = collect_files(&filesystem, &target, &context.cancellation).await?;
         let mut paths = Vec::new();
         for file in files {
@@ -636,7 +648,7 @@ impl ToolHandler for GrepFiles {
             None => None,
         };
         let (filesystem, root, lease) = self.files.filesystem(&context)?;
-        let target = filesystem.target(path.unwrap_or("."))?;
+        let target = filesystem.tool_target(path.unwrap_or(".")).await?;
         let files = collect_files(&filesystem, &target, &context.cancellation).await?;
         let mut matches = Vec::new();
         let mut total = 0usize;
@@ -1310,4 +1322,141 @@ fn workspace_error(context: &ToolRunContext, error: WorkspaceError) -> TessivumE
 }
 fn attachment_error(error: crate::attachments::AttachmentError) -> TessivumError {
     TessivumError::new(error.code(), error.to_string(), "attachments", Value::Null)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    use tessivum_core::ContextHandle;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{SessionId, ToolCallId};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("tessivum-model-file-tools-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn files(root: &Path) -> FileTools {
+        FileTools {
+            cwd: root.to_path_buf(),
+            resolver: None,
+            sessions: None,
+            approval: None,
+            max_output_bytes: 64 * 1024,
+        }
+    }
+
+    fn context(root: &ContextHandle, call: &str) -> ToolRunContext {
+        ToolRunContext {
+            session: SessionId::from("file-tools"),
+            call: ToolCallId::from(call),
+            cancellation: root.scope().cancellation(),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_and_write_tools_accept_canonical_alias_paths() {
+        let workspace = TempDir::new();
+        let aliases = TempDir::new();
+        let alias = aliases.0.join("workspace");
+        std::os::unix::fs::symlink(&workspace.0, &alias).unwrap();
+        fs::write(workspace.0.join("note.txt"), "needle").unwrap();
+        let files = files(&fs::canonicalize(&workspace.0).unwrap());
+        let context_root = ContextHandle::root();
+
+        let relative = ReadFile {
+            files: files.clone(),
+        }
+        .run(
+            context(&context_root, "read-relative"),
+            json!({"file_path": "note.txt"}),
+        )
+        .await
+        .unwrap();
+        let absolute = ReadFile {
+            files: files.clone(),
+        }
+        .run(
+            context(&context_root, "read-absolute"),
+            json!({"file_path": workspace.0.join("note.txt")}),
+        )
+        .await
+        .unwrap();
+        let alias_read = ReadFile {
+            files: files.clone(),
+        }
+        .run(
+            context(&context_root, "read-alias"),
+            json!({"file_path": alias.join("note.txt")}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(relative.meta["lines"], absolute.meta["lines"]);
+        assert_eq!(alias_read.meta["lines"], relative.meta["lines"]);
+        assert_eq!(alias_read.meta["path"], "note.txt");
+
+        let alias_write = WriteFile { files }
+            .run(
+                context(&context_root, "write-alias"),
+                json!({"file_path": alias.join("new.txt"), "content": "new"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(alias_write.meta["path"], "new.txt");
+        assert_eq!(
+            fs::read_to_string(workspace.0.join("new.txt")).unwrap(),
+            "new"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_and_grep_scan_healthy_files_beside_outward_and_dangling_links() {
+        let workspace = TempDir::new();
+        let outside = TempDir::new();
+        fs::write(workspace.0.join("healthy.txt"), "needle").unwrap();
+        fs::write(outside.0.join("secret.txt"), "needle").unwrap();
+        std::os::unix::fs::symlink(outside.0.join("secret.txt"), workspace.0.join("outward"))
+            .unwrap();
+        std::os::unix::fs::symlink("missing", workspace.0.join("dangling")).unwrap();
+        let files = files(&workspace.0);
+        let context_root = ContextHandle::root();
+
+        let glob = GlobFiles {
+            files: files.clone(),
+        }
+        .run(
+            context(&context_root, "glob-links"),
+            json!({"pattern": "**/*.txt", "path": "."}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(glob.meta["paths"], json!(["healthy.txt"]));
+        let grep = GrepFiles { files }
+            .run(
+                context(&context_root, "grep-links"),
+                json!({"pattern": "needle", "path": "."}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(grep.meta["total"], 1);
+        assert_eq!(grep.meta["files"][0]["path"], "healthy.txt");
+    }
 }

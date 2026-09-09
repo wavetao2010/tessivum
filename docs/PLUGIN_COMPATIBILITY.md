@@ -227,6 +227,14 @@ Rust Loader
 
 兼容报告必须指出具体 API/依赖，而不是只报“加载失败”。
 
+### 6.6 `dsh-better-sidebar@0.17.1` 固定 PTY 修复（Alpha.26 源码）
+
+- 来源：`packaging/patches/dsh-better-sidebar-0.17.1.patch`；只适用于原始 `lib/index.js` SHA-256 `69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad`，修复后为 `638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1`。其他版本不自动套用；输入或现有修复目录校验失败则明确拒绝。
+- `src/plugin_manager.rs` 在当前插件 profile 的依赖目录创建校验过的修复副本，再原子发布并加载该副本。原 npm 安装目录不原地改写；修复随源码交付，不依赖手工修改用户 `node_modules`，重装可重建。
+- 关闭 handle 时同步失效且幂等；write/resize、socket close、退出监听与宽限期 timer 校验 handle/连接归属。失效终端关闭连接并保留诊断，旧连接不能杀死同 key 的替代终端。
+- 可运行检查：`node scripts/check_sidebar_pty.mjs --source <profile-local-repair>/lib/index.js --real-pty`。覆盖确定性竞态和真实 node-pty shell 输出/退出；本机验证版本为 `node-pty@1.1.0`，不泛化为所有插件版本已验证。
+- 安全边界未改变：已授权 Remote Access 仍不能访问 legacy plugin HTTP 路由和 WebSocket upgrade；真实远程 Browser 请求 `/sidebar/bundle/terminal.js` 返回 `403 REMOTE_HOST_DENIED`，符合 Phase 8 §4.2 的既有约定。远程历史分页已通过；用户确认 Alpha.26 暂不支持远程侧边栏终端，不再将其列为本版发布阻断项，也不宣称远程终端已通过验收。未来需要此能力时单独设计受限授权，不放开所有 legacy 路由。
+
 ## 7. Extism/WASM 插件协议
 
 ### 7.1 适用场景

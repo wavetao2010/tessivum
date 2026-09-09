@@ -134,6 +134,15 @@ Host payload 闭集：
 
 重连语义：重新打开两条 socket，并重新获取 history/list 基线；v1 的 `since` 不提供增量恢复保证。
 
+Alpha.26 源码修复：会话列表基线由 `session.list` 分页获取，不通过单个 WebSocket 全量帧恢复。客户端完成同一 snapshot 的全部页后原子应用列表并衔接期间变更；重连废弃旧请求结果。出站帧仍受 64 KiB 预算约束，超限或丢帧走显式 `stream/error`，不静默截断为成功。
+
+### 4.4 有界会话列表（Alpha.26 源码契约）
+
+- `session.list` 请求接受可选 `limit`（默认 100，范围 1–500）与不透明 `cursor`；返回 `{ items, snapshot, nextCursor? }`。没有 `nextCursor` 表示结束，不能把不足 `limit` 条作为结束条件。
+- 会话按 `sessionId` 稳定排序；每页同时受条数与完整 `ServerResponse` JSON 的 64 KiB 字节预算约束，包括 `rpcId`、游标和 envelope。单条摘要无法容纳时返回 `response-too-large`，不跳过该会话。
+- snapshot 绑定本次 Host 启动与列表摘要；增删、摘要修改或 Host 重启使旧游标返回 `stale-cursor`。客户端最多重新开始三次，持续变化或协议错误显示可重试失败；重复 ID、循环游标和旧连接结果不能覆盖当前列表。
+- 摘要仅保留导航字段和 title projection；详细投影从会话 history/subscribe 路径恢复。加载失败保留持久化选择，不把失败当成空列表、不创建替代会话。
+
 ## 5. Core RPC 面
 
 `POST /api/<method>` 必须支持以下 52 个方法名及上游 `rpc-map.ts` 的请求、结果和错误 schema：
@@ -194,6 +203,8 @@ workspace.rename
 ```
 
 “同名但字段不同”不算兼容。实现时必须从冻结上游生成的 codec/类型建立 contract tests，特别覆盖联合类型、可选字段、错误 details 和未知字段拒绝策略。
+
+Alpha.26 未发布源码的有意产品差异：`session.models.current` 允许 `null`，模型目录项发布可选 `inputModalities`（`text`/`image`）；Rust 投影、客户端类型与校验 schema 同步迁移。未选择模型不是虚构 provider/model，首屏仍可编辑图文草稿；实际发送必须由 Host 验证选择、模态及附件。此扩展不宣称未修改的上游客户端可直接消费空选择。
 
 ## 6. Typert Remote contributions
 

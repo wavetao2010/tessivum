@@ -992,11 +992,12 @@ async fn browser_call(
 #[tokio::test]
 async fn browser_permission_remote_switches_and_seeds_projection_history() {
     let fixture = BrowserStopFixture::new();
-    let runtime = Arc::new(
-        HostRuntime::boot(HostConfig::new(&fixture.0, fixture.0.join("data")))
-            .await
-            .unwrap(),
-    );
+    let adapter = Arc::new(DelayedAdapter::new());
+    let mut config = HostConfig::new(&fixture.0, fixture.0.join("data"))
+        .with_adapter_factory(Arc::new(DelayedFactory(adapter)));
+    config.provider = "fake-provider".into();
+    config.model = "fake-model".into();
+    let runtime = Arc::new(HostRuntime::boot(config).await.unwrap());
     let session = SessionId::from("browser-permission");
     runtime.create_session(session.clone()).await.unwrap();
     let mut server = ApiServer::bind(runtime).await.unwrap();
@@ -3611,6 +3612,7 @@ async fn browser_agent_mode_rpc_is_durable_and_truthful() {
     let opened = Arc::clone(&opened_paths);
     let runtime = HostRuntime::boot(
         HostConfig::new(&fixture.0, &data)
+            .with_adapter_factory(Arc::new(DelayedFactory(Arc::new(DelayedAdapter::new()))))
             .with_agent_mode_root(&system_root, AgentModeTrust::System)
             .with_path_opener(Arc::new(move |path: &std::path::Path| {
                 opened.lock().push(path.to_path_buf());
@@ -3899,14 +3901,19 @@ async fn browser_agent_mode_rpc_is_durable_and_truthful() {
         "working"
     );
     let projections = &listed_sessions["result"]["value"]["items"][0]["projections"];
-    assert_eq!(projections["asOfSeq"], selected_events.last().unwrap().seq);
-    assert_eq!(projections["values"]["title"], "Cold preset session");
     assert_eq!(
-        projections["values"]["permissions"]["currentValue"],
-        "workspace-write"
+        projections["asOfSeq"],
+        selected_events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "session/title")
+            .unwrap()
+            .seq
     );
-    assert_eq!(projections["values"]["plan"]["active"], false);
-    assert_eq!(projections["values"]["todos"], Value::Null);
+    assert_eq!(
+        projections["values"],
+        json!({"title": "Cold preset session"})
+    );
     let prompted = browser_call(&client, &base, "live-prompt", "session.prompt", json!({"sessionId":"preset-cold","mode":"queue","content":[{"type":"text","text":"hello"}]})).await;
     assert_eq!(prompted["result"]["ok"], true);
     let locked = browser_call(

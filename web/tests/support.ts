@@ -28,6 +28,7 @@ export interface SessionListItem {
   running: boolean
   blank: boolean
   eventCount: number
+  projections?: { asOfSeq: number; values: { title?: string | null } }
 }
 
 export interface RustWebOptions {
@@ -324,9 +325,46 @@ export class RustWebHarness {
   }
 
   async sessions(): Promise<SessionListItem[]> {
-    const result = await this.rpc<{ items: SessionListItem[] }>('session.list')
-    if (!result.ok || result.value === undefined) throw new Error(`session.list failed: ${JSON.stringify(result.error)}`)
-    return result.value.items
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      const items: SessionListItem[] = []
+      const seenIds = new Set<string>()
+      const seenCursors = new Set<string>()
+      let cursor: string | undefined
+      let snapshot: string | undefined
+      let stale = false
+      do {
+        const result = await this.rpc<{
+          items: SessionListItem[]
+          snapshot: string
+          nextCursor?: string
+        }>('session.list', { limit: 500, ...(cursor === undefined ? {} : { cursor }) })
+        if (!result.ok || result.value === undefined) {
+          if (result.error?.code === 'stale-cursor' && attempt < 3) {
+            stale = true
+            break
+          }
+          throw new Error(`session.list failed: ${JSON.stringify(result.error)}`)
+        }
+        if (snapshot !== undefined && result.value.snapshot !== snapshot) {
+          throw new Error('session.list changed snapshot inside one pagination run')
+        }
+        snapshot = result.value.snapshot
+        for (const item of result.value.items) {
+          if (seenIds.has(item.sessionId)) throw new Error(`session.list repeated ${item.sessionId}`)
+          seenIds.add(item.sessionId)
+          items.push(item)
+        }
+        const next = result.value.nextCursor
+        if (next !== undefined) {
+          if (result.value.items.length === 0) throw new Error('session.list returned an empty continuing page')
+          if (seenCursors.has(next)) throw new Error('session.list returned a repeated non-progress cursor')
+          seenCursors.add(next)
+        }
+        cursor = next
+      } while (cursor !== undefined)
+      if (!stale) return items
+    }
+    throw new Error('session.list stayed stale after three retries')
   }
 
   whenTurnSettled(timeout = 60_000): Promise<string> {

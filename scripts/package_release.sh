@@ -19,6 +19,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 host_module_manifest="$script_dir/../packaging/host-modules.json"
 market_source_inventory="$script_dir/../packaging/market-source.json"
 market_license="$script_dir/../packaging/licenses/dsh-market/LICENSE"
+sidebar_patch="$script_dir/../packaging/patches/dsh-better-sidebar-0.17.1.patch"
+sidebar_patch_sha256="e7cdcbc409fe3a211acf7d5098066d3c6da9b84d3bb5b52cc7e34a2dbab15e65"
 compat_modules="$script_dir/../compat/host-modules"
 deepseek_root=$(CDPATH= cd -- "$vendor/.." && pwd)
 market_filename="tessivum-market-$version.tgz"
@@ -36,6 +38,9 @@ esac
 [[ -f $host_module_manifest ]] || { echo "Host module metadata manifest is missing: $host_module_manifest" >&2; exit 2; }
 [[ -f $market_source_inventory ]] || { echo "market source inventory is missing: $market_source_inventory" >&2; exit 2; }
 [[ -f $market_license ]] || { echo "market upstream license is missing: $market_license" >&2; exit 2; }
+[[ -f $sidebar_patch ]] || { echo "fixed sidebar patch is missing: $sidebar_patch" >&2; exit 2; }
+actual_sidebar_patch_sha256=$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "$sidebar_patch"; else shasum -a 256 "$sidebar_patch"; fi | awk '{print $1}')
+[[ $actual_sidebar_patch_sha256 == "$sidebar_patch_sha256" ]] || { echo "fixed sidebar patch checksum does not match: $sidebar_patch" >&2; exit 2; }
 [[ -f $market_tgz ]] || { echo "market package is missing: $market_tgz" >&2; exit 2; }
 [[ $(basename "$market_tgz") == "$market_filename" ]] || { echo "market package filename must be $market_filename" >&2; exit 2; }
 [[ -f $market_checksum ]] || { echo "market package checksum is missing: $market_checksum" >&2; exit 2; }
@@ -87,7 +92,7 @@ name="tessivum-$version-$target"
 stage="$output/$name"
 rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/libexec" "$stage/share/tessivum/compat-host" \
-  "$stage/share/tessivum/host-modules" "$stage/share/tessivum/plugins" "$stage/share/tessivum/vendor" \
+  "$stage/share/tessivum/host-modules" "$stage/share/tessivum/patches" "$stage/share/tessivum/plugins" "$stage/share/tessivum/vendor" \
   "$stage/share/licenses/deepseek-harness" "$stage/share/licenses/tessivum-market-$version" \
   "$stage/share/licenses/@deepseek-ai-dsh-settings-0.1.0-rc.7" \
   "$stage/share/licenses/@deepseek-ai-schemastery-3.18.1"
@@ -102,6 +107,7 @@ cp -R "$vendor"/. "$stage/share/tessivum/vendor/"
 cp "$market_tgz" "$stage/share/tessivum/plugins/$market_filename"
 cp "$market_checksum" "$stage/share/tessivum/plugins/$market_filename.sha256"
 cp "$market_source_inventory" "$stage/share/tessivum/plugins/$market_filename.source.json"
+cp "$sidebar_patch" "$stage/share/tessivum/patches/dsh-better-sidebar-0.17.1.patch"
 mkdir -p "$stage/share/tessivum/vendor/node_modules/@deepseek-ai"
 ln -s ../../cordis "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cordis"
 ln -s ../../cosmokit "$stage/share/tessivum/vendor/node_modules/@deepseek-ai/cosmokit"
@@ -153,6 +159,9 @@ the packaged assets. Native modes are built into Tessivum; user modes live in
 the selected data directory under modes/. Bun 1.3.14+ is required for PTC and
 Legacy Node plugins; pnpm is needed only by plugin add/remove. The Web shell is
 embedded in the executable.
+
+Sidebar terminals are local-only. Paired Remote Access devices cannot access
+Legacy plugin HTTP routes or WebSocket upgrades.
 
 This archive is not code-signed or notarized. Verify its adjacent SHA-256 file
 before use. Source and documentation: https://github.com/wavetao2010/tessivum

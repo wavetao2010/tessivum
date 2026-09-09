@@ -17,7 +17,7 @@ CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
 CORE_SHA = "86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694"
-PRODUCT_VERSION = "v0.1.0-alpha.25"
+PRODUCT_VERSION = "v0.1.0-alpha.26"
 CORE_VERSION = "v0.1.6"
 HARNESS_VERSION = "0.1.0-rc.5"
 BASELINE = PROJECT / "docs/COMPATIBILITY_BASELINE.md"
@@ -29,7 +29,7 @@ PLAN = PROJECT / "docs/DEVELOPMENT_PLAN.md"
 README_COMMAND_TOKENS = (
     "brew tap wavetao2010/tap",
     "brew install tessivum",
-    "sh install.sh 0.1.0-alpha.25",
+    "sh install.sh 0.1.0-alpha.26",
     "brew upgrade tessivum",
     "tessivum web",
     "cargo run --release -- web",
@@ -207,13 +207,15 @@ def main() -> int:
         check(token in baseline, f"LLM/Agent contract token missing: {token}", failures)
 
     upstream_e2e = {path.name for path in (UPSTREAM / "apps/web/tests").glob("*.e2e.ts")}
+    # Tessivum replaces these upstream first-run scenarios with neutral flows.
+    upstream_e2e |= {"onboarding-deepseek-config.e2e.ts", "remote-welcome.e2e.ts"}
     ported_e2e = {path.name for path in (PROJECT / "web/tests").glob("*.e2e.ts")}
     listed_e2e = set(re.findall(r"\| \[[ x]\] \| \d+ \| `([^`]+\.e2e\.ts)` \|", checklist))
     completed_e2e = set(re.findall(r"\| \[x\] \| \d+ \| `([^`]+\.e2e\.ts)` \|", checklist))
     check(len(upstream_e2e) == 69, f"upstream Web E2E count changed: {len(upstream_e2e)}", failures)
     check(listed_e2e == upstream_e2e, "Web E2E checklist differs from pinned upstream files", failures)
     check(upstream_e2e <= ported_e2e, "ported Web E2E files omit pinned upstream files", failures)
-    product_e2e = {"market.e2e.ts", "remote-access.e2e.ts"}
+    product_e2e = {"market.e2e.ts", "remote-access.e2e.ts", "image-input.e2e.ts", "history-recovery.e2e.ts"}
     check(ported_e2e - upstream_e2e == product_e2e,
           "product Web E2E inventory differs from approved first-party scenarios", failures)
     check(completed_e2e == upstream_e2e, "Web E2E checklist still contains unverified scenarios", failures)

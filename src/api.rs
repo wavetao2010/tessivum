@@ -40,6 +40,7 @@ use futures_util::{
 use qrcode::{render::svg, QrCode};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tessivum_node_bridge::BridgeError;
 use tokio::{
     io::copy_bidirectional,
@@ -100,6 +101,9 @@ const MAX_PROMPT_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// retaining unbounded host notifications.
 pub const MAX_SOCKET_QUEUE: usize = 32;
 const MAX_REQUEST_ID_BYTES: usize = 128;
+const DEFAULT_SESSION_PAGE_ITEMS: usize = 100;
+const MAX_SESSION_PAGE_ITEMS: usize = 500;
+const MAX_SESSION_CURSOR_BYTES: usize = 160;
 
 /// A bind configuration for [`ApiServer`]. The default only listens on loopback
 /// and lets the OS select a port.
@@ -835,6 +839,7 @@ struct CompatibilityState {
     provider: String,
     model: String,
     max_tokens: Option<u64>,
+    session_epoch: Uuid,
     data: Mutex<CompatibilityData>,
     initialized: AsyncMutex<bool>,
     frames: broadcast::Sender<CompatFrame>,
@@ -899,6 +904,7 @@ impl CompatibilityState {
             provider: descriptor.provider,
             model: descriptor.model,
             max_tokens: descriptor.max_tokens,
+            session_epoch: Uuid::new_v4(),
             data: Mutex::new(CompatibilityData {
                 sessions: BTreeMap::new(),
                 tool_calls: BTreeMap::new(),
@@ -1177,7 +1183,7 @@ impl ApiError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct CompatError {
     pub(crate) code: String,
     pub(crate) message: String,
@@ -1190,6 +1196,29 @@ impl CompatError {
             code: "bad-request".into(),
             message: message.into(),
             details: json!({"issues": []}),
+        }
+    }
+    fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid-request".into(),
+            message: message.into(),
+            details: json!({}),
+        }
+    }
+
+    fn stale_cursor() -> Self {
+        Self {
+            code: "stale-cursor".into(),
+            message: "session list changed; restart pagination without a cursor".into(),
+            details: json!({"retry": "restart"}),
+        }
+    }
+
+    fn response_too_large(session_id: &SessionId) -> Self {
+        Self {
+            code: "response-too-large".into(),
+            message: "one session summary exceeds the response limit".into(),
+            details: json!({"sessionId": session_id}),
         }
     }
 
@@ -1317,6 +1346,15 @@ struct CompatQuestionValue {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompatEmptyPayload {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompatSessionList {
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    cursor: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_usize")]
+    limit: Option<usize>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompatAgentPresetRef {
@@ -1389,6 +1427,13 @@ where
     D: Deserializer<'de>,
 {
     String::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    usize::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -2583,7 +2628,8 @@ async fn compat_unary_method(state: ApiState, method: String, request: Request) 
     if let Err(error) = validate_request_id(&envelope.rpc_id) {
         return compat_response_error(Value::Null, compat_api_error(error));
     }
-    let rpc_id = Value::String(envelope.rpc_id);
+    let rpc_id_text = envelope.rpc_id;
+    let rpc_id = Value::String(rpc_id_text.clone());
     if envelope.request_type != "client-request" {
         return compat_response_error(rpc_id, CompatError::invalid("type must be client-request"));
     }
@@ -2594,7 +2640,7 @@ async fn compat_unary_method(state: ApiState, method: String, request: Request) 
         );
     }
     let response_limit = compat_response_limit(&state, &method);
-    match compat_dispatch(&state, &method, envelope.payload).await {
+    match compat_dispatch(&state, &method, envelope.payload, &rpc_id_text).await {
         Ok(value) => compat_response_ok(rpc_id, value, response_limit),
         Err(error) => compat_response_error(rpc_id, error),
     }
@@ -2701,6 +2747,7 @@ async fn compat_dispatch(
     state: &ApiState,
     method: &str,
     payload: Value,
+    rpc_id: &str,
 ) -> Result<Value, CompatError> {
     let _workspace_mutation = if matches!(
         method,
@@ -2772,10 +2819,9 @@ async fn compat_dispatch(
         "workspace.insertSessionBefore" => compat_session_move(state, compat_decode(payload)?),
         "workspace.archiveSession" => compat_archive_session(state, compat_decode(payload)?),
         "session.list" => {
-            let _: CompatEmptyPayload = compat_decode(payload)?;
-            compat_sync_sessions(state).await?;
-            let data = compat_data(&state.compat);
-            Ok(json!({"items": data.sessions.values().cloned().collect::<Vec<_>>() }))
+            let args = serde_json::from_value(payload)
+                .map_err(|error| CompatError::invalid_request(error.to_string()))?;
+            compat_session_list(state, args, rpc_id).await
         }
         "session.create" => compat_session_create(state, compat_decode(payload)?).await,
         "session.history" => compat_session_history(state, compat_decode(payload)?).await,
@@ -4094,74 +4140,199 @@ async fn compat_initialize(state: &ApiState) -> Result<(), CompatError> {
     Ok(())
 }
 
-async fn compat_sync_sessions(state: &ApiState) -> Result<(), CompatError> {
-    let sessions = state
+async fn compat_sync_sessions(state: &ApiState) -> Result<Vec<CompatSession>, CompatError> {
+    let mut summaries = state
         .host
-        .list_sessions()
+        .list_session_summaries()
         .await
         .map_err(compat_host_error)?;
-    let mut projections = BTreeMap::new();
-    let attachment_limits = state.host.attachment_limits();
-    for session in &sessions {
-        let events = state
-            .host
-            .events(session.session_id.clone(), 0)
-            .await
-            .map_err(compat_host_error)?;
-        let mut values = compat_derived_projection_values(&events, &attachment_limits);
-        for projection in state
-            .host
-            .session_projections(session.session_id.clone())
-            .await
-            .map_err(compat_host_error)?
-        {
-            values.insert(projection.key, projection.value);
-        }
-        projections.insert(
-            session.session_id.clone(),
-            (!values.is_empty()).then_some(CompatSessionProjections {
-                as_of_seq: events.last().map_or(0, |event| event.seq),
-                values,
-            }),
-        );
-    }
-    let mut data = compat_data(&state.compat);
-    let live_ids: BTreeSet<_> = sessions
-        .iter()
-        .map(|session| session.session_id.clone())
-        .collect();
-    data.sessions.retain(|id, _| live_ids.contains(id));
-    for session in sessions {
-        let projection = projections.remove(&session.session_id).flatten();
-        let agent_preset = session.agent_mode.clone().map(|mode| mode.into_string());
-        let entry = data
-            .sessions
-            .entry(session.session_id.clone())
-            .or_insert_with(|| CompatSession {
-                session_id: session.session_id.clone(),
-                workspace_id: session.workspace_id.clone(),
+    summaries.sort_by(|left, right| left.session.session_id.cmp(&right.session.session_id));
+    let sessions = summaries
+        .into_iter()
+        .map(|summary| {
+            let session = summary.session;
+            let projections = summary.title.map(|title| CompatSessionProjections {
+                as_of_seq: title.seq.unwrap_or(0),
+                values: BTreeMap::from([("title".to_owned(), title.value)]),
+            });
+            CompatSession {
+                session_id: session.session_id,
+                workspace_id: session.workspace_id,
                 updated_at: session.updated_at.min(MAX_SAFE_INTEGER),
                 running: session.running,
                 blank: session.blank,
-                cwd: session.cwd.clone(),
-                parent_session_id: session.parent_session.clone(),
+                cwd: session.cwd,
+                parent_session_id: session.parent_session,
                 origin: session.origin,
-                agent_preset: agent_preset.clone(),
-                projections: projection.clone(),
-            });
-        entry.workspace_id = session.workspace_id;
-        entry.updated_at = entry
-            .updated_at
-            .max(session.updated_at.min(MAX_SAFE_INTEGER));
-        entry.running = session.running;
-        entry.blank = session.blank;
-        entry.cwd = session.cwd;
-        entry.parent_session_id = session.parent_session;
-        entry.origin = session.origin;
-        entry.agent_preset = agent_preset;
-        entry.projections = projection;
+                agent_preset: session.agent_mode.map(|mode| mode.into_string()),
+                projections,
+            }
+        })
+        .collect::<Vec<_>>();
+    compat_data(&state.compat).sessions = sessions
+        .iter()
+        .cloned()
+        .map(|session| (session.session_id.clone(), session))
+        .collect();
+    Ok(sessions)
+}
+
+async fn compat_session_list(
+    state: &ApiState,
+    args: CompatSessionList,
+    rpc_id: &str,
+) -> Result<Value, CompatError> {
+    let limit = args.limit.unwrap_or(DEFAULT_SESSION_PAGE_ITEMS);
+    if limit == 0 || limit > MAX_SESSION_PAGE_ITEMS {
+        return Err(CompatError::invalid_request(
+            "limit must be between 1 and 500",
+        ));
     }
-    Ok(())
+    let cursor = args
+        .cursor
+        .as_deref()
+        .map(compat_parse_session_cursor)
+        .transpose()?;
+    let sessions = compat_sync_sessions(state).await?;
+    let snapshot = compat_session_snapshot(&state.compat.session_epoch, &sessions);
+    let start = match cursor {
+        Some(cursor) => compat_session_cursor_start(cursor, &snapshot, &sessions)?,
+        None => 0,
+    };
+    let page_limit = sessions.len().min(start.saturating_add(limit));
+    let mut end = start;
+    let mut item_bytes = 0usize;
+    for (index, session) in sessions.iter().enumerate().take(page_limit).skip(start) {
+        let next_cursor = (index + 1 < sessions.len())
+            .then(|| compat_session_cursor(&snapshot, &sessions, index));
+        let empty = compat_session_page_value(Vec::new(), &snapshot, next_cursor);
+        let fixed_bytes = compat_session_response_size(rpc_id, &empty);
+        let row_bytes = serde_json::to_vec(session).map_or(usize::MAX, |row| row.len());
+        let candidate_bytes = fixed_bytes
+            .saturating_add(item_bytes)
+            .saturating_add(row_bytes)
+            .saturating_add(usize::from(end > start));
+        if candidate_bytes > MAX_FRAME_BYTES {
+            if end == start {
+                return Err(CompatError::response_too_large(&session.session_id));
+            }
+            break;
+        }
+        item_bytes = item_bytes
+            .saturating_add(row_bytes)
+            .saturating_add(usize::from(end > start));
+        end = index + 1;
+    }
+    let next_cursor = (end < sessions.len() && end > start)
+        .then(|| compat_session_cursor(&snapshot, &sessions, end - 1));
+    Ok(compat_session_page_value(
+        sessions[start..end].to_vec(),
+        &snapshot,
+        next_cursor,
+    ))
+}
+
+fn compat_session_page_value(
+    items: Vec<CompatSession>,
+    snapshot: &str,
+    next_cursor: Option<String>,
+) -> Value {
+    let mut value = json!({"items": items, "snapshot": snapshot});
+    if let Some(cursor) = next_cursor {
+        value["nextCursor"] = Value::String(cursor);
+    }
+    value
+}
+
+fn compat_session_response_size(rpc_id: &str, value: &Value) -> usize {
+    serde_json::to_vec(&json!({
+        "type": "server-response",
+        "rpcId": rpc_id,
+        "result": {"ok": true, "value": value},
+    }))
+    .map_or(usize::MAX, |body| body.len())
+}
+
+fn compat_session_snapshot(epoch: &Uuid, sessions: &[CompatSession]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(epoch.as_bytes());
+    digest.update(serde_json::to_vec(sessions).expect("session summaries serialize"));
+    compat_hex(&digest.finalize())
+}
+
+fn compat_session_cursor(snapshot: &str, sessions: &[CompatSession], index: usize) -> String {
+    let last = Sha256::digest(sessions[index].session_id.as_str().as_bytes());
+    format!("v1.{snapshot}.{index}.{}", compat_hex(&last))
+}
+
+fn compat_parse_session_cursor(cursor: &str) -> Result<(&str, usize, &str), CompatError> {
+    if cursor.is_empty() || cursor.len() > MAX_SESSION_CURSOR_BYTES {
+        return Err(CompatError::invalid_request("cursor is malformed"));
+    }
+    let mut parts = cursor.split('.');
+    let (Some(version), Some(cursor_snapshot), Some(index), Some(last), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return Err(CompatError::invalid_request("cursor is malformed"));
+    };
+    if version != "v1"
+        || !compat_is_digest(cursor_snapshot)
+        || !compat_is_digest(last)
+        || index.is_empty()
+    {
+        return Err(CompatError::invalid_request("cursor is malformed"));
+    }
+    let parsed_index = index
+        .parse::<usize>()
+        .map_err(|_| CompatError::invalid_request("cursor is malformed"))?;
+    if parsed_index.to_string() != index {
+        return Err(CompatError::invalid_request("cursor is malformed"));
+    }
+    Ok((cursor_snapshot, parsed_index, last))
+}
+
+fn compat_session_cursor_start(
+    cursor: (&str, usize, &str),
+    snapshot: &str,
+    sessions: &[CompatSession],
+) -> Result<usize, CompatError> {
+    let (cursor_snapshot, parsed_index, last) = cursor;
+    if cursor_snapshot != snapshot {
+        return Err(CompatError::stale_cursor());
+    }
+    let Some(session) = sessions.get(parsed_index) else {
+        return Err(CompatError::invalid_request(
+            "cursor does not identify a session",
+        ));
+    };
+    let expected = compat_hex(&Sha256::digest(session.session_id.as_str().as_bytes()));
+    if last != expected {
+        return Err(CompatError::invalid_request(
+            "cursor does not identify a session",
+        ));
+    }
+    Ok(parsed_index + 1)
+}
+
+fn compat_is_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn compat_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn compat_session_conflict(
@@ -5320,6 +5491,7 @@ fn compat_model_info(info: HostModelInfo) -> Value {
             Value::String(info.name.unwrap_or_else(|| info.id.clone())),
         ),
     ]);
+    model.insert("inputModalities".into(), json!(info.input_modalities));
     if let Some(description) = info.description {
         model.insert("description".into(), Value::String(description));
     }
@@ -7591,6 +7763,58 @@ fn ws_json(value: impl Serialize) -> Result<WsMessage, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_cursor_is_strict_and_bound_to_snapshot_and_last_id() {
+        let sessions = vec![CompatSession {
+            session_id: SessionId::from("alpha"),
+            workspace_id: None,
+            updated_at: 1,
+            running: false,
+            blank: true,
+            cwd: None,
+            parent_session_id: None,
+            origin: None,
+            agent_preset: None,
+            projections: None,
+        }];
+        let snapshot = compat_session_snapshot(&Uuid::nil(), &sessions);
+        let cursor = compat_session_cursor(&snapshot, &sessions, 0);
+        assert_eq!(
+            compat_session_cursor_start(
+                compat_parse_session_cursor(&cursor).unwrap(),
+                &snapshot,
+                &sessions,
+            )
+            .unwrap(),
+            1
+        );
+
+        let mut forged = cursor.clone();
+        forged.replace_range(
+            forged.len() - 1..,
+            if forged.ends_with('0') { "1" } else { "0" },
+        );
+        assert_eq!(
+            compat_session_cursor_start(
+                compat_parse_session_cursor(&forged).unwrap(),
+                &snapshot,
+                &sessions,
+            )
+            .unwrap_err()
+            .code,
+            "invalid-request"
+        );
+        assert_eq!(
+            compat_session_cursor_start(
+                compat_parse_session_cursor(&cursor).unwrap(),
+                &"0".repeat(64),
+                &sessions,
+            )
+            .unwrap_err()
+            .code,
+            "stale-cursor"
+        );
+    }
 
     #[tokio::test]
     async fn attachment_response_limit_handles_two_byte_base64_and_large_limits() {
