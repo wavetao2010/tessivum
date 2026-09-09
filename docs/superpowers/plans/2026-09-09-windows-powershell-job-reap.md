@@ -59,17 +59,25 @@ or environment error.
 - [ ] **Step 2: Add a normal-completion descendant test**
 
 Add `powershell_normal_completion_reaps_its_descendant_tree` next to the
-cancellation test. Use the existing `ToolRuntime`, `bash_config`, `text`, and
-`assert_reaped` helpers. The PowerShell command must:
+cancellation test. Use the existing `ToolRuntime`, `bash_config`, and
+`assert_reaped` helpers. Direct `Start-Process` is not suitable here because
+PowerShell retains that child's lifecycle until natural exit.
 
-1. Start `%ComSpec% /d /c ping -n 30 127.0.0.1 >nul` with `Start-Process`.
-2. Redirect the descendant's stdout and stderr to files under the temporary
-   workspace so it does not retain the root PowerShell capture pipes.
-3. Write only the descendant PID to standard output and let the root shell exit
-   normally.
+Write a test-owned `normal-child.ps1` in the temporary workspace. It atomically
+writes its own `$PID` through `normal-child.pid.tmp` to `normal-child.pid`, then
+sleeps for 30 seconds. The root tool command must:
 
-Assert that the tool output is successful, parse `text(&output)` as the PID,
-and call the unchanged `assert_reaped` helper.
+1. Invoke a short-lived `%ComSpec% /d /c start` command that launches the child
+   script through the built-in Windows PowerShell executable.
+2. Use `start "" /b` and redirect the background child's stdout and stderr to
+   workspace files so it retains neither root capture pipe.
+3. Poll only until `normal-child.pid` exists, then let the root PowerShell exit
+   normally without calling `Start-Process` or waiting for the grandchild.
+
+After the tool output returns successfully, read the PID file and call the
+unchanged `assert_reaped` helper. The background grandchild must inherit the
+same Windows Job through the intermediate `cmd`; do not use WMI, CIM, scheduled
+tasks, or any creator outside the owned process tree.
 
 - [ ] **Step 3: Run the new test and verify RED**
 
@@ -80,8 +88,9 @@ cargo test --jobs 1 --locked --test builtin_tools `
 ```
 
 Expected: exit 101 because the tool returns before the descendant is fully
-reaped. If it passes, strengthen only process creation and pipe isolation until
-the missing fence is what causes RED. Do not shorten or extend `assert_reaped`.
+reaped. If the tool still waits for the 30-second child, stop and report the
+observed process tree instead of trying another creation mechanism. Do not
+shorten or extend `assert_reaped`.
 
 - [ ] **Step 4: Add the consuming async Windows Job fence**
 
