@@ -96,6 +96,65 @@ async fn assert_reaped(pid: &str) {
     panic!("PowerShell process {pid} must be reaped");
 }
 
+#[cfg(windows)]
+struct ProcessCleanupGuard(Option<std::os::windows::io::OwnedHandle>);
+
+#[cfg(windows)]
+impl ProcessCleanupGuard {
+    fn open(pid: u32) -> Self {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::{
+            Foundation::ERROR_INVALID_PARAMETER,
+            System::Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+            },
+        };
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        };
+        if process.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                // OpenProcess reports this when future cleanup removes the PID before observation.
+                return Self(None);
+            }
+            panic!("could not open child process {pid} for cleanup: {error}");
+        }
+        Self(Some(unsafe {
+            std::os::windows::io::OwnedHandle::from_raw_handle(process)
+        }))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessCleanupGuard {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{
+            Foundation::WAIT_TIMEOUT,
+            System::Threading::{TerminateProcess, WaitForSingleObject},
+        };
+
+        let Some(process) = &self.0 else {
+            return;
+        };
+        let process = process.as_raw_handle();
+        if unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT {
+            unsafe {
+                TerminateProcess(process, 1);
+                WaitForSingleObject(process, 5_000);
+            }
+        }
+    }
+}
+
 fn text(output: &tessivum::tools::ToolOutput) -> &str {
     match output.content.as_slice() {
         [ContentBlock::Text { text }] => text,
@@ -995,6 +1054,183 @@ async fn powershell_uses_only_the_workspace_bound_to_its_session() {
         fs::read_to_string(second.join("bound.txt")).unwrap(),
         "second"
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_normal_completion_reaps_its_descendant_tree() {
+    let directory = TempDir::new();
+    fs::write(
+        directory.path().join("native-child.cs"),
+        r#"using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class NativeChild
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct STARTUPINFO
+    {
+        public uint cb;
+        public IntPtr lpReserved;
+        public IntPtr lpDesktop;
+        public IntPtr lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public ushort wShowWindow;
+        public ushort cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(
+        string lpApplicationName,
+        StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(
+        IntPtr processHandle,
+        IntPtr jobHandle,
+        [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr hThread);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    public static string Start(string comSpec)
+    {
+        var startup = new STARTUPINFO();
+        startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+        PROCESS_INFORMATION process;
+        var commandLine = new StringBuilder(
+            "\"" + comSpec + "\" /d /c ping -n 30 127.0.0.1 >nul");
+
+        bool parentInJob;
+        if (!IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out parentInJob))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        if (!CreateProcessW(
+            comSpec,
+            commandLine,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            false,
+            0x08000004,
+            IntPtr.Zero,
+            null,
+            ref startup,
+            out process))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        try
+        {
+            bool childInJob;
+            if (!IsProcessInJob(process.hProcess, IntPtr.Zero, out childInJob))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if (ResumeThread(process.hThread) == uint.MaxValue)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return process.dwProcessId + "|" + parentInJob + "|" + childInJob;
+        }
+        finally
+        {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let runtime = ToolRuntime::new();
+    let _builtins = BuiltinTools::new(&runtime, bash_config(directory.path())).unwrap();
+    let root = ContextHandle::root();
+
+    let output = runtime
+        .execute(
+            context(&root, "normal-tree"),
+            "bash",
+            json!({"command": "Add-Type -Path 'native-child.cs'; [Console]::Out.Write([NativeChild]::Start($env:ComSpec))"}),
+        )
+        .await;
+    assert!(!output.is_error, "{}", text(&output));
+    let output_text = text(&output);
+    let mut fields = output_text.trim().split('|');
+    let pid = fields.next().expect("native child output contains a PID");
+    let child_pid = pid.parse::<u32>().expect("process id is numeric");
+    let _cleanup = ProcessCleanupGuard::open(child_pid);
+    let parent_in_job_text = fields
+        .next()
+        .expect("native child output contains parent job membership");
+    let child_in_job_text = fields
+        .next()
+        .expect("native child output contains child job membership");
+    assert!(
+        fields.next().is_none(),
+        "native child output must be PID|parentInJob|childInJob, got {:?}",
+        output_text.trim()
+    );
+    let parent_in_job = match parent_in_job_text {
+        "True" => true,
+        "False" => false,
+        value => panic!("parent job membership must be True or False, got {value:?}"),
+    };
+    let child_in_job = match child_in_job_text {
+        "True" => true,
+        "False" => false,
+        value => panic!("child job membership must be True or False, got {value:?}"),
+    };
+    eprintln!("{pid}|{parent_in_job_text}|{child_in_job_text}");
+    assert!(
+        parent_in_job,
+        "PowerShell parent process must be in its assigned job before child creation; observed {parent_in_job_text}"
+    );
+    assert!(
+        !child_in_job,
+        "native child process {pid} must be outside every job before it is resumed; observed {child_in_job_text}"
+    );
+    assert_reaped(pid).await;
 }
 
 #[cfg(windows)]
