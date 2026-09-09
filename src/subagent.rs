@@ -4160,6 +4160,23 @@ mod delegation_tests {
             )
             .await
             .unwrap();
+        let completed = parent_agent.session().events();
+        parent_agent
+            .session()
+            .append(
+                SessionEvent {
+                    event_type: "turn/start".into(),
+                    seq: parent_agent.session().next_seq().unwrap(),
+                    time: 0,
+                    data: json!({"turn": 1}),
+                    ignorable: None,
+                    source_event_seqs: None,
+                    surface_op: None,
+                },
+                cancellation(),
+            )
+            .await
+            .unwrap();
         let parent = service.attach(parent_agent).unwrap();
         let child_id = SessionId::from("fork-child");
         parent
@@ -4171,8 +4188,7 @@ mod delegation_tests {
             .unwrap();
         let child = agents.get(&child_id).unwrap();
 
-        assert_eq!(child.session().header().seed_length, Some(1));
-        assert_eq!(child.session().seed_events()[0].event_type, "turn/end");
+        assert_eq!(child.session().seed_events(), completed);
         parent.dispose().await;
     }
 
