@@ -52,7 +52,7 @@ const FIXED_SIDEBAR_VERSION: &str = "0.17.1";
 const FIXED_SIDEBAR_SOURCE_SHA256: &str =
     "69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad";
 const FIXED_SIDEBAR_PATCHED_SHA256: &str =
-    "638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1";
+    "9d3ecea3921ecee81d338074784eb86f40faa76e3546cea53c49e6aab31b46ff";
 const FIXED_SIDEBAR_PATCH: &str =
     include_str!("../packaging/patches/dsh-better-sidebar-0.17.1.patch");
 const PLUGIN_FIXED_PATCH_INVALID: &str = "PLUGIN_FIXED_PATCH_INVALID";
@@ -3539,6 +3539,22 @@ fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), Plugin
     Ok(())
 }
 
+#[cfg(unix)]
+fn parent_shell() -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let shell = env::var_os("SHELL")?;
+    let path = Path::new(&shell);
+    if shell.is_empty()
+        || !path.is_absolute()
+        || !fs::metadata(path).is_ok_and(|value| value.is_file())
+    {
+        return None;
+    }
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    (unsafe { libc::access(path.as_ptr(), libc::X_OK) } == 0).then_some(shell)
+}
+
 fn legacy_host_config(
     cwd: &Path,
     profile: &Path,
@@ -3566,6 +3582,10 @@ fn legacy_host_config(
         .env("TESSIVUM_PROFILE_NAME", profile_name)
         .env("TESSIVUM_PROFILE_DIR", &process_profile)
         .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0");
+    #[cfg(unix)]
+    if let Some(shell) = parent_shell() {
+        command = command.env("SHELL", shell);
+    }
     if let Some(root) = env::var_os("TESSIVUM_HOST_MODULE_ROOT") {
         let root = PathBuf::from(root);
         let root = fs::canonicalize(&root).map_err(|error| io_error(&root, error))?;

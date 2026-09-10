@@ -229,11 +229,29 @@ Rust Loader
 
 ### 6.6 `dsh-better-sidebar@0.17.1` 固定 PTY 修复（Alpha.26 源码）
 
+本节保留 Alpha.26 已发布实现的历史哈希和验证范围；当前本地补丁的哈希与阻断项见 §6.7。
+
 - 来源：`packaging/patches/dsh-better-sidebar-0.17.1.patch`；只适用于原始 `lib/index.js` SHA-256 `69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad`，修复后为 `638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1`。其他版本不自动套用；输入或现有修复目录校验失败则明确拒绝。
 - `src/plugin_manager.rs` 在当前插件 profile 的依赖目录创建校验过的修复副本，再原子发布并加载该副本。原 npm 安装目录不原地改写；修复随源码交付，不依赖手工修改用户 `node_modules`，重装可重建。
 - 关闭 handle 时同步失效且幂等；write/resize、socket close、退出监听与宽限期 timer 校验 handle/连接归属。失效终端关闭连接并保留诊断，旧连接不能杀死同 key 的替代终端。
 - 可运行检查：`node scripts/check_sidebar_pty.mjs --source <profile-local-repair>/lib/index.js --real-pty`。覆盖确定性竞态和真实 node-pty shell 输出/退出；本机验证版本为 `node-pty@1.1.0`，不泛化为所有插件版本已验证。
 - 安全边界未改变：已授权 Remote Access 仍不能访问 legacy plugin HTTP 路由和 WebSocket upgrade；真实远程 Browser 请求 `/sidebar/bundle/terminal.js` 返回 `403 REMOTE_HOST_DENIED`，符合 Phase 8 §4.2 的既有约定。远程历史分页已通过；用户确认 Alpha.26 暂不支持远程侧边栏终端，不再将其列为本版发布阻断项，也不宣称远程终端已通过验收。未来需要此能力时单独设计受限授权，不放开所有 legacy 路由。
+
+### 6.7 默认 Shell 修复（本地未发布）
+
+本节记录 2026-09-10 的本地未发布阶段；后续用户已授权发包，Alpha.29 与正式 Core 0.1.7 的配套发行状态见 [开发计划 §4.5](DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行)。**已安装的 Alpha.28 不会自动获得修复。** 修复前，Alpha.28 + `dsh-better-sidebar@0.17.1` + Bun 1.4.0 在缺少 `SHELL` 时选择 `unknown`；同一无 `SHELL` 探测修复前退出 1，修复后选择 `/bin/bash` 并实际执行成功。
+
+- 产品层经既有 `HostCommand::env` 只下发有效父进程 POSIX `SHELL`；Core 的 `env_clear()` 及其他环境隔离不变。缺失、不存在、非文件或不可执行的自动候选继续系统兜底，不特判 `unknown`。
+- 设置覆盖 → 部署配置 → 有效 `SHELL` → 有效登录 Shell → 既有系统兜底。显式错误不静默回退；支持合法命令名、带空格路径、相对终端 cwd 的路径及独立参数。UI 与模型 PTY 创建函数使用同一规则；WebSocket 错误受 123 字节 UTF-8 上限约束，日志保留完整诊断。
+- 原始 npm `lib/index.js` SHA-256 仍为 `69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad`；新修复输出为 `9d3ecea3921ecee81d338074784eb86f40faa76e3546cea53c49e6aab31b46ff`；补丁文件为 `2fb5fc222bf7a8a074d3d55c072a0a8f711dcdb261cf16960bec1a74be3dffd3`。输入、输出及发行打包校验已同步，仍原子创建 profile-local 副本。
+- 检查命令：`node scripts/check_sidebar_pty.mjs --source <repair>/lib/index.js`；真实 Bun 检查为 `env -u SHELL bun scripts/check_sidebar_pty.mjs --source <repair>/lib/index.js --real-pty`。后者使用生产选择器，不手动指定兜底 Shell；覆盖自动/显式边界、两类创建函数及生命周期竞态。
+- 四个平台均从实际本地归档启动 Rust Host → Bun → 插件 → PTY，执行 `ARCHIVE-SHELL_OK`、`pwd`、`uname -sm`、环境标记检查及 `exit 7`；resize、裸断线重连、park/恢复保留同一 PID 和 Shell 状态。macOS ARM64 以父进程 `SHELL=/bin/sh` 验证有效继承；其余三平台删除父进程 `SHELL`，使用 `/bin/bash`。四者均输出 `SENTINEL=unset`。
+- macOS Intel 另经真实 Chromium 页面操作终端并截图，观察到 `UI-SHELL_OK`、正确 cwd、`Darwin` 和未泄漏环境标记。macOS ARM64 在旧修复副本与原始 npm 包并存、删除新缓存后重新启动，自动生成新哈希副本并通过同一终端烟测；原包与旧修复内容保持不变。
+- **模型侧本地通过：** 用户授权后，产品标准工具组新增精确 `terminal.manage`，保留父级拒绝/审批及模式隔离。macOS ARM64、无父进程 `SHELL` 下，录制模型流经过真实 Native Agent / PTC `run_code` 调用全部 8 个 `terminal_*` 工具，并从正确工作区读取唯一文件标记。冷会话 cwd 曾退回插件目录，已在本地 Core 工具回调增加会话预载、取消检查及缺失会话拒绝。烟测使用 `efbf995` Host 加同一 callback 补丁，保留历史分页；该组合与证据见 `dist/model-terminal-local/`。当前发布依赖 pin、已发布归档及此前四平台 Shell-only 候选均未包含此次模型侧改动；正式集成需 Core 先发布包含两项修复的版本。不是外部实时模型或四平台模型验收。
+- **Windows 源码门槛未通过：** 已尝试 MSVC target 检查，本机缺少 Windows SDK 的 `windows.h` / `stdlib.h`，且无已配置 Windows 主机。用户选择仅本地变更，不推送远端 CI。Windows 选择分支与既有源码门槛保留，不能声明 Windows 检查通过。
+- macOS 登录初始化还输出 `/.local/bin/env: No such file or directory`；实际命令与退出成功。记录为用户初始化文件的环境假设，不借此透传完整环境。Remote Access 的 Legacy HTTP/WebSocket 拒绝策略未改变。
+
+本地归档位于 `dist/shell-repair-local/`，仍带 Alpha.28 版本号，仅用于此次验证，不可替换已发布版本。发行状态与完整证据见 [开发计划 §4.4](DEVELOPMENT_PLAN.md#44-侧栏终端默认-shell-修复本地实现发布阻断)。
 
 ## 7. Extism/WASM 插件协议
 

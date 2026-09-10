@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.29 - 2026-09-10
+
+### Fixed
+
+- Validate and explicitly forward the parent POSIX `SHELL` without widening the Legacy Host environment allowlist. Validate automatic shell candidates and retain system fallbacks; preserve explicit shell priority, executable paths, separate arguments, and terminal working directories.
+- Extend the checksum-scoped `dsh-better-sidebar@0.17.1` repair for both PTY creation paths, defer explicit validation until creation, and bound WebSocket diagnostics without truncating server logs. Original npm packages remain unchanged.
+- Add the exact `terminal.manage` capability to the standard tool set. Preserve late plugin registration/removal and inherited Deny/Ask restrictions without allowing unrelated plugins or widening minimal/custom modes.
+- Pair native mode restrictions with Core `v0.1.7` / `0caaccf9a79d7a906a08a21c3032eafebe084ffc`: preload the native session before Legacy tool callbacks, reject missing sessions, and check cancellation before executing plugins. Preserve the prior bounded history paging fix.
+
+### Verification limits
+
+- Platform scope remains macOS/Linux x86_64 and ARM64. Windows native packages and remote sidebar terminals remain unsupported; Windows-specific acceptance is deferred.
+- The pre-release local repair evidence remains in `dist/shell-repair-local/` and `dist/model-terminal-local/`; those Alpha.28-based candidates are not Alpha.29 distribution assets. See the development plan §4.5 for the paired release acceptance.
+
 ## 0.1.0-alpha.28 - 2026-09-10
 
 ### Fixed

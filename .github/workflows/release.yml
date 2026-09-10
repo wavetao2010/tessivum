@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: wavetao2010/tessivum-core
-          ref: efbf99590a6fafd6491635e1e3c0c78c4fb790b3
+          ref: 0caaccf9a79d7a906a08a21c3032eafebe084ffc
           path: .release/tessivum-core
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

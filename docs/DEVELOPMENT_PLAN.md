@@ -2,10 +2,10 @@
 
 > 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
 > 计划校准日期：2026-09-10
-> Tessivum 实现基线：`v0.1.0-alpha.27`（已发布；四平台归档下载校验与 macOS 安装升级验收通过）
+> Tessivum 源码基线：`v0.1.0-alpha.29`（配套 Core 0.1.7，发行验收中；上一个公开版本为 Alpha.28）
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
-> 当前版本：`v0.1.0-alpha.27`，包含按持久文件修订失效的 `session.list` 导航摘要缓存，以及明确不支持图片与图片能力未知的区分；四平台发行、源码 CI、归档校验、安装升级及市场包验证已完成。支持范围仍为 macOS/Linux x86_64 与 ARM64；远程侧边栏终端及 Windows 原生发行仍不支持。
+> 当前发行工作：用户已授权推送与发包，按 Core → Tessivum 顺序发布默认 Shell 与模型终端修复，见第 4.5 节。第 4.4 节保留此前本地未发布阶段的证据，不作为当前依赖状态。支持范围仍为 macOS/Linux x86_64 与 ARM64；Windows 验收暂缓，远程侧边栏终端及 Windows 原生发行仍不支持。
 
 ## 1. 文档集
 
@@ -336,6 +336,63 @@ Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已�
 - 四个归档与第一方市场包已下载并通过 SHA-256 校验；以下载归档重算的 Formula 与工作流产物逐字节一致。Homebrew tap 已发布提交 `ce69b6bda0c2a0bc5dc545896c16f063903e4a1f`，`brew info` 返回 `0.1.0-alpha.28`。Intel macOS 下载包经 Rosetta 启动返回 Alpha.28；其他平台的原生运行证据来自发行 runner。
 - Apple Silicon 实际发行归档完成 Alpha.27→Alpha.28 升级，`tessivum` 与 `tsv` 均返回 Alpha.28；用私有 13.25 MB 历史副本启动打包后的真实 Web，`session.cwd` 与 `fs.tree` 均返回 200，第一方市场自动升级至 Alpha.28。升级及卸载后历史 SHA-256 均为 `18c581b59845c23c1db9d36b052dfd787d0a52324d5b4fe41e493f7b6b2a7d15`，托管 launcher 已移除。草稿阶段升级使用安装器本地归档入口，载荷是下载校验的真实发行归档，不是合成夹具。
 - 公开发布后，以安装器默认 HTTPS 下载路径全新安装，未启用本地归档入口；两个 launcher 均返回 Alpha.28。临时服务、安装目录、下载归档与私有历史/插件副本已清理。本轮未升级或重启用户运行中的 Homebrew Alpha.27；用户升级后须重启服务才会生效。
+
+### 4.4 侧栏终端默认 Shell 修复（本地实现，发布阻断）
+
+状态：2026-09-10 已完成 Shell 实现及本地模型侧验收。用户随后授权修复模型侧工具可见性，Windows 暂缓；仍不推送、不创建 PR、不打标签、不发布，版本及发行元数据不变。验证只使用隔离 profile、工作区和临时服务，未改写用户安装目录或已有运行服务。模型冷会话验收另需本地 Core callback hydration 修复；正式发行仍需合入保留历史分页的 Core 版本并更新产品依赖 pin。
+
+#### 4.4.1 已确认原因与验收缺口
+
+- 环境为已安装 Alpha.28、`dsh-better-sidebar@0.17.1` 和 Bun 1.4.0。运行服务的 `shell.get` 返回 `{ shell: "unknown", name: "unknown" }`，侧栏设置 `terminalShell` / `terminalShellArgs` 为空。
+- `src/plugin_manager.rs::legacy_host_config` 未传递 `SHELL`；Core supervisor 使用 `env_clear()`，仅加入显式允许的变量。移除 `SHELL` 后，本机 Bun 的 `os.userInfo().shell` 返回 `"unknown"`，Node 26.5.0 返回 `/bin/zsh`。
+- 插件 `defaultShell()` 接受任意非空登录 Shell 字符串，因而跳过 `/bin/bash` 兜底；固定补丁的 Bun PTY 后端收到 `Bun.spawn(["unknown", ...args])`，最终以 WebSocket 1011 关闭并显示找不到可执行文件。这不是 cwd、WebSocket 地址或大历史分页故障。
+- 原 `scripts/check_sidebar_pty.mjs` 的真实 PTY 检查自行选择 `process.env.SHELL` 或固定兜底并传给 `PtyManager`，未经过生产 `defaultShell()`；Alpha.28 归档升级烟测覆盖了 `session.cwd` / `fs.tree`，不能作为默认终端启动通过的证据。
+
+#### 4.4.2 实施顺序与责任边界
+
+1. **产品层补齐必要环境。** 在 `src/plugin_manager.rs::legacy_host_config` 中，通过既有 `HostCommand::env` 显式传递父进程有效的 POSIX `SHELL`。空白或不可用的自动来源不作为有效 Shell 下发；父进程没有 `SHELL` 时仍必须能经插件系统兜底打开终端。保持 Core 的 `env_clear()`，不复制全部 `env::vars()`，不顺带透传凭据、代理变量或其他无关环境。默认不改 Core API、源码或固定依赖。
+2. **修正插件 Shell 解析。** 在现有 `dsh-better-sidebar@0.17.1` 固定补丁中修复自动来源校验；不能仅以字符串非空判断有效，也不能只针对字面量 `unknown` 加特判。自动候选须按实际运行环境检查可执行性；无效候选继续既有平台兜底，兜底也不可执行时明确失败。
+3. **保持显式配置语义和两类终端一致。** 优先级仍为侧栏设置覆盖 → 插件部署 `shell` → 有效 `SHELL` → 有效登录 Shell 探测 → 既有平台兜底。显式配置错误应报可定位的错误，不静默换成别的 Shell；保留原有合法命令名/路径形式及独立参数，不把 Shell 路径拼接成命令字符串执行。UI 终端和模型侧 `terminal_*` 工具共用解析/校验规则；不改变已有终端的进程、cwd、重连或 park 语义。Windows 的 PowerShell 选择顺序不变。
+4. **进入可重装的交付链。** 从固定 npm 原始 `lib/index.js` 重建 `packaging/patches/dsh-better-sidebar-0.17.1.patch`，同步 `src/plugin_manager.rs` 的修复输出 SHA-256、`scripts/check_sidebar_pty.mjs` 的固定输出校验以及 `scripts/package_release.sh` 的补丁文件校验。原始输入校验保持固定；继续原子生成 profile-local 修复副本，不原地改写 npm 包，也不以兼容旧错误输出的方式放松校验。升级应从原始包生成新哈希副本，不能误加载旧修复副本。
+5. **验证后再准备发布。** 复用既有 PTY 检查、产品测试、Browser/发行烟测，补上生产环境与自动选择路径。完成下述门槛后再更新兼容证据、CHANGELOG、版本与发行元数据；不提前宣称 Alpha.28 已修复，也不在本次文档任务中发布新版本。
+
+#### 4.4.3 必须通过的验收
+
+| 场景 | 可观察结果 |
+|---|---|
+| 父进程有有效 `SHELL`，侧栏无显式覆盖 | 实际 Legacy 子进程使用预期 Shell；无关测试环境标记不被继承，日志不打印完整环境或凭据 |
+| 父进程没有 `SHELL`，Bun 探测返回 `unknown`、空值、抛错或不可执行路径 | 自动选择有效的既有系统兜底；真实终端能执行命令，不能只断言识别函数返回非空 |
+| 显式覆盖与错误配置 | 设置覆盖优先于部署配置及自动来源；合法配置生效，不存在/不可执行的显式配置明确失败且不静默兜底；参数边界保持不变 |
+| 真实打包环境、本地 Browser 侧栏终端 | 使用默认空 Shell 设置，从实际 Rust Host 启动 Bun 插件；通过终端执行唯一输出标记、`pwd` 和一个经 PATH 查找的外部命令，确认输出、会话工作目录及退出状态 |
+| 模型侧终端工具 | 创建、执行、读取输出和关闭实际 PTY，使用与 UI 终端一致的默认 Shell；不以 UI 一侧成功替代另一侧验收 |
+| 生命周期与升级 | resize、刷新重连、park/恢复和关闭回归通过；旧 socket/timer 不能影响替代终端；从 Alpha.28 的原始 npm 包及已有修复副本升级后，新终端采用新逻辑，原包与历史数据保持不变 |
+| 平台与交付 | macOS/Linux 支持的四个平台运行实际归档默认终端烟测；保留 Windows 源码检查及原选择分支，不扩大 Windows 原生发行或远程终端支持声明 |
+
+最小回归已在未修复版本的“无 `SHELL` + Bun 自动解析”路径失败，修复后通过；不是手工传入 `/bin/sh` 代替自动选择。macOS 登录初始化文件仍输出 `/.local/bin/env: No such file or directory`，但实际命令、cwd、外部程序及退出验证通过；不借此取消环境隔离。具体运行证据与哈希见 [插件兼容记录 §6.7](PLUGIN_COMPATIBILITY.md#67-默认-shell-修复本地未发布)。
+
+#### 4.4.4 本地验证结果与发布阻断
+
+- Rust：`cargo test --locked --test plugin_manager`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked --all-targets`、release 构建通过；PTY 检查在 Node 与无 `SHELL` 的 Bun 1.4.0 下通过。
+- 实际归档终端：macOS ARM64 原生、macOS x86_64（Rosetta）、Linux ARM64（Docker）、Linux x86_64（Docker/Rosetta）均通过。有效父进程 `/bin/sh`、缺少 `SHELL` 的 `/bin/bash` 兜底、无关标记隔离、唯一输出、cwd、PATH 外部命令、退出 7、resize、重连和 park/恢复均有执行证据。macOS 另有实际浏览器截图；升级重建保留原 npm 与旧修复字节。
+- 模型侧本地验收通过：新增精确的 `terminal.manage` 能力，保持父级 Deny/Ask、模式隔离及动态注册/卸载。录制模型流驱动真实 Native Agent → PTC `run_code` → Legacy 插件 → Bun PTY；macOS ARM64、父进程无 `SHELL`、默认空 Shell 配置下，8 个终端工具均成功执行，并从原生会话工作区读取唯一文件标记。冷会话最初错误落入插件目录，根因是 Core 工具回调未预载会话；本地修复复用既有预载逻辑，缺失会话不再伪造空 header，执行前检查取消。Core 回归修复前失败、修复后通过。
+- Windows 检查阻断：缺少 Windows SDK（`windows.h` / `stdlib.h`）；没有可用 Windows 执行主机，用户不授权此次推送触发 CI。原 Windows 分支保留，但不能声明源码门槛通过。
+- 发行结论：**不具备完整发行条件**。本次模型验收使用当前产品 debug 构建和 `efbf995` 打包 Host 加同一份本地 Core callback 补丁，保留已有分页逻辑；补丁重放所得字节与实际烟测 Host 完全一致。不是外部实时模型验收，也不是未修改归档验收。需先让 Core 新版本包含 callback 修复与分页，再更新产品 pin；本地旧 Core checkout 不可直接覆盖当前发行依赖。证据与可重放补丁在 `dist/model-terminal-local/`。此前四平台 Shell-only 候选及 SHA-256 仍保留在 `dist/shell-repair-local/`，不包含此次模型侧改动；没有发布或替换归档。
+
+| 本地候选平台 | 归档 SHA-256 |
+|---|---|
+| macOS ARM64 | `54ef2b49dc5669c07ee744c16388325f165a91a21bf02093bb1d2b6d1f217f5c` |
+| macOS x86_64 | `a499d88107b3de40776b585241b7c3ecb82f82e07390377b5eef225d856f76ff` |
+| Linux ARM64 | `cc2499ec9b49e64767e77b5943fe5fd4c8185ed0971a81aca9f260f3b82d8439` |
+| Linux x86_64 | `1d4ad07b1c481c960d057141cc55aa25fdf5c44bd270f2eca1e51d82709dbd2a` |
+
+### 4.5 Alpha.29：终端修复配套发行
+
+- 用户授权修复后推送发包；Windows 暂缓，不扩大平台或远程终端支持声明。此前“不推送/不发包”约束已由本次授权替代。
+- Core `v0.1.7` 已发布，提交 `0caaccf9a79d7a906a08a21c3032eafebe084ffc`；合并 `efbf995` 历史分页与工具回调会话预载，未用旧 checkout 覆盖当前依赖。Core 119 项 Rust 测试、28 项 Host 测试、TypeScript 检查及 Native/Extism/Legacy 实际运行烟测通过。
+- 产品、第一方市场、安装器与发行元数据统一为 Alpha.29；Cargo、源码 CI、四平台打包 Host 均固定上述 Core SHA。发行使用正式 Core 源码，不再向旧 Host 临时叠加补丁。
+- 发行资产先保留为草稿；新归档终端验收、下载 SHA-256 校验及安装器验证完成后才公开。不把第 4.4 节的旧 Alpha.28 候选包冒充新发行资产。
+- 发布前本机门槛通过：产品 574 项 Rust 测试（22 项平台过滤）、严格 Clippy、发行构建、兼容/插件/性能事实检查、安装器与 Formula fixtures；第一方市场 1059 项测试及离线打包烟测通过。集成审查无剩余阻断发现。
+- 从新打包的 Alpha.29 macOS ARM64 归档启动真实 Host，父进程移除 `SHELL`，无 Core 临时补丁；录制模型经 PTC 执行全部 8 个终端工具并读取正确工作区唯一文件。实际 Chromium 侧栏也执行了 `ARCHIVE-UI_OK`、`pwd` 和相同文件读取；证据为实际交互、终端 DOM 输出及原生模型事件。两种 CDP 截图均超时，不声明截图验收。证据保留在 `dist/alpha29-local/`；未改写用户安装或运行中的服务。
 
 ---
 
@@ -790,7 +847,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前已发布实现基线为 `v0.1.0-alpha.28`，四个 macOS/Linux 归档已完成下载校验与发行 runner 包内运行检查，具体证据见第 4.3 节。产品运行时固定 `tessivum-core v0.1.6` / `efbf99590a6fafd6491635e1e3c0c78c4fb790b3`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
+当前源码基线为 `v0.1.0-alpha.29`，产品运行时固定 `tessivum-core v0.1.7` / `0caaccf9a79d7a906a08a21c3032eafebe084ffc`，发行状态见第 4.5 节；Alpha.28 历史发行证据见第 4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 

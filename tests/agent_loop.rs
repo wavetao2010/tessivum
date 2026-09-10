@@ -26,8 +26,8 @@ use tessivum::{
     },
     system_prompt::{PromptRegistration, PromptSection, SystemPrompt},
     tools::{
-        ToolApproval, ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRunContext,
-        ToolRuntime,
+        ToolApproval, ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRestrictions,
+        ToolRunContext, ToolRuntime,
     },
     ContentBlock, FinishReason, GenerateRequest, LlmFailure, Message, MessageRole, MessageSource,
     SessionEvent, SessionHeader, SessionId, SessionOrigin, StreamChunk, SurfaceOp, ToolCallId,
@@ -2694,6 +2694,92 @@ async fn native_child_mode_excludes_owner_bound_tools() {
     child.dispose().await.unwrap();
 }
 
+#[tokio::test]
+async fn optional_terminal_tools_follow_registration_without_widening_other_modes() {
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let llm = LlmRuntime::new();
+    let _provider = llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&requests),
+                streams: Arc::new(parking_lot::Mutex::new(
+                    (0..12).map(|_| text_turn("done")).collect(),
+                )),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let _base = install_tools(
+        &tools,
+        &[
+            "read",
+            "bash",
+            "str_replace_editor",
+            "unrelated_plugin_tool",
+        ],
+    );
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(
+                llm,
+                SystemPrompt::new(),
+                tools
+                    .scoped(ToolRestrictions::new().deny("terminal_list"))
+                    .unwrap(),
+            )
+            .with_code_runtime(ptc_runtime()),
+        ))
+        .unwrap();
+    let mut agents = Vec::new();
+    for mode in ["standard", "ptc", "minimal", "test-read"] {
+        agents.push((
+            mode,
+            registry
+                .create(header_with_mode(mode, mode), options(), cancellation())
+                .await
+                .unwrap(),
+        ));
+    }
+    let mut terminal_registration = Vec::new();
+    for phase in 0..3 {
+        if phase == 1 {
+            terminal_registration = install_tools(&tools, &["terminal_create", "terminal_list"]);
+        } else if phase == 2 {
+            terminal_registration.clear();
+        }
+        for (_, agent) in &agents {
+            agent
+                .followup(user("inspect available tools"))
+                .await
+                .unwrap();
+            agent.when_idle().await.unwrap();
+        }
+        let captured = std::mem::take(&mut *requests.lock());
+        for (mode, _) in &agents {
+            let request = request_for(&captured, mode);
+            let visible = |name: &str| {
+                request.tools.as_ref().unwrap().iter().any(|tool| {
+                    tool.name == name
+                        || (tool.name == "run_code"
+                            && tool.description.contains(&format!("\"name\":\"{name}\"")))
+                })
+            };
+            assert_eq!(
+                visible("terminal_create"),
+                phase == 1 && matches!(*mode, "standard" | "ptc"),
+                "{mode}, phase {phase}"
+            );
+            assert!(!visible("unrelated_plugin_tool"), "{mode}");
+            assert!(!visible("terminal_list"), "{mode}");
+        }
+    }
+    for (_, agent) in agents {
+        agent.dispose().await.unwrap();
+    }
+}
+
 struct AlwaysApprove;
 
 #[async_trait]
@@ -2710,7 +2796,7 @@ impl ToolApproval for AlwaysApprove {
 
 #[tokio::test]
 async fn programmatic_nested_tools_preserve_denial_and_approval() {
-    for approved in [false, true] {
+    for (approved, parent_ask) in [(false, false), (true, false), (false, true), (true, true)] {
         let llm = LlmRuntime::new();
         let _provider = llm
             .register(
@@ -2739,9 +2825,21 @@ async fn programmatic_nested_tools_preserve_denial_and_approval() {
             AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
         let _factory = registry
             .register_factory(Arc::new(
-                factory(llm, SystemPrompt::new(), tools)
-                    .with_code_runtime(ptc_runtime())
-                    .with_approval_required_tools(["read".into()]),
+                factory(
+                    llm,
+                    SystemPrompt::new(),
+                    if parent_ask {
+                        tools.scoped(ToolRestrictions::new().ask("read")).unwrap()
+                    } else {
+                        tools
+                    },
+                )
+                .with_code_runtime(ptc_runtime())
+                .with_approval_required_tools(if parent_ask {
+                    Vec::new()
+                } else {
+                    vec!["read".into()]
+                }),
             ))
             .unwrap();
         let mut selected = header(if approved {

@@ -7,20 +7,31 @@ use std::{
 #[cfg(unix)]
 use parking_lot::{Mutex, MutexGuard};
 #[cfg(unix)]
-use std::{env, ffi::OsString, sync::LazyLock};
+use std::{
+    env,
+    ffi::OsString,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    process::Command,
+    sync::LazyLock,
+};
 
 use serde_json::json;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
-use tessivum::plugin_manager::install_first_party_market;
-#[cfg(unix)]
-use tessivum::plugin_manager::{mutate_plugins, PluginMutation};
 use tessivum::{
     cli::{parse_cli, resolve_data_root, CliCommand},
     plugin_manager::{enabled_client_plugin_names, load_plugin_entries, plugin_profile_root},
 };
+#[cfg(unix)]
+use tessivum::{
+    host::HostConfig,
+    plugin_manager::{
+        configure_host_plugins, install_first_party_market, mutate_plugins, PluginMutation,
+    },
+};
 use tessivum_core::RuntimeKind;
+#[cfg(unix)]
+use tessivum_node_bridge::NodeSupervisor;
 
 #[cfg(unix)]
 static PNPM_ENV_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -324,7 +335,7 @@ fn pinned_sidebar_repair_is_repeatable_and_keeps_the_installed_package_untouched
             "{:x}",
             Sha256::digest(fs::read(repaired.join("lib/index.js")).unwrap())
         ),
-        "638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1"
+        "9d3ecea3921ecee81d338074784eb86f40faa76e3546cea53c49e6aab31b46ff"
     );
     assert_eq!(
         fs::read(repaired.join("lib/client-terminal.js")).unwrap(),
@@ -501,6 +512,85 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_host_process_receives_only_the_valid_parent_shell() {
+    if let Some(root) = env::var_os("TESSIVUM_SHELL_TEST_CHILD") {
+        let root = PathBuf::from(root);
+        let mut config = HostConfig::new(&root, root.join("data"));
+        configure_host_plugins(&mut config).expect("Legacy plugin host configures");
+        let host = config
+            .legacy_host
+            .take()
+            .expect("Legacy plugin selects a host process");
+        let supervisor = NodeSupervisor::new(host.command, host.client).unwrap();
+        assert!(
+            supervisor.start().is_err(),
+            "fixture exits without a handshake"
+        );
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let profile = temp.0.join("data/plugins");
+    fs::create_dir_all(&profile).unwrap();
+    write_json(
+        &profile.join("package.json"),
+        json!({"dependencies": {"shell-bundle": "1.0.0"}}),
+    );
+    write_bundle(
+        &profile,
+        "shell-bundle",
+        false,
+        "- insert:\n    - id: shell-plugin\n      name: shell-plugin\n",
+    );
+    write_package(&profile, "shell-plugin", json!({}));
+
+    let vendor = temp.0.join("vendor");
+    fs::create_dir(&vendor).unwrap();
+    let host = temp.0.join("compat-host.ts");
+    fs::write(&host, "").unwrap();
+    let bin = temp.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let bun = bin.join("bun");
+    fs::write(
+        &bun,
+        "#!/bin/sh\nprintf '%s\\n%s' \"$SHELL\" \"${TESSIVUM_SHELL_TEST_SENTINEL+leaked}\" > \"$TESSIVUM_PROFILE_DIR/observed-shell\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&bun, fs::Permissions::from_mode(0o755)).unwrap();
+    let shell_name = if cfg!(target_os = "macos") {
+        " shell-校验 ".as_bytes()
+    } else {
+        b" shell-\xff ".as_slice()
+    };
+    let shell = temp.0.join(OsString::from_vec(shell_name.to_vec()));
+    fs::write(&shell, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let status = Command::new(env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("legacy_host_process_receives_only_the_valid_parent_shell")
+        .arg("--nocapture")
+        .env_clear()
+        .env("PATH", &bin)
+        .env("SHELL", &shell)
+        .env("TESSIVUM_SHELL_TEST_CHILD", &temp.0)
+        .env("TESSIVUM_SHELL_TEST_SENTINEL", "must-not-leak")
+        .env("TESSIVUM_COMPAT_HOST", &host)
+        .env("CORDIS_VENDOR_ROOT", &vendor)
+        .status()
+        .unwrap();
+    assert!(status.success(), "isolated test process failed");
+
+    let observed = fs::read(profile.join("observed-shell")).unwrap();
+    let mut expected = shell.as_os_str().as_bytes().to_vec();
+    expected.push(b'\n');
+    assert_eq!(observed, expected);
 }
 
 #[cfg(unix)]

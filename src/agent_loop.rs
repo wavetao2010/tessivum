@@ -44,7 +44,9 @@ use crate::{
     session::Session,
     skills::{model_catalog, skill_result_tag, SkillRuntime, SkillSessionScopes},
     system_prompt::{PromptSection, SystemPrompt},
-    tools::{ToolOutput, ToolRegistration, ToolRestrictions, ToolRunContext, ToolRuntime},
+    tools::{
+        ToolAccess, ToolOutput, ToolRegistration, ToolRestrictions, ToolRunContext, ToolRuntime,
+    },
     TessivumError,
 };
 
@@ -541,11 +543,15 @@ impl SessionRuntimeSpec {
                 json!({"agentMode": mode_id.as_str(), "missing": missing}),
             )));
         }
-        names.retain(|name| available.contains(name));
-        let approval_required = factory
-            .approval_required_tools
+        // Keep declared names even before registration: optional plugin tools can
+        // appear or disappear while this session's restricted runtime stays alive.
+        names.retain(|name| factory.native_tools.access(name) != ToolAccess::Deny);
+        let approval_required = names
             .iter()
-            .filter(|name| names.contains(*name))
+            .filter(|name| {
+                factory.approval_required_tools.contains(*name)
+                    || factory.native_tools.access(name) == ToolAccess::Ask
+            })
             .cloned()
             .collect::<Vec<_>>();
         let restrictions = approval_required

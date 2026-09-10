@@ -13,9 +13,9 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 ## Status
 
-`v0.1.0-alpha.28` fixes Legacy route failures when loading large histories. It uses `tessivum-core v0.1.6` at revision `efbf99590a6fafd6491635e1e3c0c78c4fb790b3` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
+`v0.1.0-alpha.29` fixes default sidebar shell selection and model-owned terminals, including cold-session working directories. It uses `tessivum-core v0.1.7` at revision `0caaccf9a79d7a906a08a21c3032eafebe084ffc` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
 
-Native snapshot paging and the paired Core receiver preserve complete histories under the existing message limit.
+The exact `terminal.manage` capability preserves mode isolation and parent Deny/Ask restrictions. Core retains the existing bounded history paging and hydrates native sessions before plugin tool callbacks.
 
 Available today:
 
@@ -33,13 +33,13 @@ Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exac
 
 | Platform | Architecture | Archive | SHA-256 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-aarch64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-aarch64-apple-darwin.tar.gz.sha256) |
-| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-x86_64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-x86_64-apple-darwin.tar.gz.sha256) |
-| Linux (glibc) | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-aarch64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-aarch64-unknown-linux-gnu.tar.gz.sha256) |
-| Linux (glibc) | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-x86_64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.28/tessivum-0.1.0-alpha.28-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-apple-darwin.tar.gz.sha256) |
+| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-apple-darwin.tar.gz.sha256) |
+| Linux (glibc) | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux (glibc) | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-unknown-linux-gnu.tar.gz.sha256) |
 | Windows native | x86_64/ARM64 | Not published | — |
 
-Release scope remains macOS/Linux x86_64 and ARM64. See [Alpha.28 release evidence](docs/DEVELOPMENT_PLAN.md#43-alpha28legacy-路由大历史快照修复); earlier Alpha.27 evidence is retained separately and is not claimed for this release.
+Release scope remains macOS/Linux x86_64 and ARM64. See [Alpha.29 release evidence](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行); earlier release evidence remains historical and is not claimed as new verification.
 
 The existing installer is **not macOS-only**: it detects both macOS and Linux on x86_64/ARM64. Native Windows has not passed the release build, archive, launcher, plugin, Browser, upgrade, or process-cleanup gates. Windows users can run the Linux package inside WSL2 as an unverified workaround; a Linux archive is not a native Windows executable.
 
@@ -59,8 +59,8 @@ tsv --version
 The installer selects the correct release archive, verifies its SHA-256, installs under `~/.local/lib/tessivum`, and updates launchers in `~/.local/bin`:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.28/install.sh
-sh install.sh 0.1.0-alpha.28
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.29/install.sh
+sh install.sh 0.1.0-alpha.29
 export PATH="$HOME/.local/bin:$PATH"
 tessivum --version
 ```
@@ -69,12 +69,12 @@ It does not use `sudo` or edit shell startup files. Install Bun 1.3.14+ and pnpm
 
 ### Manual archive — macOS or Linux
 
-Download the archive and adjacent `.sha256` file from the [Alpha.28 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.28). Choose one of the four target names listed above.
+Download the archive and adjacent `.sha256` file from the [Alpha.29 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.29). Choose one of the four target names listed above.
 
 Linux example:
 
 ```bash
-version=0.1.0-alpha.28
+version=0.1.0-alpha.29
 target=x86_64-unknown-linux-gnu # use aarch64-unknown-linux-gnu on ARM64
 base="https://github.com/wavetao2010/tessivum/releases/download/v$version"
 curl -fLO "$base/tessivum-$version-$target.tar.gz"
@@ -166,7 +166,7 @@ brew upgrade tessivum
 brew uninstall tessivum
 
 # No-sudo installation
-sh install.sh 0.1.0-alpha.28
+sh install.sh 0.1.0-alpha.29
 sh install.sh --uninstall
 
 # Explicit and destructive data removal
@@ -178,7 +178,7 @@ Back up the data root before changing Alpha versions. Binary rollback does not d
 ## Security and release provenance
 
 - Release archives and first-party Market artifacts include SHA-256 checksums and source metadata.
-- Checksums detect corruption; they are not signatures. Alpha.28 artifacts are not code-signed or notarized.
+- Checksums detect corruption; they are not signatures. Alpha.29 artifacts are not code-signed or notarized.
 - HTTP listeners remain loopback-only unless Remote Access is explicitly enabled with its separate authority checks.
 - Legacy Node plugins and pnpm subprocesses are trusted local code, not sandboxed extensions.
 - The Windows source ACL runner restricts writes, not reads, network access, or process visibility. It retains Everyone/logon-SID ambient grants for runtime compatibility; NTFS hard-link aliases share file permissions, so this is not complete path isolation. `danger-full-access` requires explicit approval. Windows releases remain unpublished.

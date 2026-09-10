@@ -423,6 +423,10 @@ Node Host 断开时：
 
 Legacy Node Host 运行的是可信 npm 代码。进程隔离降低故障扩散，但不是权限沙箱；文件、网络和子进程权限必须由 OS/容器/Harness sandbox 决定。
 
+子进程环境策略由两层共同负责：Core supervisor 保持 `env_clear()`，只加入 `HostCommand::env` 显式允许的变量及必要 OS 变量；Tessivum 产品层负责选择兼容运行所需的环境内容，不把整份父进程环境隐式传入插件进程。环境过滤不改变上述“可信插件、非安全沙箱”的声明。
+
+Alpha.29 默认 Shell 链路：产品层仅显式提供有效 POSIX `SHELL`；固定版本插件校验自动来源，缺失或不可用时继续既有平台兜底。显式配置在终端创建时校验，保持设置覆盖优先级，不放开全部环境变量。模型工具通过精确 `terminal.manage` 能力接入，继承父级拒绝/审批；Core 0.1.7 在工具回调前预载原生会话，避免冷会话 cwd 退回插件目录，保留已有分页与协议。发行状态见 [开发计划 §4.5](DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行)，Windows 暂缓。
+
 ## 12. Loader 与配置
 
 Loader 负责把声明式 Entry Tree 映射到 PluginRuntime：

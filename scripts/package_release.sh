@@ -20,7 +20,7 @@ host_module_manifest="$script_dir/../packaging/host-modules.json"
 market_source_inventory="$script_dir/../packaging/market-source.json"
 market_license="$script_dir/../packaging/licenses/dsh-market/LICENSE"
 sidebar_patch="$script_dir/../packaging/patches/dsh-better-sidebar-0.17.1.patch"
-sidebar_patch_sha256="e7cdcbc409fe3a211acf7d5098066d3c6da9b84d3bb5b52cc7e34a2dbab15e65"
+sidebar_patch_sha256="2fb5fc222bf7a8a074d3d55c072a0a8f711dcdb261cf16960bec1a74be3dffd3"
 compat_modules="$script_dir/../compat/host-modules"
 deepseek_root=$(CDPATH= cd -- "$vendor/.." && pwd)
 market_filename="tessivum-market-$version.tgz"

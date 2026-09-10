@@ -2,18 +2,20 @@
 # npm: https://registry.npmjs.org/dsh-better-sidebar/-/dsh-better-sidebar-0.17.1.tgz
 # integrity: sha512-7me2X6w+ecbzAMEHtuWkSPUrfLDLTBvL9qugzgBbg1FyWyy2dzS9QNDvnZjjkst4kr4LjUJTTG4rsXBcz41YzQ==
 # source-sha256: 69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad
-# patched-sha256: 638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1
+# patched-sha256: 9d3ecea3921ecee81d338074784eb86f40faa76e3546cea53c49e6aab31b46ff
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -1,4558 +1,4786 @@
+@@ -1,4558 +1,4811 @@
  import { createRequire } from "node:module";
  import { mkdir, open, opendir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
- import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
++import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
  import { WebSocket, WebSocketServer } from "ws";
  import z from "schemastery";
  import { createHash, randomUUID } from "node:crypto";
  import { once } from "node:events";
- import { chmodSync, createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs";
+-import { chmodSync, createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs";
++import { accessSync, chmodSync, constants as fsConstants, createWriteStream, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
  import { fileURLToPath } from "node:url";
  import { spawn } from "node:child_process";
  import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
@@ -96,7 +98,8 @@
  		listLimit: config?.listLimit ?? 1e3,
  		terminalsPerSession: config?.terminalsPerSession ?? 3,
  		reconnectGraceMs: config?.reconnectGraceMs ?? 3e4,
- 		shell: config?.shell?.trim() ?? "",
+-		shell: config?.shell?.trim() ?? "",
++		shell: config?.shell === void 0 || config.shell.trim() === "" ? "" : config.shell,
  		shellArgs: config?.shellArgs ?? []
  	};
  }
@@ -1328,10 +1331,6 @@
  const PTY_DEPS_MISSING = "pty-deps-missing";
  const defaultRequire = createRequire(import.meta.url);
  let cached;
--/**
--* Load node-pty once (synchronously) and cache the outcome. Returns null
--* when the package or its native binding cannot be loaded; the cause stays
--* queryable through {@link nodePtyLoadCause}. Never throws.
 +// Bun's node-pty addon can close the descriptor during shell startup. Use its native PTY.
 +function spawnBunPty(shell, args, options) {
 +	const dataListeners = new Set();
@@ -1388,7 +1387,10 @@
 +		}
 +	};
 +}
-+/**
+ /**
+-* Load node-pty once (synchronously) and cache the outcome. Returns null
+-* when the package or its native binding cannot be loaded; the cause stays
+-* queryable through {@link nodePtyLoadCause}. Never throws.
 +* Load the runtime's PTY backend once and cache the outcome. Returns null on
 +* failure; the cause stays queryable through nodePtyLoadCause. Never throws.
  */
@@ -1624,6 +1626,7 @@
 +			this.cancelClose(existing);
 +			return existing;
 +		}
++		const executable = defaultShell({ explicit: shell ?? this.shell, cwd });
 +		if (existing !== void 0) this.close(key, existing);
 +		for (const [candidate, handle] of [...this.sessions]) if (handle.sessionId === sessionId && (handle.exited || handle.closed)) this.close(candidate, handle);
  		if (this.keysOf(sessionId).length >= this.maxPerSession) throw new SidebarError("pty-error", `terminal limit reached (${this.maxPerSession}) for this session`, 400);
@@ -1632,7 +1635,8 @@
  			sessionId,
  			tabId,
  			cwd,
- 			pty: this.nodePty.spawn(shell ?? this.shell, shellSpawnArgs(shellArgs ?? this.shellArgs), {
+-			pty: this.nodePty.spawn(shell ?? this.shell, shellSpawnArgs(shellArgs ?? this.shellArgs), {
++			pty: this.nodePty.spawn(executable, shellSpawnArgs(shellArgs ?? this.shellArgs), {
  				name: "xterm-256color",
  				cols: Math.max(2, Math.floor(cols)),
  				rows: Math.max(2, Math.floor(rows)),
@@ -1722,7 +1726,8 @@
 +			this.close(handle.key, handle);
  		}, delayMs);
 -		this.pendingCloses.set(key, timer);
--	}
++		this.pendingCloses.set(handle.key, { handle, timer });
+ 	}
 -	/**
 -	* Park a terminal: the owning tab's view unmounted because the user
 -	* switched to another conversation, but the tab is still open in its
@@ -1736,11 +1741,17 @@
 -		if (this.sessions.get(key) === void 0) return;
 -		this.cancelClose(key);
 -		this.parked.add(key);
--	}
++	park(handle, connection) {
++		if (!this.owns(handle, connection)) return;
++		this.cancelClose(handle);
++		this.parked.add(handle);
+ 	}
 -	/** Whether this pty was parked (its view unmounted for a session switch). */
 -	isParked(key) {
 -		return this.parked.has(key);
--	}
++	isParked(handle) {
++		return this.parked.has(handle);
+ 	}
 -	/** Cancel a pending scheduled close (the terminal is being reopened).
 -	*  Also clears the parked state — a reconnecting view reattaches a parked
 -	*  pty and resumes normal lifecycle. */
@@ -1749,28 +1760,16 @@
 -		if (timer !== void 0) {
 -			clearTimeout(timer);
 -			this.pendingCloses.delete(key);
--		}
--		this.parked.delete(key);
--	}
--	/** Resolve a live handle by key, or undefined. */
-+		this.pendingCloses.set(handle.key, { handle, timer });
-+	}
-+	park(handle, connection) {
-+		if (!this.owns(handle, connection)) return;
-+		this.cancelClose(handle);
-+		this.parked.add(handle);
-+	}
-+	isParked(handle) {
-+		return this.parked.has(handle);
-+	}
 +	cancelClose(handle) {
 +		const pending = this.pendingCloses.get(handle.key);
 +		if (pending?.handle === handle) {
 +			clearTimeout(pending.timer);
 +			this.pendingCloses.delete(handle.key);
-+		}
+ 		}
+-		this.parked.delete(key);
 +		this.parked.delete(handle);
-+	}
+ 	}
+-	/** Resolve a live handle by key, or undefined. */
  	get(key) {
  		return this.sessions.get(key);
  	}
@@ -1796,10 +1795,9 @@
  		try {
  			handle.pty.kill();
  		} catch {}
--	}
--	/** Close every terminal (plugin teardown). */
 +		return true;
-+	}
+ 	}
+-	/** Close every terminal (plugin teardown). */
  	disposeAll() {
 -		for (const timer of this.pendingCloses.values()) clearTimeout(timer);
 +		for (const pending of this.pendingCloses.values()) clearTimeout(pending.timer);
@@ -1856,12 +1854,28 @@
  * `pwsh.exe` found on PATH or in a known install directory → the 5.1
  * fallback (machines without PowerShell 7 keep working).
  */
++function resolveShellExecutable(shell, env = process.env, cwd = process.cwd()) {
++	const trimmed = shell.trim();
++	if (trimmed === "") throw new Error("shell executable must not be empty");
++	const searchPath = env.PATH === void 0 ? "/usr/bin:/bin" : env.PATH;
++	for (const candidate of shell === trimmed ? [shell] : [shell, trimmed]) {
++		const isPath = isAbsolute(candidate) || candidate.includes("/");
++		const paths = isPath ? [resolve(cwd, candidate)] : searchPath.split(delimiter).map((dir) => resolve(cwd, dir === "" ? "." : dir, candidate));
++		for (const path of paths) try {
++			if (!statSync(path).isFile()) continue;
++			accessSync(path, fsConstants.X_OK);
++			return path;
++		} catch {}
++	}
++	throw new Error(`shell executable is not an executable regular file: "${trimmed}"`);
++}
  function defaultShell(options = {}) {
  	const platform = options.platform ?? process.platform;
  	const env = options.env ?? process.env;
  	const exists = options.exists ?? existsSync;
  	const explicit = options.explicit;
- 	if (explicit !== void 0 && explicit.trim() !== "") return explicit.trim();
+-	if (explicit !== void 0 && explicit.trim() !== "") return explicit.trim();
++	if (explicit !== void 0 && explicit.trim() !== "") return platform === "win32" ? explicit.trim() : resolveShellExecutable(explicit, env, options.cwd ?? process.cwd());
  	if (platform === "win32") {
  		const envShell = env.DSH_SIDEBAR_SHELL;
  		if (envShell !== void 0 && envShell.trim() !== "") return envShell.trim();
@@ -1871,13 +1885,21 @@
  		}
  		return "powershell.exe";
  	}
++	const cwd = options.cwd ?? process.cwd();
  	const envShell = env.SHELL;
- 	if (envShell !== void 0 && envShell.trim() !== "") return envShell.trim();
+-	if (envShell !== void 0 && envShell.trim() !== "") return envShell.trim();
++	if (envShell !== void 0 && envShell.trim() !== "") try {
++		return resolveShellExecutable(envShell, env, cwd);
++	} catch {}
  	try {
  		const loginShell = userInfo().shell;
- 		if (typeof loginShell === "string" && loginShell.trim() !== "") return loginShell;
+-		if (typeof loginShell === "string" && loginShell.trim() !== "") return loginShell;
++		if (typeof loginShell === "string" && loginShell.trim() !== "") try {
++			return resolveShellExecutable(loginShell, env, cwd);
++		} catch {}
  	} catch {}
- 	return "/bin/bash";
+-	return "/bin/bash";
++	return resolveShellExecutable("/bin/bash", env, cwd);
  }
  /**
  * A short display name for a shell executable, used as the terminal tab
@@ -2016,9 +2038,11 @@
  	* @returns the new handle's uuid (the model-facing opaque id).
  	*/
  	create(sessionId, title, command, cwd, cols = 80, rows = 24, shell, shellArgs) {
++		const executable = defaultShell({ explicit: shell ?? this.shell, cwd });
  		const uuid = randomUUID();
  		const dims = clampDims(cols, rows);
- 		const pty = this.nodePty.spawn(shell ?? this.shell, shellSpawnArgs(shellArgs ?? this.shellArgs), {
+-		const pty = this.nodePty.spawn(shell ?? this.shell, shellSpawnArgs(shellArgs ?? this.shellArgs), {
++		const pty = this.nodePty.spawn(executable, shellSpawnArgs(shellArgs ?? this.shellArgs), {
  			name: "xterm-256color",
  			cols: dims.cols,
  			rows: dims.rows,
@@ -2276,7 +2300,7 @@
  			handle.pty.kill();
  		} catch {}
  		this.notify();
- 		return true;
++		return true;
 +	}
 +	owns(handle, connection) {
 +		return this.sessions.get(handle.uuid) === handle && !handle.closed && (connection === void 0 || handle.connection === connection);
@@ -2285,11 +2309,11 @@
 +		if (!this.owns(handle)) return false;
 +		handle.connection?.dispose();
 +		handle.connection = connection;
-+		return true;
-+	}
+ 		return true;
+ 	}
 +	release(handle, connection) {
 +		if (this.owns(handle, connection)) handle.connection = null;
- 	}
++	}
  	/** Resolve a live handle by uuid (for the WS attach path). */
  	get(uuid) {
  		return this.sessions.get(uuid);
@@ -4044,7 +4068,8 @@
  	const value = getSettings()?.get().value;
  	if (value === null || typeof value !== "object") return {};
  	const record = value;
- 	const shell = typeof record.terminalShell === "string" ? record.terminalShell.trim() : "";
+-	const shell = typeof record.terminalShell === "string" ? record.terminalShell.trim() : "";
++	const shell = typeof record.terminalShell === "string" && record.terminalShell.trim() !== "" ? record.terminalShell : "";
  	const args = typeof record.terminalShellArgs === "string" ? record.terminalShellArgs.trim() : "";
  	return {
  		shell: shell === "" ? void 0 : shell,
@@ -4324,7 +4349,8 @@
  function apply(ctx, config) {
  	ensureSpawnHelper();
  	const resolved = resolveSidebarConfig(config);
- 	const terminalShell = defaultShell({ explicit: resolved.shell });
+-	const terminalShell = defaultShell({ explicit: resolved.shell });
++	const terminalShell = resolved.shell === "" ? defaultShell() : resolved.shell;
  	const fence = (req) => isTrustedApiRequest(req, ctx.webRuntime.trustedHosts);
  	const nodePty = loadNodePty();
  	if (nodePty === null) {
@@ -4674,8 +4700,9 @@
 +}
 +function closeTerminalSocket(ws, code, reason) {
 +	if (ws.readyState !== WebSocket.OPEN) return;
++	const closeReason = Buffer.byteLength(reason) > 123 ? new TextDecoder().decode(Buffer.from(reason).subarray(0, 123), { stream: true }) : reason;
 +	try {
-+		ws.close(code, reason);
++		ws.close(code, closeReason);
 +	} catch {
 +		try {
 +			ws.terminate?.();
@@ -4843,7 +4870,9 @@
 +		}
  	} catch (error) {
 -		ws.close(1011, error instanceof Error ? error.message : String(error));
-+		closeTerminalSocket(ws, 1011, error instanceof Error ? error.message : String(error));
++		const detail = error instanceof Error ? error.message : String(error);
++		ctx.logger?.warn(`[dsh-better-sidebar] terminal attach failed: ${detail}`);
++		closeTerminalSocket(ws, 1011, detail);
  	}
  }
  /**
