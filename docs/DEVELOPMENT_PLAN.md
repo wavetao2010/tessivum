@@ -330,6 +330,13 @@ Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已�
 - 使用原始历史与插件的私有副本启动真实本机 Web：原失败路由返回 200，Chromium 打开该历史后不再显示“载入历史”，文件侧栏可见真实文件，资源记录无 HTTP 4xx/5xx。截图接口两种捕获方式均超时，证据为实际交互、DOM 读回和 HTTP 状态，不宣称截图或远程访问验收。未替换用户运行中的 Alpha.27、配置或历史。
 - 配套 pin 的 `--locked` Native 测试、严格 Clippy 与兼容基线检查通过。首次本机验证使用从本地分支导入的 Cargo Git 缓存，随后已确认 Core 提交远端可获取。验证服务、浏览器任务空间、临时 Core 工作树及私有历史/插件副本已清理。
 
+2026-09-10 发行验收：
+
+- `v0.1.0-alpha.28` 固定提交 `e19e8ad99b131a8fbe11b756ab9849e2c0ad0150`，已公开为预发布版本。[四平台发行工作流](https://github.com/wavetao2010/tessivum/actions/runs/34446600778) 的 Browser、市场包、四个原生构建/包内检查与资产发布均成功；[源码 CI](https://github.com/wavetao2010/tessivum/actions/runs/34446597267) 的 Linux verify、完整 Browser E2E 和 Windows 源码 job 均成功。Windows 源码检查通过不等于支持原生 Windows 发行包。
+- 四个归档与第一方市场包已下载并通过 SHA-256 校验；以下载归档重算的 Formula 与工作流产物逐字节一致。Homebrew tap 已发布提交 `ce69b6bda0c2a0bc5dc545896c16f063903e4a1f`，`brew info` 返回 `0.1.0-alpha.28`。Intel macOS 下载包经 Rosetta 启动返回 Alpha.28；其他平台的原生运行证据来自发行 runner。
+- Apple Silicon 实际发行归档完成 Alpha.27→Alpha.28 升级，`tessivum` 与 `tsv` 均返回 Alpha.28；用私有 13.25 MB 历史副本启动打包后的真实 Web，`session.cwd` 与 `fs.tree` 均返回 200，第一方市场自动升级至 Alpha.28。升级及卸载后历史 SHA-256 均为 `18c581b59845c23c1db9d36b052dfd787d0a52324d5b4fe41e493f7b6b2a7d15`，托管 launcher 已移除。草稿阶段升级使用安装器本地归档入口，载荷是下载校验的真实发行归档，不是合成夹具。
+- 公开发布后，以安装器默认 HTTPS 下载路径全新安装，未启用本地归档入口；两个 launcher 均返回 Alpha.28。临时服务、安装目录、下载归档与私有历史/插件副本已清理。本轮未升级或重启用户运行中的 Homebrew Alpha.27；用户升级后须重启服务才会生效。
+
 ---
 
 # 阶段一：Rust Cordis 独立项目
@@ -783,7 +790,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前已发布实现基线为 `v0.1.0-alpha.27`，四个 macOS/Linux 归档已完成下载校验与发行 runner 包内运行检查。产品运行时固定 `tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
+当前已发布实现基线为 `v0.1.0-alpha.28`，四个 macOS/Linux 归档已完成下载校验与发行 runner 包内运行检查，具体证据见第 4.3 节。产品运行时固定 `tessivum-core v0.1.6` / `efbf99590a6fafd6491635e1e3c0c78c4fb790b3`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 
