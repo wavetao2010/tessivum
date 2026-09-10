@@ -13,7 +13,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 ## 当前状态
 
-`v0.1.0-alpha.27` 是发行准备中的预发布版本。它使用 `tessivum-core v0.1.6` 修订版 `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，兼容目标为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
+`v0.1.0-alpha.27` 是已发布的预发布版本。它使用 `tessivum-core v0.1.6` 修订版 `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，兼容目标为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
 
 当前已有：
 
@@ -37,13 +37,13 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 | Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.27/tessivum-0.1.0-alpha.27-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.27/tessivum-0.1.0-alpha.27-x86_64-unknown-linux-gnu.tar.gz.sha256) |
 | Windows 原生 | x86_64/ARM64 | 暂未发布 | — |
 
-Alpha.27 正在准备，尚未发布或完成发行验证。以下链接与示例面向待发布版本，须等归档和包元数据发布后才能使用。Alpha.26 仍是最新的已验证发行版本。
+Alpha.27 已发布。四个平台归档与第一方市场包均已下载并通过 SHA-256 校验，四个原生发行 runner 的包内检查通过；macOS Apple Silicon 新装、从 Alpha.26 升级、Browser 历史恢复、图片提示和卸载后历史逐字节不变均通过。已验证的 Homebrew Formula 已发布。详见[发行证据](docs/DEVELOPMENT_PLAN.md#42-当前版本alpha27-两项补丁已发布)。
 
 现有安装器**并非只能用于 macOS**：它会自动识别 macOS/Linux 的 x86_64 与 ARM64。Windows 原生版本尚未通过发布构建、归档、启动器、插件、Browser、升级和进程清理门槛。Windows 用户可以暂时在 WSL2 内运行 Linux 包，但这条路径尚未经过发布验证；Linux `.tar.gz` 不能直接作为 Windows 原生程序运行。
 
 ### Homebrew——macOS 或 Linux
 
-Alpha.27 Formula 发布后，Homebrew 是最短路径，并会安装 Web 与 Legacy 插件所需的 Bun 和 pnpm：
+Homebrew 是最短路径，并会安装 Web 与 Legacy 插件所需的 Bun 和 pnpm：
 
 ```bash
 brew tap wavetao2010/tap
@@ -67,7 +67,7 @@ tessivum --version
 
 ### 手动下载归档——macOS 或 Linux
 
-发行工作流发布工件后，从 [Alpha.27 发布页](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.27)下载归档及相邻的 `.sha256` 文件，并从上面的四个 target 中选择一个。
+从 [Alpha.27 发布页](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.27)下载归档及相邻的 `.sha256` 文件，并从上面的四个 target 中选择一个。
 
 Linux 示例：
 
@@ -106,7 +106,7 @@ tessivum web
 
 **Alpha.26：**直接进入工作台，不弹 Key 引导、不隐式选择模型；可先准备图文草稿，再显式选择已配置模型。纯文本模型或未知图片能力会拒绝发送并保留草稿。新会话只继承明确保存的默认模型，恢复会话保留原选择。明确无鉴权的端点使用 `auth: none`；CLI 使用 `TESSIVUM_LLM_AUTH=none`，仍需设置 `OPENAI_MODEL` 与 `OPENAI_BASE_URL`。
 
-**Alpha.27 补丁：**按日志修订失效的导航摘要缓存改善大量 `session.list` 分页，不缓存实时会话状态；图片发送区分明确仅支持文本与图片能力未知，后者提示到现有模型设置确认。Alpha.27 发布与发行验证仍待完成。
+**Alpha.27 补丁：**按日志修订失效的导航摘要缓存改善大量 `session.list` 分页，不缓存实时会话状态；图片发送区分明确仅支持文本与图片能力未知，后者提示到现有模型设置确认。
 
 标准 OpenAI Responses 兼容端点也可使用环境变量：
 
@@ -176,7 +176,7 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"
 ## 安全与发布来源
 
 - 发布归档与第一方市场工件包含 SHA-256 校验和及来源元数据；
-- 校验和可以检测损坏，但不是签名；待发布的 Alpha.27 工件不会进行代码签名或公证；
+- 校验和可以检测损坏，但不是签名；Alpha.27 工件未进行代码签名或公证；
 - 除非显式启用带独立权限检查的远程访问，否则 HTTP listener 保持 loopback-only；
 - Legacy Node 插件和 pnpm 子进程是受信任的本地代码，不是沙箱扩展。
 - Windows 源码中的 ACL runner 只限制写入，不隔离读取、网络或进程可见性。为兼容运行时保留 Everyone/logon SID 的环境权限；NTFS 硬链接别名共享文件权限，因此不是完整的路径隔离。`danger-full-access` 必须显式批准；Windows 发行包仍未发布。

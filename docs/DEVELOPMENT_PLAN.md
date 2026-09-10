@@ -2,10 +2,10 @@
 
 > 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
 > 计划校准日期：2026-09-10
-> Tessivum 实现基线：`v0.1.0-alpha.27`（发行准备中；尚未发布或完成发行验证）
+> Tessivum 实现基线：`v0.1.0-alpha.27`（已发布；四平台归档下载校验与 macOS 安装升级验收通过）
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
-> 当前版本：`v0.1.0-alpha.27`，仅包含按持久文件修订失效的 `session.list` 导航摘要缓存，以及明确不支持图片与图片能力未知的区分；源码已实现，发布、归档校验、安装升级及市场包验证待完成。支持范围仍为 macOS/Linux x86_64 与 ARM64；远程侧边栏终端及 Windows 原生发行仍不支持。
+> 当前版本：`v0.1.0-alpha.27`，包含按持久文件修订失效的 `session.list` 导航摘要缓存，以及明确不支持图片与图片能力未知的区分；四平台发行、源码 CI、归档校验、安装升级及市场包验证已完成。支持范围仍为 macOS/Linux x86_64 与 ARM64；远程侧边栏终端及 Windows 原生发行仍不支持。
 
 ## 1. 文档集
 
@@ -302,15 +302,24 @@ flowchart LR
 - 随后按用户要求应用本机热修复：确认 2918 个会话均未运行，备份原 Homebrew 二进制后原子替换为已验证的 release 构建，并通过 SIGINT 正常关闭旧服务、在原目录与端口启动已安装 launcher。当前运行的是 Alpha.26 本地热修复，不是新的公开发行；Homebrew 重装旧版本会覆盖该修复。
 - 本机安装验证：13 页历史请求合计 0.457 秒，页面导航到最后一页 0.867 秒（不作为冷启动数据）；展开 KnowledgePlatform 可见历史，打开旧对话并刷新后正文恢复。2918 份原始历史的 SHA-256 全部与重启前一致。安装二进制 SHA-256 为 `8eabdf5d4dbfa1420445a3ea4cddca6d33d1e36ff907491743895387a0a697e8`；原二进制与本地验证清单位于 `~/.tessivum/history-hotfix-backup-sqWcRv/`。服务由持久后台进程 `tessivum-web-hotfix` 管理；Cloudflare Quick Tunnel 已重新建立，临时远程 URL 随之变化，未将本地 Browser 验证冒充远程授权验收。
 
-### 4.2 当前版本：Alpha.27 两项补丁（发行准备中）
+### 4.2 当前版本：Alpha.27 两项补丁（已发布）
 
 Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已实现补丁；Core 与上游固定版本不变：
 
 - [x] `session.list` 导航摘要缓存按 JSONL 持久文件修订失效，只缓存持久导航摘要；运行状态、工作区归属和非持久投影仍实时读取，无修订清单的后端保持无缓存路径。
 - [x] 图片发送区分模型明确仅支持文本与图片能力未知；前者提示切换支持图片的模型，后者提示到模型设置确认图片输入能力，两种拒绝均保留草稿。
-- [ ] Alpha.27 标签、四个 macOS/Linux 目标归档、第一方市场包、安装与升级验证尚未执行；发布后只补录实际观察到的证据，不沿用 Alpha.26 的发行结果。
+- [x] Alpha.27 标签、四个 macOS/Linux 目标归档、第一方市场包、安装与升级验证已完成，Homebrew Formula 已发布。
 
 发行范围仍限 macOS/Linux x86_64 与 ARM64。Windows 原生发行与远程侧边栏终端仍不支持；Alpha.26 的已发布源码、CI、归档及安装验收记录保留在第 4.1 节，不改写为 Alpha.27 证据。
+
+2026-09-10 发行验收：
+
+- 标签 `v0.1.0-alpha.27` 固定提交 `25e9d4a0fa6d050f01b93f4bf6f4844620460584`；[四平台发行工作流](https://github.com/wavetao2010/tessivum/actions/runs/34435100910) 全部通过。[源码 CI](https://github.com/wavetao2010/tessivum/actions/runs/34435101275) 的 Linux verify、Browser E2E 和 Windows 源码 job 全部成功；不把 Windows 源码成功当作原生发行包支持。
+- 本机格式检查、严格 Clippy、571 项 Rust 测试（49 suites）、3,182 项客户端测试（240 文件）与 1,059 项市场插件测试（53 文件）通过；完整 Browser suite 耗时 603.32 秒，无失败或重试。独立静态审查未发现发布阻断问题。
+- 四个归档与市场包全部下载并通过 SHA-256。由下载归档重算生成的 Formula 与工作流产物一致，已发布至 tap 提交 `6cc28af1b28eede5bb3ca14d9c3514ddc7ad0c65`。Intel macOS 下载包经 Rosetta 启动返回 Alpha.27；四个平台的原生包内运行证据来自发行 runner。
+- macOS Apple Silicon 用固定标签安装器和实际下载归档验证新装及 Alpha.26→Alpha.27 升级，两个 launcher 均返回 Alpha.27。升级后 `session.history` 和真实 Browser 可读取旧对话，刷新后正文恢复；五个并发 `session.list` 请求均返回原历史。卸载后历史 SHA-256 保持 `dfd66d5390d22c00a9e58487a470f3a998e76385edc7154be435d53c94ef5cbc`，用户 marker 保留，两个托管 launcher 移除。草稿发布阶段使用安装器的本地归档入口，载荷是已经下载校验的真实发行包，不是合成包。
+- 下载包的模型目录保留未知、文本和图片三态；真实 Browser 中，未知状态显示设置路径、文本模型显示不支持提示，两次拒绝均保留文字及图片草稿。记录的是 Browser 交互与 DOM 读回，不宣称截图证据。测试均使用隔离目录，未改动用户当前配置或历史。
+- 公开发布后再次通过安装器默认 HTTPS 下载路径全新安装；未启用本地归档测试入口，`tessivum --version` 与 `tsv --version` 均返回 Alpha.27。Homebrew 分发记录见上述 tap 提交；本轮未升级用户正在运行的本机 Homebrew 实例。
 
 ---
 
@@ -765,11 +774,11 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前已发布实现基线为 `v0.1.0-alpha.26`，四个 macOS/Linux 归档已完成下载校验与发行 runner 包内运行检查。产品运行时固定 `tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充 Alpha.25 或 Alpha.26 的新测量。
+当前已发布实现基线为 `v0.1.0-alpha.27`，四个 macOS/Linux 归档已完成下载校验与发行 runner 包内运行检查。产品运行时固定 `tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`，Phase 9 的 Core Benchmark driver 位于 Core revision `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 
-Alpha.27 当前仅处于发行准备阶段：两项补丁源码已实现，发布与发行验证仍待完成；支持平台及远程侧边栏终端边界不变。
+Alpha.27 两项补丁、四平台发行工件与 Homebrew Formula 已发布，源码 CI、下载校验及 macOS 安装升级验收通过，具体证据见第 4.2 节。支持平台及远程侧边栏终端边界不变。
 
 ## 14.1 Alpha.9 发布记录
 
