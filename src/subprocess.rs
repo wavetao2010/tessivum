@@ -1809,8 +1809,8 @@ impl Drop for PersistentShell {
             return;
         }
         self.inner.disposed.store(true, Ordering::Release);
-        self.inner.closed.store(true, Ordering::Release);
         self.inner.dispose_signal.notify_waiters();
+        self.inner.request_termination(ProcessTermination::Shutdown);
         if let Some(job) = lock(&self.inner.job).as_ref() {
             job.terminate();
         }
@@ -1831,6 +1831,8 @@ struct PersistentShellInner {
     termination: Mutex<Option<ProcessTermination>>,
     #[cfg(windows)]
     job: Mutex<Option<WindowsJob>>,
+    #[cfg(windows)]
+    cleanup_request: Notify,
     done_state: Mutex<Option<ProcessDone>>,
     done: Notify,
     closed: AtomicBool,
@@ -1949,6 +1951,8 @@ impl PersistentShell {
             done_state: Mutex::new(None),
             #[cfg(windows)]
             job: Mutex::new(Some(job)),
+            #[cfg(windows)]
+            cleanup_request: Notify::new(),
             done: Notify::new(),
             closed: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
@@ -2159,9 +2163,9 @@ impl PersistentShellInner {
         *lock(&self.termination)
     }
 
-    async fn stop(self: &Arc<Self>, cause: ProcessTermination) {
+    fn request_termination(&self, cause: ProcessTermination) -> bool {
         if self.done().is_some() {
-            return;
+            return false;
         }
         let first = {
             let mut termination = lock(&self.termination);
@@ -2172,12 +2176,20 @@ impl PersistentShellInner {
                 true
             }
         };
-        if !first {
+        if first {
+            self.closed.store(true, Ordering::Release);
+            self.fail_active(persistent_shell_termination(cause));
+            #[cfg(windows)]
+            self.cleanup_request.notify_one();
+        }
+        first
+    }
+
+    async fn stop(self: &Arc<Self>, cause: ProcessTermination) {
+        if !self.request_termination(cause) {
             self.wait_closed().await;
             return;
         }
-        self.closed.store(true, Ordering::Release);
-        self.fail_active(persistent_shell_termination(cause));
         #[cfg(unix)]
         terminate_persistent_shell_tree(self.pid, false).await;
         #[cfg(windows)]
@@ -2217,7 +2229,7 @@ impl PersistentShellInner {
     }
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 async fn reap_persistent_shell(
     mut child: Child,
     stdout_task: tokio::task::JoinHandle<()>,
@@ -2241,6 +2253,69 @@ async fn reap_persistent_shell(
     }
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    let (exit_code, signal) = match status {
+        Ok(status) => exit_facts(status),
+        Err(_) => (None, None),
+    };
+    inner.complete(ProcessDone {
+        exit_code,
+        signal,
+        termination: inner.terminated(),
+    });
+}
+
+#[cfg(windows)]
+async fn reap_persistent_shell(
+    mut child: Child,
+    stdout_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+    inner: Arc<PersistentShellInner>,
+) {
+    let (status, job) = tokio::select! {
+        biased;
+        _ = inner.cleanup_request.notified() => {
+            let job = lock(&inner.job).take();
+            if let Some(job) = job.as_ref() {
+                let _ = job.capture_and_terminate().await;
+            }
+            (child.wait().await, job)
+        }
+        status = child.wait() => (status, lock(&inner.job).take()),
+    };
+    inner.closed.store(true, Ordering::Release);
+
+    let cleanup_error = match job {
+        Some(job) => job.cleanup_process_tree().await.err(),
+        None => None,
+    };
+    let mut cleanup_failed = cleanup_error.is_some();
+    if let Some(error) = cleanup_error.as_ref() {
+        inner.fail_active(persistent_shell_cleanup(error));
+        stdout_task.abort();
+        stderr_task.abort();
+    }
+
+    let stdout_result = stdout_task.await;
+    let stderr_result = stderr_task.await;
+    if let Err(error) = stdout_result {
+        cleanup_failed = true;
+        inner.fail_active(persistent_shell_cleanup(&error));
+    }
+    if let Err(error) = stderr_result {
+        cleanup_failed = true;
+        inner.fail_active(persistent_shell_cleanup(&error));
+    }
+    if !cleanup_failed {
+        if let Err(error) = status.as_ref() {
+            inner.fail_active(persistent_shell_error(
+                "PERSISTENT_SHELL_CLOSED",
+                "persistent shell root process wait failed",
+                json!({"error": error.to_string()}),
+            ));
+        }
+        inner.fail_active(persistent_shell_closed());
+    }
+
     let (exit_code, signal) = match status {
         Ok(status) => exit_facts(status),
         Err(_) => (None, None),
@@ -2609,6 +2684,15 @@ fn persistent_shell_closed() -> TessivumError {
         "PERSISTENT_SHELL_CLOSED",
         "persistent shell closed before command completion",
         json!({}),
+    )
+}
+
+#[cfg(windows)]
+fn persistent_shell_cleanup(error: impl fmt::Display) -> TessivumError {
+    persistent_shell_error(
+        "PERSISTENT_SHELL_CLEANUP",
+        "persistent PowerShell process-tree cleanup failed",
+        json!({"error": error.to_string()}),
     )
 }
 
