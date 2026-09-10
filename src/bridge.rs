@@ -2705,7 +2705,7 @@ impl DomainBridge {
                 Ok(json!({"events": session.events()}))
             }
             "snapshot" => {
-                let request: SessionRead = decode(params)?;
+                let request: SessionSnapshotRead = decode(params)?;
                 let (header, events) = self
                     .inner
                     .services
@@ -2717,11 +2717,48 @@ impl DomainBridge {
                     .await
                     .map_err(session_error)?
                     .ok_or_else(|| remote("SESSION_NOT_FOUND", "session does not exist"))?;
-                Ok(json!({"session": {
+                if request
+                    .through_seq
+                    .is_some_and(|end| events.last().is_none_or(|last| last.seq < end))
+                {
+                    return Err(remote(
+                        "SESSION_SNAPSHOT_CHANGED",
+                        "session history shortened while reading snapshot",
+                    ));
+                }
+                let through_seq = request
+                    .through_seq
+                    .or_else(|| events.last().map(|event| event.seq));
+                let mut result = json!({"session": {
                     "id": request.session,
                     "header": header,
-                    "events": events,
-                }}))
+                    "events": [],
+                }, "throughSeq": through_seq});
+                // Leave transport-envelope and continuation space without raising the frame limit.
+                let budget = self.inner.limits.max_json_bytes.saturating_sub(1024);
+                let mut bytes = serde_json::to_vec(&result).map_err(serialize_error)?.len();
+                let mut page = Vec::new();
+                for event in events.into_iter().filter(|event| {
+                    event.seq >= request.from_seq && through_seq.is_some_and(|end| event.seq <= end)
+                }) {
+                    let seq = event.seq;
+                    let value = serde_json::to_value(event).map_err(serialize_error)?;
+                    let size = serde_json::to_vec(&value).map_err(serialize_error)?.len() + 1;
+                    if bytes.saturating_add(size) > budget {
+                        if page.is_empty() {
+                            return Err(remote(
+                                "PAYLOAD_TOO_LARGE",
+                                "session event exceeds snapshot page limit",
+                            ));
+                        }
+                        result["nextSeq"] = json!(seq);
+                        break;
+                    }
+                    bytes += size;
+                    page.push(value);
+                }
+                result["session"]["events"] = Value::Array(page);
+                Ok(result)
             }
             "list" => {
                 let _: SessionList = decode(params)?;
@@ -2985,11 +3022,11 @@ impl DomainBridge {
             "get" => {
                 let request: AgentGet = decode(params)?;
                 self.require_owner(&request.session)?;
-                Ok(self.agent_snapshot(&request.session))
+                Ok(self.agent_snapshot(&request.session, true))
             }
             "inspectCompat" => {
                 let request: AgentGet = decode(params)?;
-                Ok(self.agent_snapshot(&request.session))
+                Ok(self.agent_snapshot(&request.session, false))
             }
             "createCompat" => {
                 let generation = require_node_generation(generation)?;
@@ -3042,7 +3079,7 @@ impl DomainBridge {
                     let _ = activation.dispose().await;
                     return Err(error);
                 }
-                Ok(self.agent_snapshot(&request.child_session))
+                Ok(self.agent_snapshot(&request.child_session, true))
             }
             "resumeCompat" => {
                 let generation = require_node_generation(generation)?;
@@ -3094,7 +3131,7 @@ impl DomainBridge {
                     let _ = activation.dispose().await;
                     return Err(error);
                 }
-                Ok(self.agent_snapshot(&request.child_session))
+                Ok(self.agent_snapshot(&request.child_session, true))
             }
             "sendCompat" => {
                 let request: AgentSend = decode(params)?;
@@ -3167,18 +3204,20 @@ impl DomainBridge {
         }
     }
 
-    fn agent_snapshot(&self, session_id: &SessionId) -> Value {
+    fn agent_snapshot(&self, session_id: &SessionId, include_session: bool) -> Value {
         let agent = self.inner.services.agents.get(session_id);
         json!({
             "sessionId": session_id,
             "live": agent.is_some(),
             "status": agent.as_ref().map(|agent| agent.status()),
             "options": agent.as_ref().map(|agent| agent.options()),
-            "session": self.inner.services.sessions.get(session_id).map(|session| json!({
-                "id": session.id(),
-                "header": session.header(),
-                "events": session.events(),
-            })),
+            "session": if include_session {
+                self.inner.services.sessions.get(session_id).map(|session| json!({
+                    "id": session.id(),
+                    "header": session.header(),
+                    "events": session.events(),
+                }))
+            } else { None },
         })
     }
 
@@ -5219,6 +5258,15 @@ struct SessionAppend {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SessionRead {
     session: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionSnapshotRead {
+    session: SessionId,
+    #[serde(default)]
+    from_seq: u64,
+    through_seq: Option<u64>,
 }
 
 #[derive(Deserialize)]

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-alpha.28 - 2026-09-10
+
+### Fixed
+
+- Load Legacy route session histories in bounded pages instead of exceeding the unchanged 12 MiB bridge limit. Pin the first page's sequence boundary across concurrent appends, publish only complete histories, and avoid duplicating history in agent metadata inspection. A single event exceeding the frame budget remains an explicit error.
+- Pair the native fix with Core revision `efbf99590a6fafd6491635e1e3c0c78c4fb790b3`. Platform scope remains macOS/Linux x86_64 and ARM64; native Windows packages and remote sidebar terminals remain unsupported.
+
 ## 0.1.0-alpha.27 - 2026-09-10
 
 ### Fixed

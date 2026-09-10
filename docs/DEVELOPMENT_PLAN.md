@@ -321,6 +321,15 @@ Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已�
 - 下载包的模型目录保留未知、文本和图片三态；真实 Browser 中，未知状态显示设置路径、文本模型显示不支持提示，两次拒绝均保留文字及图片草稿。记录的是 Browser 交互与 DOM 读回，不宣称截图证据。测试均使用隔离目录，未改动用户当前配置或历史。
 - 公开发布后再次通过安装器默认 HTTPS 下载路径全新安装；未启用本地归档测试入口，`tessivum --version` 与 `tsv --version` 均返回 Alpha.27。Homebrew 分发记录见上述 tap 提交；本轮未升级用户正在运行的本机 Homebrew 实例。
 
+### 4.3 Alpha.28：Legacy 路由大历史快照修复
+
+- 一份 13,249,914 字节历史包含 50,927 条 JSONL 记录，最大单条为 268,115 字节；旧版 `/sidebar/api/session.cwd` 返回 502，整份快照超过固定 12 MiB 服务消息上限。
+- 原生快照按字节预算分页，首个 `throughSeq` 固定本次读取上界；Core 完整拼接后才发布会话上下文。`inspectCompat` 不再重复携带历史；不提高消息上限，不截断记录。单条事件超过分页预算仍显式报错。
+- Core 补丁基于当前已发布依赖 `86c7e1c`，已推送 `fix/legacy-snapshot-pages` 分支、提交 `efbf99590a6fafd6491635e1e3c0c78c4fb790b3`，GitHub API 可按完整 SHA 获取；未改动旁边 Core 主工作树。产品源码、Cargo 依赖及 CI/打包 checkout 配套切换。
+- 14 MiB 回归在修复前得到 `PAYLOAD_TOO_LARGE`，修复后完整读回，并排除分页期间新追加的事件。Native bridge/Legacy 与桥接单元测试共 33 项通过；Core Host 28 项测试及 TypeScript 检查通过。两侧独立静态审查均无阻断发现。
+- 使用原始历史与插件的私有副本启动真实本机 Web：原失败路由返回 200，Chromium 打开该历史后不再显示“载入历史”，文件侧栏可见真实文件，资源记录无 HTTP 4xx/5xx。截图接口两种捕获方式均超时，证据为实际交互、DOM 读回和 HTTP 状态，不宣称截图或远程访问验收。未替换用户运行中的 Alpha.27、配置或历史。
+- 配套 pin 的 `--locked` Native 测试、严格 Clippy 与兼容基线检查通过。首次本机验证使用从本地分支导入的 Cargo Git 缓存，随后已确认 Core 提交远端可获取。验证服务、浏览器任务空间、临时 Core 工作树及私有历史/插件副本已清理。
+
 ---
 
 # 阶段一：Rust Cordis 独立项目

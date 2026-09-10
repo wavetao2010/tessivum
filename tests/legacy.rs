@@ -73,21 +73,23 @@ async fn legacy_profile_accepts_large_session_snapshots() {
         )
         .await
         .unwrap();
-    session
-        .append(
-            SessionEvent {
-                event_type: "test/large".into(),
-                seq: 0,
-                time: 0,
-                data: json!({"body": "x".repeat(300 * 1024)}),
-                ignorable: Some(true),
-                source_event_seqs: None,
-                surface_op: None,
-            },
-            ContextHandle::root().scope().cancellation(),
-        )
-        .await
-        .unwrap();
+    for seq in 0..14 {
+        session
+            .append(
+                SessionEvent {
+                    event_type: "test/large".into(),
+                    seq,
+                    time: 0,
+                    data: json!({"body": "x".repeat(1024 * 1024)}),
+                    ignorable: Some(true),
+                    source_event_seqs: None,
+                    surface_op: None,
+                },
+                ContextHandle::root().scope().cancellation(),
+            )
+            .await
+            .unwrap();
+    }
     let profile = LegacyProfile::new(
         HostCommand::new("bun"),
         ClientConfig::default(),
@@ -101,22 +103,46 @@ async fn legacy_profile_accepts_large_session_snapshots() {
     )
     .unwrap();
 
-    let snapshot = profile
-        .web_route_registry()
-        .dispatch_native(DomainRequest {
-            service: SESSIONS_SERVICE.into(),
-            method: "snapshot".into(),
-            params: json!({"session": "large"}),
-        })
-        .unwrap();
-
-    assert_eq!(
-        snapshot["session"]["events"][0]["data"]["body"]
-            .as_str()
-            .unwrap()
-            .len(),
-        300 * 1024
-    );
+    let mut params = json!({"session": "large"});
+    let mut count = 0;
+    loop {
+        let snapshot = profile
+            .web_route_registry()
+            .dispatch_native(DomainRequest {
+                service: SESSIONS_SERVICE.into(),
+                method: "snapshot".into(),
+                params: params.clone(),
+            })
+            .unwrap();
+        for event in snapshot["session"]["events"].as_array().unwrap() {
+            assert_eq!(event["seq"], count);
+            assert_eq!(event["data"]["body"], "x".repeat(1024 * 1024));
+            count += 1;
+        }
+        let Some(next_seq) = snapshot.get("nextSeq") else {
+            break;
+        };
+        if params.get("throughSeq").is_none() {
+            session
+                .append(
+                    SessionEvent {
+                        event_type: "test/later".into(),
+                        seq: 14,
+                        time: 0,
+                        data: json!({}),
+                        ignorable: Some(true),
+                        source_event_seqs: None,
+                        surface_op: None,
+                    },
+                    ContextHandle::root().scope().cancellation(),
+                )
+                .await
+                .unwrap();
+        }
+        params["fromSeq"] = next_seq.clone();
+        params["throughSeq"] = snapshot["throughSeq"].clone();
+    }
+    assert_eq!(count, 14);
 }
 
 fn entry(package: &Path, config: Value) -> Entry {
