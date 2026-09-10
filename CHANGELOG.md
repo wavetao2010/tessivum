@@ -13,6 +13,8 @@
 
 - Platform scope remains macOS/Linux x86_64 and ARM64. Windows native packages and remote sidebar terminals remain unsupported; Windows-specific acceptance is deferred.
 - The pre-release local repair evidence remains in `dist/shell-repair-local/` and `dist/model-terminal-local/`; those Alpha.28-based candidates are not Alpha.29 distribution assets. See the development plan §4.5 for the paired release acceptance.
+- Published after downloaded four-platform archive and market SHA-256 checks, real recorded-model/PTC and sidebar WebSocket terminal acceptance, and macOS ARM64 fresh-install/Alpha.28-upgrade/uninstall checks with byte-identical retained history. Intel macOS used Rosetta; Linux x86_64 used emulation.
+- Release workflow passed. Source CI `verify` and `browser-e2e` passed; Windows client tests had one 5-second lazy syntax-grammar timeout (3181 passed, 1 failed), so overall source CI is not green.
 
 ## 0.1.0-alpha.28 - 2026-09-10
 

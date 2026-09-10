@@ -2,10 +2,10 @@
 
 > 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
 > 计划校准日期：2026-09-10
-> Tessivum 源码基线：`v0.1.0-alpha.29`（配套 Core 0.1.7，发行验收中；上一个公开版本为 Alpha.28）
+> Tessivum 源码基线：`v0.1.0-alpha.29`（配套 Core 0.1.7，四平台预发行已公开）
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
-> 当前发行工作：用户已授权推送与发包，按 Core → Tessivum 顺序发布默认 Shell 与模型终端修复，见第 4.5 节。第 4.4 节保留此前本地未发布阶段的证据，不作为当前依赖状态。支持范围仍为 macOS/Linux x86_64 与 ARM64；Windows 验收暂缓，远程侧边栏终端及 Windows 原生发行仍不支持。
+> 当前发行工作：已按 Core → Tessivum 顺序发布默认 Shell 与模型终端修复，见第 4.5 节。第 4.4 节保留此前本地未发布阶段的证据，不作为当前依赖状态。支持范围仍为 macOS/Linux x86_64 与 ARM64；Windows 验收暂缓，远程侧边栏终端及 Windows 原生发行仍不支持。
 
 ## 1. 文档集
 
@@ -390,9 +390,14 @@ Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已�
 - 用户授权修复后推送发包；Windows 暂缓，不扩大平台或远程终端支持声明。此前“不推送/不发包”约束已由本次授权替代。
 - Core `v0.1.7` 已发布，提交 `0caaccf9a79d7a906a08a21c3032eafebe084ffc`；合并 `efbf995` 历史分页与工具回调会话预载，未用旧 checkout 覆盖当前依赖。Core 119 项 Rust 测试、28 项 Host 测试、TypeScript 检查及 Native/Extism/Legacy 实际运行烟测通过。
 - 产品、第一方市场、安装器与发行元数据统一为 Alpha.29；Cargo、源码 CI、四平台打包 Host 均固定上述 Core SHA。发行使用正式 Core 源码，不再向旧 Host 临时叠加补丁。
-- 发行资产先保留为草稿；新归档终端验收、下载 SHA-256 校验及安装器验证完成后才公开。不把第 4.4 节的旧 Alpha.28 候选包冒充新发行资产。
+- [Alpha.29 预发行](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.29) 已在新归档终端验收、下载 SHA-256 校验及安装器验证后公开；未把第 4.4 节的旧 Alpha.28 候选包冒充新发行资产。
 - 发布前本机门槛通过：产品 574 项 Rust 测试（22 项平台过滤）、严格 Clippy、发行构建、兼容/插件/性能事实检查、安装器与 Formula fixtures；第一方市场 1059 项测试及离线打包烟测通过。集成审查无剩余阻断发现。
 - 从新打包的 Alpha.29 macOS ARM64 归档启动真实 Host，父进程移除 `SHELL`，无 Core 临时补丁；录制模型经 PTC 执行全部 8 个终端工具并读取正确工作区唯一文件。实际 Chromium 侧栏也执行了 `ARCHIVE-UI_OK`、`pwd` 和相同文件读取；证据为实际交互、终端 DOM 输出及原生模型事件。两种 CDP 截图均超时，不声明截图验收。证据保留在 `dist/alpha29-local/`；未改写用户安装或运行中的服务。
+- [四平台发行工作流](https://github.com/wavetao2010/tessivum/actions/runs/34471209661) 全部通过；下载的四个发行归档及市场包 SHA-256 均通过，发行 Formula 与按下载归档重新生成的结果逐字节一致。
+- 四份实际下载归档均在父进程移除 `SHELL` 后启动：录制模型经 PTC 完成全部 8 个终端工具、读取对应工作区唯一文件；侧栏 WebSocket 返回唯一标记、正确工作目录及退出码 7。macOS ARM64 原生执行，Intel macOS 使用 Rosetta；Linux 在匹配架构容器运行，x86_64 使用模拟执行，不声明物理 Intel 主机验收。
+- macOS ARM64 全新安装、Alpha.28 → Alpha.29 升级、双 CLI 别名及卸载通过；升级后的 Host 实际读取 47 条保留历史事件，升级和卸载后会话 SHA-256 均未改变。所有安装操作使用隔离目录，未改写用户安装。
+- Linux ARM 验收曾在 macOS 共享挂载的 pnpm 存储上遇到 SQLite 错误；改用 Linux 原生卷后通过，发行包未修改。
+- [源码 CI](https://github.com/wavetao2010/tessivum/actions/runs/34471105915) 的 `verify` 与 `browser-e2e` 通过；Windows 的代码高亮语法懒加载测试触发 5000ms 超时（3181 通过、1 失败），不能声明整体 CI 全绿。Windows 按授权继续暂缓，不发布 Windows 包。
 
 ---
 
