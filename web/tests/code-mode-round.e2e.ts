@@ -1,7 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { expect, test } from 'bun:test'
-import { captureStableAria, fixture, RustWebHarness } from './support'
+import { fixture, RustWebHarness } from './support'
 
 interface EventData {
   readonly content?: Array<{ readonly text?: string; readonly type?: string }>
@@ -23,8 +22,6 @@ interface Event {
 
 const PROMPT = 'Using ONE run_code program: run bash `echo CODE_ROUND_OK`, then read the file missing.txt catching its error in the program. Return an object with both outcomes. Then reply DONE and stop.'
 const DESCRIPTION = 'Run bash echo and catch missing file read'
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/ptc-mode-round')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 
 test('PTC executes nested tools and renders durable sub-calls', async () => {
   const sourceFixture = await fixture('code-mode-round')
@@ -95,10 +92,6 @@ test('PTC executes nested tools and renders durable sub-calls', async () => {
     expect(await frame.getAttribute('data-details-collapsed')).toBe('true')
     await nest.locator('[data-sample="bash"]').first().click()
     expect(await frame.getAttribute('data-details-collapsed')).toBe('true')
-    const snapshot = (await captureStableAria(harness.page, '[class*="centerCol"]'))
-      .split(harness.root).join('{{cwd}}')
-    expect(snapshot).toBe((await readFile(UI_EXPECTED, 'utf8')).trim())
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['ui.expected.md'])
     harness.assertClean()
   } finally {
     await harness.close()

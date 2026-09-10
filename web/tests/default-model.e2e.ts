@@ -4,8 +4,8 @@ import { expect, test } from 'bun:test'
 import { RustWebHarness, waitUntil } from './support'
 
 const origin = {
-  displayName: 'Origin Gateway', baseURL: 'https://gateway.origin.example/v1', apiKeyEnv: 'ORIGIN_API_KEY',
-  models: [{ id: 'origin-large', name: 'Origin Large' }],
+  displayName: 'Origin Gateway', baseURL: 'https://gateway.origin.example/v1', auth: 'api-key', apiKeyEnv: 'ORIGIN_API_KEY',
+  models: [{ id: 'origin-large', name: 'Origin Large', input: ['text'] }],
 }
 
 test('uses a composer model switch as the default without rewriting logged sessions', async () => {
@@ -21,13 +21,15 @@ test('uses a composer model switch as the default without rewriting logged sessi
         '    origin-gateway:',
         '      displayName: Origin Gateway',
         '      baseURL: https://gateway.origin.example/v1',
+        '      auth: api-key',
         '      apiKeyEnv: ORIGIN_API_KEY',
-        '      models: [{ id: origin-large, name: Origin Large }]',
+        '      models: [{ id: origin-large, name: Origin Large, input: [text] }]',
         '    acme-gateway:',
         '      displayName: Acme Gateway',
         '      baseURL: https://gateway.acme.example/v1',
+        '      auth: api-key',
         '      apiKeyEnv: ACME_API_KEY',
-        '      models: [{ id: acme-large, name: Acme Large }]',
+        '      models: [{ id: acme-large, name: Acme Large, input: [text] }]',
         'agent-default-model:',
         '  provider: origin-gateway',
         '  model: origin-large',

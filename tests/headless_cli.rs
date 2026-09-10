@@ -4,7 +4,13 @@ use std::{
     process::{Command, Output},
 };
 
-use serde_json::Value;
+use axum::{
+    body::Body,
+    http::{header, HeaderMap, Response, StatusCode},
+    routing::post,
+    Router,
+};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 fn workspace() -> PathBuf {
@@ -155,4 +161,98 @@ fn recorded_replay_and_task_are_required_before_services_start() {
         "missing task should be a stable usage diagnostic"
     );
     assert!(!data_dir.exists(), "usage failures must not start services");
+}
+
+fn live_command(data_dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tessivum"));
+    command
+        .current_dir(workspace())
+        .args(["--data-dir"])
+        .arg(data_dir)
+        .args([
+            "--provider",
+            "openai-responses",
+            "--model",
+            "local-model",
+            "say hello",
+        ]);
+    command
+}
+
+#[test]
+fn live_cloud_route_requires_an_api_key_by_default() {
+    let data_dir = data_dir();
+    let output = live_command(&data_dir)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("TESSIVUM_LLM_AUTH")
+        .env_remove("TESSIVUM_LLM_INPUT")
+        .output()
+        .expect("tessivum binary should launch");
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn invalid_llm_auth_is_a_usage_error() {
+    let data_dir = data_dir();
+    let output = live_command(&data_dir)
+        .env("OPENAI_API_KEY", "unused-test-key")
+        .env_remove("TESSIVUM_LLM_AUTH")
+        .env_remove("TESSIVUM_LLM_INPUT")
+        .env("TESSIVUM_LLM_AUTH", "implicit")
+        .output()
+        .expect("tessivum binary should launch");
+    assert_eq!(output.status.code(), Some(2));
+}
+
+async fn no_auth_response(headers: HeaderMap) -> Response<Body> {
+    assert!(!headers.contains_key(header::AUTHORIZATION));
+    let body = [
+        json!({"type":"response.created","response":{"id":"resp_local","status":"in_progress","output":[]}}),
+        json!({"type":"response.output_text.delta","output_index":0,"delta":"local relay"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"id":"msg_local","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"local relay","annotations":[]}]}}),
+        json!({"type":"response.completed","response":{"id":"resp_local","status":"completed","output":[{"id":"msg_local","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"local relay","annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":2}}}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn explicit_no_auth_loopback_route_omits_authorization() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/responses", post(no_auth_response)),
+        )
+        .await
+        .unwrap();
+    });
+    let data_dir = data_dir();
+    let mut command = tokio::process::Command::from(live_command(&data_dir));
+    let output = command
+        .env("OPENAI_BASE_URL", format!("http://{address}/v1"))
+        .env("TESSIVUM_LLM_AUTH", "none")
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .await
+        .expect("tessivum binary should launch");
+    server.abort();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "local relay"
+    );
+    fs::remove_dir_all(data_dir).expect("temporary headless data should be removable");
 }

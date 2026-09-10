@@ -6,7 +6,11 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const upstreamRoot = process.env.TESSIVUM_DEEPSEEK_SOURCE ?? resolve(webRoot, '../../upstream/deepseek-harness')
 const vitest = resolve(upstreamRoot, 'node_modules/vitest/vitest.mjs')
 
-execFileSync('node', [vitest, 'run', '--root', upstreamRoot, 'packages/client'], {
+execFileSync('node', [
+  vitest, 'run', '--root', upstreamRoot,
+  'packages/client',
+  'packages/host/apiproxy/tests/api-proxy-models.spec.ts',
+], {
   cwd: upstreamRoot,
   stdio: 'inherit',
 })

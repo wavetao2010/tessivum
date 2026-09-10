@@ -11,6 +11,7 @@
 - 不因 Tessivum 暂无能力而 `skip`、伪造 RPC 成功或改成浅层截图测试。缺能力先实现契约，再勾选。
 - 状态以本文件为准；现有 `tessivum/web` build/test 通过不代表任何上游 E2E 已移植。
 - Legacy Node 不注入 `agentCore`、`llm`、`systemPrompt`、`sessionStore` 或 `toolRuntime`；依赖这些模块的插件必须显式失败，不能用成功 no-op、空结果或伪服务让 Web spec 通过。
+- Alpha.26 有意替换上游首次引导行为：固定补丁移除上游 `onboarding-deepseek-config.e2e.ts` 与 `remote-welcome.e2e.ts`，产品目录保留对应验收入口；69 项固定基线不因此缩减。第一方额外场景为 Market、Remote Access、`image-input.e2e.ts` 和 `history-recovery.e2e.ts`。图片场景验证无模型时的选择/粘贴/拖放、拒绝保留草稿、切模后的真实图文请求和旧错误提示清除；历史场景验证 701 个持久化会话的分页、旧会话选择和已上传图片在刷新后的恢复。此次按受影响场景验收，不宣称全部 69 项在 Alpha.26 重跑；用户确认远程侧边栏终端暂不支持，保留 legacy 路由仅限本机的边界，不纳入本版发布阻断项，见 Development Plan §4.1.8。
 
 ## Gate 缩写
 
@@ -60,8 +61,8 @@
 | [x] | 31 | `message-feedback.e2e.ts` | rating/note 跨 reload 持久化，随后可撤回。 | `PKG:message-feedback`, `WIRE` |
 | [x] | 32 | `models-settings.e2e.ts` | dormant/custom provider 的 key 校验、native auth、保存/merge patch、declare/edit/delete 全闭环。 | `HOST:settings+credentials+llm`, `WIRE` |
 | [x] | 33 | `navigation-panes.e2e.ts` | 冷 session 内容搜索、Trajectory/inspector、session export、timeline drag 和 terminal card 正确。 | `HOST:session.search`, `PKG:client-ui-trajectory` |
-| [x] | 34 | `onboarding-deepseek-config.e2e.ts` | key write-only 配置即时生效；configured reload 不闪 takeover；任意 DeepSeek model 可配置且删除选择后可恢复。 | `HOST:credentials+llm`, `WIRE` |
-| [x] | 35 | `onboarding-usable-provider.e2e.ts` | setup card cancel 不丢 add card；其他可用 provider 配好后停止 DeepSeek onboarding。 | `HOST:credentials+llm`, `WIRE` |
+| [x] | 34 | `onboarding-deepseek-config.e2e.ts` | Alpha.26 中立首屏：无 Key 编辑草稿、未选模型拒绝但保留草稿；显式保存 DeepSeek 配置并选模，不提前注册或默认选择。 | `HOST:credentials+llm`, `WIRE` |
+| [x] | 35 | `onboarding-usable-provider.e2e.ts` | 已配置提供方进入目录但不成为隐式选择；用户明确选模后才更新会话。 | `HOST:credentials+llm`, `WIRE` |
 | [x] | 36 | `permission-policy-context.e2e.ts` | read-only/full-access/workspace-write 经 GUI 切换，并在对应模型行为前进入 current system context。 | `HOST:permission`, `LLM` |
 | [x] | 37 | `plan-review.e2e.ts` | plan decision card 展示并通过真实 response wire 批准，后续 turn 正常。 | `HOST:planning`, `WIRE` |
 | [x] | 38 | `plugin-config.e2e.ts` | 每个 exposed Host namespace 一张卡；save/discard/invalid/reset 精确更新 document。 | `PKG:plugin-inventory`, `HOST:settings` |
@@ -71,7 +72,7 @@
 | [x] | 42 | `pwsh-terminal.e2e.ts` | seeded pwsh call 使用 bash terminal-card layout，并解析 exit pill。 | `HOST:toolRuntime`, `PKG:client-ui-tool` |
 | [x] | 43 | `question-composer.e2e.ts` | question 驻留 composer、可回答并完成，答案写入 log。 | `HOST:question`, `WIRE` |
 | [x] | 44 | `queue-actions.e2e.ts` | queue 精确 occurrence 编辑/删除、stop 后 FIFO 保留；Todo→Goal→Queue 响应式顺序正确。 | `HOST:session.queue`, `WIRE` |
-| [x] | 45 | `remote-welcome.e2e.ts` | remote welcome 令 root inert；process-local advance 后 reload 再次展示。 | `PKG:client-ui-welcome` |
+| [x] | 45 | `remote-welcome.e2e.ts` | Alpha.26 已授权远程首屏及 reload 后可直接编辑草稿；模型配置保持主动进入；远程 shutdown 被拒绝，撤销设备关闭存量 WebSocket。 | `HOST:remote-access`, `WIRE` |
 | [x] | 46 | `replay-round-trip.e2e.ts` | 真实组装完成 recorded round；request header/Web URL、Markdown/tool/reasoning fold/composer restore 正确。 | `LLM`, `WIRE` |
 | [x] | 47 | `scaffold-hermetic.e2e.ts` | replay skill discovery 与所有 ambient Host roots 隔离。 | `HOST:skill`, `LLM` |
 | [x] | 48 | `schedule-after.e2e.ts` | After/Every/At reminder 作为普通 assistant follow-up；Every 只批最新 overdue occurrence，At 使用请求本地浏览器上下文。 | `HOST:schedule`, `LLM` |

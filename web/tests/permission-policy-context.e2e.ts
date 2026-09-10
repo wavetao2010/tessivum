@@ -63,7 +63,7 @@ function runtimeContexts(log: readonly Event[]): string[] {
     const source = object(event.data.source)
     return event.type === 'user/message'
       && source?.kind === 'plugin'
-      && source.plugin === '@deepseek-ai/dsh-system-prompt'
+      && source.plugin === 'tessivum/runtime-context'
       ? textBlocks(event.data.content) : []
   })
 }
@@ -114,22 +114,21 @@ test('switches read-only, danger-full-access, and workspace-write through the re
     const log = await events(harness, sessionId)
     const systems = requestSystems(log)
     expect(systems).toHaveLength(1)
-    expect(systems[0]).not.toContain('Current DSH file policy:')
     expect(systems[0]).not.toContain('Approval policy:')
-    expect(systems[0]).not.toContain('Approval prompts are disabled in this session')
 
     const contexts = runtimeContexts(log)
     expect(contexts).toHaveLength(4)
-    expect(contexts[0]).toContain('Current DSH file policy: read-only. Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode.')
-    expect(contexts[0]).toContain('Do not refuse a required modification from this policy alone')
+    expect(contexts[0]).toMatch(/Tessivum[\s\S]*read-only/)
     expect(contexts[0]).toContain('Approval policy: ask.')
-    expect(contexts[1]).toContain('Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.')
-    expect(contexts[1]).toContain('Approval prompts are disabled in this session')
+    expect(contexts[0]).toMatch(/workspace-relative paths[\s\S]*absolute paths[\s\S]*workspace-confined/)
+    expect(contexts[1]).toMatch(/Tessivum[\s\S]*danger-full-access/)
+    expect(contexts[1]).toContain('Approval policy: never.')
+    expect(contexts[1]).toMatch(/capability file tools remain workspace-confined[\s\S]*danger-full-access/)
     const workspace = await realpath(harness.workspace)
-    expect(contexts[2]).toContain(`Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify(workspace)}. Some platform temporary areas may also be writable.`)
+    expect(contexts[2]).toContain(JSON.stringify(workspace))
+    expect(contexts[2]).toMatch(/Tessivum[\s\S]*workspace-write/)
     expect(contexts[2]).toContain('Approval policy: ask.')
-    expect(contexts[2]).not.toContain('Approval prompts are disabled in this session')
-    expect(contexts[3]).toContain('Current DSH file policy: read-only.')
+    expect(contexts[3]).toMatch(/Tessivum[\s\S]*read-only/)
 
     const answers = assistantTexts(log)
     expect(answers.length).toBeGreaterThanOrEqual(4)

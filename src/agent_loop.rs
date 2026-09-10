@@ -50,6 +50,7 @@ use crate::{
 
 /// Resolves the advertised prompt capacity for an exact provider/model route.
 pub type ContextWindowResolver = Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
+const RUNTIME_CONTEXT_SOURCE: &str = "tessivum/runtime-context";
 const CHILD_OWNER_BOUND_TOOL_NAMES: &[&str] = &[
     "ask_user_question",
     "bash",
@@ -936,7 +937,6 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
         append_skill_context(inner, turn, step, &messages).await?;
         if step == 1 {
             append_workspace_instructions(inner, turn, step).await?;
-            append_runtime_context(inner, turn, step).await?;
         }
         if inner.cancellation.is_cancelled() {
             return close_cancelled_step(inner, turn, step).await;
@@ -970,6 +970,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                 }
             }
         }
+        append_runtime_context(inner, turn, step).await?;
 
         let mut tool_schemas = inner.runtime.tools.schemas();
         if let Some(code_tools) = &inner.runtime.code_tools {
@@ -1056,7 +1057,14 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
         }
 
         let mut context_overflow_recovered = false;
+        let mut first_generation_attempt = true;
         let (generation, chunk_seqs) = loop {
+            if first_generation_attempt {
+                first_generation_attempt = false;
+            } else {
+                append_runtime_context(inner, turn, step).await?;
+                request.messages = request_messages(inner);
+            }
             match consume_generation_attempt(inner, turn, step, request.clone()).await {
                 Ok((generation, chunk_seqs)) => match &generation.finish_reason {
                     FinishReason::Error { failure: error } => {
@@ -1064,7 +1072,6 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                             match compact_context_overflow(inner).await {
                                 Ok(true) => {
                                     context_overflow_recovered = true;
-                                    request.messages = inner.session.derive_messages();
                                     continue;
                                 }
                                 Ok(false) => {}
@@ -1113,7 +1120,6 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                         match compact_context_overflow(inner).await {
                             Ok(true) => {
                                 context_overflow_recovered = true;
-                                request.messages = inner.session.derive_messages();
                                 continue;
                             }
                             Ok(false) => {}
@@ -1340,28 +1346,38 @@ async fn append_skill_context(
 
 async fn append_runtime_context(inner: &Inner, turn: u64, step: u64) -> Result<(), AgentError> {
     let header = inner.session.header();
-    let text = runtime_context(&inner.session.events(), header.cwd.as_deref());
+    let events = inner.session.events();
+    let text = runtime_context(&events, header.cwd.as_deref());
     let unchanged = inner
         .session
         .surface()
         .into_iter()
         .rev()
-        .find(|entry| matches!(&entry.message.source, MessageSource::Plugin { plugin, .. } if plugin == "@deepseek-ai/dsh-system-prompt"))
+        .find(|entry| matches!(&entry.message.source, MessageSource::Plugin { plugin, .. } if plugin == RUNTIME_CONTEXT_SOURCE))
         .is_some_and(|entry| matches!(entry.message.content.as_slice(), [ContentBlock::Text { text: previous }] if previous == &text));
     if unchanged {
         return Ok(());
     }
+    let ordinal = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "user/message"
+                && event.data.pointer("/source/plugin").and_then(Value::as_str)
+                    == Some(RUNTIME_CONTEXT_SOURCE)
+        })
+        .count()
+        + 1;
     append_message(
         inner,
         "user/message",
         turn,
         step,
         Message {
-            id: MessageId::from(format!("runtime-context-{turn}")),
+            id: MessageId::from(format!("runtime-context-{turn}-{step}-{ordinal}")),
             role: MessageRole::User,
             content: vec![ContentBlock::Text { text }],
             source: MessageSource::Plugin {
-                plugin: "@deepseek-ai/dsh-system-prompt".into(),
+                plugin: RUNTIME_CONTEXT_SOURCE.into(),
                 compaction_id: None,
                 form: None,
                 sections: None,

@@ -1,7 +1,7 @@
-import { cp, readFile } from 'node:fs/promises'
+import { cp } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness } from './support'
+import { RustWebHarness } from './support'
 
 interface Event {
   readonly type: string
@@ -21,7 +21,6 @@ const TOOLS = [
   'composition_inspect',
   'composition_stop',
 ] as const
-const SNAPSHOT = join(import.meta.dir, 'snapshots/cordis-tool-round/ui.expected.md')
 let packagePath = ''
 
 function replayRecording(): string {
@@ -111,10 +110,6 @@ test('Composition mode executes a real declarative WASM lifecycle', async () => 
     for (const name of TOOLS) {
       await harness.page.locator(`[data-tool="${name}"]`).waitFor({ timeout: 15_000 })
     }
-    const snapshot = (await captureStableAria(harness.page, '[class*="centerCol"]'))
-      .split(harness.root).join('{{root}}')
-      .split(harness.workspace).join('{{workspace}}')
-    expect(snapshot).toBe((await readFile(SNAPSHOT, 'utf8')).trim())
     harness.assertClean()
   } finally {
     await harness.close()

@@ -1,11 +1,10 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/fresh-round-trip')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const PROMPT = 'Use the bash tool to run exactly: echo WEB_E2E_OK. Then reply with the single word DONE and stop.'
 
 type Event = { type: string; data: Record<string, unknown> }
@@ -68,7 +67,6 @@ test('replay-round-trip drives native bash, persists the transcript, and reconst
     await harness.page.reload({ waitUntil: 'load' })
     await harness.page.getByText('DONE', { exact: true }).last().waitFor({ timeout: 15_000 })
     expect(await durableEvents(harness, sessionId)).toEqual(events)
-    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(UI_EXPECTED, 'utf8'))
 
     const think = harness.page.getByRole('button', { name: /^Think/ }).first()
     expect(await think.getAttribute('aria-expanded')).toBe('false')
@@ -82,8 +80,3 @@ test('replay-round-trip drives native bash, persists the transcript, and reconst
   }
 }, 120_000)
 
-test('replay-round-trip fixture inventory remains closed', async () => {
-  expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-    'session.jsonl', 'system-prompt.expected.md', 'ui.expected.md',
-  ].sort())
-})

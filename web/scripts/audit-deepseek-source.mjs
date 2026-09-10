@@ -55,6 +55,38 @@ for (const [specifier, source] of graph.resolvedDsh) {
   }
 }
 
+const sessionSchemaSource = readFileSync(
+  resolve(upstreamRoot, 'packages/host/apiproxy/src/api/sessions.schema.ts'),
+  'utf8',
+)
+if (!sessionSchemaSource.includes('cursor: z.string().min(1).max(4_096).optional()')
+  || !sessionSchemaSource.includes('limit: z.number().int().positive().max(500).optional()')
+  || !sessionSchemaSource.includes('snapshot: z.string().min(1)')
+  || !sessionSchemaSource.includes('nextCursor: z.string().min(1).max(4_096).optional()')) {
+  fail('session.list pagination schema is missing or unbounded')
+}
+const sessionManagerSource = readFileSync(
+  resolve(upstreamRoot, 'packages/client/runtime/src/client/sessions/manager.ts'),
+  'utf8',
+)
+for (const required of [
+  'SESSION_LIST_STALE_RETRIES = 3',
+  'SESSION_LIST_PAGE_LIMIT = 500',
+  "result.error.code === 'stale-cursor'",
+  'cursors.has(next)',
+  'this.listGeneration++',
+]) {
+  if (!sessionManagerSource.includes(required)) fail(`SessionManager pagination guard is missing: ${required}`)
+}
+const workspaceBrowserSource = readFileSync(
+  resolve(upstreamRoot, 'packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx'),
+  'utf8',
+)
+if (!workspaceBrowserSource.includes("sessionState === 'error'")
+  || !workspaceBrowserSource.includes('void refreshSessions()')) {
+  fail('session-list failure no longer exposes a retry action')
+}
+
 const heroLocalePath = resolve(upstreamRoot, 'packages/client/ui-conversation/src/client/locales.ts')
 const heroLocaleSource = readFileSync(heroLocalePath, 'utf8')
 const zhHeroLocale = heroLocaleSource.slice(

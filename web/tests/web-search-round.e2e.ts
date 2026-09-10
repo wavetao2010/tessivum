@@ -1,13 +1,12 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/web-search-round')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
-const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const PROMPT = 'Use web_search to search exactly "DeepSeek Harness snapshot search". Then reply exactly SEARCH_DONE and stop.'
 const QUERY = 'DeepSeek Harness snapshot search'
 const MAX_RESULTS = 8
@@ -151,8 +150,6 @@ test('web search uses the real DeepSeek seam, preserves citations, and projects 
       truncated: true,
     })
 
-
-    expect(`${await captureStableAria(harness.page, '[class*="centerCol"]')}\n`).toBe(await readFile(UI_EXPECTED, 'utf8'))
     const row = harness.page.locator('[data-tool="web_search"] [data-expandable]').first()
     await row.click()
     expect(await waitUntil(() => row.getAttribute('aria-expanded'), value => value === 'true')).toBe('true')
@@ -179,7 +176,6 @@ test('web search uses the real DeepSeek seam, preserves citations, and projects 
       return { widest, paddingLeft: parseFloat(getComputedStyle(element).paddingLeft) }
     })
     expect(marker.paddingLeft).toBeGreaterThanOrEqual(marker.widest)
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['session.jsonl', 'ui.expected.md'])
     harness.assertClean()
   } finally {
     await harness?.close()

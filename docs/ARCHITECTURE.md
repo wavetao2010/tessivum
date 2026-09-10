@@ -84,6 +84,10 @@ Standard 直接发布受限工具的 JSON Schema；PTC 外层仍只有 `run_code
 
 冻结源 Web 使用的 `agentPreset.*`/`agentPreset` 仅存在于 `api.rs` 的 Browser Wire adapter。内部 Session、Agent、Registry 和持久新写入统一使用 `ModeId`/`agentMode`；旧内置 ID 只在持久数据迁移边界转换。`dynamicCordisRunner/*` 仅保留不可执行的有界兼容响应，不是 Composition 或 Agent Mode 的运行时入口。完整契约、删除项和验收矩阵见 [Phase 5 计划](PHASE5_NATIVE_AGENT_MODES_PLAN.md)。
 
+Alpha.26 源码契约：Session 可在未选择模型时存在，`session.models.current` 为 `null`；实际 Agent 请求必须有有效选择。当前会话保存选择优先于显式用户默认，不按厂商或目录顺序回退。发送准入与默认修改共用 setup fence，验证图片、排队输入和有效历史后才提交；客户端能力提示不是安全边界。
+
+原生上下文来源为 `tessivum/runtime-context`，在请求组装时从真实工作区与权限状态生成，相同有效快照不重复注入，状态变化与压缩移除后重新生成；不改写旧来源事件。六类原生文件工具接受工作区相对路径及验证后的工作区内绝对路径，创建路径验证已有父目录；`lstat` 不跟随最终链接，Glob/Grep 跳过链接但不吞掉普通 I/O 错误。所有 sandbox mode 下 capability 文件工具仍受工作区约束。
+
 ## 2. 术语
 
 | 术语 | 含义 |

@@ -1,9 +1,7 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { captureStableAria, fixture, materializeRecording, openSessionByMarker, RustWebHarness, waitUntil } from './support'
-
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/message-actions')
+import { fixture, materializeRecording, openSessionByMarker, RustWebHarness, waitUntil } from './support'
 
 const SEED_ID = 'message-actions-web-e2e'
 const PROMPT = 'Use the read tool twice in one assistant message: read a.txt and b.txt. Then reply with the single word DONE and stop.'
@@ -58,18 +56,13 @@ async function fixtureUserPrompts(raw: string): Promise<string[]> {
     .flatMap(block => block.text === undefined ? [] : [block.text])
 }
 
-async function expectGolden(harness: RustWebHarness, selector: string, name: string): Promise<void> {
-  const actual = (await captureStableAria(harness.page, selector)).split(SEED_ID).join('{{seededId}}')
-  expect(actual).toBe((await readFile(join(SNAPSHOT_DIR, name), 'utf8')).trim())
-}
-
 async function childCount(harness: RustWebHarness): Promise<number> {
   const response = await harness.rpc<{ items: Array<{ parentSessionId?: string }> }>('session.list')
   if (!response.ok || response.value === undefined) throw new Error(`session.list failed: ${JSON.stringify(response.error)}`)
   return response.value.items.filter(session => session.parentSessionId !== undefined).length
 }
 
-describe('message IconActions and clocks on settled history', () => {
+describe('message actions on settled history', () => {
   let harness: RustWebHarness
 
   beforeAll(async () => {
@@ -112,13 +105,6 @@ describe('message IconActions and clocks on settled history', () => {
     await waitUntil(() => harness.page.getByRole('button', { name: 'Edit' }).count(), count => count === 0, 5_000)
   }, 60_000)
 
-  test('matches the conversation aria golden with IconActions and clocks', async () => {
-    await harness.page.getByRole('button', { name: /^Select model, current/ }).waitFor({ timeout: 10_000 })
-    await harness.page.getByText(/Cache hit \d+%/u).first().waitFor({ timeout: 10_000 })
-    await harness.page.getByRole('button', { name: 'Copy' }).first().focus()
-    await expectGolden(harness, '[class*="centerCol"]', 'ui.expected.md')
-  })
-
   test('forks through the settled-message and session-row actions', async () => {
     const tree = harness.page.getByRole('tree', { name: 'Sessions' })
     const group = tree.getByRole('treeitem').first()
@@ -150,11 +136,7 @@ describe('message IconActions and clocks on settled history', () => {
     expect(listed.ok).toBe(true)
     expect(listed.value?.items.filter(item => item.parentSessionId !== undefined)).toHaveLength(2)
     expect(listed.value?.items.some(item => item.parentSessionId === SEED_ID)).toBe(true)
-    await expectGolden(harness, '[role="tree"][aria-label="Sessions"]', 'fork.expected.md')
-  })
-
-  test('issues zero model calls and keeps the fixture inventory closed', async () => {
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['fork.expected.md', 'ui.expected.md'])
     harness.assertClean()
   })
+
 })

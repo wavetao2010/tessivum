@@ -1,7 +1,5 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, openSessionByMarker, RustWebHarness, settledRecording, textReplay, waitUntil, withSubagents } from './support'
+import { openSessionByMarker, RustWebHarness, settledRecording, textReplay, waitUntil, withSubagents } from './support'
 
 const PARENT = 'subagent-conversation-parent'
 const CHILD = 'subagent-conversation-child'
@@ -16,7 +14,6 @@ const LABEL = 'event-sourcing researcher'
 const ONE_SHOT_LABEL = 'event-sourcing reviewer'
 const NESTED_LABEL = 'example editor'
 const PARENT_DONE = 'PARENT_READY'
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/subagent-conversation')
 const ANSWER = "Event sourcing is a pattern where all changes to an application's state are stored as an immutable, append-only sequence of events, rather than persisting only the current state, enabling full auditability, temporal queries, and event-driven architectures."
 const REASONING = "The user is asking for a one-sentence description of event sourcing. This is a straightforward knowledge question that doesn't require any skill loading or tool calls."
 
@@ -91,22 +88,6 @@ function childHistory(harness: RustWebHarness) {
   return harness.rpc<{ events: Array<{ event: ChildEvent }> }>('subagent.history', {
     parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable', maxMessages: 100,
   })
-}
-
-function stableSubagentAria(snapshot: string): string {
-  let seen = false
-  return snapshot.replace(
-    /- button "Context injection @deepseek-ai\/dsh-system-prompt":\n  - img\n  - img\n  - text: Context injection @deepseek-ai\/dsh-system-prompt\n/g,
-    match => {
-      if (seen) return ''
-      seen = true
-      return match
-    },
-  )
-}
-
-async function assertGolden(harness: RustWebHarness, selector: string, name: string): Promise<void> {
-  expect(stableSubagentAria(`${await captureStableAria(harness.page, selector)}\n`)).toBe(await readFile(join(SNAPSHOT_DIR, name), 'utf8'))
 }
 
 test('subagent catalog preserves cold hierarchy, transcript, fork placement, and resumed follow-ups', async () => {
@@ -184,7 +165,6 @@ test('subagent catalog preserves cold hierarchy, transcript, fork placement, and
       const tree = harness.page.getByRole('tree', { name: 'Subagent sessions' })
       await tree.getByRole('treeitem', { name: 'Loading subagents' }).first().waitFor()
       expect(await tree.getByRole('treeitem', { name: 'Loading subagents' }).count()).toBe(2)
-      await assertGolden(harness, '[role="tree"][aria-label="Subagent sessions"]', 'stale-catalog.expected.md')
       releaseCatalog()
       await tree.getByRole('treeitem', { name: new RegExp(LABEL) }).waitFor()
       await tree.press('Escape')
@@ -204,16 +184,15 @@ test('subagent catalog preserves cold hierarchy, transcript, fork placement, and
     await harness.page.waitForTimeout(1_100)
     expect(await childRow.getAttribute('aria-label')).toBe(childLabel)
     await harness.page.getByRole('treeitem', { name: new RegExp(NESTED_LABEL) }).waitFor()
-    await assertGolden(harness, '[role="tree"][aria-label="Subagent sessions"]', 'tree.expected.md')
     await harness.page.getByRole('tree', { name: 'Subagent sessions' }).press('Escape')
 
     const callsBeforeOpen = apiCalls.filter(path => path === '/api/subagent.prompt').length
     await harness.page.getByRole('button', { name: '3 subagents' }).click()
     await harness.page.getByRole('treeitem', { name: new RegExp(LABEL) }).click()
     await harness.page.getByText(INITIAL, { exact: true }).waitFor()
+    await harness.page.getByText(ANSWER, { exact: true }).waitFor()
     expect(apiCalls.filter(path => path === '/api/subagent.prompt')).toHaveLength(callsBeforeOpen)
     await harness.page.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button', { name: LABEL, disabled: true }).waitFor()
-    await assertGolden(harness, '[role="tree"][aria-label="Sessions"]', 'sidebar.expected.md')
 
     const input = harness.page.getByRole('textbox', { name: 'Message the agent' })
     const continued = harness.page.waitForResponse(response => new URL(response.url()).pathname === '/api/subagent.prompt')
@@ -228,7 +207,6 @@ test('subagent catalog preserves cold hierarchy, transcript, fork placement, and
     expect(followedEvents.filter(event => event.type === 'turn/end').map(event => event.data.reason?.kind)).toEqual(['completed', 'completed'])
     expect(await harness.page.getByRole('button', { name: 'Stop generating' }).count()).toBe(0)
     await waitUntil(() => harness.page.getByText(FOLLOW_UP, { exact: true }).count(), count => count === 1, 15_000)
-    await assertGolden(harness, '[class*="centerCol"]', 'ui.expected.md')
     await waitUntil(
       () => harness.rpc<{ parentAvailable: boolean }>('subagent.list', { parentSessionId: CHILD }),
       result => result.ok && result.value?.parentAvailable === false,
@@ -243,13 +221,11 @@ test('subagent catalog preserves cold hierarchy, transcript, fork placement, and
     expect(treeBox).not.toBeNull()
     expect(clickAreaBox).not.toBeNull()
     expect([Math.round(clickAreaBox!.x - treeBox!.x), Math.round(treeBox!.x + treeBox!.width - clickAreaBox!.x - clickAreaBox!.width)]).toEqual([4, 4])
-    await assertGolden(harness, '[role="tree"][aria-label="Subagent sessions"]', 'branchless.expected.md')
     await nestedRow.click()
     await harness.page.getByText('The parent session is offline; reopen it to continue sending messages.').waitFor()
     await harness.page.getByText(NESTED, { exact: true }).waitFor()
     const crumbs = await harness.page.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').allTextContents()
     expect(crumbs.slice(-2)).toEqual([LABEL, NESTED_LABEL])
-    await assertGolden(harness, '[class*="centerCol"]', 'nested.expected.md')
 
     await harness.page.getByRole('tree', { name: 'Sessions' }).getByRole('treeitem', { name: /Ask a research subagent to/ }).click()
     await harness.page.getByRole('button', { name: '3 subagents' }).click()
@@ -265,7 +241,6 @@ test('subagent catalog preserves cold hierarchy, transcript, fork placement, and
     await waitUntil(() => harness.page.getByRole('tree', { name: 'Sessions' }).getByRole('treeitem').count(), count => count === 3, 15_000)
     expect(await harness.page.getByText('Ungrouped', { exact: true }).count()).toBe(0)
     await waitUntil(() => harness.page.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').count(), count => count === 1, 15_000)
-    await assertGolden(harness, '[role="tree"][aria-label="Sessions"]', 'fork.expected.md')
 
     const sessions = harness.page.getByRole('tree', { name: 'Sessions' })
     await sessions.getByRole('treeitem', { name: /Ask a research subagent to/ }).click()

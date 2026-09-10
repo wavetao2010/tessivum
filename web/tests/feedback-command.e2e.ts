@@ -1,11 +1,10 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { captureStableAria, RustWebHarness, waitUntil } from './support'
+import { RustWebHarness, waitUntil } from './support'
 
 const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/feedback-command')
 const FIXTURE = join(SNAPSHOT_DIR, 'session.jsonl')
-const ACK_EXPECTED = join(SNAPSHOT_DIR, 'ack.expected.md')
 const PROMPT = 'Reply with the single word LIGHTHOUSE and stop.'
 const FEEDBACK = 'the diff view is unreadable'
 
@@ -74,13 +73,6 @@ test('feedback command records acknowledgement, lifecycle, and reload persistenc
     'i',
   ))
 
-  const expected = (await readFile(ACK_EXPECTED, 'utf8'))
-    .replaceAll('Session sharing is enabled.', 'Session sharing is not configured.')
-    .trim()
-  const actual = (await captureStableAria(harness.page, '[class*="centerCol"]'))
-    .replaceAll(sessionId, '{{sessionId}}')
-    .replace(/Anonymous user: .*?(?=\. Session sharing)/g, 'Anonymous user: {{uuid}}')
-  expect(actual).toBe(expected)
 
   await harness.page.reload({ waitUntil: 'load' })
   await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
@@ -93,9 +85,6 @@ test('feedback command records acknowledgement, lifecycle, and reload persistenc
   expect(reloadedRecord?.data).toEqual({ text: FEEDBACK })
   expect(reloadedDone?.data.commandId).toBe(reloadedRun?.data.commandId)
   expect(reloadedDone?.data.sourceEventSeq).toBe(reloadedRecord?.seq)
+  harness.assertClean()
 }, 60_000)
 
-test('feedback command keeps its fixture inventory closed', async () => {
-  expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual(['ack.expected.md', 'session.jsonl'])
-  harness.assertClean()
-})

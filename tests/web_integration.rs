@@ -16,6 +16,8 @@ use tessivum::{
     frontend::FrontendStatic,
     host::{HostApi, HostConfig, HostRuntime},
     plugin_manager::configure_host_plugins,
+    projection::ProjectionDefinition,
+    protocol::SessionId,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -254,6 +256,19 @@ fn host_config(root: &Fixture) -> HostConfig {
         HostConfig::new(root.path(), root.path().join("data")).with_recorded_replay(REPLAY);
     config.enable_trusted_bash = true;
     config
+}
+
+fn event_count_projection() -> ProjectionDefinition {
+    ProjectionDefinition::new(
+        "integration-event-count",
+        1,
+        |_| Ok(json!({"count": 0})),
+        |state, _| {
+            let count = state["count"].as_u64().expect("projection count");
+            Ok(json!({"count": count + 1}))
+        },
+        |state| Ok(state.clone()),
+    )
 }
 
 struct ChildCleanup(Option<Child>);
@@ -883,6 +898,9 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
         .expect("client package scan succeeds");
     let config = host_config(&fixture);
     let runtime = HostRuntime::boot(config.clone()).await.expect("host boots");
+    runtime
+        .register_projection(event_count_projection())
+        .expect("integration projection registers");
     let handle = runtime.handle();
     let host: Arc<dyn HostApi> = Arc::new(handle.clone());
     let mut server = ApiServer::bind_with_config(
@@ -1064,6 +1082,17 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
         "export const revision = 2;"
     );
 
+    let session_id = SessionId::from("web-session");
+    let durable_event_count = HostApi::events(&handle, session_id.clone(), 0)
+        .await
+        .expect("durable events remain readable")
+        .len() as u64;
+    let durable_history = HostApi::read_raw_session(&handle, session_id.clone())
+        .await
+        .expect("raw session read succeeds")
+        .expect("raw JSONL session exists");
+    assert_eq!(durable_history.filename, "session.jsonl");
+
     let stopped = rpc(&client, &base, "host/shutdown", "stop", json!({})).await;
     assert_eq!(stopped["ok"], true);
     server.shutdown().await.expect("server drains sockets");
@@ -1073,11 +1102,16 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
         .expect("host shutdown is idempotent");
     assert_eq!(handle.in_flight(), 0, "host has no admitted work");
 
-    let resumed = HostRuntime::boot(config)
-        .await
-        .expect("durable host resumes");
+    let resumed = Arc::new(
+        HostRuntime::boot(config)
+            .await
+            .expect("durable host resumes"),
+    );
+    resumed
+        .register_projection(event_count_projection())
+        .expect("integration projection re-registers");
     let resumed_handle = resumed.handle();
-    let resumed_host: Arc<dyn HostApi> = Arc::new(resumed_handle.clone());
+    let resumed_host: Arc<dyn HostApi> = resumed.clone();
     let mut resumed_server = ApiServer::bind_with_config(
         resumed_host,
         ApiServerConfig {
@@ -1086,8 +1120,12 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
         },
     )
     .await
-    .expect("resumed API server binds");
+    .expect("runtime-backed API server binds");
     let resumed_base = format!("http://{}", resumed_server.local_addr());
+    let mut resumed_handle_server = ApiServer::bind(Arc::new(resumed_handle.clone()))
+        .await
+        .expect("handle-backed API server binds");
+    let resumed_handle_base = format!("http://{}", resumed_handle_server.local_addr());
     let browser_sessions = browser_rpc(
         &client,
         &resumed_base,
@@ -1105,6 +1143,80 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
     assert!(session_items
         .iter()
         .any(|item| { item["sessionId"] == "blank-session" && item["blank"] == true }));
+    let web_session = session_items
+        .iter()
+        .find(|item| item["sessionId"] == "web-session")
+        .expect("cold web session summary");
+    assert!(web_session["projections"]["asOfSeq"].is_number());
+    assert!(web_session["projections"]["values"]["title"].is_string());
+    assert_eq!(
+        web_session["projections"]["values"]
+            .as_object()
+            .expect("summary projection values")
+            .len(),
+        1,
+        "session.list retains only the title projection"
+    );
+    let opened = browser_rpc(
+        &client,
+        &resumed_base,
+        "session.history",
+        "opened-session",
+        json!({"sessionId": "web-session", "maxMessages": 1000}),
+    )
+    .await;
+    assert!(opened["result"]["value"]["events"]
+        .as_array()
+        .is_some_and(|events| !events.is_empty()));
+    assert!(opened["result"]["value"]["projections"]["values"]["permissions"].is_object());
+    assert_eq!(
+        opened["result"]["value"]["projections"]["values"]["integration-event-count"],
+        json!({"count": durable_event_count})
+    );
+    let opened_through_handle = browser_rpc(
+        &client,
+        &resumed_handle_base,
+        "session.history",
+        "opened-session-handle",
+        json!({"sessionId": "web-session", "maxMessages": 1000}),
+    )
+    .await;
+    assert_eq!(
+        opened_through_handle["result"]["value"], opened["result"]["value"],
+        "HostRuntime and HostHandle expose the same full history"
+    );
+    let reopened = browser_rpc(
+        &client,
+        &resumed_base,
+        "session.history",
+        "reopened-session",
+        json!({"sessionId": "web-session", "maxMessages": 1000}),
+    )
+    .await;
+    assert_eq!(reopened["result"]["value"], opened["result"]["value"]);
+    assert!(
+        !HostApi::subagent_list(resumed.as_ref(), session_id.clone())
+            .await
+            .expect("runtime agent state is readable")
+            .parent_available,
+        "history reads do not activate the session agent"
+    );
+    assert!(
+        !HostApi::subagent_list(&resumed_handle, session_id.clone())
+            .await
+            .expect("handle agent state is readable")
+            .parent_available,
+        "handle history reads do not activate the session agent"
+    );
+    assert_eq!(
+        HostApi::read_raw_session(&resumed_handle, session_id)
+            .await
+            .expect("resumed raw session read succeeds")
+            .expect("resumed raw JSONL session exists")
+            .bytes,
+        durable_history.bytes,
+        "history reads do not rewrite the durable JSONL log"
+    );
     let browser_workspaces = browser_rpc(
         &client,
         &resumed_base,
@@ -1130,6 +1242,10 @@ async fn real_host_api_keeps_sessions_authoritative_while_static_graphs_update()
     .await;
     assert!(resumed_events["output"].to_string().contains(REPLAY_FACT));
     idle_status(&client, &resumed_base, "web-session").await;
+    resumed_handle_server
+        .shutdown()
+        .await
+        .expect("handle-backed server drains sockets");
     resumed_server
         .shutdown()
         .await

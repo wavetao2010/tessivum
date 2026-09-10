@@ -906,9 +906,16 @@ fn validate_schema(schema: &Value, path: &str) -> Result<(), TessivumError> {
                 | "items"
                 | "enum"
                 | "oneOf"
+                | "description"
         ) {
             return Err(schema_error(path, format!("unsupported keyword {key:?}")));
         }
+    }
+    if object
+        .get("description")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Err(schema_error(path, "description must be a string"));
     }
 
     let type_name = match object.get("type") {

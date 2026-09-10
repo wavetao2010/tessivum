@@ -47,6 +47,15 @@ const FIRST_PARTY_MARKET_TARBALL: &str =
     concat!("tessivum-market-", env!("CARGO_PKG_VERSION"), ".tgz");
 const MAX_FIRST_PARTY_MARKET_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
 const RETIRED_REMOTE_WEB_UI_NAME: &str = "@linxin666/dsh-remote-web-ui";
+const FIXED_SIDEBAR_NAME: &str = "dsh-better-sidebar";
+const FIXED_SIDEBAR_VERSION: &str = "0.17.1";
+const FIXED_SIDEBAR_SOURCE_SHA256: &str =
+    "69d9a98b7e8a72540c93d4b7de049c3467f01911445eacdb2e89876748d6c9ad";
+const FIXED_SIDEBAR_PATCHED_SHA256: &str =
+    "638f2bcbd541dc3221f56ea3222027f4b65e90de45399af152d547f883e3adb1";
+const FIXED_SIDEBAR_PATCH: &str =
+    include_str!("../packaging/patches/dsh-better-sidebar-0.17.1.patch");
+const PLUGIN_FIXED_PATCH_INVALID: &str = "PLUGIN_FIXED_PATCH_INVALID";
 
 #[derive(Debug, Error)]
 pub enum PluginManagerError {
@@ -2420,6 +2429,263 @@ fn apply_bundle(
     Ok(())
 }
 
+fn repaired_plugin_root(
+    profile: &Path,
+    package: &str,
+    root: &Path,
+) -> Result<PathBuf, PluginManagerError> {
+    if package != FIXED_SIDEBAR_NAME {
+        return Ok(root.to_path_buf());
+    }
+    let manifest_path = root.join("package.json");
+    let manifest_bytes = read_bounded(&manifest_path, MAX_PROFILE_MANIFEST_BYTES)?;
+    let manifest: Value =
+        serde_json::from_slice(&manifest_bytes).map_err(|error| io_error(&manifest_path, error))?;
+    if manifest.get("version").and_then(Value::as_str) != Some(FIXED_SIDEBAR_VERSION) {
+        return Ok(root.to_path_buf());
+    }
+    let source_path = root.join("lib/index.js");
+    let source = read_bounded(&source_path, MAX_PACKAGE_ENTRY_BYTES)?;
+    let source_hash = sha256_hex(&source);
+    let repaired = if source_hash == FIXED_SIDEBAR_SOURCE_SHA256 {
+        apply_fixed_sidebar_patch(&source)?
+    } else if source_hash == FIXED_SIDEBAR_PATCHED_SHA256 {
+        source
+    } else {
+        return Err(compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            format!(
+                "{FIXED_SIDEBAR_NAME}@{FIXED_SIDEBAR_VERSION} lib/index.js has unexpected sha256 {source_hash}; expected {FIXED_SIDEBAR_SOURCE_SHA256} (npm source) or {FIXED_SIDEBAR_PATCHED_SHA256} (Tessivum repair). Reinstall the exact package before retrying"
+            ),
+        ));
+    };
+    let dependency_root = root.parent().ok_or_else(|| {
+        compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            "fixed sidebar package has no dependency root",
+        )
+    })?;
+    let profile_root = fs::canonicalize(profile).map_err(|error| io_error(profile, error))?;
+    let dependency_root =
+        fs::canonicalize(dependency_root).map_err(|error| io_error(dependency_root, error))?;
+    if !dependency_root.starts_with(&profile_root) {
+        return Err(compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            "fixed sidebar dependency root escapes the plugin profile",
+        ));
+    }
+    let repair = dependency_root.join(format!(
+        ".tessivum-{FIXED_SIDEBAR_NAME}-{FIXED_SIDEBAR_VERSION}-{FIXED_SIDEBAR_PATCHED_SHA256}"
+    ));
+    if repair.exists() {
+        let repair_root = fs::canonicalize(&repair).map_err(|error| io_error(&repair, error))?;
+        if !repair_root.starts_with(&dependency_root) {
+            return Err(compatibility_error(
+                PLUGIN_FIXED_PATCH_INVALID,
+                "profile-local sidebar repair escapes its dependency root",
+            ));
+        }
+        validate_sidebar_repair(&repair_root, &manifest_bytes)?;
+        return Ok(repair_root);
+    }
+    let temporary = dependency_root.join(format!(
+        ".tessivum-{FIXED_SIDEBAR_NAME}-{FIXED_SIDEBAR_VERSION}-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        copy_package_tree(root, &temporary)?;
+        let repaired_entry = temporary.join("lib/index.js");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&repaired_entry)
+            .map_err(|error| io_error(&repaired_entry, error))?;
+        file.write_all(&repaired)
+            .map_err(|error| io_error(&repaired_entry, error))?;
+        file.sync_all()
+            .map_err(|error| io_error(&repaired_entry, error))?;
+        drop(file);
+        validate_sidebar_repair(&temporary, &manifest_bytes)?;
+        fs::rename(&temporary, &repair).map_err(|error| io_error(&repair, error))?;
+        #[cfg(unix)]
+        fs::File::open(&dependency_root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| io_error(&dependency_root, error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result?;
+    fs::canonicalize(&repair).map_err(|error| io_error(&repair, error))
+}
+
+fn apply_fixed_sidebar_patch(source: &[u8]) -> Result<Vec<u8>, PluginManagerError> {
+    if sha256_hex(source) != FIXED_SIDEBAR_SOURCE_SHA256 {
+        return Err(compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            "fixed sidebar patch input checksum does not match dsh-better-sidebar@0.17.1",
+        ));
+    }
+    let source = std::str::from_utf8(source).map_err(|error| {
+        compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            format!("fixed sidebar patch input is not UTF-8: {error}"),
+        )
+    })?;
+    let source_lines = source.split_inclusive('\n').collect::<Vec<_>>();
+    let mut output = String::with_capacity(source.len());
+    let mut source_index = 0_usize;
+    let mut in_hunk = false;
+    let mut hunks = 0_usize;
+    for line in FIXED_SIDEBAR_PATCH.lines() {
+        if line.starts_with("@@ -") {
+            let range = line
+                .strip_prefix("@@ -")
+                .and_then(|line| line.split_once(" +"))
+                .map(|(range, _)| range)
+                .ok_or_else(|| {
+                    compatibility_error(
+                        PLUGIN_FIXED_PATCH_INVALID,
+                        format!("invalid fixed sidebar patch hunk header {line:?}"),
+                    )
+                })?;
+            let start = range
+                .split(',')
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|start| *start > 0)
+                .ok_or_else(|| {
+                    compatibility_error(
+                        PLUGIN_FIXED_PATCH_INVALID,
+                        format!("invalid fixed sidebar patch source range {range:?}"),
+                    )
+                })?
+                - 1;
+            if start < source_index || start > source_lines.len() {
+                return Err(compatibility_error(
+                    PLUGIN_FIXED_PATCH_INVALID,
+                    "fixed sidebar patch hunks are out of order",
+                ));
+            }
+            for line in &source_lines[source_index..start] {
+                output.push_str(line);
+            }
+            source_index = start;
+            in_hunk = true;
+            hunks += 1;
+            continue;
+        }
+        if !in_hunk || line == "\\ No newline at end of file" {
+            continue;
+        }
+        let (kind, text) = line.split_at(1);
+        match kind {
+            " " | "-" => {
+                let actual = source_lines.get(source_index).ok_or_else(|| {
+                    compatibility_error(
+                        PLUGIN_FIXED_PATCH_INVALID,
+                        "fixed sidebar patch reads beyond its source",
+                    )
+                })?;
+                if actual.strip_suffix('\n').unwrap_or(actual) != text {
+                    return Err(compatibility_error(
+                        PLUGIN_FIXED_PATCH_INVALID,
+                        format!(
+                            "fixed sidebar patch context mismatch at source line {}",
+                            source_index + 1
+                        ),
+                    ));
+                }
+                if kind == " " {
+                    output.push_str(actual);
+                }
+                source_index += 1;
+            }
+            "+" => {
+                output.push_str(text);
+                output.push('\n');
+            }
+            _ => {
+                in_hunk = false;
+            }
+        }
+    }
+    if hunks == 0 {
+        return Err(compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            "fixed sidebar patch contains no hunks",
+        ));
+    }
+    for line in &source_lines[source_index..] {
+        output.push_str(line);
+    }
+    if sha256_hex(output.as_bytes()) != FIXED_SIDEBAR_PATCHED_SHA256 {
+        return Err(compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            "fixed sidebar patch output checksum does not match its pinned result",
+        ));
+    }
+    Ok(output.into_bytes())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_sidebar_repair(
+    repair: &Path,
+    expected_manifest: &[u8],
+) -> Result<(), PluginManagerError> {
+    let manifest = read_bounded(&repair.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
+    let entry = read_bounded(&repair.join("lib/index.js"), MAX_PACKAGE_ENTRY_BYTES)?;
+    if manifest != expected_manifest || sha256_hex(&entry) != FIXED_SIDEBAR_PATCHED_SHA256 {
+        return Err(compatibility_error(
+            PLUGIN_FIXED_PATCH_INVALID,
+            format!(
+                "profile-local sidebar repair changed unexpectedly at {}",
+                repair.display()
+            ),
+        ));
+    }
+    for chunk in ["terminal", "editor", "mermaid"] {
+        let path = repair.join(format!("lib/client-{chunk}.js"));
+        if !path.is_file() {
+            return Err(compatibility_error(
+                PLUGIN_FIXED_PATCH_INVALID,
+                format!("profile-local sidebar repair is missing {}", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), PluginManagerError> {
+    fs::create_dir(destination).map_err(|error| io_error(destination, error))?;
+    for entry in fs::read_dir(source).map_err(|error| io_error(source, error))? {
+        let entry = entry.map_err(|error| io_error(source, error))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata =
+            fs::symlink_metadata(&source_path).map_err(|error| io_error(&source_path, error))?;
+        if metadata.is_dir() {
+            copy_package_tree(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            fs::copy(&source_path, &destination_path)
+                .map_err(|error| io_error(&destination_path, error))?;
+        } else {
+            return Err(compatibility_error(
+                PLUGIN_FIXED_PATCH_INVALID,
+                format!(
+                    "fixed sidebar package contains unsupported non-file entry {}",
+                    source_path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn package_entry(
     profile: &Path,
     package: &str,
@@ -2464,6 +2730,7 @@ fn package_entry(
         group: None,
     };
     apply_entry_override_options(&mut options, row)?;
+    let root = repaired_plugin_root(profile, package, &root)?;
     Ok(Some(Entry::new(root.to_string_lossy(), options)))
 }
 
