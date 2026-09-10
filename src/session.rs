@@ -234,6 +234,16 @@ pub trait SessionPersistence: Send + Sync {
         Err(SessionError::RawArtifactsUnsupported)
     }
 
+    /// Cheap, backend-owned change tokens for every durable log, if supported.
+    /// Tokens must change on append, replacement, or header edits, including external writes.
+    /// `None` disables metadata caching; implementations must not use a time-based TTL.
+    async fn list_revisions(
+        &self,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<BTreeMap<SessionId, u64>>, SessionError> {
+        Ok(None)
+    }
+
     async fn list(
         &self,
         cancellation: CancellationToken,

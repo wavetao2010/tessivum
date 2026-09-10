@@ -1,7 +1,8 @@
 //! Durable JSONL-backed [`SessionPersistence`] implementation.
 
 use std::{
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap},
+    hash::{Hash, Hasher},
     io::Cursor,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -443,6 +444,62 @@ impl SessionPersistence for JsonlSessionPersistence {
         }
         lock(&self.flush_counts).remove(session_id);
         Ok(())
+    }
+
+    async fn list_revisions(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<Option<BTreeMap<SessionId, u64>>, SessionError> {
+        check_cancellation(&cancellation)?;
+        let mut directory = match fs::read_dir(&self.root).await {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Some(BTreeMap::new()));
+            }
+            Err(error) => return Err(io_error("list session logs", &self.root, error)),
+        };
+        let mut revisions = BTreeMap::new();
+        while let Some(entry) = directory
+            .next_entry()
+            .await
+            .map_err(|error| io_error("read session directory", &self.root, error))?
+        {
+            check_cancellation(&cancellation)?;
+            let path = entry.path();
+            let Some((id, format)) = id_from_path(&path) else {
+                continue;
+            };
+            // Match existing_path: the raw log wins if both encodings exist.
+            if format == JsonlStorageFormat::Zstd && path_exists(&self.raw_path(&id)).await? {
+                continue;
+            }
+            let metadata = match fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error("stat session log", &path, error)),
+            };
+            let mut digest = DefaultHasher::new();
+            path.hash(&mut digest);
+            metadata.len().hash(&mut digest);
+            metadata
+                .modified()
+                .map_err(|error| io_error("stat log modification", &path, error))?
+                .hash(&mut digest);
+            metadata.created().ok().hash(&mut digest);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+                    .hash(&mut digest);
+            }
+            revisions.insert(id, digest.finish());
+        }
+        Ok(Some(revisions))
     }
 
     async fn list(

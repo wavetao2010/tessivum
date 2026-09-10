@@ -2058,6 +2058,111 @@ async fn cold_session_catalog_uses_latest_durable_event_time() {
 }
 
 #[tokio::test]
+async fn cached_catalog_tracks_external_append_replacement_and_delete() {
+    let root = TempDir::new();
+    let persistence = JsonlSessionPersistence::new(root.path().join("data"));
+    let id = SessionId::from("catalog-cache");
+    persist_session(&persistence, persisted_header(id.as_str(), None), []).await;
+    let runtime = HostRuntime::boot(config(&root)).await.unwrap();
+    for _ in 0..2 {
+        let rows = runtime.list_session_summaries().await.unwrap();
+        assert!(
+            rows.iter()
+                .find(|row| row.session.session_id == id)
+                .unwrap()
+                .session
+                .blank
+        );
+    }
+    let next_seq = persistence
+        .inspect(&id, ContextHandle::root().scope().cancellation())
+        .await
+        .unwrap()
+        .unwrap()
+        .next_seq;
+    let mut event = surface_event("user/message", next_seq, "external activity");
+    event.time = 42;
+    persistence
+        .append(&id, &event, ContextHandle::root().scope().cancellation())
+        .await
+        .unwrap();
+    let rows = runtime.list_session_summaries().await.unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row.session.session_id == id)
+        .unwrap();
+    assert!(!row.session.blank);
+    assert_eq!(row.session.updated_at, 42);
+
+    let title = SessionEvent {
+        event_type: "session/title".into(),
+        seq: next_seq + 1,
+        time: 43,
+        data: json!({"title": "Before"}),
+        ignorable: None,
+        source_event_seqs: None,
+        surface_op: None,
+    };
+    persistence
+        .append(&id, &title, ContextHandle::root().scope().cancellation())
+        .await
+        .unwrap();
+    let rows = runtime.list_session_summaries().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.session.session_id == id)
+            .unwrap()
+            .title
+            .as_ref()
+            .unwrap()
+            .value,
+        "Before"
+    );
+
+    // Same byte length and restored mtime: an atomic replacement must still invalidate.
+    let path = persistence.raw_path(&id);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let replacement = path.with_extension("replacement");
+    fs::write(
+        &replacement,
+        fs::read_to_string(&path)
+            .unwrap()
+            .replace("Before", "After!"),
+    )
+    .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::rename(replacement, &path).unwrap();
+    let rows = runtime.list_session_summaries().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.session.session_id == id)
+            .unwrap()
+            .title
+            .as_ref()
+            .unwrap()
+            .value,
+        "After!"
+    );
+
+    persistence
+        .delete(&id, ContextHandle::root().scope().cancellation())
+        .await
+        .unwrap();
+    assert!(runtime
+        .list_session_summaries()
+        .await
+        .unwrap()
+        .iter()
+        .all(|row| row.session.session_id != id));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn session_search_rename_and_fork_use_durable_workspace_visible_history() {
     let root = TempDir::new();
     let persistence = JsonlSessionPersistence::new(root.path().join("data"));
@@ -2979,6 +3084,8 @@ async fn image_admission_preserves_input_and_blocks_incompatible_switches() {
             "baseURL": "http://127.0.0.1:1/v1",
             "models": [
                 {"id": "text", "input": ["text"]},
+                {"id": "unknown"},
+                {"id": "empty", "input": []},
                 {"id": "vision", "input": ["text", "image"]}
             ]
         }}},
@@ -3007,6 +3114,44 @@ async fn image_admission_preserves_input_and_blocks_incompatible_switches() {
         "UNSUPPORTED_MODALITY"
     );
     assert_eq!(runtime.events(session.clone(), 0).await.unwrap(), before);
+
+    let mut server = tessivum::api::ApiServer::bind(Arc::new(runtime.handle()))
+        .await
+        .unwrap();
+    let response: Value = reqwest::Client::new()
+        .post(format!("http://{}/api/llm.models", server.local_addr()))
+        .json(&json!({"type": "client-request", "rpcId": "image-capabilities", "method": "llm.models", "payload": {}}))
+        .send().await.unwrap().json().await.unwrap();
+    let models = response["result"]["value"]["groups"][0]["models"]
+        .as_array()
+        .unwrap();
+    for id in ["unknown", "empty"] {
+        assert!(models
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap()
+            .get("inputModalities")
+            .is_none());
+        runtime
+            .select_model(session.clone(), "local".into(), id.into(), None)
+            .await
+            .unwrap();
+        let before = runtime.events(session.clone(), 0).await.unwrap();
+        assert_eq!(
+            runtime.prompt(image_prompt()).await.unwrap_err().code,
+            "IMAGE_CAPABILITY_UNKNOWN"
+        );
+        assert_eq!(runtime.events(session.clone(), 0).await.unwrap(), before);
+    }
+    assert_eq!(
+        models.iter().find(|model| model["id"] == "text").unwrap()["inputModalities"],
+        json!(["text"])
+    );
+    assert_eq!(
+        models.iter().find(|model| model["id"] == "vision").unwrap()["inputModalities"],
+        json!(["text", "image"])
+    );
+    server.shutdown().await.unwrap();
 
     runtime
         .select_model(session.clone(), "local".into(), "vision".into(), None)

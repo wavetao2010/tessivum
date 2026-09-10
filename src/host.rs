@@ -2053,6 +2053,7 @@ struct HostInner {
     cancellation: tessivum_core::CancellationToken,
     sessions: SessionStore,
     persistence: Arc<dyn SessionPersistence>,
+    session_summaries: AsyncMutex<BTreeMap<SessionId, (u64, AgentModeId, HostSessionSummary)>>,
     workspace_registry: WorkspaceRegistry,
     default_workspace_id: Option<WorkspaceId>,
     agent_modes: Arc<AgentModeRegistry>,
@@ -3267,6 +3268,7 @@ impl HostRuntime {
             cancellation,
             sessions,
             persistence,
+            session_summaries: AsyncMutex::new(BTreeMap::new()),
             workspace_registry,
             default_workspace_id,
             projections,
@@ -4233,20 +4235,24 @@ impl HostHandle {
                         .iter()
                         .find(|model| model.id == selection.model)
                 })
-                .is_some_and(|model| {
+                .filter(|model| !model.input.is_empty())
+                .map(|model| {
                     model
                         .input
                         .iter()
                         .any(|input| input == RESPONSES_IMAGE_MODALITY)
                 })
         };
-        if supports_image {
-            Ok(())
-        } else {
-            Err(HostError::invalid(
+        match supports_image {
+            Some(true) => Ok(()),
+            Some(false) => Err(HostError::invalid(
                 "UNSUPPORTED_MODALITY",
                 "the selected model does not support image input in the effective session context",
-            ))
+            )),
+            None => Err(HostError::invalid(
+                "IMAGE_CAPABILITY_UNKNOWN",
+                "image capability is not configured; confirm it in Settings > Model provider > Model details > Image input",
+            )),
         }
     }
     pub fn attachment_limits(&self) -> AttachmentLimits {
@@ -4410,71 +4416,105 @@ impl HostHandle {
     }
 
     async fn list_session_summaries_inner(&self) -> Result<Vec<HostSessionSummary>, HostError> {
-        let sessions = self
-            .inner
-            .persistence
-            .list(self.inner.cancellation.clone())
-            .await?;
-        let mut listed = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            self.inner
-                .workspace_registry
-                .recognize_session(&session.header.id)?;
-            // ponytail: fold list metadata from the one history read; add a persistence index only if profiling requires it.
-            let events = self
+        let default_mode = current_default_agent_mode(&self.inner).map_err(mode_error)?;
+        let persistence = &self.inner.persistence;
+        // Serialize cold readers, retaining summaries only, never complete conversation logs.
+        let mut cache = self.inner.session_summaries.lock().await;
+        let mut listed = Vec::new();
+        if let Some(revisions) = persistence
+            .list_revisions(self.inner.cancellation.clone())
+            .await?
+        {
+            cache.retain(|id, _| revisions.contains_key(id));
+            for (id, revision) in revisions {
+                if let Some((cached_revision, cached_default, summary)) = cache.get(&id) {
+                    if *cached_revision == revision && *cached_default == default_mode {
+                        listed.push(summary.clone());
+                        continue;
+                    }
+                }
+                let Some(session) = persistence
+                    .inspect(&id, self.inner.cancellation.clone())
+                    .await?
+                else {
+                    cache.remove(&id);
+                    continue;
+                };
+                let summary = self.load_session_summary(session, &default_mode).await?;
+                cache.insert(id, (revision, default_mode.clone(), summary.clone()));
+                listed.push(summary);
+            }
+        } else {
+            cache.clear();
+            for session in persistence.list(self.inner.cancellation.clone()).await? {
+                listed.push(self.load_session_summary(session, &default_mode).await?);
+            }
+        }
+        drop(cache);
+        // Running state, workspace membership and non-durable projections are live,
+        // not properties of a log revision. Never serve them from the durable cache.
+        for summary in &mut listed {
+            let id = &summary.session.session_id;
+            self.inner.workspace_registry.recognize_session(id)?;
+            summary.session.running = self.session_running(id);
+            summary.session.workspace_id = self
                 .inner
-                .persistence
-                .read_from(&session.header.id, 0, self.inner.cancellation.clone())
-                .await?;
-            let updated_at = events
-                .iter()
-                .rev()
-                .find(|event| event.event_type == "user/message")
-                .map_or(session.header.created_at, |event| event.time);
-            let agent_mode = Some(
-                selected_agent_mode_from(
-                    &events,
-                    session.header.agent_mode.clone(),
-                    &current_default_agent_mode(&self.inner).map_err(mode_error)?,
-                )
-                .map_err(mode_error)?,
-            );
-            let title = match session_title_projection(&events) {
-                Some(title) => Some(title),
-                None => self
+                .workspace_registry
+                .workspace_for_session(id)
+                .map(|workspace| workspace.workspace_id);
+            if summary.title.is_none() {
+                summary.title = self
                     .inner
                     .projections
-                    .snapshot(&session.header.id, "title")
+                    .snapshot(id, "title")
                     .ok()
                     .filter(|projection| projection.view.is_string())
                     .map(|projection| HostSessionProjection {
                         key: projection.key,
                         value: projection.view,
                         seq: projection.as_of_seq,
-                    }),
-            };
-            listed.push(HostSessionSummary {
-                session: HostSessionInfo {
-                    workspace_id: self
-                        .inner
-                        .workspace_registry
-                        .workspace_for_session(&session.header.id)
-                        .map(|workspace| workspace.workspace_id),
-                    session_id: session.header.id.clone(),
-                    created_at: session.header.created_at,
-                    updated_at,
-                    running: self.session_running(&session.header.id),
-                    cwd: session.header.cwd,
-                    parent_session: session.header.parent_session,
-                    origin: session.header.origin,
-                    agent_mode,
-                    event_count: session.event_count,
-                    blank: !has_model_visible_work(&events),
-                },
-                title,
-            });
+                    });
+            }
         }
         Ok(listed)
+    }
+
+    async fn load_session_summary(
+        &self,
+        session: crate::session::SessionInspection,
+        default_mode: &AgentModeId,
+    ) -> Result<HostSessionSummary, HostError> {
+        let events = self
+            .inner
+            .persistence
+            .read_from(&session.header.id, 0, self.inner.cancellation.clone())
+            .await?;
+        let updated_at = events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "user/message")
+            .map_or(session.header.created_at, |event| event.time);
+        let agent_mode = Some(
+            selected_agent_mode_from(&events, session.header.agent_mode.clone(), default_mode)
+                .map_err(mode_error)?,
+        );
+        let title = session_title_projection(&events);
+        Ok(HostSessionSummary {
+            session: HostSessionInfo {
+                workspace_id: None,
+                session_id: session.header.id,
+                created_at: session.header.created_at,
+                updated_at,
+                running: false,
+                cwd: session.header.cwd,
+                parent_session: session.header.parent_session,
+                origin: session.header.origin,
+                agent_mode,
+                event_count: session.event_count,
+                blank: !has_model_visible_work(&events),
+            },
+            title,
+        })
     }
 
     async fn search_sessions_inner(
@@ -7906,7 +7946,7 @@ struct RawOpenAiModel {
     name: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default = "default_modalities", alias = "inputModalities")]
+    #[serde(default, alias = "inputModalities")]
     input: Vec<String>,
     #[serde(default)]
     context_window: Option<u64>,
@@ -7918,9 +7958,6 @@ struct RawOpenAiModel {
     default_effort: Option<String>,
 }
 
-fn default_modalities() -> Vec<String> {
-    vec![RESPONSES_TEXT_MODALITY.into()]
-}
 const REASONING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 fn parse_reasoning_efforts(
@@ -7986,10 +8023,7 @@ fn parse_models(raw_models: Vec<RawOpenAiModel>) -> Result<Vec<ResponsesModel>, 
                 Value::Null,
             ));
         }
-        let mut input = raw_model.input;
-        if input.is_empty() {
-            input.push(RESPONSES_TEXT_MODALITY.into());
-        }
+        let input = raw_model.input;
         let mut seen = BTreeSet::new();
         if input.iter().any(|modality| !seen.insert(modality.clone())) {
             return Err(TessivumError::new(
@@ -8687,11 +8721,7 @@ fn model_group_for_route(credentials: &Arc<Credentials>, route: ResponsesRoute) 
                 id: model.id,
                 name: model.name,
                 description: model.description,
-                input_modalities: if model.input.is_empty() {
-                    default_modalities()
-                } else {
-                    model.input
-                },
+                input_modalities: model.input,
                 context_window: model.context_window,
                 max_tokens: model.max_tokens,
                 reasoning: (!model.reasoning_efforts.is_empty()).then(|| HostModelReasoning {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-alpha.27 - 2026-09-10
+
+### Fixed
+
+- Avoid replaying every JSONL conversation on every `session.list` page. Reuse durable navigation summaries only while file identity, size, and timestamps remain unchanged; refresh live running state, workspace membership, and transient title projections separately. External append, replacement, and deletion invalidate the catalog without a TTL or persistent schema migration. Backends without revision inventories retain uncached behavior.
+- Preserve undeclared image capability as unknown instead of silently treating it as text-only. Image drafts for unconfigured models now point to the existing model capability setting; explicitly text-only models retain the unsupported-image warning. Both cases remain blocked before input is committed.
+
+Platform scope is unchanged: macOS and Linux on x86_64/ARM64. Native Windows packages and remote sidebar terminals remain unsupported.
+
 ## 0.1.0-alpha.26 - 2026-09-09
 
 ### Fixed

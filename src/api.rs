@@ -5491,7 +5491,9 @@ fn compat_model_info(info: HostModelInfo) -> Value {
             Value::String(info.name.unwrap_or_else(|| info.id.clone())),
         ),
     ]);
-    model.insert("inputModalities".into(), json!(info.input_modalities));
+    if !info.input_modalities.is_empty() {
+        model.insert("inputModalities".into(), json!(info.input_modalities));
+    }
     if let Some(description) = info.description {
         model.insert("description".into(), Value::String(description));
     }

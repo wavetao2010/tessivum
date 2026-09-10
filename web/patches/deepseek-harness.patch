@@ -8857,7 +8857,7 @@ index fac380ef8edf88d4774a06d90807a3143d6373b9..0421d78e6753602da1952cbbdd01c905
    // Entry 1: the /model popupSelect over the shared directory. The command
    // description is registry-held text: it reads t() once at registration and
 diff --git a/packages/client/ui-model-selection/src/client/locales.ts b/packages/client/ui-model-selection/src/client/locales.ts
-index 2200eee56bb136466f81a78c466e7af1c9f1ebe9..ee9645ecd0fe4a39f9ab54a3a3c4e0519873ed6a 100644
+index 2200eee56bb136466f81a78c466e7af1c9f1ebe9..068a526187f878f91f5d1936461130739ec6d82e 100644
 --- a/packages/client/ui-model-selection/src/client/locales.ts
 +++ b/packages/client/ui-model-selection/src/client/locales.ts
 @@ -26,6 +26,12 @@ export const zh = {
@@ -8869,7 +8869,7 @@ index 2200eee56bb136466f81a78c466e7af1c9f1ebe9..ee9645ecd0fe4a39f9ab54a3a3c4e051
 +  'capability.unknown': '图片能力未知',
 +  'validation.selectModel': '发送前请先选择模型',
 +  'validation.imageUnsupported': '当前模型不支持图片，请切换支持图片的模型',
-+  'validation.imageUnknown': '当前模型的图片能力未知，请切换模型或在设置中明确配置图片能力',
++  'validation.imageUnknown': '尚未配置此模型的图片能力，请到 设置 → 模型提供方 → 模型详情 → 图片输入 中确认',
    'empty.efforts': '当前模型未提供推理等级。',
  } satisfies Record<string, string>
  
@@ -8882,7 +8882,7 @@ index 2200eee56bb136466f81a78c466e7af1c9f1ebe9..ee9645ecd0fe4a39f9ab54a3a3c4e051
 +  'capability.unknown': 'Image support unknown',
 +  'validation.selectModel': 'Select a model before sending',
 +  'validation.imageUnsupported': 'The current model does not support images; switch to an image-capable model',
-+  'validation.imageUnknown': 'This model’s image capability is unknown; switch models or configure it explicitly in Settings',
++  'validation.imageUnknown': 'Image capability is not configured for this model. Confirm it in Settings → Model provider → Model details → Image input.',
    'empty.efforts': 'This model provides no reasoning effort levels.',
  } satisfies Record<ModelKey, string>
 diff --git a/packages/client/ui-model-selection/src/client/service.ts b/packages/client/ui-model-selection/src/client/service.ts

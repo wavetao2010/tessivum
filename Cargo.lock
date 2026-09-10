@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "tessivum"
-version = "0.1.0-alpha.26"
+version = "0.1.0-alpha.27"
 dependencies = [
  "async-stream",
  "async-trait",

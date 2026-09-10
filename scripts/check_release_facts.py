@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Alpha.26 release claims against the retained Alpha.23 benchmark evidence."""
+"""Check Alpha.27 release claims against the retained Alpha.23 benchmark evidence."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def pair(metric: dict[str, Any], scale: float, digits: int, suffix: str) -> str:
 def main() -> int:
     manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8").splitlines()
     version = next(line.split('"', 2)[1] for line in manifest if line.startswith("version = "))
-    require(version == "0.1.0-alpha.26", f"unexpected package version: {version}")
+    require(version == "0.1.0-alpha.27", f"unexpected package version: {version}")
 
     core = load(CORE_PATH)
     require(core.get("schema") == "tessivum.core-benchmark-paired/v2", "invalid Core evidence schema")
@@ -221,7 +221,7 @@ def main() -> int:
     require("PHASE9_BENCHMARK_REPORT.md" in english, "English README lost benchmark evidence link")
     require("PHASE9_BENCHMARK_REPORT.zh-CN.md" in chinese, "Chinese README lost benchmark evidence link")
 
-    print("PASS: Alpha.26 release claims match retained Alpha.23 benchmark evidence")
+    print("PASS: Alpha.27 release claims match retained Alpha.23 benchmark evidence")
     return 0
 
 
