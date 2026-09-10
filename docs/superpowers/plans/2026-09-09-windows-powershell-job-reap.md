@@ -9,8 +9,10 @@ one-shot and persistent shell operations publish completion.
 
 **Architecture:** Keep Job Object termination for processes that remain in the
 Job, and add a Windows-native Toolhelp ancestry tracker for descendants that
-escape it. Capture stable process handles while the root is alive, then consume
-one bounded fixed-point cleanup fence before stream and lifecycle completion.
+escape it. Own the root and each retained process as a handle plus
+`(PID, creation time)` generation identity. Validate each parent edge before
+retaining descendants, then consume one bounded fixed-point cleanup fence before
+stream and lifecycle completion.
 
 **Tech Stack:** Rust 2024, Tokio, `windows-sys` 0.61, Windows Job Objects,
 Toolhelp process snapshots, and native Windows integration tests.
@@ -32,6 +34,9 @@ the following constraints throughout implementation and review.
   `apply_patch`, inspect the resulting diff, and preserve unrelated work.
 - Do not modify production code until all three behavior tests fail for the
   expected process-not-reaped reason on the restored production baseline.
+- Do not modify the current Task 1 production code until both PID-reuse
+  regressions and the deterministic termination-race regression produce the
+  required RED evidence against `4d9f745` in merged source `da0a4d0`.
 - Use `--jobs 1` for every compiling or linking Cargo command in this plan.
 - Commit each implementation task separately. After each implementation
   commit, run specification review first and code-quality review second. Fix
@@ -39,13 +44,21 @@ the following constraints throughout implementation and review.
   on.
 - Do not push this branch before the later fresh Groups 01-16 verification.
 
+The current correction target is merged Alpha.27 source
+`da0a4d09a60280a745910c9d4de4c85b5210c9d5`. It contains the behavior-test
+commit `291348c` and the initial Task 1 production commit `4d9f745`. Task 0
+below records the established behavior-first history. Do not repeat its
+baseline restoration, editing, or commit steps against the current merged
+source. Later tasks explicitly identify which behavior tests to rerun. The new
+Task 1 RED steps target the current implementation.
+
 ## File map
 
 The implementation stays within the current process-ownership boundary.
 
 - Modify `tests/builtin_tools.rs` to finish the deterministic normal-exit RED
   and remove temporary Job-membership diagnostics from existing tests.
-- Modify `src/subprocess.rs` to own stable Windows process identities, discover
+- Modify `src/subprocess.rs` to own exact Windows process generations, discover
   descendants, implement capture and fixed-point cleanup, and integrate the
   persistent reaper request path.
 - Modify `src/builtin_tools.rs` to integrate capture and cleanup into one-shot
@@ -53,10 +66,12 @@ The implementation stays within the current process-ownership boundary.
 - Modify lower-level Windows process tests only when a deterministic native or
   pure ancestry behavior cannot be covered through `tests/builtin_tools.rs`.
 
-## Task 0: Restore the baseline and establish all REDs
+## Task 0: Preserve the established behavior RED baseline
 
-This task removes every rejected production experiment and creates valid RED
-evidence before implementation. Do not commit production code in this task.
+This task records the RED work that landed in `291348c`. It removed rejected
+production experiments and established valid behavior RED evidence before the
+initial Task 1 implementation. Keep these steps as provenance; do not rerun
+them against `da0a4d0` and expect the original process-not-reaped failures.
 
 **Files:**
 
@@ -198,10 +213,15 @@ files are clean and `.ci/` is absent. Dispatch a specification reviewer, reclaim
 it, then dispatch a quality reviewer and reclaim it. Resolve and re-review all
 Critical or Important findings before Task 1.
 
-## Task 1: Add stable Windows process-tree ownership
+## Task 1: Harden Windows process-generation ownership
 
-This task implements the native identity, discovery, capture, and consuming
-cleanup primitives. It does not change one-shot or persistent caller ordering.
+This task corrects the native identity, discovery, capture, and consuming
+cleanup primitives currently present in `4d9f745`. It does not change one-shot
+or persistent caller ordering. Microsoft documents that a
+[process handle remains valid after termination][process-handles], but the PID
+is valid only until termination and can then be reused. The implementation must
+therefore use [`GetProcessTimes`][get-process-times] creation and exit times to
+distinguish process generations.
 
 **Files:**
 
@@ -209,104 +229,175 @@ cleanup primitives. It does not change one-shot or persistent caller ordering.
 - Test: `src/subprocess.rs` Windows-only unit tests or an existing lower-level
   Windows process test when integration coverage is required
 
-- [ ] **Step 1: Add failing pure ancestry tests**
+- [ ] **Step 1: Add and run the retained-anchor reuse RED**
 
-Extract parent-chain evaluation behind a private Windows-only helper that can
-be tested with synthetic snapshot entries. Add tests proving that it:
+Before editing production code, add a pure synthetic ancestry regression for
+the retained-anchor PID-reuse hole in `4d9f745`. Model an exited retained
+anchor with one PID, creation time, and exit time; reuse the same PID for a
+later process generation; and give that replacement a child created after the
+historical anchor exited. The current PID-only helper accepts the child through
+the reused anchor.
 
-- includes direct and transitive descendants of the stable root;
-- uses every retained validated identity as an ancestry anchor;
-- excludes an unrelated PID and breaks parent cycles without looping; and
-- does not treat a PID from a stale snapshot as owned after fresh-snapshot
-  ancestry no longer reaches an owned anchor.
+The test must assert that generation-aware evaluation rejects the child. It
+must also assert that the replacement generation itself is absent from the
+retained-generation result and the termination-target result. Neither the
+replacement nor its child may become a termination target.
 
 Run:
 
 ```powershell
-cargo test --jobs 1 --locked --lib windows_process_tree `
-  -- --nocapture --test-threads=1
+cargo test --jobs 1 --locked --lib `
+  subprocess::windows_process_tree_tests::rejects_reused_retained_anchor `
+  -- --exact --nocapture --test-threads=1
 ```
 
-Expected: the new test target fails to compile or assert because the helper is
-not implemented. Confirm the failure is specific to the new behavior.
+Expected against `4d9f745` as merged in `da0a4d0`: Cargo exits 101 at the new
+assertion because PID-only ancestry incorrectly accepts the replacement's
+child or conflates the replacement with the retained anchor. A setup, unrelated
+compile, or unrelated assertion failure is not valid RED evidence. Record the
+output before changing production code.
 
-- [ ] **Step 2: Introduce RAII ownership state**
+- [ ] **Step 2: Add and run the root reuse RED**
+
+Still without editing production code, add a second pure synthetic regression
+for root PID reuse. Model an exited exact root generation, a later replacement
+with the same PID, and a child created by that replacement after the original
+root exited. The test must reject the replacement's child and must assert that
+the replacement itself appears in neither the retained-generation result nor
+the termination-target result.
+
+Run:
+
+```powershell
+cargo test --jobs 1 --locked --lib `
+  subprocess::windows_process_tree_tests::rejects_reused_root `
+  -- --exact --nocapture --test-threads=1
+```
+
+Expected against the same current production source: Cargo exits 101 at the
+new assertion because PID-only ancestry treats the reused root PID as the old
+root and accepts the replacement's child. Record this RED separately. Do not
+edit production code between the retained-anchor and root-reuse RED runs.
+
+- [ ] **Step 3: Add and run the termination-normalization RED**
+
+Still without editing production code, add a deterministic pure test for the
+[`TerminateProcess`][terminate-process] failure decision. Cover these cases:
+
+- Suppress `ERROR_ACCESS_DENIED` only when an immediate zero-time wait on the
+  same handle reports signaled.
+- Preserve the original termination error when that handle is unsignaled.
+- Preserve the original termination error when the immediate wait fails.
+- Preserve a non-`ERROR_ACCESS_DENIED` termination error.
+
+Run the exact new test against the same current production source:
+
+```powershell
+cargo test --jobs 1 --locked --lib `
+  subprocess::windows_process_tree_tests::normalizes_terminate_failure `
+  -- --exact --nocapture --test-threads=1
+```
+
+Expected: Cargo exits 101 for the specific missing normalization helper or new
+assertion. Because a compile failure can prevent other unit tests from running,
+retain both PID-reuse assertion RED outputs separately. Do not modify production
+until all three RED reasons have been reviewed and accepted.
+
+- [ ] **Step 4: Introduce exact RAII generation state**
 
 Replace the tuple `WindowsJob` representation with a private `Arc`-owned state
 that holds:
 
 - the Job as `OwnedHandle` or an equivalent standard RAII owner;
-- the stable root PID;
-- a mutex-protected PID-deduplicated collection of validated descendant
-  `OwnedHandle` values; and
+- the owned root generation: PID, `GetProcessTimes` creation timestamp, and a
+  duplicated `OwnedHandle`;
+- a mutex-protected collection of validated descendant generations, keyed by
+  `(PID, creation time)` and owning one handle per generation; and
 - the first capture error, which later errors cannot overwrite.
 
 Do not add a blanket `unsafe impl Send` or `unsafe impl Sync`. The owner must be
 movable into `spawn_blocking` through standard handle ownership.
 
-- [ ] **Step 3: Capture the stable root identity in both spawn paths**
+- [ ] **Step 5: Own the exact root generation during assignment**
 
-In `spawn` and `spawn_std`, get the root PID synchronously from the newly
-created process handle. When assigning any raw process handle, call
-`GetProcessId(process)` and return `last_os_error()` when it returns zero.
-Keep the child object live until the consuming fence finishes so its root handle
-pins the root identity.
+In `assign_raw`, synchronously duplicate the supplied process handle into an
+owned handle before returning. Query the duplicate with `GetProcessId` and
+`GetProcessTimes`, and store its PID and creation timestamp as the root
+generation. Return the operating-system error if duplication, PID lookup, or
+time lookup fails. `spawn` and `spawn_std` must use this same assignment path.
+The root identity must not borrow a `Child` handle or rely on `Child::id()`.
 
-- [ ] **Step 4: Implement snapshot and post-open validation**
+- [ ] **Step 6: Implement parent-first generation validation**
 
 Use `CreateToolhelp32Snapshot`, `Process32FirstW`, and `Process32NextW` to build
-PID-to-parent relationships. For each newly traceable PID:
+PID-to-parent discovery hints. A snapshot parent PID is never an identity or
+termination authority. Validate candidates parent-first as follows:
 
 1. Open it with only the query, synchronize, and terminate rights needed.
 2. Keep the handle open.
-3. Take a fresh snapshot after the open.
-4. Require the same PID to remain present and its current parent chain to reach
-   the stable root or a previously validated retained identity.
-5. Close without termination if the PID disappeared or now has unrelated
-   ancestry; treat snapshot or access ambiguity as an error.
+3. Verify `GetProcessId` and read the candidate's creation time with
+   `GetProcessTimes`.
+4. Take a fresh snapshot after the open and require its immediate parent PID to
+   name the exact root or a previously validated retained generation.
+5. If the parent handle is live, require parent creation time to be no later
+   than child creation time.
+6. If the parent handle is signaled, query its exit time and also require child
+   creation time to be no later than parent exit time.
+7. Retain the exact candidate generation before considering its descendants.
 
-Retain validated Job members as anchors as well as escaped descendants. Never
-terminate solely from a PID observed in an old snapshot.
+If a current process reuses an anchor PID, its creation time differs. Do not
+treat it as the old anchor, and do not terminate it. Missing timing data,
+inconsistent ordering, disappearance during validation, or identity ambiguity
+is a cleanup error. Retain validated Job members as anchors as well as escaped
+descendants.
 
-- [ ] **Step 5: Implement asynchronous early capture**
+- [ ] **Step 7: Correct asynchronous early capture**
 
 Add `capture_and_terminate(&self)`. It must clone the private `Arc` into
-`tokio::task::spawn_blocking`, perform one discovery/open/revalidation pass,
-store newly validated handles, preserve the first error, and only then call
-fast `TerminateJobObject`. Repeated calls must be idempotent and may add newly
-discovered identities.
+`tokio::task::spawn_blocking`, perform one parent-first
+discovery/open/revalidation pass, store newly validated generations, preserve
+the first error, and only then call fast `TerminateJobObject`. Repeated calls
+must be idempotent and may add newly discovered generations.
 
 The method performs no wait or fixed-point loop. It returns the capture error to
 the caller, but callers must still wait for the root and run consuming cleanup
 before surfacing that error.
 
-- [ ] **Step 6: Implement the consuming fixed-point fence**
+- [ ] **Step 8: Correct the consuming fixed-point fence**
 
 Add one consuming async cleanup method that moves the owner into
 `spawn_blocking`. The blocking operation creates one 10-second `Instant`
 deadline at entry and never restarts it. Until a complete fixed point, it must:
 
-1. discover traceable descendants from the root and retained anchors;
-2. open and fresh-snapshot revalidate every new identity;
+1. discover candidate descendants from the exact root and retained anchors;
+2. open and fresh-snapshot validate every new generation parent-first;
 3. call `TerminateJobObject` again;
-4. terminate every active retained descendant through its handle;
+4. terminate every active retained generation through its owned handle;
 5. wait on retained handles only for the remaining shared deadline; and
-6. repeat discovery until a full validation pass adds no identity.
+6. repeat discovery until a full validation pass adds no generation.
 
 Success requires all retained handles signaled, Job accounting reporting zero
-active processes, and one final validation snapshot adding no identity.
-Snapshot failure, a present process that cannot be opened, failed termination,
-failed wait, a blocking-task panic, or deadline expiry returns
-`std::io::Error`. `ERROR_ACCESS_DENIED` never means that a process exited.
-Return the stored first capture error after completing the best available fence.
+active processes, and one final validation snapshot adding no generation.
+Fresh passes can discover children created after an earlier snapshot. Retaining
+each parent first lets its handle remain a historical anchor after exit;
+creation and exit times then validate only children created during that exact
+parent's lifetime.
 
-- [ ] **Step 7: Keep synchronous termination and Drop fast**
+Snapshot failure, a process that cannot be opened, missing or inconsistent
+timing data, failed wait, a blocking-task panic, or deadline expiry returns
+`std::io::Error`. When `TerminateProcess` fails, immediately perform a zero-time
+wait on the same owned handle. Suppress only `ERROR_ACCESS_DENIED` when that
+wait reports signaled. If the handle is unsignaled or the wait fails, preserve
+the termination error. Return the stored first capture error after completing
+the best available fence.
+
+- [ ] **Step 9: Keep synchronous termination and Drop fast**
 
 Keep `terminate(&self)` limited to one best-effort `TerminateJobObject` call.
 `Drop` may invoke only that operation. Neither may scan, wait, take the capture
 mutex, panic, or overwrite a stored error.
 
-- [ ] **Step 8: Make the ancestry tests GREEN and run lower-level tests**
+- [ ] **Step 10: Make the generation tests GREEN and run lower-level tests**
 
 Run:
 
@@ -320,7 +411,7 @@ cargo test --jobs 1 --locked --test windows_process `
 Expected: both commands exit 0. The three higher-level PowerShell tests may
 remain RED because caller integration is intentionally not part of this task.
 
-- [ ] **Step 9: Commit and review Task 1**
+- [ ] **Step 11: Commit and review the Task 1 hardening**
 
 Run:
 
@@ -329,12 +420,18 @@ cargo fmt --all --check
 git diff --check
 git add -- src/subprocess.rs
 git diff --cached --check
-git commit -m "fix: track escaped Windows process identities"
+git diff --cached --name-only
+git commit -m "fix: harden Windows process generation ownership"
 ```
+
+Expected: the staged set contains only `src/subprocess.rs`, including its
+Windows-only tests. Create a normal follow-up commit at the current merged
+`HEAD`. Preserve merge `da0a4d0`, initial Task 1 commit `4d9f745`, and upstream
+Alpha.27 publication commit `f28d8fe`; do not rewrite existing history.
 
 Dispatch the Task 1 specification reviewer and reclaim it. Only after approval,
 dispatch the quality reviewer and reclaim it. Fix and re-review every Critical
-or Important finding.
+or Important finding in follow-up commits.
 
 ## Task 2: Integrate one-shot PowerShell cleanup
 
@@ -372,9 +469,9 @@ result.
 
 After the root wait, run the consuming fixed-point fence before joining stream
 tasks or publishing output. A normal root may already have exited, so this path
-uses identities retained during available capture opportunities and the final
-snapshot rules. On fence failure, abort and await both stream tasks and surface
-the same specific cleanup error.
+uses the owned historical root generation, identities retained during available
+capture opportunities, and the final snapshot rules. On fence failure, abort
+and await both stream tasks and surface the same specific cleanup error.
 
 - [ ] **Step 4: Make both one-shot tests GREEN**
 
@@ -574,3 +671,7 @@ git log --oneline --decorate -8
 Expected: only explicitly preserved untracked `.ci/` or later planned work may
 remain. Do not push; proceed to the separately approved Windows Cargo
 resource-bound plan.
+
+[process-handles]: https://learn.microsoft.com/en-us/windows/win32/procthread/process-handles-and-identifiers
+[get-process-times]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes
+[terminate-process]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
