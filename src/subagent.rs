@@ -1652,10 +1652,10 @@ impl Drop for ChildFutureCleanup {
         self.runtime.spawn(async move {
             loop {
                 let result = state.dispose(true).await;
-                if !result
+                if result
                     .error
                     .as_ref()
-                    .is_some_and(|error| error.code == "AGENT_DISPOSE_FAILED")
+                    .is_none_or(|error| error.code != "AGENT_DISPOSE_FAILED")
                 {
                     break;
                 }
