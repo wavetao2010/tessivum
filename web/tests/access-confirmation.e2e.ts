@@ -5,9 +5,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, type Browser, type Page } from 'playwright-core'
+import { buildBinary } from './support'
 
-const CRATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..')
-const CARGO = process.env.CARGO_BIN ?? 'cargo'
 const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), 'snapshots/access-confirmation/ui.expected.yml')
 
 let browser: Browser
@@ -57,17 +56,12 @@ beforeAll(async () => {
     '  model: deepseek-v4-flash',
     '',
   ].join('\n'))
-  const build = Bun.spawn([CARGO, 'build', '--quiet', '--manifest-path', join(CRATE_ROOT, 'Cargo.toml'), '--bin', 'tessivum'], {
-    cwd: CRATE_ROOT,
-    stdout: 'inherit',
-    stderr: 'inherit',
-  })
-  expect(await build.exited).toBe(0)
+  const executable = await buildBinary()
 
   const port = await freePort()
   const baseUrl = `http://127.0.0.1:${port}`
   server = Bun.spawn([
-    join(CRATE_ROOT, 'target/debug/tessivum'), 'web', '--data-dir', join(workspace, '.tessivum'),
+    executable, 'web', '--data-dir', join(workspace, '.tessivum'),
   ], {
     cwd: workspace,
     env: { ...process.env, DEEPSEEK_API_KEY: 'test', TESSIVUM_WEB_ADDR: `127.0.0.1:${port}` },

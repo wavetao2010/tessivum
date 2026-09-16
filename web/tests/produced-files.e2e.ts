@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import { openSeededSession, RustWebHarness, waitUntil } from './support'
@@ -139,7 +139,14 @@ test('a completed write turn keeps a one-line ten-file summary and native folder
         showFolder.click({ clickCount: 1 }),
       ])
       expect(response.status()).toBe(200)
-      expect(opened?.payload).toEqual({ path: `${harness.workspace}/.` })
+      const openedPayload = opened?.payload
+      if (openedPayload === null || typeof openedPayload !== 'object' || Array.isArray(openedPayload)) {
+        throw new Error('host.openPath payload must be an object')
+      }
+      if (!('path' in openedPayload) || typeof openedPayload.path !== 'string' || Object.keys(openedPayload).length !== 1) {
+        throw new Error('host.openPath payload must contain exactly one path')
+      }
+      expect(await realpath(openedPayload.path)).toBe(await realpath(harness.workspace))
     } finally {
       await harness.page.unroute('**/api/host.openPath')
     }

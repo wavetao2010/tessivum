@@ -509,7 +509,10 @@ while True:
         open(marker, 'w').write('exited')
         break
 "#.replace("__MARKER__", &serde_json::to_string(&exited.to_string_lossy()).unwrap());
-    let mut config = StdioLspConfig::new("python3", workspace.path());
+    let mut config = StdioLspConfig::new(
+        if cfg!(windows) { "python" } else { "python3" },
+        workspace.path(),
+    );
     config.args = vec!["-u".into(), "-c".into(), script];
     config.request_timeout = Duration::from_secs(2);
     let provider = StdioLspProvider::spawn(config).await.unwrap();

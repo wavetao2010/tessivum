@@ -302,12 +302,7 @@ async fn disconnect_shuts_down_host_without_waiting_for_input() {
 
 #[test]
 fn typescript_and_python_clients_match_scripted_wire_snapshots() {
-    if Command::new("bun").arg("--version").output().is_err()
-        || Command::new("python3").arg("--version").output().is_err()
-        || Command::new("node").arg("--version").output().is_err()
-    {
-        return;
-    }
+    let python_program = if cfg!(windows) { "python" } else { "python3" };
 
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temporary = std::env::temp_dir().join(format!(
@@ -427,7 +422,7 @@ asyncio.run(run())
         "{}",
         String::from_utf8_lossy(&typescript.stderr)
     );
-    let python = Command::new("python3")
+    let python = Command::new(python_program)
         .arg(&python_driver)
         .output()
         .unwrap();

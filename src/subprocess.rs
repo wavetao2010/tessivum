@@ -415,7 +415,7 @@ impl WindowsJob {
 
     pub(crate) async fn cleanup_process_tree(self) -> std::io::Result<()> {
         let state = Arc::clone(&self.inner);
-        match tokio::task::spawn_blocking(move || cleanup_windows_process_tree(&self.inner)).await {
+        match tokio::task::spawn_blocking(move || self.cleanup_process_tree_blocking()).await {
             Ok(result) => result,
             Err(error) => {
                 let task_error = blocking_task_error("Windows process-tree cleanup", error);
@@ -431,39 +431,9 @@ impl WindowsJob {
         }
     }
 
-    /// Fences permission teardown against asynchronous Job termination.
-    pub(crate) fn wait_for_exit(&self) -> std::io::Result<()> {
-        use windows_sys::Win32::System::JobObjects::{
-            JobObjectBasicAccountingInformation, QueryInformationJobObject,
-            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        };
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-            if unsafe {
-                QueryInformationJobObject(
-                    self.inner.job.as_raw_handle() as _,
-                    JobObjectBasicAccountingInformation,
-                    std::ptr::from_mut(&mut info).cast(),
-                    std::mem::size_of_val(&info) as u32,
-                    std::ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            if info.ActiveProcesses == 0 {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Windows Job processes did not exit after termination",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+    /// Fences synchronous runners before they revoke grants or remove private temp.
+    pub(crate) fn cleanup_process_tree_blocking(self) -> std::io::Result<()> {
+        cleanup_windows_process_tree(&self.inner)
     }
 }
 
@@ -678,14 +648,19 @@ fn validate_candidate_parent(
     capture: &WindowsCaptureState,
     parent_pid: u32,
     child_creation_time: u64,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let parents = std::iter::once(&state.root)
         .chain(capture.retained.values())
         .filter(|generation| generation.key.pid == parent_pid);
     let mut matched = false;
-    let mut last_mismatch = None;
     for parent in parents {
         let exit_time = parent_generation_exit_time(parent)?;
+        if exit_time.is_some_and(|exit| exit < parent.key.creation_time) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "owned parent exit time predates its creation time",
+            ));
+        }
         match validate_generation_edge(parent.key.creation_time, exit_time, child_creation_time) {
             Ok(()) if matched => {
                 return Err(std::io::Error::new(
@@ -694,19 +669,10 @@ fn validate_candidate_parent(
                 ));
             }
             Ok(()) => matched = true,
-            Err(error) => last_mismatch = Some(error),
+            Err(_) => {} // A disjoint lifetime proves this is an unrelated PID generation.
         }
     }
-    if matched {
-        Ok(())
-    } else {
-        Err(last_mismatch.unwrap_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("parent PID {parent_pid} is not an owned process generation"),
-            )
-        }))
-    }
+    Ok(matched)
 }
 
 #[cfg(windows)]
@@ -759,21 +725,19 @@ fn open_and_revalidate_process(
     expected_parent_pid: u32,
     state: &WindowsJobState,
     capture: &WindowsCaptureState,
-) -> std::io::Result<ProcessGeneration> {
+) -> std::io::Result<Option<ProcessGeneration>> {
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
 
     const SYNCHRONIZE: u32 = 0x0010_0000;
-    let process = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
-            0,
-            pid,
-        )
-    };
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
     if process.is_null() {
-        return Err(std::io::Error::last_os_error());
+        let error = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!("OpenProcess query PID {pid}: {error}"),
+        ));
     }
     // SAFETY: `OpenProcess` returned a new owned, non-null process handle.
     let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
@@ -803,13 +767,44 @@ fn open_and_revalidate_process(
             ),
         ));
     }
-    validate_candidate_parent(
+    if !validate_candidate_parent(
         state,
         capture,
         current_parent_pid,
         generation.key.creation_time,
-    )?;
-    Ok(generation)
+    )? {
+        return Ok(None);
+    }
+    if process_handle_signaled(&generation.handle)? {
+        return Ok(Some(generation));
+    }
+    let termination_handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if termination_handle.is_null() {
+        let error = std::io::Error::last_os_error();
+        if process_handle_signaled(&generation.handle)? {
+            return Ok(Some(generation));
+        }
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!("OpenProcess termination PID {pid}: {error}"),
+        ));
+    }
+    // SAFETY: OpenProcess returned a new handle, owned exclusively here.
+    let termination_handle = unsafe { OwnedHandle::from_raw_handle(termination_handle.cast()) };
+    let terminating = ProcessGeneration::from_owned_handle(termination_handle)?;
+    if terminating.key != generation.key {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "process generation changed while acquiring termination access",
+        ));
+    }
+    Ok(Some(terminating))
 }
 
 #[cfg(windows)]
@@ -873,12 +868,18 @@ fn discover_and_retain_processes(
             }
             let parent_pid = parents[&pid];
             match open_and_revalidate_process(pid, parent_pid, state, &capture) {
-                Ok(generation) => {
+                Ok(Some(generation)) => {
                     let key = generation.key;
                     if capture.retained.insert(key, generation).is_none() {
                         outcome.added += 1;
                     }
                     anchor_pids.insert(pid);
+                }
+                Ok(None) => {
+                    // Children of a proven foreign generation are also outside our ownership.
+                    candidates.retain(|candidate| {
+                        !process_reaches_owned_anchor(*candidate, &parents, pid, &BTreeSet::new())
+                    });
                 }
                 Err(error) => preserve_first_error(&mut outcome.first_error, error),
             }
@@ -1068,9 +1069,19 @@ fn terminate_and_wait_retained_processes(
                 // SAFETY: the retained handle has PROCESS_TERMINATE access and remains owned.
                 if unsafe { TerminateProcess(generation.handle.as_raw_handle() as _, 1) } == 0 {
                     let termination_error = std::io::Error::last_os_error();
-                    let immediate_wait = wait_for_process_handle(&generation.handle, 0);
+                    // TerminateJobObject may have started kernel teardown without
+                    // signaling this handle yet. ERROR_ACCESS_DENIED is benign
+                    // only if that same process exits within our shared deadline.
+                    let wait_millis = if termination_error.raw_os_error()
+                        == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+                    {
+                        remaining_wait_millis(deadline).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let termination_wait = wait_for_process_handle(&generation.handle, wait_millis);
                     if let Some(error) =
-                        normalize_terminate_failure(termination_error, immediate_wait)
+                        normalize_terminate_failure(termination_error, termination_wait)
                     {
                         preserve_first_error(&mut first_error, error);
                     }

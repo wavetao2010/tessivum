@@ -8,7 +8,7 @@ const prompt = `Write a file named notes.txt in the workspace containing exactly
 
 function approvalReplay(text: string): string {
   const argumentsJson = JSON.stringify({
-    command: `echo '${text}' > notes.txt`,
+    command: `[System.IO.File]::WriteAllText('notes.txt', '${text}' + [char]10, [System.Text.UTF8Encoding]::new($false))`,
     description: 'Write notes.txt with the requested text',
     sandbox_permissions: 'workspace-write',
     justification: 'Need to write the file requested by the user.',

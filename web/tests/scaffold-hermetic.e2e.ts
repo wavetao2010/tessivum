@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { RustWebHarness } from './support'
 
 let harness: RustWebHarness
@@ -36,7 +36,15 @@ afterAll(async () => {
 })
 
 test('isolates Web skill discovery from every ambient host root', async () => {
-  const session = (await harness.sessions()).find(item => item.cwd === harness.workspace)
+  const workspaces = await harness.rpc<{
+    items: Array<{ path: string; sessionIds: string[] }>
+  }>('workspace.list')
+  if (!workspaces.ok || workspaces.value === undefined) {
+    throw new Error(`workspace.list failed: ${JSON.stringify(workspaces.error)}`)
+  }
+  const workspace = workspaces.value.items.find(item => item.path === toNamespacedPath(harness.workspace))
+  if (workspace === undefined) throw new Error('native host did not create the expected workspace')
+  const session = (await harness.sessions()).find(item => workspace.sessionIds.includes(item.sessionId))
   if (session === undefined) throw new Error('native host created no workspace session')
   const result = await harness.rpc<{ skills: Array<{ name: string }> }>('skill.list', { sessionId: session.sessionId })
   expect(result.ok).toBe(true)

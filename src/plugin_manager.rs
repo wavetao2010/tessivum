@@ -2493,7 +2493,7 @@ fn repaired_plugin_root(
         uuid::Uuid::new_v4()
     ));
     let result = (|| {
-        copy_package_tree(root, &temporary)?;
+        copy_package_tree(root, &temporary, true)?;
         let repaired_entry = temporary.join("lib/index.js");
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -2660,16 +2660,41 @@ fn validate_sidebar_repair(
     Ok(())
 }
 
-fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), PluginManagerError> {
+fn copy_package_tree(
+    source: &Path,
+    destination: &Path,
+    copy_dependencies: bool,
+) -> Result<(), PluginManagerError> {
     fs::create_dir(destination).map_err(|error| io_error(destination, error))?;
     for entry in fs::read_dir(source).map_err(|error| io_error(source, error))? {
         let entry = entry.map_err(|error| io_error(source, error))?;
+        if !copy_dependencies && entry.file_name() == "node_modules" {
+            // Vendor development links are not runtime payload. Runtime aliases
+            // are installed together in the profile's own node_modules.
+            continue;
+        }
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata =
             fs::symlink_metadata(&source_path).map_err(|error| io_error(&source_path, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(PluginManagerError::Invalid(format!(
+                "package contains a symbolic link: {}",
+                source_path.display()
+            )));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(PluginManagerError::Invalid(format!(
+                    "package contains a reparse point: {}",
+                    source_path.display()
+                )));
+            }
+        }
         if metadata.is_dir() {
-            copy_package_tree(&source_path, &destination_path)?;
+            copy_package_tree(&source_path, &destination_path, copy_dependencies)?;
         } else if metadata.is_file() {
             fs::copy(&source_path, &destination_path)
                 .map_err(|error| io_error(&destination_path, error))?;
@@ -3483,19 +3508,21 @@ fn install_vendor_aliases(profile: &Path, vendor: &Path) -> Result<(), PluginMan
         }
         fs::create_dir_all(alias.parent().expect("module aliases have a parent"))
             .map_err(|error| io_error(&alias, error))?;
-        symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
+        install_module_alias(&source, &alias)?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(source, alias)
+fn install_module_alias(source: &Path, alias: &Path) -> Result<(), PluginManagerError> {
+    std::os::unix::fs::symlink(source, alias).map_err(|error| io_error(alias, error))
 }
 
 #[cfg(windows)]
-fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(source, alias)
+fn install_module_alias(source: &Path, alias: &Path) -> Result<(), PluginManagerError> {
+    // Ordinary Windows users cannot create symlinks. The packaged runtime uses
+    // the same real-directory layout, without enabling Developer Mode.
+    copy_package_tree(source, alias, false)
 }
 
 fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), PluginManagerError> {
@@ -3534,7 +3561,7 @@ fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), Plugin
         }
         fs::create_dir_all(alias.parent().expect("scoped alias has a parent"))
             .map_err(|error| io_error(&alias, error))?;
-        symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
+        install_module_alias(&source, &alias)?;
     }
     Ok(())
 }

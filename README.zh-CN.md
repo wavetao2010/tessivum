@@ -39,7 +39,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 Alpha.27 已发布。四个平台归档与第一方市场包均已下载并通过 SHA-256 校验，四个原生发行 runner 的包内检查通过；macOS Apple Silicon 新装、从 Alpha.26 升级、Browser 历史恢复、图片提示和卸载后历史逐字节不变均通过。已验证的 Homebrew Formula 已发布。详见[发行证据](docs/DEVELOPMENT_PLAN.md#42-当前版本alpha27-两项补丁已发布)。
 
-现有安装器**并非只能用于 macOS**：它会自动识别 macOS/Linux 的 x86_64 与 ARM64。Windows 原生版本尚未通过发布构建、归档、启动器、插件、Browser、升级和进程清理门槛。Windows 用户可以暂时在 WSL2 内运行 Linux 包，但这条路径尚未经过发布验证；Linux `.tar.gz` 不能直接作为 Windows 原生程序运行。
+`install.sh` 支持 macOS/Linux 的 x86_64 与 ARM64。本源码树另有原生 Windows x86_64 ZIP 发行流程与独立的 `install.ps1`，但这些改动**尚未作为 Alpha.27 资产发布**。Linux 归档不能直接作为 Windows 原生程序运行；Windows ARM64 不在本次发行目标内。
 
 ### Homebrew——macOS 或 Linux
 
@@ -84,6 +84,27 @@ tar -xzf "tessivum-$version-$target.tar.gz"
 
 macOS 请选择 `apple-darwin` target，并将 `sha256sum -c` 替换为 `shasum -a 256 -c`。
 
+### 原生 Windows x86_64——尚未发布的源码候选版
+
+**仅为检查点：**完整 Windows 验收、无 Node 的 PTC 发行 smoke、安装器故障边界测试尚未全部通过，请勿用此安装器进行正式升级。详见[实测结果与四项遗留阻塞](docs/WINDOWS_CHECKPOINT_20260916.md)。
+
+Windows ZIP 包含静态 CRT 的 MSVC 可执行文件、`tessivum.cmd`/`tsv.cmd` 启动器，以及兼容宿主、Cordis 和市场资源。不需要 WSL、管理员权限、开发者模式或单独安装 VC++ 运行库。使用 Web/插件前另行安装 Bun `1.4.0` 和 pnpm `11.7.0`。归档尚未做代码签名。
+
+本地生成到 `dist` 的 ZIP，应先验证相邻校验和再解压：
+
+```powershell
+$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.27-x86_64-pc-windows-msvc.zip).Path
+$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -ne "$hash  $(Split-Path $archive -Leaf)") {
+    throw 'Windows archive checksum mismatch'
+}
+Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
+& .\windows-release\tessivum-0.1.0-alpha.27-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
+& .\windows-release\tessivum-0.1.0-alpha.27-x86_64-pc-windows-msvc\bin\tessivum.cmd web
+```
+
+匹配的 Windows 版本发布后，`powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` 会安装到 `%LOCALAPPDATA%\Tessivum\versions`，并在 `%LOCALAPPDATA%\Tessivum\bin` 创建受管启动器。安装器在切换版本前验证 ZIP 与启动器，支持升级、降级和回滚，仅修改用户级 PATH。`-Uninstall` 只移除受管安装文件和安装器拥有的 PATH 项，保留应用历史与设置。当前已发布的 Alpha.27 没有 Windows 资产，不能据此直接联网安装。
+
 ### 从源码运行
 
 源码构建需要带 `rustfmt`、`clippy` 的 Rust stable、Bun 1.3.14+、pnpm 10+、Git，以及访问固定依赖的网络。
@@ -94,7 +115,7 @@ cd tessivum
 cargo run --release -- web
 ```
 
-Windows 原生源码构建目前没有经过发布测试，因此不属于受支持安装路径。
+原生 Windows 的源码前置条件、普通用户及中文空格路径验收流程，见 [Windows 源码测试](docs/WINDOWS_SOURCE_TEST.md)。源码测试、本地 ZIP 验证和已发布版本验证是不同层次的证据。
 
 ## 启动
 

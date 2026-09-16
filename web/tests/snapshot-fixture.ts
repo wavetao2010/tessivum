@@ -61,7 +61,7 @@ function snapshotRecording(attachment: Record<string, unknown>): string {
   append('step/end', { turn: 1, step: 0 })
   append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
-  toolTurn(2, 'bash', { command: 'pnpm run check', cwd: '/tmp/fixture/deep/nested' }, 'Running checks\n1 of 4 checks failed')
+  toolTurn(2, 'bash', { command: 'pnpm run check', cwd: '{{cwd}}' }, 'Running checks\n1 of 4 checks failed')
   const searchFiles = [
     { path: 'packages/client/ui-primitives/src/SearchBlock.tsx', matches: [
       { lineNumber: 16, line: 'export const DEFAULT_SEARCH_MAX_LINES = 16' },

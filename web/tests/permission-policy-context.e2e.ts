@@ -1,5 +1,5 @@
 import { readFile, readdir, realpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { expect, test } from 'bun:test'
 import { RustWebHarness } from './support'
 
@@ -124,7 +124,7 @@ test('switches read-only, danger-full-access, and workspace-write through the re
     expect(contexts[1]).toMatch(/Tessivum[\s\S]*danger-full-access/)
     expect(contexts[1]).toContain('Approval policy: never.')
     expect(contexts[1]).toMatch(/capability file tools remain workspace-confined[\s\S]*danger-full-access/)
-    const workspace = await realpath(harness.workspace)
+    const workspace = toNamespacedPath(await realpath(harness.workspace))
     expect(contexts[2]).toContain(JSON.stringify(workspace))
     expect(contexts[2]).toMatch(/Tessivum[\s\S]*workspace-write/)
     expect(contexts[2]).toContain('Approval policy: ask.')

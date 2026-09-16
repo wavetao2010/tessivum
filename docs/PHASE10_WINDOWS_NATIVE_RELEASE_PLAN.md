@@ -1,11 +1,12 @@
 # Tessivum Phase 10 Windows 原生发行开发计划
 
-> 状态：实施中（Milestone 10-B 已实现，Windows 原生安全验收进行中；10-C/D/E 尚未完成）
+> 状态：2026-09-16 检查点。原生 Rust 全量、ZIP 与真实包内 Web/市场、Remote Access 已有本机通过证据；完整 Browser、无 Node PTC 发行 smoke、安装器故障边界仍有阻塞。按用户要求登记后暂缓，不作为正式发布。
 > 计划日期：2026-09-04
 > Tessivum 起点：`v0.1.0-alpha.23` / `4674aeda870989fede1fc79fb07afbe764d3a1eb`
 > 产品 Core pin：`tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 首个正式目标：Windows 11 x86-64 / `x86_64-pc-windows-msvc`
+> 最新证据与未解决项：[Windows 检查点报告](WINDOWS_CHECKPOINT_20260916.md)。下文起点事实和旧验收记录保留为历史，不代表当前全部实现状态。
 
 ## 1. 目标
 

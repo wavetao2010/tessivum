@@ -3209,16 +3209,34 @@ async fn unary_routes_are_allowlisted_strict_and_stably_enveloped() {
         false
     );
 
-    let oversized = client
-        .post(format!("{base}/api/session/status"))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(vec![b'x'; MAX_FRAME_BYTES + 1])
-        .send()
+    // Reject from the headers before uploading the body. Sending a rejected body
+    // concurrently races the HTTP response with an unread-data TCP reset on Windows.
+    let mut oversized = TcpStream::connect(server.local_addr())
         .await
-        .expect("oversized response");
-    assert_eq!(oversized.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        .expect("oversized HTTP connects");
+    oversized
+        .write_all(
+            format!(
+                "POST /api/session/status HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+                server.local_addr(),
+                MAX_FRAME_BYTES + 1,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("oversized headers write");
+    let mut rejected = String::new();
+    timeout(
+        Duration::from_secs(5),
+        oversized.read_to_string(&mut rejected),
+    )
+    .await
+    .expect("oversized request rejects without its body")
+    .expect("oversized response reads");
+    let (headers, body) = rejected.split_once("\r\n\r\n").expect("HTTP response");
+    assert!(headers.starts_with("HTTP/1.1 413 "), "{headers}");
     assert_eq!(
-        oversized.json::<Value>().await.expect("oversized JSON")["error"]["code"],
+        serde_json::from_str::<Value>(body).expect("oversized JSON")["error"]["code"],
         "PAYLOAD_TOO_LARGE"
     );
 

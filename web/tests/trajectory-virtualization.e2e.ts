@@ -19,7 +19,7 @@ function streamingReplay(): string {
     { type: 'finish', reason: { kind: 'stop' } },
   ]
   return [
-    { type: 'session', version: 0, id: 'trajectory-virtualization-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'trajectory-virtualization-replay', createdAt: 0 },
     ...chunks.map((chunk, seq) => ({ type: 'assistant/chunk', seq, time: 0, data: { turn: 1, step: 1, chunk } })),
   ].map(row => JSON.stringify(row)).join('\n')
 }

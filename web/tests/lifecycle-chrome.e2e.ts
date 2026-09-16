@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, waitUntil } from './support'
 
@@ -148,7 +148,18 @@ describe('lifecycle chrome over RustWebHarness', () => {
     )
     await waitUntil(() => harness.page.locator('[role="treeitem"][aria-selected="true"]').count(), count => count === 1, 10_000)
     await waitUntil(() => harness.page.getByText('LIGHTHOUSE', { exact: true }).count(), count => count >= 1, 15_000)
-    expect((await harness.sessions()).filter(session => !session.blank).map(session => session.cwd)).toEqual([harness.workspace])
+    const sessions = (await harness.sessions()).filter(session => !session.blank)
+    expect(sessions.map(session => session.sessionId)).toEqual([sessionId])
+    expect(sessions[0]?.cwd).toBe(toNamespacedPath(harness.workspace))
+    const workspaces = await harness.rpc<{
+      items: Array<{ path: string; sessionIds: string[] }>
+    }>('workspace.list')
+    if (!workspaces.ok || workspaces.value === undefined) {
+      throw new Error(`workspace.list failed: ${JSON.stringify(workspaces.error)}`)
+    }
+    const workspace = workspaces.value.items.find(item => item.sessionIds.includes(sessionId))
+    if (workspace === undefined) throw new Error('materialized session has no workspace membership')
+    expect(workspace.path).toBe(toNamespacedPath(harness.workspace))
     const turnEnds = (await sessionEvents(sessionId)).filter(event => event.type === 'turn/end')
     expect(turnEnds).toHaveLength(1)
     expect(turnEnds[0]?.data?.reason?.kind).toBe('completed')

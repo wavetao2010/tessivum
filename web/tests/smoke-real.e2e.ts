@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { join } from 'node:path'
 import { RustWebHarness } from './support'
 
 const WORKSPACE_INSTRUCTION = 'SMOKE_REAL_WORKSPACE_CONTEXT must reach the model request.'
@@ -25,7 +26,7 @@ function replayRecording(marker: string, requiredRequest?: string): string {
     { type: 'finish', reason: { kind: 'stop' } },
   ]
   return [
-    { type: 'session', version: 0, id: `smoke-real-${marker}`, createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: `smoke-real-${marker}`, createdAt: 0 },
     ...chunks.map((chunk, seq) => ({ type: 'assistant/chunk', seq, time: 0, data: { turn: 1, step: 1, chunk } })),
   ].map(row => JSON.stringify(row)).join('\n')
 }
@@ -107,7 +108,7 @@ test('the loopback Web host completes a conversation and retains the live surfac
     name: 'smoke-real-web-e2e',
     replayRecording: replayRecording(ROUND, WORKSPACE_INSTRUCTION),
     viewport: { width: 1680, height: 1000 },
-    beforeStart: async candidate => { await Bun.write(`${candidate.workspace}/AGENTS.md`, `${WORKSPACE_INSTRUCTION}\n`) },
+    beforeStart: async candidate => { await Bun.write(join(candidate.workspace, 'AGENTS.md'), `${WORKSPACE_INSTRUCTION}\n`) },
   })
   try {
     expect(harness.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)

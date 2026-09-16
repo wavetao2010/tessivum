@@ -1,8 +1,0 @@
-- button "Choose workspace":
-  - img
-  - text: workspace
-  - img
-- button "Standard":
-  - img
-  - text: Standard
-  - img

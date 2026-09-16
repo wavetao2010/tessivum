@@ -39,7 +39,7 @@ Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exac
 
 Alpha.27 is published. All four archives and the first-party market package passed downloaded SHA-256 verification; native package smokes passed on all four release runners. macOS Apple Silicon clean installation, Alpha.26 upgrade, Browser history restoration, image guidance, and uninstall retaining byte-identical history passed. The verified Homebrew Formula is published. See [release evidence](docs/DEVELOPMENT_PLAN.md#42-当前版本alpha27-两项补丁已发布).
 
-The existing installer is **not macOS-only**: it detects both macOS and Linux on x86_64/ARM64. Native Windows has not passed the release build, archive, launcher, plugin, Browser, upgrade, or process-cleanup gates. Windows users can run the Linux package inside WSL2 as an unverified workaround; a Linux archive is not a native Windows executable.
+`install.sh` supports macOS and Linux on x86_64/ARM64. This source tree also contains a native Windows x86_64 ZIP pipeline and a separate `install.ps1`; these changes are **not published Alpha.27 assets**. A Linux archive is not a native Windows executable, and Windows ARM64 is not a release target.
 
 ### Homebrew — macOS or Linux
 
@@ -84,6 +84,27 @@ tar -xzf "tessivum-$version-$target.tar.gz"
 
 On macOS, select an `apple-darwin` target and replace `sha256sum -c` with `shasum -a 256 -c`.
 
+### Native Windows x86_64 — unpublished source candidate
+
+**Checkpoint only:** full Windows acceptance, the no-Node PTC release smoke, and installer fault-boundary tests are not green. Do not use this installer for production upgrades. See the [verified results and four tracked blockers](docs/WINDOWS_CHECKPOINT_20260916.md).
+
+The Windows ZIP contains a static-CRT MSVC executable, `tessivum.cmd`/`tsv.cmd`, and the packaged compatibility, Cordis, and market assets. It does not require WSL, elevation, Developer Mode, or a separate VC++ runtime installation. Install Bun `1.4.0` and pnpm `11.7.0` separately for Web/plugin use. The archive is not code-signed.
+
+For a ZIP generated locally into `dist`, verify its adjacent checksum before extraction:
+
+```powershell
+$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.27-x86_64-pc-windows-msvc.zip).Path
+$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -ne "$hash  $(Split-Path $archive -Leaf)") {
+    throw 'Windows archive checksum mismatch'
+}
+Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
+& .\windows-release\tessivum-0.1.0-alpha.27-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
+& .\windows-release\tessivum-0.1.0-alpha.27-x86_64-pc-windows-msvc\bin\tessivum.cmd web
+```
+
+After a matching Windows release is published, `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` installs under `%LOCALAPPDATA%\Tessivum\versions`, with owned launchers in `%LOCALAPPDATA%\Tessivum\bin`. It verifies the ZIP and launchers before activation, supports upgrade/downgrade and rollback, and changes only the User PATH. `-Uninstall` removes managed installation files and only installer-owned PATH entries; application history and settings are retained. Do not point the installer at the existing Alpha.27 release expecting a Windows asset.
+
 ### Build from source
 
 Source builds require Rust stable with `rustfmt` and `clippy`, Bun 1.3.14+, pnpm 10+, Git, and network access to the pinned dependencies.
@@ -94,7 +115,7 @@ cd tessivum
 cargo run --release -- web
 ```
 
-Native Windows source builds are not currently release-tested or supported.
+For native Windows source prerequisites and the ordinary-user, Chinese-and-space-path acceptance procedure, see [Windows source testing](docs/WINDOWS_SOURCE_TEST.md). Source-test results, local ZIP validation, and published-release validation are separate evidence.
 
 ## Start
 

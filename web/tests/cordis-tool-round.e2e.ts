@@ -43,7 +43,7 @@ function replayRecording(): string {
   ]
   let seq = 0
   const rows: unknown[] = [
-    { type: 'session', version: 0, id: 'composition-mode-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'composition-mode-replay', createdAt: 0 },
   ]
   for (const [index, call] of calls.entries()) {
     const id = `composition-${index + 1}`

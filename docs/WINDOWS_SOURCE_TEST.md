@@ -35,6 +35,11 @@ The failed run used Windows 11 25H2 build 26200, PowerShell 7.6.4, Git
 executable path, and difference. Do not force or downgrade unrelated
 tools merely to reproduce those patch versions.
 
+Windows compilation uses `--jobs 1` to bound compiler/linker memory peaks.
+Keep sufficient free space for debug symbols; set `CARGO_TARGET_DIR` to an
+NTFS volume with sufficient capacity when the system drive is nearly full.
+This changes build scheduling only, not Rust test concurrency or coverage.
+
 ## Command groups 1–15
 
 Save the block as `windows-source-test.ps1` outside the checkout and run it from PowerShell 7.4+:
@@ -244,13 +249,13 @@ try {
   "Group 09 exit=$LASTEXITCODE; file-symlink capability outcome is in this transcript"
   # 10
   Set-Location $Repo
-  cargo check --all-targets --locked
+  cargo check --jobs 1 --all-targets --locked
   "Group 10 exit=$LASTEXITCODE"
   # 11
-  cargo clippy --all-targets --locked -- -D warnings
+  cargo clippy --jobs 1 --all-targets --locked -- -D warnings
   "Group 11 exit=$LASTEXITCODE"
   # 12
-  cargo test --all-targets --locked
+  cargo test --jobs 1 --all-targets --locked
   "Group 12 exit=$LASTEXITCODE"
   # 13
   Set-Location "$Repo\web"
@@ -260,7 +265,7 @@ try {
   # 14: first real Agent round trip.
   Set-Location $Repo
   $state = Join-Path $env:TEMP ("tessivum-windows-" + [guid]::NewGuid())
-  $first = @(& cargo run --locked -- --session windows-smoke --data-dir $state `
+  $first = @(& cargo run --jobs 1 --locked -- --session windows-smoke --data-dir $state `
     --replay fixtures/headless/recorded-replay.jsonl --trusted-bash 'prove the CLI tool round trip')
   $first | Tee-Object -FilePath (Join-Path $Evidence 'agent-first.stdout.txt')
   if ($first.Count -ne 1 -or $first[0] -ne 'CLI tool round trip complete: CLI_TOOL_ROUND_TRIP') {
@@ -273,7 +278,7 @@ try {
   "Group 14 exit=$LASTEXITCODE"
 
   # 15: same state and Session; existing bytes must remain an exact prefix.
-  $resumed = @(& cargo run --locked -- --session windows-smoke --data-dir $state `
+  $resumed = @(& cargo run --jobs 1 --locked -- --session windows-smoke --data-dir $state `
     --replay fixtures/headless/recorded-replay.jsonl --trusted-bash --resume `
     'prove the CLI tool round trip')
   $resumed | Tee-Object -FilePath (Join-Path $Evidence 'agent-resume.stdout.txt')
@@ -329,7 +334,7 @@ Set-Location $Repo
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 Start-Transcript -Path (Join-Path $Evidence 'group-16-web.log')
-cargo run --release -- web
+cargo run --jobs 1 --release -- web
 ```
 
 While it listens, terminal B must receive HTTP 200 from `http://127.0.0.1:3000`, open the

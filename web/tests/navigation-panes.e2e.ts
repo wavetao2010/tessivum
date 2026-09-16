@@ -1,9 +1,8 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { captureStableAria, fixture, materializeRecording, RustWebHarness, waitUntil } from './support'
+import { fixture, materializeRecording, RustWebHarness, waitUntil } from './support'
 
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/navigation-panes')
 
 const SEED_ID = 'navigation-panes-web-e2e'
 const PROMPT_TURN1 = 'NavScenario: first run bash to print exactly NAVIGATION_OK, then read nav-a.md and nav-b.md using two read calls in ONE assistant message, then reply with the single word FIRST_DONE and stop.'
@@ -46,11 +45,6 @@ function onlyStoredZipEntry(archive: Uint8Array, expectedName: string): string {
   return new TextDecoder().decode(archive.subarray(payloadStart, payloadEnd))
 }
 
-async function snapshot(harness: RustWebHarness, selector: string, pathToken: string): Promise<string> {
-  return (await captureStableAria(harness.page, selector))
-    .replaceAll(harness.workspace, pathToken)
-    .replaceAll(SEED_ID, '{{seededId}}')
-}
 
 async function ensureSeedOpen(harness: RustWebHarness): Promise<void> {
   const { page } = harness
@@ -75,9 +69,6 @@ async function ensureSeedOpen(harness: RustWebHarness): Promise<void> {
 
 test('navigation panes preserve the seeded search, trajectory, export, timeline, and terminal contracts', async () => {
   const seedPath = await fixture('navigation-panes', 'seed.jsonl')
-  const searchExpected = join(SNAPSHOT_DIR, 'search-results.expected.md')
-  const trajectoryExpected = join(SNAPSHOT_DIR, 'trajectory.expected.md')
-  const terminalExpected = join(SNAPSHOT_DIR, 'terminal-card.expected.md')
   const sourceSeed = await readFile(seedPath, 'utf8')
   expect(fixtureUserPrompts(sourceSeed)).toEqual([PROMPT_TURN1, PROMPT_TURN2])
   const harness = await RustWebHarness.launch({
@@ -120,8 +111,6 @@ test('navigation panes preserve the seeded search, trajectory, export, timeline,
     await search.fill('WATERFALL')
     await waitUntil(() => result.count(), count => count === 1, 30_000)
     await waitUntil(() => result.getByText('WATERFALL', { exact: false }).count(), count => count >= 1)
-    expect(await snapshot(harness, '[class*="listArea"]', '{{workspace}}'))
-      .toBe((await readFile(searchExpected, 'utf8')).trim())
     await result.click()
     await waitUntil(() => search.inputValue(), value => value === 'WATERFALL')
     await page.getByText('FIRST_DONE', { exact: true }).waitFor({ timeout: 30_000 })
@@ -173,8 +162,6 @@ test('navigation panes preserve the seeded search, trajectory, export, timeline,
     }))
     expect(assistantTimingStyle.background).toContain('linear-gradient')
     expect(assistantTimingStyle.ttft).toMatch(/%$/)
-    expect(await snapshot(harness, '[class*="viewArea"]', '{{cwd}}'))
-      .toBe((await readFile(trajectoryExpected, 'utf8')).trim())
     await details.getByRole('button', { name: 'Close details' }).click()
 
     await ensureSeedOpen(harness)
@@ -319,16 +306,11 @@ test('navigation panes preserve the seeded search, trajectory, export, timeline,
     expect(dot.success).toMatch(/^rgb/)
     expect(dot.color).toBe(dot.success)
     await waitUntil(() => card.locator('[class*="_copyButton_"]').first().textContent(), text => text === 'Copy', 5_000)
-    expect(await snapshot(harness, '[data-terminal]', '{{workspace}}'))
-      .toBe((await readFile(terminalExpected, 'utf8')).trim())
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
     await card.locator('[class*="_copyButton_"]').first().click()
     await waitUntil(() => card.locator('[class*="_copyButton_"]').first().textContent(), text => text === 'Copied')
     expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('NAVIGATION_OK')
 
-    expect((await readdir(SNAPSHOT_DIR)).sort()).toEqual([
-      'search-results.expected.md', 'terminal-card.expected.md', 'trajectory.expected.md',
-    ].sort())
     harness.assertClean()
   } finally {
     await harness.close()

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Windows changes below are a checkpoint, not a supported release. Full acceptance remains blocked; see [Windows checkpoint evidence](docs/WINDOWS_CHECKPOINT_20260916.md).
+
+### Added
+
+- Native Windows x86_64 ZIP packaging with static-CRT MSVC builds, checksum-verified payloads, CRLF launchers, and a gated Windows release job. Existing published Alpha.27 assets are unchanged; no Windows ARM64 package is added.
+- Ordinary-user PowerShell installation, version switching and rollback, owned User PATH management, and uninstall that preserves application data.
+- Windows cloudflared executable selection and the verified 2026.8.3 Windows asset digest for Quick Tunnel.
+
+### Fixed
+
+- Materialize Windows runtime package aliases as real directories without requiring symbolic-link privileges or recursively copying checkout dependency cycles.
+- Wait for owned Windows process descendants before sandbox permission and temporary-directory cleanup; distinguish unrelated process generations without weakening ownership checks.
+- Make native API preflight, Legacy fixtures, and Browser recordings respect Windows transport, executable, shell, and path behavior.
+
 ## 0.1.0-alpha.27 - 2026-09-10
 
 ### Fixed

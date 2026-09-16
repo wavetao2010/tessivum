@@ -612,7 +612,7 @@ def main() -> int:
     check_windows_ci_prerequisite_order(ci_workflow, failures)
     check(ci_workflow.count(f"ref: {CORE_SHA}") == 3,
           "CI tessivum-core checkout revision changed", failures)
-    check(release_workflow.count(f"ref: {CORE_SHA}") == 1,
+    check(release_workflow.count(f"ref: {CORE_SHA}") == 2,
           "release tessivum-core checkout revision changed", failures)
     harness_package = (UPSTREAM / "package.json").read_text(encoding="utf-8")
     check(f'"version": "{HARNESS_VERSION}"' in harness_package,
