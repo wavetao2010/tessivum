@@ -28,7 +28,16 @@ function responseStream(): string {
 }
 
 test('paginated refresh restores selected old history and a persisted uploaded image', async () => {
-  const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(responseStream(), { headers: { 'content-type': 'text/event-stream' } }) })
+  const requests: unknown[] = []
+  const provider = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      if (new URL(request.url).pathname !== '/v1/responses') return new Response(null, { status: 404 })
+      requests.push(await request.json())
+      return new Response(responseStream(), { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
   const harness = await RustWebHarness.launch({
     name: 'history-recovery-web-e2e', locale: 'en-US',
     env: { HISTORY_IMAGE_KEY: 'fixture-image-key', DEEPSEEK_API_KEY: '' },
@@ -56,13 +65,24 @@ test('paginated refresh restores selected old history and a persisted uploaded i
     acknowledgeReloadConnectionLoss(harness, warningStart)
     await harness.page.getByText(HISTORY_MARKER, { exact: true }).waitFor({ timeout: 30_000 })
 
+    const pendingImages = harness.page.getByRole('group', { name: 'Pending images' })
     await harness.page.locator('input[type="file"]').setInputFiles({ name: 'persisted.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') })
-    await harness.page.locator('textarea').first().fill('Persist this image')
+    await waitUntil(() => pendingImages.locator('img[alt="persisted.png"]').count(), count => count === 1)
+    await harness.page.locator('textarea:enabled').last().fill('Persist this image')
     await harness.page.getByRole('button', { name: 'Select model', exact: true }).click()
     await harness.page.getByRole('menuitem', { name: /Model/ }).click()
     await harness.page.getByRole('menuitemradio', { name: 'Vision Model' }).click()
+    const selected = await waitUntil(
+      () => harness.rpc<{ current: { provider: string; model: string } | null }>('session.models', { sessionId: SELECTED_ID }),
+      response => response.ok
+        && response.value?.current?.provider === 'history-image'
+        && response.value?.current?.model === 'vision-model',
+    )
+    expect(selected.value?.current).toEqual({ provider: 'history-image', model: 'vision-model' })
     await harness.page.getByRole('button', { name: 'Send message', exact: true }).click()
     await harness.page.getByText(IMAGE_MARKER, { exact: true }).waitFor({ timeout: 30_000 })
+    expect(requests).toHaveLength(1)
+    expect(JSON.stringify(requests)).toContain(`data:image/png;base64,${PNG_BASE64}`)
 
     warningStart = harness.warnings.length
     await harness.page.reload({ waitUntil: 'domcontentloaded' })

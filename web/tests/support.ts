@@ -13,7 +13,7 @@ export const CRATE_ROOT = join(HERE, '../..')
 export const UPSTREAM_ROOT = process.env.TESSIVUM_DEEPSEEK_SOURCE ?? join(CRATE_ROOT, '../upstream/deepseek-harness')
 export const UPSTREAM_TESTS = join(UPSTREAM_ROOT, 'apps/web/tests')
 const CARGO = process.env.CARGO_BIN ?? 'cargo'
-let build: Promise<void> | undefined
+let build: Promise<string> | undefined
 
 export interface RpcResult<T> {
   ok: boolean
@@ -34,6 +34,7 @@ export interface SessionListItem {
 export interface RustWebOptions {
   name: string
   agentMode?: 'standard' | 'ptc' | 'minimal' | 'composition'
+  settingsFile?: string
   locale?: string
   remoteAuthority?: string
   timeZoneId?: string
@@ -49,16 +50,26 @@ export interface RustWebOptions {
   browser?: Browser
 }
 
-async function buildBinary(): Promise<void> {
+export async function buildBinary(): Promise<string> {
+  if (process.env.TESSIVUM_TEST_BINARY !== undefined) return process.env.TESSIVUM_TEST_BINARY
   if (build === undefined) {
     build = (async () => {
       const child = Bun.spawn([
-        CARGO, 'build', '--quiet', '--manifest-path', join(CRATE_ROOT, 'Cargo.toml'), '--bin', 'tessivum',
-      ], { cwd: CRATE_ROOT, stdout: 'inherit', stderr: 'inherit' })
+        CARGO, 'build', '--locked', '--message-format=json', '--manifest-path', join(CRATE_ROOT, 'Cargo.toml'), '--bin', 'tessivum',
+        ...(process.platform === 'win32' ? ['--jobs', '1'] : []),
+      ], { cwd: CRATE_ROOT, stdout: 'pipe', stderr: 'inherit' })
+      const output = await new Response(child.stdout).text()
       expect(await child.exited).toBe(0)
+      for (const line of output.trim().split('\n').reverse()) {
+        const message = JSON.parse(line)
+        if (message.reason === 'compiler-artifact' && message.target?.name === 'tessivum' && message.executable) {
+          return message.executable as string
+        }
+      }
+      throw new Error('Cargo did not report a Tessivum executable')
     })()
   }
-  await build
+  return build
 }
 
 async function freePort(): Promise<number> {
@@ -129,6 +140,59 @@ async function startRemoteProxy(port: number, backendPort: number, authority: st
   return proxy
 }
 
+interface SeedTokens {
+  sessionId: string
+  cwd: string
+  rpcId: string
+  system: string
+  tools: string
+}
+
+function replaceSeedTokens(value: string, tokens: SeedTokens): string {
+  return value
+    .replaceAll('{{sessionId}}', tokens.sessionId)
+    .replaceAll('{{cwd}}', tokens.cwd)
+    .replaceAll('{{rpcId}}', tokens.rpcId)
+    .replaceAll('{{system}}', tokens.system)
+    .replaceAll('{{tools}}', tokens.tools)
+}
+
+function materializeNestedSeedJson(value: string, tokens: SeedTokens): string {
+  const escapedTokens = { ...tokens, cwd: JSON.stringify(tokens.cwd).slice(1, -1) }
+  const materialized = replaceSeedTokens(value, escapedTokens)
+  try {
+    const nested = JSON.parse(materialized) as unknown
+    if (nested === null || typeof nested !== 'object') return materialized
+    return JSON.stringify(materializeSeedValue(nested, tokens))
+  } catch {
+    return materialized
+  }
+}
+
+function materializeSeedValue(value: unknown, tokens: SeedTokens): unknown {
+  if (typeof value === 'string') return replaceSeedTokens(value, tokens)
+  if (Array.isArray(value)) return value.map(entry => materializeSeedValue(entry, tokens))
+  if (value === null || typeof value !== 'object') return value
+  const materialized: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    materialized[replaceSeedTokens(key, tokens)] = (key === 'arguments' || key === 'argumentsDelta') && typeof entry === 'string'
+      ? materializeNestedSeedJson(entry, tokens)
+      : materializeSeedValue(entry, tokens)
+  }
+  return materialized
+}
+
+function materializeSeedRecording(recording: string, tokens: SeedTokens): string {
+  return recording.split('\n').map((line, index) => {
+    if (line === '') return line
+    try {
+      return JSON.stringify(materializeSeedValue(JSON.parse(line) as unknown, tokens))
+    } catch (error) {
+      throw new Error(`seed recording line ${index + 1} is not valid JSON: ${String(error)}`)
+    }
+  }).join('\n')
+}
+
 export class RustWebHarness {
   readonly root: string
   readonly workspace: string
@@ -140,6 +204,7 @@ export class RustWebHarness {
   browser!: Browser
   page!: Page
   private server!: Bun.Subprocess
+  private executable!: string
   private remoteProxy?: HttpsServer
   private ownsBrowser = true
 
@@ -151,11 +216,14 @@ export class RustWebHarness {
   }
 
   static async launch(options: RustWebOptions): Promise<RustWebHarness> {
-    await buildBinary()
+    const executable = await buildBinary()
+    // Drain closed Bun process resources before Windows can reuse their handles.
+    if (process.platform === 'win32') Bun.gc(true)
     const root = await realpath(await mkdtemp(join(tmpdir(), `tessivum-${options.name}-`)))
     const workspace = join(root, 'workspace')
     await mkdir(workspace)
     const harness = new RustWebHarness(root, workspace, await freePort())
+    harness.executable = executable
     const remotePort = options.remoteAuthority === undefined ? undefined : await freePort()
     const remoteAuthority = remotePort === undefined ? undefined : `${options.remoteAuthority}:${remotePort}`
     try {
@@ -193,8 +261,9 @@ export class RustWebHarness {
       }
       if (options.replayOverride !== undefined) env.TESSIVUM_REPLAY_OVERRIDE_FILE = options.replayOverride
       const command = [
-        join(CRATE_ROOT, 'target/debug/tessivum'), 'web', '--data-dir', harness.dataDir,
+        executable, 'web', '--data-dir', harness.dataDir,
       ]
+      if (options.settingsFile !== undefined) command.push('--settings-file', options.settingsFile)
       if (options.agentMode !== undefined) {
         const patch = join(root, 'agent-mode.yml')
         await writeFile(patch, `agent-presets:\n  default: ${options.agentMode}\n`)
@@ -363,12 +432,13 @@ export class RustWebHarness {
   }
   async seedSession(id: string, recording: string): Promise<void> {
     await mkdir(this.dataDir, { recursive: true })
-    const document = recording
-      .replaceAll('{{sessionId}}', id)
-      .replaceAll('{{cwd}}', this.workspace)
-      .replaceAll('{{rpcId}}', 'seed')
-      .replaceAll('{{system}}', '')
-      .replaceAll('{{tools}}', '[]')
+    const document = materializeSeedRecording(recording, {
+      sessionId: id,
+      cwd: this.workspace,
+      rpcId: 'seed',
+      system: '',
+      tools: '[]',
+    })
     const path = join(this.dataDir, `session-${Buffer.from(id).toString('hex')}.jsonl`)
     await writeFile(path, document.endsWith('\n') ? document : `${document}\n`)
     await chmod(path, 0o600)
@@ -379,6 +449,38 @@ export class RustWebHarness {
     expect(this.pageErrors).toEqual([])
     expect(this.httpErrors).toEqual([])
     expect(this.warnings).toEqual([])
+  }
+
+  private async closeRestartedWindowsHost(): Promise<void> {
+    const cleanup = Bun.spawn(['pwsh', '-NoProfile', '-Command', `
+$ErrorActionPreference = 'Stop'
+$listeners = @(Get-NetTCPConnection -State Listen -LocalPort $env:TESSIVUM_TEST_PORT -ErrorAction SilentlyContinue | Where-Object LocalAddress -eq '127.0.0.1')
+foreach ($listener in $listeners) {
+  try { $owned = [Diagnostics.Process]::GetProcessById($listener.OwningProcess) }
+  catch [ArgumentException] { continue }
+  try {
+    $null = $owned.SafeHandle
+    if ($owned.HasExited) { continue }
+    $record = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $owned.Id)
+    if ($owned.HasExited) { continue }
+    if ($owned.Path -ne $env:TESSIVUM_TEST_BINARY -or -not $record.CommandLine.Contains($env:TESSIVUM_TEST_DATA)) {
+      throw 'refusing to terminate an unrelated listener during Browser cleanup'
+    }
+    $owned.Kill($true)
+    if (-not $owned.WaitForExit(10000)) { throw 'restarted Browser Host did not exit' }
+  } finally { $owned.Dispose() }
+}
+`], {
+      env: {
+        ...process.env,
+        TESSIVUM_TEST_PORT: new URL(this.baseUrl).port,
+        TESSIVUM_TEST_BINARY: await realpath(this.executable),
+        TESSIVUM_TEST_DATA: this.dataDir,
+      },
+      stdout: 'ignore', stderr: 'pipe', timeout: 30_000,
+    })
+    const [code, error] = await Promise.all([cleanup.exited, new Response(cleanup.stderr).text()])
+    if (code !== 0) throw new Error(`restarted Windows Host cleanup failed: ${error}`)
   }
 
   async close(): Promise<void> {
@@ -396,6 +498,9 @@ export class RustWebHarness {
       ])
     }
     if (this.server !== undefined) {
+      if (process.platform === 'win32' && this.server.exitCode !== null) {
+        await this.closeRestartedWindowsHost()
+      }
       this.server.kill('SIGINT')
       await Promise.race([this.server.exited, Bun.sleep(5_000)])
       if (this.server.exitCode === null) this.server.kill('SIGKILL')
@@ -656,7 +761,7 @@ export function longChatFixture(options: { markerPrefix: string; title: string; 
     if (turn % 8 === 0) {
       const calls = [1, 2].map(index => {
         const marker = markers.tool(turn, index)
-        return { id: `chat-scroll-${suffix(turn)}-${index}`, marker, arguments: JSON.stringify({ command: `printf '${marker}\\n'`, description: marker }) }
+        return { id: `chat-scroll-${suffix(turn)}-${index}`, marker, arguments: JSON.stringify({ command: `[Console]::Out.Write('${marker}' + [char]10)`, description: marker }) }
       })
       append('assistant/message', {
         turn, step: 1, message: { id: `assistant-tools-${suffix(turn)}`, role: 'assistant', content: calls.map(call => ({ type: 'tool-call', id: call.id, name: 'bash', arguments: call.arguments })), source: { kind: 'model', provider: 'fixture', model: 'fixture' } },

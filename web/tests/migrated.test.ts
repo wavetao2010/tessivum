@@ -21,8 +21,6 @@ test('migrated web suite', async () => {
 
   const failed: string[] = []
   for (const file of [...files].sort()) {
-    if (await run(file) === 0) continue
-    console.warn(`retrying migrated web test: ${file}`)
     if (await run(file) !== 0) failed.push(file)
   }
   if (failed.length !== 0) throw new Error(`migrated web tests failed:\n${failed.join('\n')}`)

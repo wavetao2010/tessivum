@@ -1,8 +1,19 @@
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { expect, test } from 'bun:test'
 import { acknowledgeReloadConnectionLoss, RustWebHarness, waitUntil } from './support'
 
 const ROOT = 'div[data-phase]'
+
+interface Workspace {
+  path: string
+  sessionIds: string[]
+}
+
+async function workspaceItems(harness: RustWebHarness): Promise<Workspace[]> {
+  const result = await harness.rpc<{ items: Workspace[] }>('workspace.list')
+  if (!result.ok || result.value === undefined) throw new Error(`workspace.list failed: ${JSON.stringify(result.error)}`)
+  return result.value.items
+}
 
 test('startup materializes and auto-selects blank workspaces without replacing the resident hero or composer', async () => {
   const harness = await RustWebHarness.launch({ name: 'startup-auto-selection' })
@@ -14,7 +25,12 @@ test('startup materializes and auto-selects blank workspaces without replacing t
     await page.locator(`${ROOT}[data-phase="hero"]`).waitFor({ timeout: 15_000 })
     expect(await composer.isVisible()).toBe(true)
     expect(await page.getByText('Principle and implementation, in concert.', { exact: false }).count()).toBeGreaterThan(0)
-    expect((await harness.sessions()).some(session => session.cwd === harness.workspace && session.blank)).toBe(true)
+    const initialWorkspace = (await workspaceItems(harness))
+      .find(workspace => workspace.path === toNamespacedPath(harness.workspace))
+    if (initialWorkspace === undefined) throw new Error('native host did not create the expected workspace')
+    expect((await harness.sessions()).some(session => (
+      session.blank && initialWorkspace.sessionIds.includes(session.sessionId)
+    ))).toBe(true)
 
     await page.evaluate(() => {
       const refs = {
@@ -29,7 +45,7 @@ test('startup materializes and auto-selects blank workspaces without replacing t
     })
 
     const title = 'startup-auto-selection-second'
-    const path = join(harness.root, title)
+    const workspacePath = join(harness.root, title)
     await page.getByRole('button', { name: 'Add workspace' }).click()
     const picker = page.getByRole('dialog', { name: 'Select Workspace Directory' })
     await picker.waitFor({ timeout: 10_000 })
@@ -42,8 +58,14 @@ test('startup materializes and auto-selects blank workspaces without replacing t
     await picker.getByRole('button', { name: 'Open', exact: true }).click()
     await picker.waitFor({ state: 'hidden', timeout: 10_000 })
     await waitUntil(
-      () => harness.sessions(),
-      sessions => sessions.some(session => session.cwd === path && session.blank),
+      async () => {
+        const [workspaces, sessions] = await Promise.all([workspaceItems(harness), harness.sessions()])
+        return workspaces.some(workspace => (
+          workspace.path === toNamespacedPath(workspacePath)
+          && sessions.some(session => session.blank && workspace.sessionIds.includes(session.sessionId))
+        ))
+      },
+      Boolean,
       15_000,
     )
     expect(await page.evaluate(() => {

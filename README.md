@@ -41,7 +41,7 @@ Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exac
 
 Release scope remains macOS/Linux x86_64 and ARM64. See [Alpha.29 release evidence](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行); earlier release evidence remains historical and is not claimed as new verification.
 
-The existing installer is **not macOS-only**: it detects both macOS and Linux on x86_64/ARM64. Native Windows has not passed the release build, archive, launcher, plugin, Browser, upgrade, or process-cleanup gates. Windows users can run the Linux package inside WSL2 as an unverified workaround; a Linux archive is not a native Windows executable.
+`install.sh` supports macOS and Linux on x86_64/ARM64. This source tree also contains a native Windows x86_64 ZIP pipeline and a separate `install.ps1`; these changes are **not published Alpha.27 assets**. A Linux archive is not a native Windows executable, and Windows ARM64 is not a release target.
 
 ### Homebrew — macOS or Linux
 
@@ -86,6 +86,29 @@ tar -xzf "tessivum-$version-$target.tar.gz"
 
 On macOS, select an `apple-darwin` target and replace `sha256sum -c` with `shasum -a 256 -c`.
 
+### Native Windows x86_64 — unpublished source candidate
+
+**Local verification only:** the four Windows checkpoint blockers have been repaired, including the no-Node PTC smoke and installer fault boundaries. These changes are not a published Windows release; do not treat the local ZIP as an official upgrade asset. See the [repair results and verification scope](docs/WINDOWS_CHECKPOINT_20260916.md).
+
+The Windows ZIP contains a static-CRT MSVC executable, `tessivum.cmd`/`tsv.cmd`, and the packaged compatibility, Cordis, and market assets. It does not require WSL, elevation, Developer Mode, or a separate VC++ runtime installation. Install Bun `1.4.0` and pnpm `11.7.0` separately for Web/plugin use. The archive is not code-signed.
+
+For a ZIP generated locally into `dist`, verify its adjacent checksum before extraction:
+
+```powershell
+$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.29-x86_64-pc-windows-msvc.zip).Path
+$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -ne "$hash  $(Split-Path $archive -Leaf)") {
+    throw 'Windows archive checksum mismatch'
+}
+Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
+& .\windows-release\tessivum-0.1.0-alpha.29-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
+& .\windows-release\tessivum-0.1.0-alpha.29-x86_64-pc-windows-msvc\bin\tessivum.cmd web
+```
+
+After a matching Windows release is published, `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` installs under `%LOCALAPPDATA%\Tessivum\versions`, with owned launchers in `%LOCALAPPDATA%\Tessivum\bin`. It verifies the ZIP and launchers before activation, supports upgrade/downgrade and rollback, and changes only the User PATH. `-Uninstall` removes managed installation files and only installer-owned PATH entries; application history and settings are retained. Do not point the installer at the existing Alpha.27 release expecting a Windows asset.
+
+There is no default Windows release: installation requires an explicit version or `VERSION`; uninstall does not. The September 16 report covers the older Windows candidate, not the Alpha.29/Core 0.1.7 integration. The draft integration also has an unresolved Windows PowerShell 5.1 PATH preservation issue: expandable registry values may be written back as expanded strings. Do not use the installer against a real user PATH until this merge gate is closed.
+
 ### Build from source
 
 Source builds require Rust stable with `rustfmt` and `clippy`, Bun 1.3.14+, pnpm 10+, Git, and network access to the pinned dependencies.
@@ -96,7 +119,7 @@ cd tessivum
 cargo run --release -- web
 ```
 
-Native Windows source builds are not currently release-tested or supported.
+For native Windows source prerequisites and the ordinary-user, Chinese-and-space-path acceptance procedure, see [Windows source testing](docs/WINDOWS_SOURCE_TEST.md). Source-test results, local ZIP validation, and published-release validation are separate evidence.
 
 ## Start
 
@@ -105,6 +128,8 @@ tessivum web
 ```
 
 Open <http://127.0.0.1:3000>, then configure a model relay from **Models/Settings**.
+
+`tessivum web --settings-file <file>` selects a writable settings document; relative paths resolve from the Host working directory. Separate Hosts can point to the same file while keeping distinct `--data-dir` directories and ports. This does not require symbolic links or share workspace locks.
 
 **Alpha.26:** the workbench opens without a Key dialog or implicit model selection. Prepare text/images first, then explicitly select a configured model; text-only or unknown image capabilities refuse submission without discarding the draft. New sessions inherit only an explicitly saved default, while restored sessions retain their saved selection. For deliberately unauthenticated endpoints, configure `auth: none`; the CLI equivalent is `TESSIVUM_LLM_AUTH=none` (still set `OPENAI_MODEL` and `OPENAI_BASE_URL`).
 

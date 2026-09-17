@@ -1151,11 +1151,19 @@ async fn run_windows_powershell(
         max_output_bytes,
     ));
     let status = tokio::select! {
-        status = child.wait() => status.map_err(|error| bash_error("could not wait for PowerShell", error))?,
+        status = child.wait() => status,
         _ = context.cancellation.cancelled() => {
-            job.terminate();
+            let capture_error = job.capture_and_terminate().await.err();
             let killed = child.kill().await;
             let waited = child.wait().await;
+            let cleanup_error = job.cleanup_process_tree().await.err();
+            if let Some(error) = cleanup_error.or(capture_error) {
+                stdout_task.abort();
+                stderr_task.abort();
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(bash_error("could not reap PowerShell process tree", error));
+            }
             finish_copy(stdout_task).await?;
             finish_copy(stderr_task).await?;
             if let Err(error) = waited {
@@ -1169,7 +1177,14 @@ async fn run_windows_powershell(
             return Err(TessivumError::new("CANCELLED", "tool call was cancelled", "tools", Value::Null));
         }
     };
-    job.terminate();
+    if let Err(error) = job.cleanup_process_tree().await {
+        stdout_task.abort();
+        stderr_task.abort();
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        return Err(bash_error("could not reap PowerShell process tree", error));
+    }
+    let status = status.map_err(|error| bash_error("could not wait for PowerShell", error))?;
     finish_copy(stdout_task).await?;
     finish_copy(stderr_task).await?;
     let mut output =

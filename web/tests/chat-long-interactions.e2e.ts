@@ -19,7 +19,7 @@ function contextKey(kind: string, id: string): string {
 function replayRecording(): string {
   const text = `${CONTINUE_FIRST} The branched conversation continues from the selected semantic boundary. ${CONTINUE_DONE}`
   return [
-    { type: 'session', version: 0, id: 'chat-long-interactions-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'chat-long-interactions-replay', createdAt: 0 },
     ...[
       { type: 'block-start', index: 0, blockType: 'text' },
       { type: 'text-delta', index: 0, text: `${CONTINUE_FIRST} ` },

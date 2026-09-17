@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join, relative, sep } from 'node:path'
 import { RustWebHarness } from './support'
 
 const MARKET_ROOT = join(import.meta.dir, '../../plugins/market')
@@ -13,7 +13,7 @@ test('first-party market runs in the native host', async () => {
   const build = Bun.spawn(['bun', 'run', 'build'], { cwd: MARKET_ROOT, stdout: 'inherit', stderr: 'inherit' })
   expect(await build.exited).toBe(0)
   packRoot = await mkdtemp(join(tmpdir(), 'tessivum-market-pack-'))
-  const pack = Bun.spawn(['bun', 'pm', 'pack', '--ignore-scripts', '--destination', packRoot], { cwd: MARKET_ROOT, stdout: 'inherit', stderr: 'inherit' })
+  const pack = Bun.spawn(['npm', 'pack', '--ignore-scripts', '--pack-destination', packRoot], { cwd: MARKET_ROOT, stdout: 'inherit', stderr: 'inherit' })
   expect(await pack.exited).toBe(0)
 
   const manifest = await Bun.file(join(MARKET_ROOT, 'package.json')).json() as { version: string }
@@ -44,7 +44,19 @@ test('first-party market runs in the native host', async () => {
     dependencies?: Record<string, string>
     dsh?: { profile?: { bundles?: string[] } }
   }
-  expect(installed.dependencies?.['tessivum-market']).toContain('/artifacts/market/')
+  const dependency = installed.dependencies?.['tessivum-market']
+  if (typeof dependency !== 'string' || !dependency.startsWith('file:')) {
+    throw new Error('native host did not install the market from a file artifact')
+  }
+  const artifact = await realpath(dependency.slice('file:'.length))
+  const artifactRoot = await realpath(join(harness.dataDir, 'artifacts', 'market'))
+  const artifactRelative = relative(artifactRoot, artifact)
+  const outsideArtifactRoot = artifactRelative === ''
+    || artifactRelative === '..'
+    || artifactRelative.startsWith(`..${sep}`)
+    || isAbsolute(artifactRelative)
+  expect(outsideArtifactRoot).toBe(false)
+  expect(basename(artifact)).toBe(basename(tarball))
   expect(installed.dsh?.profile?.bundles).toContain('tessivum-market')
 
   await harness.page.getByRole('button', { name: '设置', exact: true }).click()

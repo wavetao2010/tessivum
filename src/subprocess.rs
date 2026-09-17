@@ -6,6 +6,11 @@ use std::os::fd::RawFd;
 use std::sync::atomic::AtomicUsize;
 #[cfg(any(unix, windows))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::{
+    collections::BTreeSet,
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
@@ -189,7 +194,61 @@ struct ProcessInner {
 }
 
 #[cfg(windows)]
-pub(crate) struct WindowsJob(isize);
+pub(crate) struct WindowsJob {
+    inner: Arc<WindowsJobState>,
+}
+
+#[cfg(windows)]
+struct WindowsJobState {
+    job: OwnedHandle,
+    root: ProcessGeneration,
+    capture: Mutex<WindowsCaptureState>,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProcessGenerationKey {
+    pid: u32,
+    creation_time: u64,
+}
+
+#[cfg(windows)]
+struct ProcessGeneration {
+    key: ProcessGenerationKey,
+    handle: OwnedHandle,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsCaptureState {
+    retained: BTreeMap<ProcessGenerationKey, ProcessGeneration>,
+    first_error: Option<WindowsCaptureError>,
+}
+
+#[cfg(windows)]
+struct WindowsCaptureError {
+    kind: std::io::ErrorKind,
+    raw_os_error: Option<i32>,
+    message: String,
+}
+
+#[cfg(windows)]
+impl WindowsCaptureError {
+    fn from_error(error: &std::io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            message: error.to_string(),
+        }
+    }
+
+    fn to_error(&self) -> std::io::Error {
+        match self.raw_os_error {
+            Some(code) => std::io::Error::from_raw_os_error(code),
+            None => std::io::Error::new(self.kind, self.message.clone()),
+        }
+    }
+}
 
 #[cfg(windows)]
 impl WindowsJob {
@@ -215,13 +274,7 @@ impl WindowsJob {
                 ));
             }
         };
-        let pid = child.id().ok_or_else(|| {
-            terminate_and_wait_process(process);
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "suspended process has no process identifier",
-            )
-        })?;
+        let pid = process_id(process).inspect_err(|_| terminate_and_wait_process(process))?;
         let job = match unsafe { Self::assign_raw(process) } {
             Ok(job) => job,
             Err(error) => {
@@ -241,7 +294,7 @@ impl WindowsJob {
     pub(crate) fn spawn_std(
         command: &mut std::process::Command,
     ) -> std::io::Result<(std::process::Child, Self)> {
-        use std::os::windows::{io::AsRawHandle, process::CommandExt};
+        use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 
         command.creation_flags(CREATE_SUSPENDED);
@@ -255,7 +308,7 @@ impl WindowsJob {
                 "suspended process has no process handle",
             ));
         }
-        let pid = child.id();
+        let pid = process_id(process).inspect_err(|_| terminate_and_wait_process(process))?;
         let job = match unsafe { Self::assign_raw(process) } {
             Ok(job) => job,
             Err(error) => {
@@ -296,79 +349,842 @@ impl WindowsJob {
                 "process handle is invalid",
             ));
         }
-        let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        let root = ProcessGeneration::from_owned_handle(duplicate_process_handle(process)?)?;
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
         }
-        let job = Self(handle as isize);
+        // SAFETY: `CreateJobObjectW` returned a new owned, non-null handle.
+        let job = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if SetInformationJobObject(
-            handle,
-            JobObjectExtendedLimitInformation,
-            std::ptr::from_ref(&limits).cast(),
-            std::mem::size_of_val(&limits) as u32,
-        ) == 0
+        if unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        } == 0
         {
             return Err(std::io::Error::last_os_error());
         }
-        if AssignProcessToJobObject(handle, process) == 0 {
+        if unsafe { AssignProcessToJobObject(handle, process) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(job)
+        Ok(Self {
+            inner: Arc::new(WindowsJobState {
+                job,
+                root,
+                capture: Mutex::new(WindowsCaptureState::default()),
+            }),
+        })
     }
 
     pub(crate) fn terminate(&self) {
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-        unsafe {
-            TerminateJobObject(self.0 as _, 1);
+        let _ = terminate_windows_job(&self.inner);
+    }
+
+    pub(crate) async fn capture_and_terminate(&self) -> std::io::Result<()> {
+        let state = Arc::clone(&self.inner);
+        let task_state = Arc::clone(&state);
+        match tokio::task::spawn_blocking(move || {
+            let discovery = discover_and_retain_processes(&task_state, None);
+            let mut first_error = discovery.first_error;
+            if let Err(error) = terminate_windows_job(&task_state) {
+                preserve_first_capture_error(&task_state, &error);
+                preserve_first_error(&mut first_error, error);
+            }
+            if let Some(error) = first_error {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let error = blocking_task_error("Windows process-tree capture", error);
+                preserve_first_capture_error(&state, &error);
+                let _ = terminate_windows_job(&state);
+                Err(error)
+            }
         }
     }
 
-    /// Fences permission teardown against asynchronous Job termination.
-    pub(crate) fn wait_for_exit(&self) -> std::io::Result<()> {
-        use windows_sys::Win32::System::JobObjects::{
-            JobObjectBasicAccountingInformation, QueryInformationJobObject,
-            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        };
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-            if unsafe {
-                QueryInformationJobObject(
-                    self.0 as _,
-                    JobObjectBasicAccountingInformation,
-                    std::ptr::from_mut(&mut info).cast(),
-                    std::mem::size_of_val(&info) as u32,
-                    std::ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(std::io::Error::last_os_error());
+    pub(crate) async fn cleanup_process_tree(self) -> std::io::Result<()> {
+        let state = Arc::clone(&self.inner);
+        match tokio::task::spawn_blocking(move || self.cleanup_process_tree_blocking()).await {
+            Ok(result) => result,
+            Err(error) => {
+                let task_error = blocking_task_error("Windows process-tree cleanup", error);
+                match lock(&state.capture)
+                    .first_error
+                    .as_ref()
+                    .map(WindowsCaptureError::to_error)
+                {
+                    Some(error) => Err(error),
+                    None => Err(task_error),
+                }
             }
-            if info.ActiveProcesses == 0 {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Windows Job processes did not exit after termination",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Fences synchronous runners before they revoke grants or remove private temp.
+    pub(crate) fn cleanup_process_tree_blocking(self) -> std::io::Result<()> {
+        cleanup_windows_process_tree(&self.inner)
     }
 }
 
 #[cfg(windows)]
 impl Drop for WindowsJob {
     fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
         self.terminate();
-        unsafe {
-            CloseHandle(self.0 as _);
+    }
+}
+
+#[cfg(windows)]
+fn process_id(process: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<u32> {
+    use windows_sys::Win32::System::Threading::GetProcessId;
+
+    // SAFETY: callers provide a live process handle; GetProcessId does not retain it.
+    let pid = unsafe { GetProcessId(process) };
+    if pid == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(pid)
+    }
+}
+
+#[cfg(windows)]
+impl ProcessGeneration {
+    fn from_owned_handle(handle: OwnedHandle) -> std::io::Result<Self> {
+        let process = handle.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let pid = process_id(process)?;
+        let creation_time = process_times(process)?.creation_time;
+        Ok(Self {
+            key: ProcessGenerationKey { pid, creation_time },
+            handle,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn duplicate_process_handle(
+    process: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<OwnedHandle> {
+    use windows_sys::Win32::{
+        Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS},
+        System::Threading::GetCurrentProcess,
+    };
+
+    // SAFETY: `GetCurrentProcess` returns the current process pseudo-handle.
+    let current_process = unsafe { GetCurrentProcess() };
+    let mut duplicate = std::ptr::null_mut();
+    // SAFETY: source and target are the current process, `process` is valid by
+    // the caller contract, and `duplicate` points to writable handle storage.
+    if unsafe {
+        DuplicateHandle(
+            current_process,
+            process,
+            current_process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `DuplicateHandle` returned a new owned, non-null process handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) })
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct ProcessTimes {
+    creation_time: u64,
+    exit_time: u64,
+}
+
+#[cfg(windows)]
+fn file_time_to_u64(time: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+}
+
+#[cfg(windows)]
+fn process_times(process: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<ProcessTimes> {
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: callers keep `process` valid and all four FILETIME outputs are writable.
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let creation_time = file_time_to_u64(creation);
+    if creation_time == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Windows process has no creation time",
+        ));
+    }
+    Ok(ProcessTimes {
+        creation_time,
+        exit_time: file_time_to_u64(exit),
+    })
+}
+
+#[cfg(windows)]
+fn terminate_windows_job(state: &WindowsJobState) -> std::io::Result<()> {
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+    // SAFETY: the state owns a live Job handle for the duration of this call.
+    if unsafe { TerminateJobObject(state.job.as_raw_handle() as _, 1) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn traceable_processes(
+    parents: &HashMap<u32, u32>,
+    root_pid: u32,
+    retained: &BTreeSet<u32>,
+) -> BTreeSet<u32> {
+    parents
+        .keys()
+        .copied()
+        .filter(|pid| {
+            *pid != root_pid
+                && !retained.contains(pid)
+                && process_reaches_owned_anchor(*pid, parents, root_pid, retained)
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn process_reaches_owned_anchor(
+    pid: u32,
+    parents: &HashMap<u32, u32>,
+    root_pid: u32,
+    retained: &BTreeSet<u32>,
+) -> bool {
+    let mut current = pid;
+    let mut visited = BTreeSet::new();
+    while visited.insert(current) {
+        let Some(parent) = parents.get(&current).copied() else {
+            return false;
+        };
+        if parent == root_pid || retained.contains(&parent) {
+            return true;
         }
+        current = parent;
+    }
+    false
+}
+
+#[cfg(windows)]
+fn validate_generation_edge(
+    parent_creation_time: u64,
+    parent_exit_time: Option<u64>,
+    child_creation_time: u64,
+) -> std::io::Result<()> {
+    if parent_creation_time > child_creation_time {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "child process generation predates its parent generation",
+        ));
+    }
+    if let Some(exit_time) = parent_exit_time {
+        if exit_time < parent_creation_time {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "parent process exit time predates its creation time",
+            ));
+        }
+        if child_creation_time > exit_time {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "child process generation was created after its parent generation exited",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn parent_generation_exit_time(parent: &ProcessGeneration) -> std::io::Result<Option<u64>> {
+    let exit_time = match process_handle_signaled(&parent.handle)? {
+        false => None,
+        true => {
+            let times = process_times(parent.handle.as_raw_handle() as _)?;
+            if times.creation_time != parent.key.creation_time {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "owned parent process creation time changed",
+                ));
+            }
+            if times.exit_time == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "signaled parent process has no exit time",
+                ));
+            }
+            Some(times.exit_time)
+        }
+    };
+    Ok(exit_time)
+}
+
+#[cfg(windows)]
+fn validate_candidate_parent(
+    state: &WindowsJobState,
+    capture: &WindowsCaptureState,
+    parent_pid: u32,
+    child_creation_time: u64,
+) -> std::io::Result<bool> {
+    let parents = std::iter::once(&state.root)
+        .chain(capture.retained.values())
+        .filter(|generation| generation.key.pid == parent_pid);
+    let mut matched = false;
+    for parent in parents {
+        let exit_time = parent_generation_exit_time(parent)?;
+        if exit_time.is_some_and(|exit| exit < parent.key.creation_time) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "owned parent exit time predates its creation time",
+            ));
+        }
+        match validate_generation_edge(parent.key.creation_time, exit_time, child_creation_time) {
+            Ok(()) if matched => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("multiple owned process generations match parent PID {parent_pid}"),
+                ));
+            }
+            Ok(()) => matched = true,
+            Err(_) => {} // A disjoint lifetime proves this is an unrelated PID generation.
+        }
+    }
+    Ok(matched)
+}
+
+#[cfg(windows)]
+fn snapshot_process_parents() -> std::io::Result<HashMap<u32, u32>> {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: Toolhelp returned a new valid snapshot handle.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let raw_snapshot = snapshot.as_raw_handle() as _;
+    if unsafe { Process32FirstW(raw_snapshot, &mut entry) } == 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+            Ok(HashMap::new())
+        } else {
+            Err(error)
+        };
+    }
+
+    let mut parents = HashMap::new();
+    loop {
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        if unsafe { Process32NextW(raw_snapshot, &mut entry) } != 0 {
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+            return Ok(parents);
+        }
+        return Err(error);
+    }
+}
+
+#[cfg(windows)]
+fn open_and_revalidate_process(
+    pid: u32,
+    expected_parent_pid: u32,
+    state: &WindowsJobState,
+    capture: &WindowsCaptureState,
+) -> std::io::Result<Option<ProcessGeneration>> {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        let error = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!("OpenProcess query PID {pid}: {error}"),
+        ));
+    }
+    // SAFETY: `OpenProcess` returned a new owned, non-null process handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
+    let generation = ProcessGeneration::from_owned_handle(process)?;
+    if generation.key.pid != pid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "opened process identity changed from PID {pid} to {}",
+                generation.key.pid
+            ),
+        ));
+    }
+
+    let current = snapshot_process_parents()?;
+    let current_parent_pid = current.get(&pid).copied().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("process PID {pid} disappeared during generation validation"),
+        )
+    })?;
+    if current_parent_pid != expected_parent_pid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "process PID {pid} changed parent from {expected_parent_pid} to {current_parent_pid}"
+            ),
+        ));
+    }
+    if !validate_candidate_parent(
+        state,
+        capture,
+        current_parent_pid,
+        generation.key.creation_time,
+    )? {
+        return Ok(None);
+    }
+    if process_handle_signaled(&generation.handle)? {
+        return Ok(Some(generation));
+    }
+    let termination_handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if termination_handle.is_null() {
+        let error = std::io::Error::last_os_error();
+        if process_handle_signaled(&generation.handle)? {
+            return Ok(Some(generation));
+        }
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!("OpenProcess termination PID {pid}: {error}"),
+        ));
+    }
+    // SAFETY: OpenProcess returned a new handle, owned exclusively here.
+    let termination_handle = unsafe { OwnedHandle::from_raw_handle(termination_handle.cast()) };
+    let terminating = ProcessGeneration::from_owned_handle(termination_handle)?;
+    if terminating.key != generation.key {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "process generation changed while acquiring termination access",
+        ));
+    }
+    Ok(Some(terminating))
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsDiscoveryOutcome {
+    added: usize,
+    first_error: Option<std::io::Error>,
+}
+
+#[cfg(windows)]
+fn discover_and_retain_processes(
+    state: &WindowsJobState,
+    deadline: Option<std::time::Instant>,
+) -> WindowsDiscoveryOutcome {
+    let mut capture = lock(&state.capture);
+    let mut outcome = WindowsDiscoveryOutcome::default();
+    if let Err(error) = check_windows_cleanup_deadline(deadline) {
+        outcome.first_error = Some(error);
+        preserve_discovery_error(&mut capture, &outcome);
+        return outcome;
+    }
+    let parents = match snapshot_process_parents() {
+        Ok(parents) => parents,
+        Err(error) => {
+            outcome.first_error = Some(error);
+            preserve_discovery_error(&mut capture, &outcome);
+            return outcome;
+        }
+    };
+    if let Err(error) = check_windows_cleanup_deadline(deadline) {
+        outcome.first_error = Some(error);
+        preserve_discovery_error(&mut capture, &outcome);
+        return outcome;
+    }
+    let retained_pids = capture
+        .retained
+        .keys()
+        .map(|generation| generation.pid)
+        .collect::<BTreeSet<_>>();
+    let mut candidates = traceable_processes(&parents, state.root.key.pid, &retained_pids);
+    let mut anchor_pids = retained_pids;
+    anchor_pids.insert(state.root.key.pid);
+    loop {
+        let ready = candidates
+            .iter()
+            .copied()
+            .filter(|pid| {
+                parents
+                    .get(pid)
+                    .is_some_and(|parent_pid| anchor_pids.contains(parent_pid))
+            })
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            break;
+        }
+        for pid in ready {
+            candidates.remove(&pid);
+            if let Err(error) = check_windows_cleanup_deadline(deadline) {
+                preserve_first_error(&mut outcome.first_error, error);
+                break;
+            }
+            let parent_pid = parents[&pid];
+            match open_and_revalidate_process(pid, parent_pid, state, &capture) {
+                Ok(Some(generation)) => {
+                    let key = generation.key;
+                    if capture.retained.insert(key, generation).is_none() {
+                        outcome.added += 1;
+                    }
+                    anchor_pids.insert(pid);
+                }
+                Ok(None) => {
+                    // Children of a proven foreign generation are also outside our ownership.
+                    candidates.retain(|candidate| {
+                        !process_reaches_owned_anchor(*candidate, &parents, pid, &BTreeSet::new())
+                    });
+                }
+                Err(error) => preserve_first_error(&mut outcome.first_error, error),
+            }
+            if let Err(error) = check_windows_cleanup_deadline(deadline) {
+                preserve_first_error(&mut outcome.first_error, error);
+                break;
+            }
+        }
+        if outcome
+            .first_error
+            .as_ref()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+        {
+            break;
+        }
+    }
+    if !candidates.is_empty() {
+        preserve_first_error(
+            &mut outcome.first_error,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate process ancestry could not be validated parent-first",
+            ),
+        );
+    }
+    preserve_discovery_error(&mut capture, &outcome);
+    outcome
+}
+
+#[cfg(windows)]
+fn preserve_discovery_error(capture: &mut WindowsCaptureState, outcome: &WindowsDiscoveryOutcome) {
+    if capture.first_error.is_none() {
+        if let Some(error) = outcome.first_error.as_ref() {
+            capture.first_error = Some(WindowsCaptureError::from_error(error));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn preserve_first_capture_error(state: &WindowsJobState, error: &std::io::Error) {
+    let mut capture = lock(&state.capture);
+    if capture.first_error.is_none() {
+        capture.first_error = Some(WindowsCaptureError::from_error(error));
+    }
+}
+
+#[cfg(windows)]
+fn preserve_first_error(slot: &mut Option<std::io::Error>, error: std::io::Error) {
+    if slot.is_none() {
+        *slot = Some(error);
+    }
+}
+
+#[cfg(windows)]
+fn blocking_task_error(context: &str, error: tokio::task::JoinError) -> std::io::Error {
+    let failure = if error.is_panic() {
+        "panicked"
+    } else if error.is_cancelled() {
+        "was cancelled"
+    } else {
+        "failed"
+    };
+    std::io::Error::other(format!("{context} blocking task {failure}: {error}"))
+}
+
+#[cfg(windows)]
+fn check_windows_cleanup_deadline(deadline: Option<std::time::Instant>) -> std::io::Result<()> {
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        Err(windows_cleanup_timeout())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_cleanup_timeout() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "Windows process tree did not exit before the cleanup deadline",
+    )
+}
+
+#[cfg(windows)]
+fn query_windows_job_active_processes(state: &WindowsJobState) -> std::io::Result<u32> {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectBasicAccountingInformation, QueryInformationJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    };
+
+    let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    // SAFETY: the state owns the Job handle and `info` is writable for its exact size.
+    if unsafe {
+        QueryInformationJobObject(
+            state.job.as_raw_handle() as _,
+            JobObjectBasicAccountingInformation,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of_val(&info) as u32,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(info.ActiveProcesses)
+    }
+}
+
+#[cfg(windows)]
+fn process_handle_signaled(process: &OwnedHandle) -> std::io::Result<bool> {
+    wait_for_process_handle(process, 0).map(|result| result == WindowsWaitResult::Signaled)
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WindowsWaitResult {
+    Signaled,
+    TimedOut,
+}
+
+#[cfg(windows)]
+fn normalize_terminate_failure(
+    termination_error: std::io::Error,
+    immediate_wait: std::io::Result<WindowsWaitResult>,
+) -> Option<std::io::Error> {
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+    if termination_error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+        && matches!(immediate_wait, Ok(WindowsWaitResult::Signaled))
+    {
+        None
+    } else {
+        Some(termination_error)
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_process_handle(
+    process: &OwnedHandle,
+    timeout_millis: u32,
+) -> std::io::Result<WindowsWaitResult> {
+    use windows_sys::Win32::{
+        Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
+    };
+
+    // SAFETY: `process` owns a live synchronizable handle for the duration of the wait.
+    match unsafe { WaitForSingleObject(process.as_raw_handle() as _, timeout_millis) } {
+        WAIT_OBJECT_0 => Ok(WindowsWaitResult::Signaled),
+        WAIT_TIMEOUT => Ok(WindowsWaitResult::TimedOut),
+        WAIT_FAILED => Err(std::io::Error::last_os_error()),
+        result => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected process wait result {result}"),
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn remaining_wait_millis(deadline: std::time::Instant) -> Option<u32> {
+    let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+    wait_millis_for_remaining_duration(remaining)
+}
+
+#[cfg(windows)]
+fn wait_millis_for_remaining_duration(remaining: Duration) -> Option<u32> {
+    let millis = remaining.as_millis();
+    if millis == 0 {
+        None
+    } else {
+        Some(millis.min((u32::MAX - 1) as u128) as u32)
+    }
+}
+
+#[cfg(windows)]
+fn terminate_and_wait_retained_processes(
+    state: &WindowsJobState,
+    deadline: std::time::Instant,
+) -> (bool, Option<std::io::Error>) {
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+
+    let capture = lock(&state.capture);
+    let mut first_error = None;
+    for generation in capture.retained.values() {
+        match process_handle_signaled(&generation.handle) {
+            Ok(true) => {}
+            Ok(false) => {
+                // SAFETY: the retained handle has PROCESS_TERMINATE access and remains owned.
+                if unsafe { TerminateProcess(generation.handle.as_raw_handle() as _, 1) } == 0 {
+                    let termination_error = std::io::Error::last_os_error();
+                    // TerminateJobObject may have started kernel teardown without
+                    // signaling this handle yet. ERROR_ACCESS_DENIED is benign
+                    // only if that same process exits within our shared deadline.
+                    let wait_millis = if termination_error.raw_os_error()
+                        == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+                    {
+                        remaining_wait_millis(deadline).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let termination_wait = wait_for_process_handle(&generation.handle, wait_millis);
+                    if let Some(error) =
+                        normalize_terminate_failure(termination_error, termination_wait)
+                    {
+                        preserve_first_error(&mut first_error, error);
+                    }
+                }
+            }
+            Err(error) => preserve_first_error(&mut first_error, error),
+        }
+    }
+
+    let mut all_signaled = true;
+    for generation in capture.retained.values() {
+        match process_handle_signaled(&generation.handle) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                all_signaled = false;
+                preserve_first_error(&mut first_error, error);
+                continue;
+            }
+        }
+        let Some(timeout_millis) = remaining_wait_millis(deadline) else {
+            all_signaled = false;
+            preserve_first_error(&mut first_error, windows_cleanup_timeout());
+            continue;
+        };
+        match wait_for_process_handle(&generation.handle, timeout_millis) {
+            Ok(WindowsWaitResult::Signaled) => {}
+            Ok(WindowsWaitResult::TimedOut) => {
+                all_signaled = false;
+                preserve_first_error(&mut first_error, windows_cleanup_timeout());
+            }
+            Err(error) => {
+                all_signaled = false;
+                preserve_first_error(&mut first_error, error);
+            }
+        }
+    }
+    (all_signaled, first_error)
+}
+
+#[cfg(windows)]
+fn cleanup_windows_process_tree(state: &WindowsJobState) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut first_error = lock(&state.capture)
+        .first_error
+        .as_ref()
+        .map(WindowsCaptureError::to_error);
+
+    loop {
+        let discovery = discover_and_retain_processes(state, Some(deadline));
+        let discovery_complete = discovery.first_error.is_none();
+        preserve_optional_error(&mut first_error, discovery.first_error);
+
+        if let Err(error) = terminate_windows_job(state) {
+            preserve_first_error(&mut first_error, error);
+        }
+        if let Err(error) = check_windows_cleanup_deadline(Some(deadline)) {
+            preserve_first_error(&mut first_error, error);
+        }
+        let (all_retained_signaled, retained_error) =
+            terminate_and_wait_retained_processes(state, deadline);
+        preserve_optional_error(&mut first_error, retained_error);
+        if let Err(error) = check_windows_cleanup_deadline(Some(deadline)) {
+            preserve_first_error(&mut first_error, error);
+        }
+
+        let job_is_empty = match query_windows_job_active_processes(state) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(error) => {
+                preserve_first_error(&mut first_error, error);
+                false
+            }
+        };
+        if let Err(error) = check_windows_cleanup_deadline(Some(deadline)) {
+            preserve_first_error(&mut first_error, error);
+        }
+
+        if discovery_complete && discovery.added == 0 && all_retained_signaled && job_is_empty {
+            let final_discovery = discover_and_retain_processes(state, Some(deadline));
+            let final_complete = final_discovery.first_error.is_none();
+            preserve_optional_error(&mut first_error, final_discovery.first_error);
+            if final_complete && final_discovery.added == 0 {
+                return match first_error {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                };
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            preserve_first_error(&mut first_error, windows_cleanup_timeout());
+            return Err(first_error.expect("cleanup deadline always supplies an error"));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(Duration::from_millis(1).min(remaining));
+    }
+}
+
+#[cfg(windows)]
+fn preserve_optional_error(first: &mut Option<std::io::Error>, next: Option<std::io::Error>) {
+    if let Some(error) = next {
+        preserve_first_error(first, error);
     }
 }
 
@@ -1004,8 +1820,8 @@ impl Drop for PersistentShell {
             return;
         }
         self.inner.disposed.store(true, Ordering::Release);
-        self.inner.closed.store(true, Ordering::Release);
         self.inner.dispose_signal.notify_waiters();
+        self.inner.request_termination(ProcessTermination::Shutdown);
         if let Some(job) = lock(&self.inner.job).as_ref() {
             job.terminate();
         }
@@ -1026,6 +1842,8 @@ struct PersistentShellInner {
     termination: Mutex<Option<ProcessTermination>>,
     #[cfg(windows)]
     job: Mutex<Option<WindowsJob>>,
+    #[cfg(windows)]
+    cleanup_request: Notify,
     done_state: Mutex<Option<ProcessDone>>,
     done: Notify,
     closed: AtomicBool,
@@ -1144,6 +1962,8 @@ impl PersistentShell {
             done_state: Mutex::new(None),
             #[cfg(windows)]
             job: Mutex::new(Some(job)),
+            #[cfg(windows)]
+            cleanup_request: Notify::new(),
             done: Notify::new(),
             closed: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
@@ -1354,9 +2174,9 @@ impl PersistentShellInner {
         *lock(&self.termination)
     }
 
-    async fn stop(self: &Arc<Self>, cause: ProcessTermination) {
+    fn request_termination(&self, cause: ProcessTermination) -> bool {
         if self.done().is_some() {
-            return;
+            return false;
         }
         let first = {
             let mut termination = lock(&self.termination);
@@ -1367,12 +2187,20 @@ impl PersistentShellInner {
                 true
             }
         };
-        if !first {
+        if first {
+            self.closed.store(true, Ordering::Release);
+            self.fail_active(persistent_shell_termination(cause));
+            #[cfg(windows)]
+            self.cleanup_request.notify_one();
+        }
+        first
+    }
+
+    async fn stop(self: &Arc<Self>, cause: ProcessTermination) {
+        if !self.request_termination(cause) {
             self.wait_closed().await;
             return;
         }
-        self.closed.store(true, Ordering::Release);
-        self.fail_active(persistent_shell_termination(cause));
         #[cfg(unix)]
         terminate_persistent_shell_tree(self.pid, false).await;
         #[cfg(windows)]
@@ -1412,7 +2240,7 @@ impl PersistentShellInner {
     }
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 async fn reap_persistent_shell(
     mut child: Child,
     stdout_task: tokio::task::JoinHandle<()>,
@@ -1436,6 +2264,69 @@ async fn reap_persistent_shell(
     }
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    let (exit_code, signal) = match status {
+        Ok(status) => exit_facts(status),
+        Err(_) => (None, None),
+    };
+    inner.complete(ProcessDone {
+        exit_code,
+        signal,
+        termination: inner.terminated(),
+    });
+}
+
+#[cfg(windows)]
+async fn reap_persistent_shell(
+    mut child: Child,
+    stdout_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+    inner: Arc<PersistentShellInner>,
+) {
+    let (status, job) = tokio::select! {
+        biased;
+        _ = inner.cleanup_request.notified() => {
+            let job = lock(&inner.job).take();
+            if let Some(job) = job.as_ref() {
+                let _ = job.capture_and_terminate().await;
+            }
+            (child.wait().await, job)
+        }
+        status = child.wait() => (status, lock(&inner.job).take()),
+    };
+    inner.closed.store(true, Ordering::Release);
+
+    let cleanup_error = match job {
+        Some(job) => job.cleanup_process_tree().await.err(),
+        None => None,
+    };
+    let mut cleanup_failed = cleanup_error.is_some();
+    if let Some(error) = cleanup_error.as_ref() {
+        inner.fail_active(persistent_shell_cleanup(error));
+        stdout_task.abort();
+        stderr_task.abort();
+    }
+
+    let stdout_result = stdout_task.await;
+    let stderr_result = stderr_task.await;
+    if let Err(error) = stdout_result {
+        cleanup_failed = true;
+        inner.fail_active(persistent_shell_cleanup(&error));
+    }
+    if let Err(error) = stderr_result {
+        cleanup_failed = true;
+        inner.fail_active(persistent_shell_cleanup(&error));
+    }
+    if !cleanup_failed {
+        if let Err(error) = status.as_ref() {
+            inner.fail_active(persistent_shell_error(
+                "PERSISTENT_SHELL_CLOSED",
+                "persistent shell root process wait failed",
+                json!({"error": error.to_string()}),
+            ));
+        }
+        inner.fail_active(persistent_shell_closed());
+    }
+
     let (exit_code, signal) = match status {
         Ok(status) => exit_facts(status),
         Err(_) => (None, None),
@@ -1804,6 +2695,15 @@ fn persistent_shell_closed() -> TessivumError {
         "PERSISTENT_SHELL_CLOSED",
         "persistent shell closed before command completion",
         json!({}),
+    )
+}
+
+#[cfg(windows)]
+fn persistent_shell_cleanup(error: impl fmt::Display) -> TessivumError {
+    persistent_shell_error(
+        "PERSISTENT_SHELL_CLEANUP",
+        "persistent PowerShell process-tree cleanup failed",
+        json!({"error": error.to_string()}),
     )
 }
 
@@ -2428,4 +3328,232 @@ fn shell_result(done: ProcessDone) -> Result<ProcessDone, TessivumError> {
         ));
     }
     Ok(done)
+}
+
+#[cfg(all(test, windows))]
+mod windows_process_tree_tests {
+    use std::{
+        collections::{BTreeMap, BTreeSet, HashMap},
+        time::Duration,
+    };
+
+    use super::{
+        normalize_terminate_failure, traceable_processes, validate_generation_edge,
+        wait_millis_for_remaining_duration, WindowsWaitResult,
+    };
+
+    fn parents(entries: &[(u32, u32)]) -> HashMap<u32, u32> {
+        entries.iter().copied().collect()
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct SyntheticGeneration {
+        pid: u32,
+        creation_time: u64,
+        exit_time: Option<u64>,
+    }
+
+    fn generation_aware_results(
+        snapshot: &HashMap<u32, u32>,
+        current: &BTreeMap<u32, SyntheticGeneration>,
+        root: SyntheticGeneration,
+        retained: &BTreeSet<SyntheticGeneration>,
+    ) -> (BTreeSet<SyntheticGeneration>, BTreeSet<SyntheticGeneration>) {
+        let retained_generations = retained.clone();
+        let mut anchors = retained.clone();
+        anchors.insert(root);
+        let anchor_pids = anchors
+            .iter()
+            .map(|generation| generation.pid)
+            .collect::<BTreeSet<_>>();
+        let mut candidates = traceable_processes(snapshot, root.pid, &anchor_pids);
+        let mut termination_targets = BTreeSet::new();
+        loop {
+            let ready = candidates
+                .iter()
+                .copied()
+                .filter(|pid| {
+                    snapshot.get(pid).is_some_and(|parent_pid| {
+                        anchors
+                            .iter()
+                            .any(|generation| generation.pid == *parent_pid)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                break;
+            }
+            for pid in ready {
+                candidates.remove(&pid);
+                let generation = current[&pid];
+                let parent_pid = snapshot[&pid];
+                let valid_parents = anchors
+                    .iter()
+                    .filter(|parent| parent.pid == parent_pid)
+                    .filter(|parent| {
+                        validate_generation_edge(
+                            parent.creation_time,
+                            parent.exit_time,
+                            generation.creation_time,
+                        )
+                        .is_ok()
+                    })
+                    .count();
+                if valid_parents == 1 {
+                    anchors.insert(generation);
+                    termination_targets.insert(generation);
+                }
+            }
+        }
+        (retained_generations, termination_targets)
+    }
+
+    #[test]
+    fn rejects_reused_retained_anchor() {
+        let historical_anchor = SyntheticGeneration {
+            pid: 20,
+            creation_time: 100,
+            exit_time: Some(200),
+        };
+        let replacement = SyntheticGeneration {
+            pid: 20,
+            creation_time: 300,
+            exit_time: None,
+        };
+        let replacement_child = SyntheticGeneration {
+            pid: 30,
+            creation_time: 400,
+            exit_time: None,
+        };
+        let snapshot = parents(&[(20, 99), (30, 20)]);
+        let current = BTreeMap::from([(20, replacement), (30, replacement_child)]);
+        let root = SyntheticGeneration {
+            pid: 10,
+            creation_time: 50,
+            exit_time: None,
+        };
+        let retained = BTreeSet::from([historical_anchor]);
+
+        let (retained_generations, termination_targets) =
+            generation_aware_results(&snapshot, &current, root, &retained);
+
+        assert!(!retained_generations.contains(&replacement));
+        assert!(!retained_generations.contains(&replacement_child));
+        assert!(!termination_targets.contains(&replacement));
+        assert!(!termination_targets.contains(&replacement_child));
+    }
+
+    #[test]
+    fn rejects_reused_root() {
+        let historical_root = SyntheticGeneration {
+            pid: 10,
+            creation_time: 100,
+            exit_time: Some(200),
+        };
+        let replacement = SyntheticGeneration {
+            pid: 10,
+            creation_time: 300,
+            exit_time: None,
+        };
+        let replacement_child = SyntheticGeneration {
+            pid: 20,
+            creation_time: 400,
+            exit_time: None,
+        };
+        let snapshot = parents(&[(10, 99), (20, 10)]);
+        let current = BTreeMap::from([(10, replacement), (20, replacement_child)]);
+
+        let (retained_generations, termination_targets) =
+            generation_aware_results(&snapshot, &current, historical_root, &BTreeSet::new());
+
+        assert!(!retained_generations.contains(&replacement));
+        assert!(!retained_generations.contains(&replacement_child));
+        assert!(!termination_targets.contains(&replacement));
+        assert!(!termination_targets.contains(&replacement_child));
+    }
+
+    #[test]
+    fn normalizes_terminate_failure() {
+        use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+        let access_denied = || std::io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
+        let other_error_code = 87;
+
+        assert!(
+            normalize_terminate_failure(access_denied(), Ok(WindowsWaitResult::Signaled)).is_none()
+        );
+        assert_eq!(
+            normalize_terminate_failure(access_denied(), Ok(WindowsWaitResult::TimedOut))
+                .and_then(|error| error.raw_os_error()),
+            Some(ERROR_ACCESS_DENIED as i32)
+        );
+        assert_eq!(
+            normalize_terminate_failure(access_denied(), Err(std::io::Error::from_raw_os_error(6)))
+                .and_then(|error| error.raw_os_error()),
+            Some(ERROR_ACCESS_DENIED as i32)
+        );
+        assert_eq!(
+            normalize_terminate_failure(
+                std::io::Error::from_raw_os_error(other_error_code),
+                Ok(WindowsWaitResult::Signaled)
+            )
+            .and_then(|error| error.raw_os_error()),
+            Some(other_error_code)
+        );
+    }
+
+    #[test]
+    fn windows_process_tree_includes_direct_and_transitive_descendants() {
+        let snapshot = parents(&[(10, 1), (20, 10), (30, 20)]);
+
+        assert_eq!(
+            traceable_processes(&snapshot, 10, &BTreeSet::new()),
+            BTreeSet::from([20, 30])
+        );
+    }
+
+    #[test]
+    fn windows_process_tree_uses_every_retained_identity_as_an_anchor() {
+        let snapshot = parents(&[(10, 1), (20, 99), (30, 20), (40, 30)]);
+        let retained = BTreeSet::from([20, 30]);
+
+        assert_eq!(
+            traceable_processes(&snapshot, 10, &retained),
+            BTreeSet::from([40])
+        );
+    }
+
+    #[test]
+    fn windows_process_tree_excludes_unrelated_pids_and_breaks_cycles() {
+        let snapshot = parents(&[(10, 1), (20, 10), (30, 40), (40, 30), (50, 99)]);
+
+        assert_eq!(
+            traceable_processes(&snapshot, 10, &BTreeSet::new()),
+            BTreeSet::from([20])
+        );
+    }
+
+    #[test]
+    fn windows_process_tree_rejects_stale_ancestry_after_a_fresh_snapshot() {
+        let observed = parents(&[(10, 1), (20, 10)]);
+        let revalidated = parents(&[(10, 1), (20, 99)]);
+
+        assert_eq!(
+            traceable_processes(&observed, 10, &BTreeSet::new()),
+            BTreeSet::from([20])
+        );
+        assert!(traceable_processes(&revalidated, 10, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn windows_process_tree_never_rounds_a_wait_past_the_shared_deadline() {
+        assert_eq!(
+            wait_millis_for_remaining_duration(Duration::from_micros(999)),
+            None
+        );
+        assert_eq!(
+            wait_millis_for_remaining_duration(Duration::from_millis(1)),
+            Some(1)
+        );
+    }
 }

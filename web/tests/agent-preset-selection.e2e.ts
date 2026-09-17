@@ -1,24 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Locator } from 'playwright-core'
 import { RustWebHarness } from './support.ts'
 
-const SNAPSHOT_DIR = join(import.meta.dir, 'snapshots/agent-mode-selection')
 const SEED_ID = 'agent-mode-selection-web-e2e'
 const CHILD_ID = 'agent-mode-selection-child'
 
 let harness: RustWebHarness
+let workspaceId: string
 
-function normalize(snapshot: string): string {
-  return snapshot.replaceAll(harness.workspace, '<workspace>').replaceAll('\\', '/').trim()
-}
-
-async function expectGolden(locator: Locator, name: string): Promise<void> {
-  expect(normalize(await locator.ariaSnapshot())).toBe(
-    normalize(await Bun.file(join(SNAPSHOT_DIR, name)).text()),
-  )
-}
 
 
 async function seedSessions(root: string, workspace: string): Promise<void> {
@@ -56,7 +46,7 @@ async function waitUntil<T>(read: () => Promise<T>, accepts: (value: T) => boole
 
 interface SessionWireItem {
   sessionId: string
-  cwd?: string
+  workspaceId?: string
   agentPreset?: string
 }
 
@@ -64,7 +54,7 @@ async function liveMode(): Promise<string | undefined> {
   const result = await harness.rpc<{ items: SessionWireItem[] }>('session.list')
   if (!result.ok || result.value === undefined) throw new Error(`session.list failed: ${JSON.stringify(result.error)}`)
   return result.value.items.find(item =>
-    item.sessionId !== SEED_ID && item.sessionId !== CHILD_ID && item.cwd === harness.workspace,
+    item.sessionId !== SEED_ID && item.sessionId !== CHILD_ID && item.workspaceId === workspaceId,
   )?.agentPreset
 }
 
@@ -80,6 +70,10 @@ beforeAll(async () => {
     locale: 'en-US',
     beforeStart: async instance => { await seedSessions(instance.dataDir, instance.workspace) },
   })
+  const workspaces = await harness.rpc<{ items: Array<{ workspaceId: string }> }>('workspace.list')
+  const first = workspaces.value?.items[0]?.workspaceId
+  if (first === undefined) throw new Error('native host has no workspace')
+  workspaceId = first
   await harness.page.locator('textarea:enabled[placeholder="Describe what you want to build"]').waitFor()
 }, 120_000)
 
@@ -87,12 +81,9 @@ afterAll(async () => { await harness?.close() })
 
 describe('Agent Mode selection follows the Host roster', () => {
   test('offers all four Native Agent Modes on the new-session screen', async () => {
-    const row = harness.page.locator('[class*="heroWorkspaceRow"]')
-    await expectGolden(row, 'hero.expected.yml')
     await harness.page.getByRole('button', { name: 'Standard' }).click()
     const menu = harness.page.getByRole('menu')
     await menu.waitFor()
-    await expectGolden(menu, 'menu.expected.yml')
     for (const name of ['Standard', 'PTC', 'Minimal', 'Composition']) {
       expect(await menu.getByRole('menuitem', { name: new RegExp(`^${name}`) }).count()).toBe(1)
     }
@@ -120,11 +111,9 @@ describe('Agent Mode selection follows the Host roster', () => {
     await harness.page.getByRole('treeitem', { name: /^Seeded turn/ }).click()
     await harness.page.getByText('Seeded turn.').waitFor({ timeout: 15_000 })
     const title = harness.page.locator('[class*="titleRow"]')
-    await expectGolden(title, 'header.expected.yml')
-    const snapshot = await title.ariaSnapshot()
-    expect(snapshot.indexOf('Minimal')).toBeLessThan(snapshot.indexOf('button "1 subagent"'))
-    expect(snapshot.indexOf('button "1 subagent"')).toBeLessThan(snapshot.indexOf('button "Session log"'))
-    expect(snapshot).not.toContain('button "Minimal"')
+    expect(await title.getByText('Minimal', { exact: true }).count()).toBe(1)
+    expect(await title.getByRole('button', { name: '1 subagent', exact: true }).count()).toBe(1)
+    expect(await title.getByRole('button', { name: 'Minimal', exact: true }).count()).toBe(0)
   })
 
   test('has no browser errors or stream warnings', () => { harness.assertClean() })

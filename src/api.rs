@@ -2687,10 +2687,9 @@ fn canonical_client_time_zone(value: &str) -> Option<String> {
     {
         return None;
     }
-    value
-        .parse::<chrono_tz::Tz>()
+    jiff::tz::TimeZone::get(value)
         .ok()
-        .map(|zone| zone.name().to_owned())
+        .map(|zone| zone.iana_name().unwrap_or(value).to_owned())
 }
 
 fn compat_response_limit(state: &ApiState, method: &str) -> usize {

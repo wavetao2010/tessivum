@@ -41,12 +41,42 @@ async function remoteRpc(
 async function waitForDevice(page: Page, name: string): Promise<void> {
   await page.getByText(name, { exact: true }).waitFor({ timeout: 10_000 })
 }
+async function createFakeCloudflared(tunnelRoot: string): Promise<string> {
+  const executable = join(tunnelRoot, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')
+  if (process.platform === 'win32') {
+    const source = join(tunnelRoot, 'cloudflared.rs')
+    await writeFile(source, [
+      'use std::{env, path::Path, thread, time::Duration};',
+      '',
+      'fn main() {',
+      '    let mut failure = env::current_exe().expect("current executable").into_os_string();',
+      '    failure.push(".fail");',
+      '    if Path::new(&failure).is_file() {',
+      '        eprintln!("tunnel unavailable");',
+      '        std::process::exit(1);',
+      '    }',
+      '    eprintln!("https://remote-test.trycloudflare.com");',
+      '    loop {',
+      '        thread::sleep(Duration::from_secs(1));',
+      '    }',
+      '}',
+      '',
+    ].join('\n'))
+    const compiler = Bun.spawn([process.env.RUSTC ?? 'rustc', source, '-O', '-o', executable], {
+      stdout: 'inherit', stderr: 'inherit',
+    })
+    expect(await compiler.exited).toBe(0)
+  } else {
+    await writeFile(executable, '#!/bin/sh\nif [ -f "$0.fail" ]; then echo "tunnel unavailable" >&2; exit 1; fi\necho "https://remote-test.trycloudflare.com" >&2\ntrap "exit 0" TERM INT\nwhile :; do sleep 1; done\n')
+    await chmod(executable, 0o700)
+  }
+  return executable
+}
+
 
 test('Rust-owned Remote Access UI enables, remembers, pairs, and revokes', async () => {
   const tunnelRoot = await mkdtemp(join(tmpdir(), 'tessivum-fake-cloudflared-'))
-  const fakeCloudflared = join(tunnelRoot, 'cloudflared')
-  await writeFile(fakeCloudflared, '#!/bin/sh\nif [ -f "$0.fail" ]; then echo "tunnel unavailable" >&2; exit 1; fi\necho "https://remote-test.trycloudflare.com" >&2\ntrap "exit 0" TERM INT\nwhile :; do sleep 1; done\n')
-  await chmod(fakeCloudflared, 0o700)
+  const fakeCloudflared = await createFakeCloudflared(tunnelRoot)
   try {
     const disabledHarness = await RustWebHarness.launch({
       name: 'remote-access-disabled',

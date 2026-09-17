@@ -25,9 +25,16 @@ describe('durable per-message feedback', () => {
 
   async function openSeededSession(): Promise<void> {
     if (await harness.page.getByText('DONE', { exact: true }).count() > 0) return
-    const workspace = harness.page.getByRole('treeitem', { name: 'workspace', exact: true })
-    if (await workspace.getAttribute('aria-expanded') !== 'true') await workspace.click()
-    await harness.page.getByRole('treeitem', { name: /Use the read tool twice/ }).last().click()
+    const listed = await harness.rpc<{ items: Array<{ sessionId: string }> }>('session.list')
+    if (!listed.ok || listed.value?.items.some(item => item.sessionId === SEED_ID) !== true) {
+      throw new Error(`seeded session is unavailable: ${JSON.stringify(listed.error)}`)
+    }
+    await harness.page.evaluate(sessionId => {
+      localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId }))
+    }, SEED_ID)
+    const warningStart = harness.warnings.length
+    await harness.page.reload({ waitUntil: 'load' })
+    acknowledgeReloadConnectionLoss(harness, warningStart)
   }
 
   test('persists a rating and its note across a reload, then retracts', async () => {
