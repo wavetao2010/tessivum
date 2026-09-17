@@ -7,7 +7,7 @@ const DONE = 'BACKGROUND_JOB_LIST_DONE'
 const CALL_ID = 'background-job-list-call'
 const CANCEL_ID = 'background-job-list-cancel'
 const CANCELLED = 'BACKGROUND_JOB_LIST_CANCELLED'
-const COMMAND = 'Start-Sleep -Seconds 45'
+const COMMAND = process.platform === 'win32' ? 'Start-Sleep -Seconds 45' : 'sleep 45'
 
 function replayRecording(): string {
   const argumentsJson = JSON.stringify({ command: COMMAND, description: 'Hold a background slot open', run_in_background: true })

@@ -44,7 +44,10 @@ function textChunks(spec: TurnSpec): unknown[] {
 }
 
 function toolChunks(spec: TurnSpec): unknown[] {
-  const argumentsJson = JSON.stringify({ command: `[Console]::Out.Write('${spec.toolMarker}' + [char]10)`, description: spec.toolMarker })
+  const command = process.platform === 'win32'
+    ? `[Console]::Out.Write('${spec.toolMarker}' + [char]10)`
+    : `echo '${spec.toolMarker}'`
+  const argumentsJson = JSON.stringify({ command, description: spec.toolMarker })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
     { type: 'tool-call-delta', index: 0, id: spec.callId, name: 'bash', argumentsDelta: argumentsJson },

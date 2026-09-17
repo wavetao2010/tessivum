@@ -25,6 +25,7 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Finalize closed Bun child-process resources before starting the next Windows Browser Host, avoiding stale DevTools pipe handles without retries or altered product behavior.
 - Align the Windows packaging Core checkout with the Alpha.29 Core 0.1.7 pin; keep CI prerequisite-order tests independent of duplicate dependency SHA assertions.
 - Require an explicit Windows installer version instead of defaulting to an unavailable Alpha.27 asset; support Alpha.29/30 adjacent-version binary fixtures and Python 3.9 compatibility checks.
+- Select native Windows/Unix shell commands in Browser replay fixtures instead of unconditionally sending PowerShell to the Unix shell; preserve the explicit PowerShell terminal scenario and the goal fixture's single intentional tool failure.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 

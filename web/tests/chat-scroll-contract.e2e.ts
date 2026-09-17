@@ -49,7 +49,9 @@ function textChunks(first: string, done: string, count: number): unknown[] {
 }
 
 function toolChunks(): unknown[] {
-  const command = [`New-Item -ItemType File -Path '${TOOL_READY}' -Force | Out-Null`, `while (-not (Test-Path -LiteralPath '${TOOL_RELEASE}')) { Start-Sleep -Milliseconds 20 }`, `1..64 | ForEach-Object { [Console]::Out.Write(('CHAT_SCROLL_TOOL_RESULT line {0:D2}' -f $_) + [char]10) }`].join('; ')
+  const command = process.platform === 'win32'
+    ? [`New-Item -ItemType File -Path '${TOOL_READY}' -Force | Out-Null`, `while (-not (Test-Path -LiteralPath '${TOOL_RELEASE}')) { Start-Sleep -Milliseconds 20 }`, `1..64 | ForEach-Object { [Console]::Out.Write(('CHAT_SCROLL_TOOL_RESULT line {0:D2}' -f $_) + [char]10) }`].join('; ')
+    : [`touch '${TOOL_READY}'`, `while [ ! -f '${TOOL_RELEASE}' ]; do sleep 0.02; done`, `i=1; while [ "$i" -le 64 ]; do printf 'CHAT_SCROLL_TOOL_RESULT line %02d' "$i"; echo; i=$((i + 1)); done`].join('; ')
   const argumentsJson = JSON.stringify({ command, description: 'CHAT_SCROLL_TOOL_RESULT' })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },

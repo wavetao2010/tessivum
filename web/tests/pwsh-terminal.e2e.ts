@@ -8,7 +8,9 @@ const DONE = 'PWSH_NATIVE_TERMINAL_DONE'
 
 function replayRecording(): string {
   const argumentsJson = JSON.stringify({
-    command: "Get-Item -LiteralPath 'missing.txt' -ErrorAction Stop",
+    command: process.platform === 'win32'
+      ? "Get-Item -LiteralPath 'missing.txt' -ErrorAction Stop"
+      : "pwsh -NoLogo -NoProfile -NonInteractive -Command \"Get-Item -LiteralPath 'missing.txt' -ErrorAction Stop\"",
     description: 'Fail deliberately',
   })
   const attempts = [

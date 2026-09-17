@@ -52,7 +52,9 @@ interface HistoryEvent {
 
 function replayRecording(): string {
   const bash = JSON.stringify({
-    command: "[Console]::Out.Write('SHIPPED_BACKGROUND_OK')",
+    command: process.platform === 'win32'
+      ? "[Console]::Out.Write('SHIPPED_BACKGROUND_OK')"
+      : "printf '%s' 'SHIPPED_BACKGROUND_OK'",
     description: 'Verify the shipped background-job registry',
     run_in_background: true,
   })
