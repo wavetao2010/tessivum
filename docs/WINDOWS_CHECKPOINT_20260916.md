@@ -118,3 +118,13 @@ bun test ./tests/migrated.test.ts ./tests/remote-access.e2e.ts --max-concurrency
 - 当前源码固定客户端：240 文件、3182 测试全部通过，退出 0，见 `integration-source-client.log`。Market：check 退出 0；53 文件、1056 passed、3 既有 skipped，见 `integration-market-check-portable-pack.log`、`integration-market-test.log`。
 - Market offline smoke 复现 Bun 1.4.0 无法在中文目的路径创建 tarball；改用已有 Browser 打包方案中的 npm 后，两次归档摘要一致，Bun 离线安装和实际 import 均通过。没有更换 Bun 版本或放宽离线检查。
 - 新增注册表 CI 步骤最初打断了固定依赖 checkout 的位置约束；已移到三个 checkout 之后。兼容基线、插件账本、发行事实检查均退出 0，原失败日志保留。
+
+### 首个候选提交及追加验收发现
+
+- `8263d0987e12e141cb0d198a670dd31de495130f` 已快进推送至 PR #6 的 `integrate/windows-alpha29`，未修改 main、创建 tag 或发布资产。本地最终 Rust 重验为 560 passed、0 failed、0 ignored；严格 Clippy、格式、重建 WASM guest 合约及真实 Legacy Node 生命周期均退出 0。完整安装器行为检查也退出 0。
+- 本轮静态 CRT release 构建、打包自检及 PE 检查通过；PE 仅列出 Windows 系统 DLL。首个 ZIP 的实际安装器完整测试通过，但 ZIP smoke 在 Legacy 本地包安装处失败，因此该包不作为最终验收通过的交付；原包摘要及结果记录在 `candidate-8263d09.json`。
+- 新发现：`file://` URL 的预检已解码，但传给 pnpm 的参数仍保留百分号编码。新增真实 CLI 回归在修复前退出 101，修复后退出 0，并确认中文、空格、`%`、`#` 路径中的本地 bundle 实际安装并贡献可加载条目；见 `plugin-file-uri-real-red.log`、`plugin-file-uri-real-green.log`。没有把 ZIP smoke 改成绕过 URL 输入。
+- [该提交 CI](https://github.com/wavetao2010/tessivum/actions/runs/35208687913) 的 Linux verify 已通过；macOS Browser 在 `openSeededSession` 点击已不存在的 collapsed 选择器时超时，公开 annotations 指向 `markdown-inline-code-links.e2e.ts` 和 `support.ts:676`。修复导航夹具：只在 Sessions 树中原子检查并展开关闭的分组，避免与自动展开竞争；不改产品、不增加重试或 sleep。实际 Browser 对关闭/已展开两种初态均通过，八个调用方场景全部通过，截图为 `seeded-session-disclosure.png`。
+- 首次本地完整 Browser 另在 `queue-actions.e2e.ts` 遇到 Playwright 1.62.1 的 `request@… was not bound in the connection` 协议异常。根因尚未确认；没有删除 Queue 断言、吞掉此异常或增加自动重试。原始 `integration-browser-full.log` 保留，追加源码修复后须重新执行完整套件。
+- Git SSH 推送可用，但现有 GitHub REST 凭据返回 401；非交互 Credential Manager 查询得到的既有凭据也返回 401。尝试连接既有 PR 浏览器标签超时，未请求导航其他用户页面。PR 正文暂不能直接改写；代码、仓库文档与公开 CI 状态仍可更新和验证，见 `pr-metadata-access.json`。
+- 追加 URL 修复后的完整 Rust 重验：49 套件、561 passed、0 failed、0 ignored；严格 Clippy 与格式检查均退出 0。记录为 `integration-tests-uri.log`、`rust-uri-totals.json`、`integration-clippy-uri.log`、`integration-format-uri-check.log`。最终 scoped 侧栏夹具的两种初态和八个调用方复验也全部通过，见 `browser-disclosure-scoped-proof.log`、`browser-seeded-scoped-consumers.log`。

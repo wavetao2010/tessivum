@@ -31,6 +31,8 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Wait for acknowledged Browser model selection before asserting image-capability admission, rather than racing the selection request.
 - Use npm for the market offline smoke's reproducible archives, matching Browser packaging and avoiding Bun 1.4.0 failures for Unicode destination paths; keep the offline install and import checks on Bun.
 - Preserve raw Windows User PATH registry text, `REG_SZ`/`REG_EXPAND_SZ` types, and missing-versus-empty values during install, rollback, and uninstall; verify real registry transactions through process-local HKCU isolation on PowerShell 5.1 and 7.
+- Normalize local plugin `file://` URLs before invoking pnpm, not just during package preflight; verify actual installation and activation under Unicode, percent, hash, and space-containing paths.
+- Make seeded Browser session setup expand only closed workspace disclosures in one browser task, avoiding a selector race with automatic expansion without changing product behavior or weakening scenario assertions.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 

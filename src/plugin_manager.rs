@@ -995,6 +995,18 @@ fn is_local_package_specifier(specifier: &str) -> bool {
         || path.starts_with("../")
 }
 
+fn local_package_file_url_path(specifier: &str) -> Result<PathBuf, PluginManagerError> {
+    url::Url::parse(specifier)
+        .ok()
+        .and_then(|url| url.to_file_path().ok())
+        .ok_or_else(|| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                "invalid local package file URL",
+            )
+        })
+}
+
 fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerError> {
     if let Some(package) = add_package_name(specifier).filter(|name| !name.is_empty()) {
         return Ok(package.into());
@@ -1006,15 +1018,7 @@ fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerErro
         ));
     }
     let root = if specifier.starts_with("file://") {
-        url::Url::parse(specifier)
-            .ok()
-            .and_then(|url| url.to_file_path().ok())
-            .ok_or_else(|| {
-                compatibility_error(
-                    PLUGIN_PACKAGE_ENTRY_INVALID,
-                    "invalid local package file URL",
-                )
-            })?
+        local_package_file_url_path(specifier)?
     } else {
         let path = Path::new(specifier.strip_prefix("file:").unwrap_or(specifier));
         if path.is_absolute() {
@@ -1040,6 +1044,10 @@ fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerErro
 }
 
 fn anchor_path_spec(specifier: &str, cwd: &Path) -> Result<String, PluginManagerError> {
+    if specifier.starts_with("file://") {
+        let path = local_package_file_url_path(specifier)?;
+        return Ok(format!("file:{}", path.to_string_lossy()));
+    }
     let (prefix, path) = specifier
         .strip_prefix("file:")
         .map_or(("", specifier), |path| ("file:", path));

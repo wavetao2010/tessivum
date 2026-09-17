@@ -672,9 +672,18 @@ export function textReplay(sessionId: string, text: string, requestId?: string):
 export async function openSeededSession(harness: RustWebHarness, done: string): Promise<void> {
   const target = harness.page.getByText(done, { exact: true })
   if (await target.count() > 0) return
-  const collapsed = harness.page.locator('[role="treeitem"][aria-expanded="false"]')
-  while (await collapsed.count() > 0) await collapsed.first().click()
-  const sessions = harness.page.locator('[role="treeitem"]:not([aria-expanded])')
+  const tree = harness.page.getByRole('tree', { name: 'Sessions', exact: true })
+  const groups = tree.locator('[role="treeitem"][aria-expanded]')
+  await groups.first().waitFor({ timeout: 10_000 })
+  // The current group may auto-expand between separate locator operations.
+  // Read and activate disclosures in one browser task, without toggling open rows.
+  await groups.evaluateAll(rows => {
+    for (const row of rows) {
+      if (row.getAttribute('aria-expanded') === 'false') (row as HTMLElement).click()
+    }
+  })
+  await waitUntil(() => tree.locator('[role="treeitem"][aria-expanded="false"]').count(), count => count === 0, 10_000)
+  const sessions = tree.locator('[role="treeitem"]:not([aria-expanded])')
   await waitUntil(() => sessions.count(), count => count > 0, 10_000)
   for (let index = await sessions.count() - 1; index >= 0; index -= 1) {
     await sessions.nth(index).click()
