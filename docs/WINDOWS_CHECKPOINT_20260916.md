@@ -79,3 +79,42 @@ bun test ./tests/migrated.test.ts ./tests/remote-access.e2e.ts --max-concurrency
 已按生成目录名称、创建时间、进程归属、嵌入资源哈希及无 reparse point 条件清理 C 盘的 251 个本轮临时前端资产目录，回收 4,968,614,375 字节；Browser 完成后再清理 E 盘中文空格临时根下 360 个目录，回收 7,127,947,614 字节。完整路径与哈希见 `generated-cache-cleanup-report.json`、`browser-postsuite-cleanup-report.json` 和 `browser-postsuite-cleanup-remainder-report.json`；未删除用户数据或原始失败日志。
 
 最终进程检查未发现 `tessivum.exe`；3000、3001、3002 均没有监听端口。临时 Browser 诊断源码已删除，原始日志保留为证据。
+
+## 2026-09-17 Alpha.29 集成：独立验收记录
+
+以下记录与上面的 9 月 16 日历史结果分开。当前修复基线为
+`011694d57480b7e030fffb0508be9960bcafd828`，开发分支为
+`fix/windows-alpha29-integration`，目标为草稿 [PR #6](https://github.com/wavetao2010/tessivum/pull/6)。
+产品保持 Alpha.29，Core 保持 `0caaccf9a79d7a906a08a21c3032eafebe084ffc`（0.1.7）。
+
+本轮证据目录：`C:/Users/Q/Documents/New project/windows-integration-20260917`。
+每个执行步骤保留 `.log` 和包含命令、工作目录、起止时间及退出码的 `.json`；
+定向修复工作区的结果不冒充最终提交或干净机器验收。
+
+- 工作区：`C:/Users/Q/Documents/New project/集成 修复/tessivum-alpha29`；旧工作区及未跟踪依赖未清理。
+- 环境：Windows 11 Pro x64 build 26200、NTFS、非管理员、Developer Mode 未启用。
+- 工具：现有 Node 24.20.0 固定安装仅加入本轮子进程 PATH；Bun 1.4.0、pnpm 11.7.0、Rust/Cargo 1.94.0、Windows PowerShell 5.1.26100.8655、Python 3.12.10。初始 PowerShell 7 探针报告 7.6.4，随后实际解析到 WindowsApps 的 7.6.6；本任务未执行 PowerShell 安装或升级，后续以 `powershell-resolution.log` 记录的实际版本为准。
+- 原始用户 PATH 为 `REG_EXPAND_SZ`，测试前保存原始值的 SHA-256；没有在日常用户 PATH 上执行安装或破坏性实验。
+- DeepSeek/Cordis 从已固定提交的本地 Git 仓库进行全新 `--no-local` 克隆；Core 从远端检出上述 0.1.7 pin。没有复制旧 `node_modules` 或使用旧产品 ZIP。
+- 全新冻结安装、实际 esbuild 0.21.5/0.25.12/0.28.1 执行及安装后的第二次冻结安装通过。Web 冻结安装和当前源码 Web build 通过。
+- Cargo 初次 fetch 因失效本地代理失败；仅本轮命令使用 Git CLI、SSH 和代理覆盖后通过。Host 模块下载遇到 TLS EOF，已有不可变缓存通过当前清单及逐文件 inventory 校验后使用；不改变版本或完整性检查。
+
+### 基线 CI 与定向观察
+
+- [基线 CI](https://github.com/wavetao2010/tessivum/actions/runs/35196621898)：`verify` 通过；`windows` 在 Rust tests/Legacy bridge 阶段失败，其后客户端/WASM 步骤未执行；`browser-e2e` 在 `image-input.e2e.ts:108` 等待图片能力提示时失败。
+- 未修改基线上的 `powershell_normal_completion_reaps_its_descendant_tree` 本机执行通过，输出 `30348|True|False`。这仍是旧宿主特殊条件，不是普通 runner 可移植性的证明，也不是 WIN-INTEGRATION-02 已复现或关闭。
+- WIN-INTEGRATION-03 已在未修改的基线上取得真实注册表 RED：进程局部 HKCU 映射到 GUID 临时键，只调用原安装器快照读取函数。PowerShell 5.1 与实际 PowerShell 7.6.6 均将 `%TESSIVUM_SNAPSHOT_REFERENCE%\bin` 展开为固定路径，而注册表原文及类型仍为变量引用和 `REG_EXPAND_SZ`。两条命令退出 1，临时键均已删除；此探针未调用真实用户 PATH 写入函数。完整写入/回滚/事务覆盖仍须另行验证。
+- Browser 请求屏障实验证明：Host 尚未接收模型选择时发送，显示“发送前请先选择模型”；放行选择并等待界面显示 Text Model 后发送，才显示图片能力拒绝且保留草稿。没有使用定时 sleep 驱动该证据。测试夹具增加等待已选模型的可见状态，原完整图片场景定向通过；不能仅据此宣称原 CI 只有这一种失败原因或跨平台 CI 已通过。
+- 三项安全阻塞及最终提交的完整 Rust、Browser、注册表事务、ZIP 和 CI 仍须以本轮实际结果结案；本节不授予合并或发布批准。
+
+### 本轮源码修复与定向证据
+
+- WIN-INTEGRATION-01：仅把受控逃逸夹具追加到未修改的 `011694d` 生产代码，最后持有者/运行时关闭场景退出 101，明确因逃逸孙进程未退出而失败；修复后取消、超时、dispose、运行时关闭四项全部通过。证据：`persistent-escape-baseline-red-qualified.log`、`persistent-escape-green.log`。
+- WIN-INTEGRATION-02：普通子进程测试不再要求子进程处于所有 Job 之外；独立逃逸夹具只允许自身测试 Job 显式 breakaway，并检查该 Job 的成员身份、文件锁释放及无关进程存活。普通子进程定向复验退出 0，见 `integration-ordinary-child-green.log`；hosted Windows CI 仍待当前提交结果。
+- WIN-INTEGRATION-03：旧安装器在 PowerShell 5.1 与 7 的真实安装回滚中均把 `%TESSIVUM_REGISTRY_PATH_TEST_TOKEN%` 写成已展开值，分别见 `registry-transactions-baseline-native-capture.log`、`registry-transactions-baseline-ps7-red.log`。修复后的双宿主真实注册表事务退出 0，见 `registry-transactions-green-native-capture.log`；快照/写入/恢复独立检查也退出 0。所有写入均在已验证的进程局部 HKCU 映射下进行，不是全新用户或真实用户 PATH 安装验收。
+- 注册表事务此阶段使用本轮从未修改基线新构建的 Alpha.29 ZIP，配合当前安装器；不作为最终修复 ZIP 的验收结果。测试夹具修正了脚本参数与 script-scope 变量重叠、数组 splatting 未绑定 `-Uninstall` 开关、未初始化退出码及 PowerShell 5.1 原生 stderr 捕获问题。
+- PowerShell 5.1 的 MAX_PATH 限制曾在 ZIP 展开前阻断测试，不能算作 PATH 缺陷的 RED。夹具缩短临时目录名称，事务命令的 TEMP/TMP 使用 `E:/验 收`；保留中文及空格条件，没有开启系统长路径策略、提权或改变全局环境。
+- 当前源码 Rust 全 targets：49 个结果套件，560 passed、0 failed、0 ignored，退出 0；见 `integration-rust-all-targets.log`、`rust-integration-totals.json`。严格 Clippy、最终格式及最终提交验收另行记录。
+- 当前源码固定客户端：240 文件、3182 测试全部通过，退出 0，见 `integration-source-client.log`。Market：check 退出 0；53 文件、1056 passed、3 既有 skipped，见 `integration-market-check-portable-pack.log`、`integration-market-test.log`。
+- Market offline smoke 复现 Bun 1.4.0 无法在中文目的路径创建 tarball；改用已有 Browser 打包方案中的 npm 后，两次归档摘要一致，Bun 离线安装和实际 import 均通过。没有更换 Bun 版本或放宽离线检查。
+- 新增注册表 CI 步骤最初打断了固定依赖 checkout 的位置约束；已移到三个 checkout 之后。兼容基线、插件账本、发行事实检查均退出 0，原失败日志保留。

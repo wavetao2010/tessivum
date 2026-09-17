@@ -107,7 +107,7 @@ Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
 
 匹配的 Windows 版本发布后，`powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` 会安装到 `%LOCALAPPDATA%\Tessivum\versions`，并在 `%LOCALAPPDATA%\Tessivum\bin` 创建受管启动器。安装器在切换版本前验证 ZIP 与启动器，支持升级、降级和回滚，仅修改用户级 PATH。`-Uninstall` 只移除受管安装文件和安装器拥有的 PATH 项，保留应用历史与设置。当前已发布的 Alpha.27 没有 Windows 资产，不能据此直接联网安装。
 
-当前没有默认 Windows 发行版本：安装必须传入版本或设置 `VERSION`，卸载不需要。9 月 16 日报告验证的是旧 Windows 候选版，不是 Alpha.29/Core 0.1.7 集成结果。草稿集成另有尚未解决的 Windows PowerShell 5.1 PATH 保留问题：注册表中的可展开变量引用可能被展开后写回。此合并门禁关闭前，不要用安装器修改真实用户 PATH。
+当前没有默认 Windows 发行版本：安装必须传入版本或设置 `VERSION`，卸载不需要。9 月 16 日报告验证的是旧 Windows 候选版，不是 Alpha.29/Core 0.1.7 集成结果。安装器现已保留 PATH 的 `REG_SZ`/`REG_EXPAND_SZ` 原文、类型，以及不存在和空值的区别；修复已通过 Windows PowerShell 5.1 与 PowerShell 7 的进程局部 HKCU 隔离事务回归，但这不是全新用户验收。集成仍为等待最终 ZIP 和跨平台 CI 门禁的草稿；门禁关闭前，不要用草稿安装器修改真实用户 PATH。
 
 ### 从源码运行
 

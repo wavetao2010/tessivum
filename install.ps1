@@ -857,6 +857,19 @@ function Assert-ManagedVersionDirectory {
     Assert-ReleaseLayout -Root $Path -ExpectedVersion $ExpectedVersion
 }
 
+function Get-UserPathRegistryKey {
+    param(
+        [Parameter(Mandatory = $true)][bool]$Writable,
+        [Parameter(Mandatory = $true)][bool]$CreateIfMissing
+    )
+
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $Writable)
+    if ($null -eq $key -and $CreateIfMissing) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    }
+    return $key
+}
+
 function Get-PathStoreSnapshot {
     param([string]$PathStore)
 
@@ -867,6 +880,7 @@ function Get-PathStoreSnapshot {
                 Kind = 'file'
                 Exists = $false
                 Value = $null
+                RegistryValueKind = $null
             }
         }
         if ($item.PSIsContainer -or (Test-ReparsePoint -Item $item)) {
@@ -876,15 +890,61 @@ function Get-PathStoreSnapshot {
             Kind = 'file'
             Exists = $true
             Value = [System.IO.File]::ReadAllText($PathStore, $script:Utf8NoBom)
+            RegistryValueKind = $null
         }
     }
 
-    $value = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
-    return [PSCustomObject]@{
-        Kind = 'user'
-        Exists = ($null -ne $value)
-        Value = $value
+    $key = Get-UserPathRegistryKey -Writable $false -CreateIfMissing $false
+    if ($null -eq $key) {
+        return [PSCustomObject]@{
+            Kind = 'registry'
+            Exists = $false
+            Value = $null
+            RegistryValueKind = $null
+        }
     }
+    try {
+        $missing = [System.Object]::new()
+        $value = $key.GetValue(
+            'Path',
+            $missing,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        if ([System.Object]::ReferenceEquals($value, $missing)) {
+            return [PSCustomObject]@{
+                Kind = 'registry'
+                Exists = $false
+                Value = $null
+                RegistryValueKind = $null
+            }
+        }
+
+        $registryValueKind = $key.GetValueKind('Path')
+        if ($registryValueKind -ne [Microsoft.Win32.RegistryValueKind]::String -and $registryValueKind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+            Fail "User PATH must be REG_SZ or REG_EXPAND_SZ"
+        }
+        if ($value -isnot [string]) {
+            Fail 'User PATH must be a string registry value'
+        }
+        return [PSCustomObject]@{
+            Kind = 'registry'
+            Exists = $true
+            Value = $value
+            RegistryValueKind = $registryValueKind
+        }
+    }
+    finally {
+        $key.Close()
+    }
+}
+
+function Get-PathStoreWriteKind {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+
+    if ($Snapshot.Kind -eq 'registry' -and $Snapshot.Exists) {
+        return $Snapshot.RegistryValueKind
+    }
+    return [Microsoft.Win32.RegistryValueKind]::String
 }
 
 function Write-AtomicTextFile {
@@ -932,14 +992,55 @@ function Write-AtomicTextFile {
     }
 }
 
+function Send-EnvironmentChangedBroadcast {
+    if ($null -eq ('TessivumInstaller.EnvironmentChangeNotifier' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace TessivumInstaller
+{
+    public static class EnvironmentChangeNotifier
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr SendMessageTimeout(
+            IntPtr hWnd,
+            uint message,
+            IntPtr wParam,
+            string lParam,
+            uint flags,
+            uint timeout,
+            out IntPtr result);
+    }
+}
+'@
+    }
+
+    $result = [System.IntPtr]::Zero
+    [void][TessivumInstaller.EnvironmentChangeNotifier]::SendMessageTimeout(
+        [System.IntPtr]0xffff,
+        [uint32]0x001a,
+        [System.IntPtr]::Zero,
+        'Environment',
+        [uint32]0x0002,
+        [uint32]5000,
+        [ref]$result
+    )
+}
+
 function Set-PathStoreValue {
+    [CmdletBinding(DefaultParameterSetName = 'Write')]
     param(
         [string]$PathStore,
-        [AllowNull()][string]$Value
+        [Parameter(Mandatory = $true, ParameterSetName = 'Write')]
+        [AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Delete')]
+        [switch]$Delete,
+        [Microsoft.Win32.RegistryValueKind]$RegistryValueKind = [Microsoft.Win32.RegistryValueKind]::String
     )
 
     if (-not [string]::IsNullOrEmpty($PathStore)) {
-        if ($null -eq $Value) {
+        if ($Delete.IsPresent) {
             $item = Get-ExistingItem -Path $PathStore
             if ($null -ne $item) {
                 if ($item.PSIsContainer -or (Test-ReparsePoint -Item $item)) {
@@ -953,8 +1054,48 @@ function Set-PathStoreValue {
         return
     }
 
-    [Environment]::SetEnvironmentVariable('Path', $Value, [EnvironmentVariableTarget]::User)
+    if ($Delete.IsPresent) {
+        $key = Get-UserPathRegistryKey -Writable $true -CreateIfMissing $false
+        if ($null -eq $key) {
+            return
+        }
+
+        $deleted = $false
+        try {
+            $missing = [System.Object]::new()
+            $currentValue = $key.GetValue(
+                'Path',
+                $missing,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+            if (-not [System.Object]::ReferenceEquals($currentValue, $missing)) {
+                $key.DeleteValue('Path', $false)
+                $deleted = $true
+            }
+        }
+        finally {
+            $key.Close()
+        }
+        if ($deleted) {
+            Send-EnvironmentChangedBroadcast
+        }
+        return
+    }
+
+    if ($RegistryValueKind -ne [Microsoft.Win32.RegistryValueKind]::String -and $RegistryValueKind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+        Fail 'User PATH registry value must be REG_SZ or REG_EXPAND_SZ'
+    }
+
+    $key = Get-UserPathRegistryKey -Writable $true -CreateIfMissing $true
+    try {
+        $key.SetValue('Path', $Value, $RegistryValueKind)
+    }
+    finally {
+        $key.Close()
+    }
+    Send-EnvironmentChangedBroadcast
 }
+
 
 function Restore-PathStoreSnapshot {
     param(
@@ -962,18 +1103,27 @@ function Restore-PathStoreSnapshot {
         [string]$PathStore
     )
 
-    if ($Snapshot.Kind -eq 'file' -and -not $Snapshot.Exists) {
-        Set-PathStoreValue -PathStore $PathStore -Value $null
+    if (-not $Snapshot.Exists) {
+        Set-PathStoreValue -PathStore $PathStore -Delete
         return
     }
-    Set-PathStoreValue -PathStore $PathStore -Value $Snapshot.Value
+
+    Set-PathStoreValue `
+        -PathStore $PathStore `
+        -Value $Snapshot.Value `
+        -RegistryValueKind (Get-PathStoreWriteKind -Snapshot $Snapshot)
 }
+
 
 function Get-InstalledPathUpdate {
     param(
-        [AllowNull()][string]$CurrentValue,
+        [AllowNull()]$CurrentValue,
         [Parameter(Mandatory = $true)][string]$BinDirectory
     )
+
+    if ($null -ne $CurrentValue -and $CurrentValue -isnot [string]) {
+        Fail 'PATH must be a string registry value'
+    }
 
     $entries = if ($null -eq $CurrentValue) {
         @()
@@ -1006,18 +1156,24 @@ function Get-InstalledPathUpdate {
     }
 }
 
+
 function Get-UninstalledPathUpdate {
     param(
-        [AllowNull()][string]$CurrentValue,
+        [AllowNull()]$CurrentValue,
         [Parameter(Mandatory = $true)][string]$BinDirectory
     )
 
-    $entries = if ($null -eq $CurrentValue) {
-        @()
+    if ($null -ne $CurrentValue -and $CurrentValue -isnot [string]) {
+        Fail 'PATH must be a string registry value'
     }
-    else {
-        @($CurrentValue.Split([char[]]@(';'), [System.StringSplitOptions]::None))
+    if ($null -eq $CurrentValue) {
+        return [PSCustomObject]@{
+            Value = $null
+            Changed = $false
+        }
     }
+
+    $entries = @($CurrentValue.Split([char[]]@(';'), [System.StringSplitOptions]::None))
     $updatedEntries = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in $entries) {
         if (-not [string]::Equals($entry, $BinDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -1042,6 +1198,7 @@ function Get-PathOwnershipRecord {
         return [PSCustomObject]@{
             Exists = $false
             Content = $null
+            OriginalPathExists = $null
         }
     }
     if ($item.PSIsContainer -or (Test-ReparsePoint -Item $item)) {
@@ -1049,21 +1206,60 @@ function Get-PathOwnershipRecord {
     }
 
     $content = [System.IO.File]::ReadAllText($OwnershipPath, $script:Utf8NoBom)
-    $expected = 'TESSIVUM-PATH-OWNER: 1' + "`r`n" + $BinDirectory + "`r`n"
-    if (-not [string]::Equals($content, $expected, [System.StringComparison]::Ordinal)) {
+    $legacyExpected = 'TESSIVUM-PATH-OWNER: 1' + "`r`n" + $BinDirectory + "`r`n"
+    $presentExpected = 'TESSIVUM-PATH-OWNER: 2' + "`r`n" + $BinDirectory + "`r`nPathExisted: 1`r`n"
+    $missingExpected = 'TESSIVUM-PATH-OWNER: 2' + "`r`n" + $BinDirectory + "`r`nPathExisted: 0`r`n"
+    $originalPathExists = $null
+    if ([string]::Equals($content, $legacyExpected, [System.StringComparison]::Ordinal)) {
+        $originalPathExists = $null
+    }
+    elseif ([string]::Equals($content, $presentExpected, [System.StringComparison]::Ordinal)) {
+        $originalPathExists = $true
+    }
+    elseif ([string]::Equals($content, $missingExpected, [System.StringComparison]::Ordinal)) {
+        $originalPathExists = $false
+    }
+    else {
         Fail "refusing to replace unmanaged PATH ownership record: $OwnershipPath"
     }
 
     return [PSCustomObject]@{
         Exists = $true
         Content = $content
+        OriginalPathExists = $originalPathExists
     }
 }
 
-function New-PathOwnershipContent {
-    param([Parameter(Mandatory = $true)][string]$BinDirectory)
 
-    return ('TESSIVUM-PATH-OWNER: 1' + "`r`n" + $BinDirectory + "`r`n")
+function New-PathOwnershipContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$BinDirectory,
+        [Parameter(Mandatory = $true)][bool]$OriginalPathExists
+    )
+
+    $pathExisted = if ($OriginalPathExists) { '1' } else { '0' }
+    return ('TESSIVUM-PATH-OWNER: 2' + "`r`n" + $BinDirectory + "`r`nPathExisted: " + $pathExisted + "`r`n")
+}
+
+function Set-UninstalledPathStoreValue {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)]$Update,
+        [Parameter(Mandatory = $true)]$Ownership,
+        [string]$PathStore
+    )
+
+    if (-not $Update.Changed) {
+        return
+    }
+    if ($Ownership.OriginalPathExists -eq $false -and [string]::IsNullOrEmpty($Update.Value)) {
+        Set-PathStoreValue -PathStore $PathStore -Delete
+        return
+    }
+    Set-PathStoreValue `
+        -PathStore $PathStore `
+        -Value $Update.Value `
+        -RegistryValueKind (Get-PathStoreWriteKind -Snapshot $Snapshot)
 }
 
 function Enter-InstallerLock {
@@ -1241,11 +1437,16 @@ function Invoke-Install {
 
         $pathUpdate = Get-InstalledPathUpdate -CurrentValue $pathSnapshot.Value -BinDirectory $BinDirectory
         if ($pathUpdate.Changed) {
-            Set-PathStoreValue -PathStore $PathStore -Value $pathUpdate.Value
+            Set-PathStoreValue `
+                -PathStore $PathStore `
+                -Value $pathUpdate.Value `
+                -RegistryValueKind (Get-PathStoreWriteKind -Snapshot $pathSnapshot)
             $pathChanged = $true
         }
         if ($pathUpdate.Added -and -not $ownership.Exists) {
-            Write-AtomicTextFile -Path $ownershipPath -Content (New-PathOwnershipContent -BinDirectory $BinDirectory)
+            Write-AtomicTextFile `
+                -Path $ownershipPath `
+                -Content (New-PathOwnershipContent -BinDirectory $BinDirectory -OriginalPathExists $pathSnapshot.Exists)
             $ownershipCreated = $true
         }
 
@@ -1416,7 +1617,11 @@ function Remove-OwnedPathEntryOnly {
     try {
         $update = Get-UninstalledPathUpdate -CurrentValue $snapshot.Value -BinDirectory $BinDirectory
         if ($update.Changed) {
-            Set-PathStoreValue -PathStore $PathStore -Value $update.Value
+            Set-UninstalledPathStoreValue `
+                -Snapshot $snapshot `
+                -Update $update `
+                -Ownership $ownership `
+                -PathStore $PathStore
             $changed = $true
         }
         [System.IO.File]::Delete($OwnershipPath)
@@ -1551,7 +1756,11 @@ function Invoke-Uninstall {
         if ($ownership.Exists) {
             $pathUpdate = Get-UninstalledPathUpdate -CurrentValue $pathSnapshot.Value -BinDirectory $BinDirectory
             if ($pathUpdate.Changed) {
-                Set-PathStoreValue -PathStore $PathStore -Value $pathUpdate.Value
+                Set-UninstalledPathStoreValue `
+                    -Snapshot $pathSnapshot `
+                    -Update $pathUpdate `
+                    -Ownership $ownership `
+                    -PathStore $PathStore
                 $pathChanged = $true
             }
             [System.IO.File]::Delete($ownershipPath)
@@ -1563,10 +1772,10 @@ function Invoke-Uninstall {
     catch {
         $failure = $_
         if ($null -eq $ownership) {
-            $ownership = [PSCustomObject]@{ Exists = $false; Content = $null }
+            $ownership = [PSCustomObject]@{ Exists = $false; Content = $null; OriginalPathExists = $null }
         }
         if ($null -eq $pathSnapshot) {
-            $pathSnapshot = [PSCustomObject]@{ Kind = 'file'; Exists = $false; Value = $null }
+            $pathSnapshot = [PSCustomObject]@{ Kind = 'file'; Exists = $false; Value = $null; RegistryValueKind = $null }
         }
         $rollbackProblems = Restore-UninstallState `
             -LauncherStates $launcherStates `
@@ -1644,6 +1853,7 @@ try {
     if (-not $testMode -and -not [string]::IsNullOrEmpty($env:REPOSITORY)) {
         Fail 'REPOSITORY is not configurable; release downloads are pinned to GitHub HTTPS releases'
     }
+
 
     $requestedVersion = if (-not $Uninstall.IsPresent -and -not [string]::IsNullOrEmpty($Version)) {
         $Version

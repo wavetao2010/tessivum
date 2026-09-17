@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1.7. The earlier local Windows verification applies only to the original candidate, not this merged tree. Windows acceptance and the PowerShell 5.1 raw PATH/type preservation issue remain merge gates. See the [Windows repair evidence and remaining publication scope](docs/WINDOWS_CHECKPOINT_20260916.md).
+Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1.7. The earlier local Windows verification applies only to the original candidate, not this merged tree. Raw PATH/type preservation now passes isolated transaction regressions on PowerShell 5.1 and 7; final ZIP and cross-platform CI acceptance remain merge gates. See the [Windows repair evidence and remaining publication scope](docs/WINDOWS_CHECKPOINT_20260916.md).
 
 ### Added
 
@@ -26,6 +26,11 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Align the Windows packaging Core checkout with the Alpha.29 Core 0.1.7 pin; keep CI prerequisite-order tests independent of duplicate dependency SHA assertions.
 - Require an explicit Windows installer version instead of defaulting to an unavailable Alpha.27 asset; support Alpha.29/30 adjacent-version binary fixtures and Python 3.9 compatibility checks.
 - Select native Windows/Unix shell commands in Browser replay fixtures instead of unconditionally sending PowerShell to the Unix shell; preserve the explicit PowerShell terminal scenario and the goal fixture's single intentional tool failure.
+- Capture persistent PowerShell descendants before terminating their Windows Job, including cancellation, timeout, disposal, and last-owner runtime teardown; fence retained process generations before releasing resources.
+- Separate ordinary Job-inherited children from explicitly escaped grandchildren in Windows process regressions; keep unrelated processes alive during cleanup verification.
+- Wait for acknowledged Browser model selection before asserting image-capability admission, rather than racing the selection request.
+- Use npm for the market offline smoke's reproducible archives, matching Browser packaging and avoiding Bun 1.4.0 failures for Unicode destination paths; keep the offline install and import checks on Bun.
+- Preserve raw Windows User PATH registry text, `REG_SZ`/`REG_EXPAND_SZ` types, and missing-versus-empty values during install, rollback, and uninstall; verify real registry transactions through process-local HKCU isolation on PowerShell 5.1 and 7.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 

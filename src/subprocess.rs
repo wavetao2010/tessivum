@@ -194,6 +194,20 @@ struct ProcessInner {
 }
 
 #[cfg(windows)]
+impl ProcessInner {
+    fn windows_job_state(&self) -> Option<Arc<WindowsJobState>> {
+        lock(&self.job).as_ref().map(|job| Arc::clone(&job.inner))
+    }
+
+    fn cleanup_windows_job_blocking(&self) -> std::io::Result<()> {
+        match lock(&self.job).take() {
+            Some(job) => job.cleanup_process_tree_blocking(),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(windows)]
 pub(crate) struct WindowsJob {
     inner: Arc<WindowsJobState>,
 }
@@ -203,6 +217,7 @@ struct WindowsJobState {
     job: OwnedHandle,
     root: ProcessGeneration,
     capture: Mutex<WindowsCaptureState>,
+    cleanup: Mutex<()>,
 }
 
 #[cfg(windows)]
@@ -377,6 +392,7 @@ impl WindowsJob {
                 job,
                 root,
                 capture: Mutex::new(WindowsCaptureState::default()),
+                cleanup: Mutex::new(()),
             }),
         })
     }
@@ -385,55 +401,79 @@ impl WindowsJob {
         let _ = terminate_windows_job(&self.inner);
     }
 
+    /// Captures every currently traceable descendant before terminating Job members.
+    ///
+    /// Callers that can await cleanup should use this before a root process can
+    /// disappear; the later fence consumes the retained identities.
     pub(crate) async fn capture_and_terminate(&self) -> std::io::Result<()> {
-        let state = Arc::clone(&self.inner);
-        let task_state = Arc::clone(&state);
-        match tokio::task::spawn_blocking(move || {
-            let discovery = discover_and_retain_processes(&task_state, None);
-            let mut first_error = discovery.first_error;
-            if let Err(error) = terminate_windows_job(&task_state) {
-                preserve_first_capture_error(&task_state, &error);
-                preserve_first_error(&mut first_error, error);
-            }
-            if let Some(error) = first_error {
-                Err(error)
-            } else {
-                Ok(())
-            }
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                let error = blocking_task_error("Windows process-tree capture", error);
-                preserve_first_capture_error(&state, &error);
-                let _ = terminate_windows_job(&state);
-                Err(error)
-            }
-        }
+        capture_and_terminate_windows_job(Arc::clone(&self.inner)).await
     }
 
-    pub(crate) async fn cleanup_process_tree(self) -> std::io::Result<()> {
-        let state = Arc::clone(&self.inner);
-        match tokio::task::spawn_blocking(move || self.cleanup_process_tree_blocking()).await {
-            Ok(result) => result,
-            Err(error) => {
-                let task_error = blocking_task_error("Windows process-tree cleanup", error);
-                match lock(&state.capture)
-                    .first_error
-                    .as_ref()
-                    .map(WindowsCaptureError::to_error)
-                {
-                    Some(error) => Err(error),
-                    None => Err(task_error),
-                }
-            }
-        }
+    pub(crate) async fn cleanup_process_tree(&self) -> std::io::Result<()> {
+        cleanup_windows_job(Arc::clone(&self.inner)).await
     }
 
     /// Fences synchronous runners before they revoke grants or remove private temp.
-    pub(crate) fn cleanup_process_tree_blocking(self) -> std::io::Result<()> {
+    pub(crate) fn cleanup_process_tree_blocking(&self) -> std::io::Result<()> {
         cleanup_windows_process_tree(&self.inner)
+    }
+}
+
+#[cfg(windows)]
+fn capture_and_terminate_windows_job_blocking(state: &WindowsJobState) -> std::io::Result<()> {
+    let discovery = discover_and_retain_processes(state, None);
+    let mut first_error = discovery.first_error;
+    if let Err(error) = terminate_windows_job(state) {
+        preserve_first_capture_error(state, &error);
+        preserve_first_error(&mut first_error, error);
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+async fn capture_and_terminate_windows_job(state: Arc<WindowsJobState>) -> std::io::Result<()> {
+    let task_state = Arc::clone(&state);
+    match tokio::task::spawn_blocking(move || {
+        capture_and_terminate_windows_job_blocking(&task_state)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_error) => {
+            let error = blocking_task_error("Windows process-tree capture", join_error);
+            preserve_first_capture_error(&state, &error);
+            // A cancelled or panicked blocking task did not establish the
+            // ordering guarantee. Make one direct capture attempt before the
+            // fallback termination it performs.
+            let _ = capture_and_terminate_windows_job_blocking(&state);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn cleanup_windows_job(state: Arc<WindowsJobState>) -> std::io::Result<()> {
+    let task_state = Arc::clone(&state);
+    match tokio::task::spawn_blocking(move || cleanup_windows_process_tree(&task_state)).await {
+        Ok(result) => result,
+        Err(join_error) => {
+            let task_error = blocking_task_error("Windows process-tree cleanup", join_error);
+            preserve_first_capture_error(&state, &task_error);
+            // The scheduled fence did not report completion. Run it directly so
+            // a later `WindowsJob::drop` cannot become the first termination.
+            let _ = cleanup_windows_process_tree(&state);
+            match lock(&state.capture)
+                .first_error
+                .as_ref()
+                .map(WindowsCaptureError::to_error)
+            {
+                Some(error) => Err(error),
+                None => Err(task_error),
+            }
+        }
     }
 }
 
@@ -1124,6 +1164,7 @@ fn terminate_and_wait_retained_processes(
 
 #[cfg(windows)]
 fn cleanup_windows_process_tree(state: &WindowsJobState) -> std::io::Result<()> {
+    let _cleanup = lock(&state.cleanup);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut first_error = lock(&state.capture)
         .first_error
@@ -1439,8 +1480,8 @@ impl Subprocess {
         #[cfg(unix)]
         let _ = signal_tree(pid, libc::SIGTERM);
         #[cfg(windows)]
-        if let Some(job) = lock(&self.inner.job).as_ref() {
-            job.terminate();
+        if let Some(state) = self.inner.windows_job_state() {
+            let _ = capture_and_terminate_windows_job(state).await;
         }
         let notified = self.inner.done.notified();
         if self.done().is_none() {
@@ -1468,15 +1509,14 @@ struct RuntimeInner {
 #[cfg(windows)]
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
-        for inner in lock(&self.children).values() {
+        let children = std::mem::take(&mut *lock(&self.children));
+        for inner in children.into_values() {
             let mut state = lock(&inner.state);
             if state.done.is_none() && state.termination.is_none() {
                 state.termination = Some(ProcessTermination::Shutdown);
             }
             drop(state);
-            if let Some(job) = lock(&inner.job).as_ref() {
-                job.terminate();
-            }
+            let _ = inner.cleanup_windows_job_blocking();
         }
     }
 }
@@ -1822,8 +1862,12 @@ impl Drop for PersistentShell {
         self.inner.disposed.store(true, Ordering::Release);
         self.inner.dispose_signal.notify_waiters();
         self.inner.request_termination(ProcessTermination::Shutdown);
-        if let Some(job) = lock(&self.inner.job).as_ref() {
-            job.terminate();
+        // Runtime teardown can cancel the async reaper before it gets a poll.
+        // Keep ownership local until this synchronous fence has captured every
+        // still-observable generation and terminated the complete tree.
+        if let Err(error) = self.inner.cleanup_windows_job_blocking() {
+            self.inner
+                .record_cleanup_failure(persistent_shell_cleanup(error));
         }
     }
 }
@@ -1844,6 +1888,8 @@ struct PersistentShellInner {
     job: Mutex<Option<WindowsJob>>,
     #[cfg(windows)]
     cleanup_request: Notify,
+    #[cfg(windows)]
+    cleanup_failure: Mutex<Option<TessivumError>>,
     done_state: Mutex<Option<ProcessDone>>,
     done: Notify,
     closed: AtomicBool,
@@ -1964,6 +2010,8 @@ impl PersistentShell {
             job: Mutex::new(Some(job)),
             #[cfg(windows)]
             cleanup_request: Notify::new(),
+            #[cfg(windows)]
+            cleanup_failure: Mutex::new(None),
             done: Notify::new(),
             closed: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
@@ -2010,8 +2058,8 @@ impl PersistentShell {
         let cancellation = request.cancellation.clone();
         let operation = tokio::select! {
             biased;
-            _ = self.inner.disposed() => return Err(persistent_shell_disposed()),
-            _ = optional_cancellation(cancellation.clone()) => return Err(persistent_shell_cancelled()),
+            _ = self.inner.disposed() => return Err(self.inner.terminal_error(persistent_shell_disposed())),
+            _ = optional_cancellation(cancellation.clone()) => return Err(self.inner.terminal_error(persistent_shell_cancelled())),
             operation = self.inner.serial.lock() => operation,
         };
         let result = self.run_locked(&request).await;
@@ -2024,24 +2072,24 @@ impl PersistentShell {
         request: &PersistentShellCommand,
     ) -> Result<PersistentShellResult, TessivumError> {
         if self.inner.disposed.load(Ordering::Acquire) {
-            return Err(persistent_shell_disposed());
+            return Err(self.inner.terminal_error(persistent_shell_disposed()));
         }
         if self.inner.closed.load(Ordering::Acquire) {
-            return Err(persistent_shell_closed());
+            return Err(self.inner.terminal_error(persistent_shell_closed()));
         }
         if request
             .cancellation
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
         {
-            return Err(persistent_shell_cancelled());
+            return Err(self.inner.terminal_error(persistent_shell_cancelled()));
         }
         if let Err(error) = (self.inner.validator)() {
             self.inner.stop(ProcessTermination::Terminated).await;
-            return Err(error);
+            return Err(self.inner.terminal_error(error));
         }
         if self.inner.closed.load(Ordering::Acquire) {
-            return Err(persistent_shell_closed());
+            return Err(self.inner.terminal_error(persistent_shell_closed()));
         }
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let command = Arc::new(PersistentShellCommandState::new(
@@ -2072,27 +2120,33 @@ impl PersistentShell {
             command.fail(failure.clone());
             self.inner.stop(ProcessTermination::Terminated).await;
             self.inner.clear_active(&command);
-            return Err(failure);
+            return Err(self.inner.terminal_error(failure));
         }
         let cancellation = request.cancellation.clone();
         let result = tokio::select! {
             biased;
             _ = self.inner.disposed() => {
                 self.inner.stop(ProcessTermination::Shutdown).await;
-                Err(persistent_shell_disposed())
+                Err(self.inner.terminal_error(persistent_shell_disposed()))
             }
             _ = optional_cancellation(cancellation) => {
                 self.inner.stop(ProcessTermination::Aborted).await;
-                Err(persistent_shell_cancelled())
+                Err(self.inner.terminal_error(persistent_shell_cancelled()))
             }
             _ = time::sleep(request.timeout) => {
                 self.inner.stop(ProcessTermination::TimedOut).await;
-                Err(persistent_shell_timed_out(request.timeout))
+                Err(self.inner.terminal_error(persistent_shell_timed_out(request.timeout)))
             }
             result = command.wait() => result,
         };
         self.inner.clear_active(&command);
-        result
+        if self.inner.terminated().is_some() && self.inner.done().is_none() {
+            self.inner.wait_closed().await;
+        }
+        if let Some(error) = self.inner.cleanup_failure() {
+            return Err(error);
+        }
+        result.map_err(|error| self.inner.terminal_error(error))
     }
 
     /// Cancels the active command and its complete process group.
@@ -2174,6 +2228,42 @@ impl PersistentShellInner {
         *lock(&self.termination)
     }
 
+    #[cfg(windows)]
+    fn windows_job_state(&self) -> Option<Arc<WindowsJobState>> {
+        lock(&self.job).as_ref().map(|job| Arc::clone(&job.inner))
+    }
+
+    #[cfg(windows)]
+    fn cleanup_windows_job_blocking(&self) -> std::io::Result<()> {
+        match lock(&self.job).take() {
+            Some(job) => job.cleanup_process_tree_blocking(),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(windows)]
+    fn record_cleanup_failure(&self, error: TessivumError) {
+        let mut failure = lock(&self.cleanup_failure);
+        if failure.is_none() {
+            *failure = Some(error);
+        }
+    }
+
+    #[cfg(windows)]
+    fn cleanup_failure(&self) -> Option<TessivumError> {
+        lock(&self.cleanup_failure).clone()
+    }
+
+    #[cfg(unix)]
+    fn cleanup_failure(&self) -> Option<TessivumError> {
+        let _ = self;
+        None
+    }
+
+    fn terminal_error(&self, fallback: TessivumError) -> TessivumError {
+        self.cleanup_failure().unwrap_or(fallback)
+    }
+
     fn request_termination(&self, cause: ProcessTermination) -> bool {
         if self.done().is_some() {
             return false;
@@ -2203,10 +2293,6 @@ impl PersistentShellInner {
         }
         #[cfg(unix)]
         terminate_persistent_shell_tree(self.pid, false).await;
-        #[cfg(windows)]
-        if let Some(job) = lock(&self.job).as_ref() {
-            job.terminate();
-        }
         let notified = self.done.notified();
         if self.done().is_none() {
             tokio::select! {
@@ -2282,26 +2368,43 @@ async fn reap_persistent_shell(
     stderr_task: tokio::task::JoinHandle<()>,
     inner: Arc<PersistentShellInner>,
 ) {
-    let (status, job) = tokio::select! {
+    let (status, capture_error) = tokio::select! {
         biased;
         _ = inner.cleanup_request.notified() => {
-            let job = lock(&inner.job).take();
-            if let Some(job) = job.as_ref() {
-                let _ = job.capture_and_terminate().await;
-            }
-            (child.wait().await, job)
+            // Keep the Job in `inner` while capture runs. If runtime teardown
+            // cancels this task, last-owner Drop still owns a fenceable Job.
+            let capture_error = match inner.windows_job_state() {
+                Some(state) => capture_and_terminate_windows_job(state).await.err(),
+                None => None,
+            };
+            (child.wait().await, capture_error)
         }
-        status = child.wait() => (status, lock(&inner.job).take()),
+        status = child.wait() => {
+            // A normally exited root still has an owned process handle. Capture
+            // before the first Job termination so surviving descendants retain
+            // their validated ancestry.
+            let capture_error = match inner.windows_job_state() {
+                Some(state) => capture_and_terminate_windows_job(state).await.err(),
+                None => None,
+            };
+            (status, capture_error)
+        }
     };
     inner.closed.store(true, Ordering::Release);
 
-    let cleanup_error = match job {
-        Some(job) => job.cleanup_process_tree().await.err(),
-        None => None,
-    };
+    let mut cleanup_error = capture_error;
+    if let Some(state) = inner.windows_job_state() {
+        preserve_optional_error(&mut cleanup_error, cleanup_windows_job(state).await.err());
+    }
+    // Do not let `WindowsJob::drop` be the first Job termination. The complete
+    // fence above has already captured and terminated all owned generations.
+    let _ = lock(&inner.job).take();
+
     let mut cleanup_failed = cleanup_error.is_some();
     if let Some(error) = cleanup_error.as_ref() {
-        inner.fail_active(persistent_shell_cleanup(error));
+        let failure = persistent_shell_cleanup(error);
+        inner.record_cleanup_failure(failure.clone());
+        inner.fail_active(failure);
         stdout_task.abort();
         stderr_task.abort();
     }
@@ -2310,11 +2413,15 @@ async fn reap_persistent_shell(
     let stderr_result = stderr_task.await;
     if let Err(error) = stdout_result {
         cleanup_failed = true;
-        inner.fail_active(persistent_shell_cleanup(&error));
+        let failure = persistent_shell_cleanup(&error);
+        inner.record_cleanup_failure(failure.clone());
+        inner.fail_active(failure);
     }
     if let Err(error) = stderr_result {
         cleanup_failed = true;
-        inner.fail_active(persistent_shell_cleanup(&error));
+        let failure = persistent_shell_cleanup(&error);
+        inner.record_cleanup_failure(failure.clone());
+        inner.fail_active(failure);
     }
     if !cleanup_failed {
         if let Err(error) = status.as_ref() {
@@ -2776,9 +2883,11 @@ async fn reap_child(
     let stderr_task = tokio::spawn(collect_stderr(stderr, stderr_policy));
     let status = child.wait().await;
     #[cfg(windows)]
-    if let Some(job) = lock(&inner.job).take() {
-        job.terminate();
+    if let Some(state) = inner.windows_job_state() {
+        let _ = cleanup_windows_job(state).await;
     }
+    #[cfg(windows)]
+    let _ = lock(&inner.job).take();
     if let Some(task) = stdin_task {
         let _ = task.await;
     }
@@ -3556,4 +3665,835 @@ mod windows_process_tree_tests {
             Some(1)
         );
     }
+}
+
+#[cfg(all(test, windows))]
+mod windows_persistent_escape_tests {
+    use std::{
+        ffi::OsStr,
+        fs::{self, OpenOptions},
+        io,
+        os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        },
+        path::{Path, PathBuf},
+        process::{Child, Command, Stdio},
+        sync::Arc,
+        time::Duration,
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::{
+            JobObjects::{
+                IsProcessInJob, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+            Threading::{
+                CreateEventW, OpenProcess, SetEvent, TerminateProcess, WaitForSingleObject,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            },
+        },
+    };
+
+    use super::{
+        lock, PersistentShell, PersistentShellCommand, PersistentShellConfig, WindowsJobState,
+    };
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tessivum-persistent-escape-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&path).expect("escape fixture directory creates");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Clone)]
+    struct NamedEvent {
+        name: String,
+        handle: Arc<OwnedHandle>,
+    }
+
+    impl NamedEvent {
+        fn new(label: &str) -> io::Result<Self> {
+            let name = format!("Local\\tessivum-{label}-{}", uuid::Uuid::new_v4());
+            let wide = OsStr::new(&name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                name,
+                handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(handle.cast()) }),
+            })
+        }
+
+        fn set(&self) -> io::Result<()> {
+            if unsafe { SetEvent(self.handle.as_raw_handle() as _) } == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&self, timeout: Duration) -> io::Result<()> {
+            let millis = timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
+            match unsafe { WaitForSingleObject(self.handle.as_raw_handle() as _, millis) } {
+                WAIT_OBJECT_0 => Ok(()),
+                WAIT_TIMEOUT => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("named event {} was not signaled", self.name),
+                )),
+                WAIT_FAILED => Err(io::Error::last_os_error()),
+                result => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected named-event wait result {result}"),
+                )),
+            }
+        }
+    }
+
+    struct ProcessGuard(OwnedHandle);
+
+    impl ProcessGuard {
+        fn open(pid: u32) -> io::Result<Self> {
+            let process = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                    0,
+                    pid,
+                )
+            };
+            if process.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(unsafe {
+                OwnedHandle::from_raw_handle(process.cast())
+            }))
+        }
+
+        fn is_alive(&self) -> io::Result<bool> {
+            match unsafe { WaitForSingleObject(self.0.as_raw_handle() as _, 0) } {
+                WAIT_TIMEOUT => Ok(true),
+                WAIT_OBJECT_0 => Ok(false),
+                WAIT_FAILED => Err(io::Error::last_os_error()),
+                result => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected process wait result {result}"),
+                )),
+            }
+        }
+
+        fn wait_for_exit(&self, timeout: Duration) -> io::Result<()> {
+            let millis = timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
+            match unsafe { WaitForSingleObject(self.0.as_raw_handle() as _, millis) } {
+                WAIT_OBJECT_0 => Ok(()),
+                WAIT_TIMEOUT => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "controlled escaped process did not exit",
+                )),
+                WAIT_FAILED => Err(io::Error::last_os_error()),
+                result => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected process wait result {result}"),
+                )),
+            }
+        }
+
+        fn is_in_job(&self, state: &WindowsJobState) -> io::Result<bool> {
+            let mut in_job = 0;
+            if unsafe {
+                IsProcessInJob(
+                    self.0.as_raw_handle() as _,
+                    state.job.as_raw_handle() as _,
+                    &mut in_job,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(in_job != 0)
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if matches!(self.is_alive(), Ok(true)) {
+                unsafe {
+                    TerminateProcess(self.0.as_raw_handle() as _, 1);
+                    WaitForSingleObject(self.0.as_raw_handle() as _, 5_000);
+                }
+            }
+        }
+    }
+
+    fn powershell_program() -> PathBuf {
+        PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is available"))
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    }
+
+    fn powershell_literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn powershell_path(path: &Path) -> String {
+        powershell_literal(&path.display().to_string())
+    }
+
+    fn windows_argument(value: &str) -> String {
+        let mut quoted = String::from("\"");
+        let mut backslashes = 0;
+        for character in value.chars() {
+            if character == '\\' {
+                backslashes += 1;
+                continue;
+            }
+            if character == '\"' {
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                quoted.push(character);
+                backslashes = 0;
+                continue;
+            }
+            quoted.extend(std::iter::repeat_n('\\', backslashes));
+            quoted.push(character);
+            backslashes = 0;
+        }
+        quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+        quoted.push('\"');
+        quoted
+    }
+
+    struct EscapeFixture {
+        root: TempRoot,
+        powershell: PathBuf,
+        intermediate: PathBuf,
+        grandchild: PathBuf,
+        unrelated: PathBuf,
+        helper: PathBuf,
+        pid_file: PathBuf,
+        lock_file: PathBuf,
+        ready: NamedEvent,
+        hold: NamedEvent,
+        unrelated_hold: NamedEvent,
+    }
+
+    impl EscapeFixture {
+        fn new() -> Self {
+            let root = TempRoot::new();
+            let intermediate = root.path().join("intermediate.ps1");
+            let grandchild = root.path().join("grandchild.ps1");
+            let unrelated = root.path().join("unrelated.ps1");
+            let helper = root.path().join("escape-helper.cs");
+            let pid_file = root.path().join("processes.txt");
+            let lock_file = root.path().join("escaped.lock");
+            let ready =
+                NamedEvent::new("persistent-escape-ready").expect("controlled ready event creates");
+            let hold =
+                NamedEvent::new("persistent-escape-hold").expect("controlled hold event creates");
+            let unrelated_hold = NamedEvent::new("persistent-escape-unrelated")
+                .expect("unrelated hold event creates");
+
+            fs::write(&helper, ESCAPE_HELPER).expect("escape helper writes");
+            fs::write(&intermediate, INTERMEDIATE_SCRIPT).expect("intermediate script writes");
+            fs::write(&grandchild, GRANDCHILD_SCRIPT).expect("grandchild script writes");
+            fs::write(&unrelated, UNRELATED_SCRIPT).expect("unrelated script writes");
+
+            Self {
+                root,
+                powershell: powershell_program(),
+                intermediate,
+                grandchild,
+                unrelated,
+                helper,
+                pid_file,
+                lock_file,
+                ready,
+                hold,
+                unrelated_hold,
+            }
+        }
+
+        fn workspace(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn arguments(&self) -> String {
+            [
+                powershell_path(&self.helper),
+                powershell_path(&self.powershell),
+                powershell_path(&self.grandchild),
+                powershell_path(&self.pid_file),
+                powershell_path(&self.lock_file),
+                powershell_literal(&self.ready.name),
+                powershell_literal(&self.hold.name),
+            ]
+            .join(" ")
+        }
+
+        fn foreground_command(&self) -> String {
+            format!(
+                "& {} -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {} {}",
+                powershell_path(&self.powershell),
+                powershell_path(&self.intermediate),
+                self.arguments(),
+            )
+        }
+
+        fn background_command(&self) -> String {
+            let arguments = [
+                "-NoLogo".to_owned(),
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                self.intermediate.display().to_string(),
+                self.helper.display().to_string(),
+                self.powershell.display().to_string(),
+                self.grandchild.display().to_string(),
+                self.pid_file.display().to_string(),
+                self.lock_file.display().to_string(),
+                self.ready.name.clone(),
+                self.hold.name.clone(),
+            ]
+            .iter()
+            .map(|argument| windows_argument(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+            format!(
+                "Start-Process -FilePath {} -ArgumentList {} | Out-Null",
+                powershell_path(&self.powershell),
+                powershell_literal(&arguments),
+            )
+        }
+
+        async fn generations(&self) -> (u32, u32) {
+            let ready = self.ready.clone();
+            tokio::task::spawn_blocking(move || ready.wait(Duration::from_secs(10)))
+                .await
+                .expect("ready-event waiter joins")
+                .expect("escaped grandchild reaches the ready event");
+            let record = fs::read_to_string(&self.pid_file).expect("fixture writes process IDs");
+            let mut fields = record.trim().split('|');
+            let intermediate = fields
+                .next()
+                .expect("fixture records intermediate PID")
+                .parse()
+                .expect("intermediate PID is numeric");
+            let grandchild = fields
+                .next()
+                .expect("fixture records escaped grandchild PID")
+                .parse()
+                .expect("escaped grandchild PID is numeric");
+            assert!(
+                fields.next().is_none(),
+                "fixture process record must be intermediate|grandchild, got {record:?}"
+            );
+            (intermediate, grandchild)
+        }
+
+        fn assert_lock_held(&self) {
+            assert!(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.lock_file)
+                    .is_err(),
+                "escaped grandchild holds its exclusive resource before cleanup"
+            );
+        }
+
+        fn assert_resource_released(&self) {
+            let handle = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.lock_file)
+                .expect("escaped grandchild releases its resource after cleanup");
+            drop(handle);
+            fs::remove_file(&self.lock_file).expect("released resource can be removed");
+        }
+
+        fn spawn_unrelated(&self) -> Child {
+            Command::new(&self.powershell)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&self.unrelated)
+                .arg(&self.unrelated_hold.name)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("unrelated controlled process starts")
+        }
+
+        fn release_unrelated(&self) {
+            self.unrelated_hold
+                .set()
+                .expect("unrelated release event signals");
+        }
+    }
+
+    fn enable_fixture_breakaway(shell: &PersistentShell) {
+        let job = lock(&shell.inner.job);
+        let state = &job
+            .as_ref()
+            .expect("persistent shell owns its fixture Job")
+            .inner;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // This is an isolated test Job. Production keeps only KILL_ON_JOB_CLOSE;
+        // enabling explicit breakaway here constructs the escaped-child boundary.
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        assert_ne!(
+            unsafe {
+                SetInformationJobObject(
+                    state.job.as_raw_handle() as _,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            },
+            0,
+            "fixture Job permits only its controlled explicit breakaway: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    fn assert_fixture_membership(
+        shell: &PersistentShell,
+        intermediate: &ProcessGuard,
+        grandchild: &ProcessGuard,
+    ) {
+        let job = lock(&shell.inner.job);
+        let state = &job
+            .as_ref()
+            .expect("persistent shell keeps its Job until cleanup")
+            .inner;
+        assert!(
+            intermediate
+                .is_in_job(state)
+                .expect("intermediate job membership queries"),
+            "controlled intermediate is an ordinary member of the persistent Job"
+        );
+        assert!(
+            !grandchild
+                .is_in_job(state)
+                .expect("escaped grandchild job membership queries"),
+            "controlled grandchild explicitly breaks away from the fixture Job"
+        );
+    }
+
+    async fn start_shell(fixture: &EscapeFixture) -> PersistentShell {
+        let shell =
+            PersistentShell::start(PersistentShellConfig::new(fixture.workspace()), || Ok(()))
+                .await
+                .expect("persistent PowerShell starts");
+        enable_fixture_breakaway(&shell);
+        shell
+    }
+
+    async fn ready_escape(
+        shell: &PersistentShell,
+        fixture: &EscapeFixture,
+    ) -> (ProcessGuard, ProcessGuard) {
+        let (intermediate_pid, grandchild_pid) = fixture.generations().await;
+        let intermediate = ProcessGuard::open(intermediate_pid)
+            .expect("controlled intermediate remains observable");
+        let grandchild = ProcessGuard::open(grandchild_pid)
+            .expect("controlled escaped grandchild remains observable");
+        assert_fixture_membership(shell, &intermediate, &grandchild);
+        fixture.assert_lock_held();
+        (intermediate, grandchild)
+    }
+
+    fn assert_cleanup(
+        fixture: &EscapeFixture,
+        intermediate: &ProcessGuard,
+        escaped: &ProcessGuard,
+        unrelated: &ProcessGuard,
+    ) {
+        intermediate
+            .wait_for_exit(Duration::from_secs(5))
+            .expect("job-member intermediate exits before lifecycle completion");
+        escaped
+            .wait_for_exit(Duration::from_secs(5))
+            .expect("escaped grandchild exits before lifecycle completion");
+        fixture.assert_resource_released();
+        assert!(
+            unrelated
+                .is_alive()
+                .expect("unrelated process status queries"),
+            "cleanup must not terminate an unrelated process"
+        );
+    }
+
+    fn finish_unrelated(fixture: &EscapeFixture, mut unrelated: Child) {
+        fixture.release_unrelated();
+        assert!(
+            unrelated.wait().expect("unrelated process waits").success(),
+            "unrelated process exits only after its own release"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistent_cancellation_captures_escaped_grandchild_before_job_termination() {
+        let fixture = EscapeFixture::new();
+        let shell = start_shell(&fixture).await;
+        let running = tokio::spawn({
+            let shell = shell.clone();
+            let command = fixture.foreground_command();
+            async move { shell.run(PersistentShellCommand::new(command)).await }
+        });
+        let (intermediate, escaped) = ready_escape(&shell, &fixture).await;
+        let unrelated = fixture.spawn_unrelated();
+        let unrelated_guard = ProcessGuard::open(unrelated.id()).expect("unrelated process opens");
+        assert_fixture_membership(&shell, &intermediate, &escaped);
+
+        shell.cancel().await;
+        assert_eq!(
+            running
+                .await
+                .expect("cancelled command joins")
+                .unwrap_err()
+                .code,
+            "PERSISTENT_SHELL_CANCELLED"
+        );
+        assert_cleanup(&fixture, &intermediate, &escaped, &unrelated_guard);
+        finish_unrelated(&fixture, unrelated);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistent_timeout_captures_escaped_grandchild_before_job_termination() {
+        let fixture = EscapeFixture::new();
+        let shell = start_shell(&fixture).await;
+        let running = tokio::spawn({
+            let shell = shell.clone();
+            let mut command = PersistentShellCommand::new(fixture.foreground_command());
+            command.timeout = Duration::from_secs(10);
+            async move { shell.run(command).await }
+        });
+        let (intermediate, escaped) = ready_escape(&shell, &fixture).await;
+        let unrelated = fixture.spawn_unrelated();
+        let unrelated_guard = ProcessGuard::open(unrelated.id()).expect("unrelated process opens");
+
+        assert_eq!(
+            running
+                .await
+                .expect("timed-out command joins")
+                .unwrap_err()
+                .code,
+            "PERSISTENT_SHELL_TIMEOUT"
+        );
+        assert_cleanup(&fixture, &intermediate, &escaped, &unrelated_guard);
+        finish_unrelated(&fixture, unrelated);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistent_dispose_captures_escaped_grandchild_before_job_termination() {
+        let fixture = EscapeFixture::new();
+        let shell = start_shell(&fixture).await;
+        let running = tokio::spawn({
+            let shell = shell.clone();
+            let command = fixture.foreground_command();
+            async move { shell.run(PersistentShellCommand::new(command)).await }
+        });
+        let (intermediate, escaped) = ready_escape(&shell, &fixture).await;
+        let unrelated = fixture.spawn_unrelated();
+        let unrelated_guard = ProcessGuard::open(unrelated.id()).expect("unrelated process opens");
+
+        shell.dispose().await;
+        assert_eq!(
+            running
+                .await
+                .expect("disposed command joins")
+                .unwrap_err()
+                .code,
+            "PERSISTENT_SHELL_DISPOSED"
+        );
+        assert_cleanup(&fixture, &intermediate, &escaped, &unrelated_guard);
+        finish_unrelated(&fixture, unrelated);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn last_persistent_owner_captures_escaped_grandchild_during_runtime_teardown() {
+        let fixture = EscapeFixture::new();
+        let workspace = fixture.workspace().to_path_buf();
+        let command = fixture.background_command();
+        let shutdown =
+            NamedEvent::new("persistent-runtime-shutdown").expect("runtime shutdown event creates");
+        let shutdown_worker = shutdown.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("fixture runtime creates");
+            let launch = runtime.block_on(async move {
+                let shell =
+                    PersistentShell::start(PersistentShellConfig::new(workspace), || Ok(()))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                enable_fixture_breakaway(&shell);
+                shell
+                    .run(PersistentShellCommand::new(command))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tokio::spawn(async move {
+                    std::future::pending::<()>().await;
+                    drop(shell);
+                });
+                Ok::<(), String>(())
+            });
+            match launch {
+                Ok(()) => {
+                    let _ = started_tx.send(Ok(()));
+                    let shutdown_result = shutdown_worker
+                        .wait(Duration::from_secs(15))
+                        .map_err(|error| error.to_string());
+                    runtime.shutdown_timeout(Duration::from_secs(15));
+                    let _ = finished_tx.send(shutdown_result);
+                }
+                Err(error) => {
+                    let _ = started_tx.send(Err(error));
+                }
+            }
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("fixture runtime reports startup")
+            .expect("fixture runtime starts its persistent shell");
+        let (intermediate_pid, grandchild_pid) = fixture.generations().await;
+        let intermediate = ProcessGuard::open(intermediate_pid).expect("intermediate opens");
+        let escaped = ProcessGuard::open(grandchild_pid).expect("escaped grandchild opens");
+        fixture.assert_lock_held();
+        let unrelated = fixture.spawn_unrelated();
+        let unrelated_guard = ProcessGuard::open(unrelated.id()).expect("unrelated process opens");
+
+        shutdown.set().expect("runtime shutdown event signals");
+        finished_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("fixture runtime reports teardown")
+            .expect("fixture runtime receives its teardown signal");
+        worker.join().expect("fixture runtime thread joins");
+        assert_cleanup(&fixture, &intermediate, &escaped, &unrelated_guard);
+        finish_unrelated(&fixture, unrelated);
+    }
+
+    const INTERMEDIATE_SCRIPT: &str = r#"
+param(
+    [string]$Helper,
+    [string]$PowerShell,
+    [string]$Grandchild,
+    [string]$PidFile,
+    [string]$LockPath,
+    [string]$ReadyEvent,
+    [string]$HoldEvent
+)
+Add-Type -Path $Helper
+[ControlledBreakaway]::Start($PowerShell, $Grandchild, $PidFile, $LockPath, $ReadyEvent, $HoldEvent)
+[System.Threading.EventWaitHandle]::OpenExisting($HoldEvent).WaitOne()
+"#;
+
+    const GRANDCHILD_SCRIPT: &str = r#"
+param([string]$LockPath, [string]$ReadyEvent, [string]$HoldEvent)
+$lock = [System.IO.File]::Open(
+    $LockPath,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+)
+try {
+    [System.Threading.EventWaitHandle]::OpenExisting($ReadyEvent).Set()
+    [System.Threading.EventWaitHandle]::OpenExisting($HoldEvent).WaitOne()
+}
+finally {
+    $lock.Dispose()
+}
+"#;
+
+    const UNRELATED_SCRIPT: &str = r#"
+param([string]$HoldEvent)
+[System.Threading.EventWaitHandle]::OpenExisting($HoldEvent).WaitOne()
+"#;
+
+    const ESCAPE_HELPER: &str = r#"
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class ControlledBreakaway
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct STARTUPINFO
+    {
+        public uint cb;
+        public IntPtr lpReserved;
+        public IntPtr lpDesktop;
+        public IntPtr lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public ushort wShowWindow;
+        public ushort cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(
+        string lpApplicationName,
+        StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr hThread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    public static void Start(
+        string powershell,
+        string grandchild,
+        string pidFile,
+        string lockPath,
+        string readyEvent,
+        string holdEvent)
+    {
+        var startup = new STARTUPINFO();
+        startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+        PROCESS_INFORMATION process;
+        var commandLine = new StringBuilder(
+            Quote(powershell) +
+            " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " +
+            Quote(grandchild) + " " + Quote(lockPath) + " " +
+            Quote(readyEvent) + " " + Quote(holdEvent));
+        if (!CreateProcessW(
+            powershell,
+            commandLine,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            false,
+            0x09000004,
+            IntPtr.Zero,
+            null,
+            ref startup,
+            out process))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        var resumed = false;
+        try
+        {
+            File.WriteAllText(pidFile, GetCurrentProcessId() + "|" + process.dwProcessId);
+            if (ResumeThread(process.hThread) == uint.MaxValue)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            resumed = true;
+        }
+        finally
+        {
+            if (!resumed)
+            {
+                TerminateProcess(process.hProcess, 1);
+            }
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    }
+
+    private static string Quote(string value)
+    {
+        var quoted = new StringBuilder("\"");
+        var backslashes = 0;
+        foreach (var character in value)
+        {
+            if (character == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+            if (character == '\"')
+            {
+                quoted.Append('\\', backslashes * 2 + 1);
+                quoted.Append(character);
+                backslashes = 0;
+                continue;
+            }
+            quoted.Append('\\', backslashes);
+            quoted.Append(character);
+            backslashes = 0;
+        }
+        quoted.Append('\\', backslashes * 2);
+        quoted.Append('\"');
+        return quoted.ToString();
+    }
+}
+"#;
 }

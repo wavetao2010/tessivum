@@ -1,8 +1,17 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Archive')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Archive')]
     [ValidateNotNullOrEmpty()]
-    [string]$ArchivePath
+    [string]$ArchivePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'RegistryOnly')]
+    [switch]$RegistryOnly,
+    [Parameter(ParameterSetName = 'Archive')]
+    [Parameter(ParameterSetName = 'RegistryOnly')]
+    [ValidateNotNullOrEmpty()]
+    [string]$InstallerPath,
+    [Parameter(ParameterSetName = 'Archive')]
+    [switch]$RegistryPathRegression,
+    [int]$ExpectedPowerShellMajor = 0
 )
 
 Set-StrictMode -Version Latest
@@ -11,7 +20,7 @@ $ErrorActionPreference = 'Stop'
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:Target = 'x86_64-pc-windows-msvc'
 $script:WorkDirectory = $null
-$script:InstallerPath = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'install.ps1'
+$script:TestScriptPath = $PSCommandPath
 $script:PowerShellHost = $null
 
 function Fail {
@@ -346,6 +355,8 @@ function New-TestPrefix {
         PathStore = Join-Path -Path $base -ChildPath 'user-path.txt'
         Home = Join-Path -Path $base -ChildPath 'user-home'
         LocalAppData = Join-Path -Path $base -ChildPath 'local-appdata'
+        RegistryOverrideRootSubKey = $null
+        RegistryOverrideProbe = $null
     }
     [System.IO.Directory]::CreateDirectory($configuration.Base) | Out-Null
     [System.IO.Directory]::CreateDirectory($configuration.Home) | Out-Null
@@ -390,10 +401,208 @@ function Get-PathEntryCount {
     return $count
 }
 
+function Get-RegistryOverrideBootstrapContent {
+    return @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$InstallerPath,
+    [Parameter(Mandatory = $true)][string]$RegistryOverrideRootSubKey,
+    [Parameter(Mandatory = $true)][string]$RegistryOverrideProbe,
+    [Parameter(Mandatory = $true)][string]$InstallerArgumentsBase64,
+    [switch]$LoadPathStoreFunctions
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+if ($null -eq ('TessivumInstallerTest.RegistryOverrideNativeMethods' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace TessivumInstallerTest
+{
+    public static class RegistryOverrideNativeMethods
+    {
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern int RegOverridePredefKey(IntPtr hKey, IntPtr hNewHKey);
+
+        public static int OverrideCurrentUser(IntPtr replacement)
+        {
+            return RegOverridePredefKey(new IntPtr(unchecked((int)0x80000001)), replacement);
+        }
+
+        public static int RestoreCurrentUser()
+        {
+            return RegOverridePredefKey(new IntPtr(unchecked((int)0x80000001)), IntPtr.Zero);
+        }
+    }
+}
+"@
+}
+
+$rootKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RegistryOverrideRootSubKey, $true)
+if ($null -eq $rootKey) {
+    throw "temporary registry root does not exist: $RegistryOverrideRootSubKey"
+}
+
+$overrideActive = $false
+$environmentKey = $null
+$exitCode = 0
+try {
+    $status = [TessivumInstallerTest.RegistryOverrideNativeMethods]::OverrideCurrentUser($rootKey.Handle.DangerousGetHandle())
+    if ($status -ne 0) {
+        throw "RegOverridePredefKey failed: $status"
+    }
+    $overrideActive = $true
+
+    $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+    if ($null -eq $environmentKey) {
+        throw 'temporary HKCU override has no Environment key'
+    }
+    try {
+        $missing = [System.Object]::new()
+        $probe = $environmentKey.GetValue(
+            'TessivumRegistryOverrideProbe',
+            $missing,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        if ([System.Object]::ReferenceEquals($probe, $missing) -or -not [string]::Equals([string]$probe, $RegistryOverrideProbe, [System.StringComparison]::Ordinal)) {
+            throw 'temporary HKCU override probe did not resolve through the redirected Environment key'
+        }
+        $environmentApiProbe = [Environment]::GetEnvironmentVariable('TessivumRegistryOverrideProbe', [EnvironmentVariableTarget]::User)
+        if (-not [string]::Equals($environmentApiProbe, $RegistryOverrideProbe, [System.StringComparison]::Ordinal)) {
+            throw 'Environment.GetEnvironmentVariable did not resolve through the redirected Environment key'
+        }
+    }
+    finally {
+        $environmentKey.Close()
+        $environmentKey = $null
+    }
+
+    if ($LoadPathStoreFunctions.IsPresent) {
+        $tokens = $null
+        $parseErrors = $null
+        $installerAst = [System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$tokens, [ref]$parseErrors)
+        if ($null -ne $parseErrors -and $parseErrors.Count -gt 0) {
+            throw 'cannot parse installer functions for the registry-only regression'
+        }
+
+        $functionNames = @(
+            'Fail',
+            'Get-UserPathRegistryKey',
+            'Get-PathStoreSnapshot',
+            'Get-PathStoreWriteKind',
+            'Send-EnvironmentChangedBroadcast',
+            'Set-PathStoreValue',
+            'Restore-PathStoreSnapshot',
+            'Get-InstalledPathUpdate'
+        )
+        $definitionText = [System.Text.StringBuilder]::new()
+        foreach ($functionName in $functionNames) {
+            $predicate = {
+                param($node)
+
+                return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and [string]::Equals($node.Name, $functionName, [System.StringComparison]::Ordinal)
+            }.GetNewClosure()
+            $definitions = @($installerAst.FindAll($predicate, $true))
+            if ($definitions.Count -ne 1) {
+                throw "installer regression function was not found exactly once: $functionName"
+            }
+            [void]$definitionText.AppendLine($definitions[0].Extent.Text)
+        }
+
+        $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+        . ([scriptblock]::Create($definitionText.ToString()))
+
+        $snapshot = Get-PathStoreSnapshot -PathStore $null
+        if ($snapshot.Kind -ne 'registry') {
+            Fail 'registry-only regression did not load the registry PATH store'
+        }
+        $probeEntry = 'C:\TessivumRegistryProbe\' + [System.Guid]::NewGuid().ToString('N')
+        $update = Get-InstalledPathUpdate -CurrentValue $snapshot.Value -BinDirectory $probeEntry
+        if (-not $update.Changed) {
+            Fail 'registry-only regression did not create a distinct PATH update'
+        }
+
+        $written = $false
+        try {
+            $written = $true
+            Set-PathStoreValue `
+                -PathStore $null `
+                -Value $update.Value `
+                -RegistryValueKind (Get-PathStoreWriteKind -Snapshot $snapshot)
+
+            $updatedSnapshot = Get-PathStoreSnapshot -PathStore $null
+            if (-not $updatedSnapshot.Exists -or -not [string]::Equals($updatedSnapshot.Value, $update.Value, [System.StringComparison]::Ordinal)) {
+                Fail 'registry-only regression did not retain the raw updated PATH value'
+            }
+            if ($updatedSnapshot.RegistryValueKind -ne (Get-PathStoreWriteKind -Snapshot $snapshot)) {
+                Fail 'registry-only regression changed the PATH registry value kind'
+            }
+        }
+        finally {
+            if ($written) {
+                Restore-PathStoreSnapshot -Snapshot $snapshot -PathStore $null
+            }
+        }
+
+        $restoredSnapshot = Get-PathStoreSnapshot -PathStore $null
+        if (([bool]$restoredSnapshot.Exists) -ne ([bool]$snapshot.Exists)) {
+            Fail 'registry-only regression did not restore PATH value existence'
+        }
+        if ($snapshot.Exists) {
+            if (-not [string]::Equals($restoredSnapshot.Value, $snapshot.Value, [System.StringComparison]::Ordinal)) {
+                Fail 'registry-only regression did not restore the raw PATH value'
+            }
+            if ($restoredSnapshot.RegistryValueKind -ne $snapshot.RegistryValueKind) {
+                Fail 'registry-only regression did not restore the PATH registry value kind'
+            }
+        }
+    }
+    else {
+        $installerArgumentsJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($InstallerArgumentsBase64))
+        $installerPayload = ConvertFrom-Json -InputObject $installerArgumentsJson
+        $installerParameters = @{}
+        foreach ($argument in @($installerPayload.Arguments)) {
+            if ($argument -eq '-Uninstall') {
+                $installerParameters.Uninstall = $true
+            }
+            else {
+                $installerParameters.Version = [string]$argument
+            }
+        }
+        $global:LASTEXITCODE = 0
+        & $InstallerPath @installerParameters
+        if ($LASTEXITCODE -is [int]) {
+            $exitCode = $LASTEXITCODE
+        }
+    }
+}
+finally {
+    if ($null -ne $environmentKey) {
+        $environmentKey.Close()
+    }
+    if ($overrideActive) {
+        $restoreStatus = [TessivumInstallerTest.RegistryOverrideNativeMethods]::RestoreCurrentUser()
+        if ($restoreStatus -ne 0) {
+            throw "RegOverridePredefKey restoration failed: $restoreStatus"
+        }
+    }
+    $rootKey.Close()
+}
+
+exit $exitCode
+'@
+}
+
 function Invoke-InstallerProcess {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Overrides,
-        [Parameter(Mandatory = $true)][string[]]$InstallerArguments
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$InstallerArguments,
+        [AllowNull()][string]$RegistryOverrideRootSubKey,
+        [AllowNull()][string]$RegistryOverrideProbe,
+        [switch]$LoadPathStoreFunctions
     )
 
     $controlledNames = @(
@@ -424,11 +633,52 @@ function Invoke-InstallerProcess {
         foreach ($name in $Overrides.Keys) {
             [Environment]::SetEnvironmentVariable($name, [string]$Overrides[$name], [EnvironmentVariableTarget]::Process)
         }
-        $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:InstallerPath)
-        $arguments += $InstallerArguments
-        $output = @(& $script:PowerShellHost @arguments 2>&1)
+
+        if ([string]::IsNullOrEmpty($RegistryOverrideRootSubKey)) {
+            Assert-True -Condition (-not $LoadPathStoreFunctions.IsPresent) -Message 'registry AST loading requires an isolated HKCU override'
+            $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:InstallerPath)
+            $arguments += $InstallerArguments
+        }
+        else {
+            Assert-True -Condition (-not [string]::IsNullOrEmpty($RegistryOverrideProbe)) -Message 'registry override requires a probe value'
+            $bootstrapPath = Join-Path -Path $script:WorkDirectory -ChildPath ('registry-override-' + [System.Guid]::NewGuid().ToString('N') + '.ps1')
+            [System.IO.File]::WriteAllText($bootstrapPath, (Get-RegistryOverrideBootstrapContent), $script:Utf8NoBom)
+            $payload = [PSCustomObject]@{ Arguments = @($InstallerArguments) }
+            $argumentsJson = ConvertTo-Json -InputObject $payload -Compress
+            $argumentsBase64 = [System.Convert]::ToBase64String($script:Utf8NoBom.GetBytes($argumentsJson))
+            $arguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                $bootstrapPath,
+                '-InstallerPath',
+                $script:InstallerPath,
+                '-RegistryOverrideRootSubKey',
+                $RegistryOverrideRootSubKey,
+                '-RegistryOverrideProbe',
+                $RegistryOverrideProbe,
+                '-InstallerArgumentsBase64',
+                $argumentsBase64
+            )
+            if ($LoadPathStoreFunctions.IsPresent) {
+                $arguments += '-LoadPathStoreFunctions'
+            }
+        }
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # PowerShell 5.1 surfaces redirected native stderr as error records.
+            # Capture those records and assert the actual exit code in the caller.
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $script:PowerShellHost @arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         return [PSCustomObject]@{
-            ExitCode = $LASTEXITCODE
+            ExitCode = $exitCode
             Output = $output
         }
     }
@@ -451,12 +701,19 @@ function Invoke-TestInstall {
         FIXTURE_URL = Get-FileUri -Path $FixtureArchive
         INSTALL_ROOT = $Configuration.InstallRoot
         BIN_DIR = $Configuration.BinDirectory
-        PATH_STORE = $Configuration.PathStore
         USERPROFILE = $Configuration.Home
         LOCALAPPDATA = $Configuration.LocalAppData
     }
-    return Invoke-InstallerProcess -Overrides $overrides -InstallerArguments @($Version)
+    if (-not [string]::IsNullOrEmpty($Configuration.PathStore)) {
+        $overrides.PATH_STORE = $Configuration.PathStore
+    }
+    return Invoke-InstallerProcess `
+        -Overrides $overrides `
+        -InstallerArguments @($Version) `
+        -RegistryOverrideRootSubKey $Configuration.RegistryOverrideRootSubKey `
+        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe
 }
+
 
 function Invoke-TestUninstall {
     param([Parameter(Mandatory = $true)]$Configuration)
@@ -465,11 +722,31 @@ function Invoke-TestUninstall {
         TESSIVUM_INSTALLER_TEST = '1'
         INSTALL_ROOT = $Configuration.InstallRoot
         BIN_DIR = $Configuration.BinDirectory
-        PATH_STORE = $Configuration.PathStore
         USERPROFILE = $Configuration.Home
         LOCALAPPDATA = $Configuration.LocalAppData
     }
-    return Invoke-InstallerProcess -Overrides $overrides -InstallerArguments @('-Uninstall')
+    if (-not [string]::IsNullOrEmpty($Configuration.PathStore)) {
+        $overrides.PATH_STORE = $Configuration.PathStore
+    }
+    return Invoke-InstallerProcess `
+        -Overrides $overrides `
+        -InstallerArguments @('-Uninstall') `
+        -RegistryOverrideRootSubKey $Configuration.RegistryOverrideRootSubKey `
+        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe
+}
+
+function Invoke-TestPathStoreRegression {
+    param([Parameter(Mandatory = $true)]$Configuration)
+
+    $overrides = @{
+        TESSIVUM_INSTALLER_TEST = '1'
+    }
+    return Invoke-InstallerProcess `
+        -Overrides $overrides `
+        -InstallerArguments @() `
+        -RegistryOverrideRootSubKey $Configuration.RegistryOverrideRootSubKey `
+        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe `
+        -LoadPathStoreFunctions
 }
 
 function Invoke-UngatedFixtureInstall {
@@ -588,19 +865,518 @@ function Clear-ReadOnlyFiles {
     }
 }
 
-try {
-    if ($PSVersionTable.PSVersion.Major -lt 5) {
-        Fail 'PowerShell 5.1 or later is required'
+function New-RegistryPathTestPrefix {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $configuration = New-TestPrefix -Name $Name
+    $configuration.PathStore = $null
+    $configuration.RegistryOverrideRootSubKey = 'Software\Tessivum\InstallerTests\' + [System.Guid]::NewGuid().ToString('N')
+    $configuration.RegistryOverrideProbe = [System.Guid]::NewGuid().ToString('N')
+
+    $rootKey = $null
+    $environmentKey = $null
+    try {
+        $rootKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($configuration.RegistryOverrideRootSubKey)
+        $environmentKey = $rootKey.CreateSubKey('Environment')
+        $environmentKey.SetValue(
+            'TessivumRegistryOverrideProbe',
+            $configuration.RegistryOverrideProbe,
+            [Microsoft.Win32.RegistryValueKind]::String
+        )
     }
-    if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-        Fail 'this test only supports Windows'
+    finally {
+        if ($null -ne $environmentKey) {
+            $environmentKey.Close()
+        }
+        if ($null -ne $rootKey) {
+            $rootKey.Close()
+        }
     }
 
-    $archive = Get-AbsolutePath -Path $ArchivePath
-    Assert-True -Condition ([System.IO.File]::Exists($archive)) -Message "archive does not exist: $archive"
-    Assert-True -Condition ([System.IO.File]::Exists($archive + '.sha256')) -Message "archive checksum does not exist: $archive.sha256"
-    Assert-True -Condition ([System.IO.File]::Exists($script:InstallerPath)) -Message "installer does not exist: $script:InstallerPath"
+    return $configuration
+}
 
+function Remove-RegistryPathTestPrefix {
+    param([Parameter(Mandatory = $true)]$Configuration)
+
+    $prefix = 'Software\Tessivum\InstallerTests\'
+    $rootSubKey = $Configuration.RegistryOverrideRootSubKey
+    if ([string]::IsNullOrEmpty($rootSubKey) -or -not $rootSubKey.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail 'registry test attempted to remove an invalid temporary key'
+    }
+    $leaf = $rootSubKey.Substring($prefix.Length)
+    if ([string]::IsNullOrEmpty($leaf) -or $leaf.IndexOf('\', [System.StringComparison]::Ordinal) -ge 0) {
+        Fail 'registry test attempted to remove an invalid temporary key leaf'
+    }
+
+    $parentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Tessivum\InstallerTests', $true)
+    if ($null -eq $parentKey) {
+        return
+    }
+    try {
+        $childKey = $parentKey.OpenSubKey($leaf, $false)
+        if ($null -ne $childKey) {
+            $childKey.Close()
+            $parentKey.DeleteSubKeyTree($leaf)
+        }
+    }
+    finally {
+        $parentKey.Close()
+    }
+}
+
+function Set-TestRegistryPathValue {
+    [CmdletBinding(DefaultParameterSetName = 'Write')]
+    param(
+        [Parameter(Mandatory = $true)]$Configuration,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Write')]
+        [AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Delete')]
+        [switch]$Delete,
+        [Microsoft.Win32.RegistryValueKind]$RegistryValueKind = [Microsoft.Win32.RegistryValueKind]::String
+    )
+
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Configuration.RegistryOverrideRootSubKey + '\Environment', $true)
+    if ($null -eq $key) {
+        Fail 'temporary registry Environment key does not exist'
+    }
+    try {
+        if ($Delete.IsPresent) {
+            $key.DeleteValue('Path', $false)
+        }
+        else {
+            $key.SetValue('Path', $Value, $RegistryValueKind)
+        }
+    }
+    finally {
+        $key.Close()
+    }
+}
+
+function Get-TestRegistryPathState {
+    param([Parameter(Mandatory = $true)]$Configuration)
+
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Configuration.RegistryOverrideRootSubKey + '\Environment', $false)
+    if ($null -eq $key) {
+        Fail 'temporary registry Environment key does not exist'
+    }
+    try {
+        $missing = [System.Object]::new()
+        $value = $key.GetValue(
+            'Path',
+            $missing,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        if ([System.Object]::ReferenceEquals($value, $missing)) {
+            return [PSCustomObject]@{
+                Exists = $false
+                Value = $null
+                RegistryValueKind = $null
+                ExpandedValue = $null
+            }
+        }
+        return [PSCustomObject]@{
+            Exists = $true
+            Value = $value
+            RegistryValueKind = $key.GetValueKind('Path')
+            ExpandedValue = $key.GetValue('Path', $missing)
+        }
+    }
+    finally {
+        $key.Close()
+    }
+}
+
+function Assert-TestRegistryPathState {
+    param(
+        [Parameter(Mandatory = $true)]$Configuration,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][bool]$ExpectedExists,
+        [AllowNull()][AllowEmptyString()][string]$ExpectedValue,
+        [AllowNull()]$ExpectedRegistryValueKind,
+        [AllowNull()][AllowEmptyString()][string]$ExpectedExpandedValue
+    )
+
+    $actual = Get-TestRegistryPathState -Configuration $Configuration
+    Assert-Equal -Expected $ExpectedExists -Actual $actual.Exists -Message "$Label PATH existence"
+    if (-not $ExpectedExists) {
+        return
+    }
+    Assert-True -Condition ($actual.Value -is [string]) -Message "$Label PATH raw value is not a string"
+    Assert-Equal -Expected $ExpectedValue -Actual $actual.Value -Message "$Label PATH raw value"
+    Assert-Equal -Expected $ExpectedRegistryValueKind -Actual $actual.RegistryValueKind -Message "$Label PATH registry value kind"
+    if ($PSBoundParameters.ContainsKey('ExpectedExpandedValue')) {
+        Assert-Equal -Expected $ExpectedExpandedValue -Actual $actual.ExpandedValue -Message "$Label PATH expanded view"
+    }
+}
+
+function Get-ExpectedInstalledPathValue {
+    param(
+        [AllowNull()]$CurrentValue,
+        [Parameter(Mandatory = $true)][string]$BinDirectory
+    )
+
+    if ($null -eq $CurrentValue) {
+        return $BinDirectory
+    }
+    return ($CurrentValue + ';' + $BinDirectory)
+}
+
+function Invoke-RegistryPathRoundTrip {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$FixtureArchive,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][bool]$InitialExists,
+        [AllowNull()]$InitialValue,
+        [Microsoft.Win32.RegistryValueKind]$InitialRegistryValueKind = [Microsoft.Win32.RegistryValueKind]::String,
+        [Parameter(Mandatory = $true)][bool]$CheckExpandedValue,
+        [AllowNull()]$ExpectedInitialExpandedValue,
+        [Parameter(Mandatory = $true)][bool]$AssertRawAndExpandedDiffer,
+        [Parameter(Mandatory = $true)][bool]$ExerciseUninstallRollback,
+        [bool]$UseMissingInstallPathCleanup = $false
+    )
+
+    $configuration = New-RegistryPathTestPrefix -Name $Name
+    try {
+        if ($InitialExists) {
+            Set-TestRegistryPathValue `
+                -Configuration $configuration `
+                -Value $InitialValue `
+                -RegistryValueKind $InitialRegistryValueKind
+        }
+        else {
+            Set-TestRegistryPathValue -Configuration $configuration -Delete
+        }
+
+        $initialStateArguments = @{
+            Configuration = $configuration
+            Label = "$Name initial"
+            ExpectedExists = $InitialExists
+            ExpectedValue = $InitialValue
+            ExpectedRegistryValueKind = $InitialRegistryValueKind
+        }
+        if ($CheckExpandedValue) {
+            $initialStateArguments.ExpectedExpandedValue = $ExpectedInitialExpandedValue
+        }
+        Assert-TestRegistryPathState @initialStateArguments
+        if ($AssertRawAndExpandedDiffer) {
+            $initialState = Get-TestRegistryPathState -Configuration $configuration
+            Assert-True -Condition (-not [string]::Equals($initialState.Value, $initialState.ExpandedValue, [System.StringComparison]::Ordinal)) -Message "$Name initial PATH raw value unexpectedly equals its expanded view"
+        }
+
+        $installResult = Invoke-TestInstall -Configuration $configuration -FixtureArchive $FixtureArchive -Version $Version
+        Assert-Succeeded -Result $installResult -Label "$Name install"
+        $installedValue = Get-ExpectedInstalledPathValue -CurrentValue $InitialValue -BinDirectory $configuration.BinDirectory
+        $installedRegistryValueKind = if ($InitialExists) {
+            $InitialRegistryValueKind
+        }
+        else {
+            [Microsoft.Win32.RegistryValueKind]::String
+        }
+        $installedStateArguments = @{
+            Configuration = $configuration
+            Label = "$Name install"
+            ExpectedExists = $true
+            ExpectedValue = $installedValue
+            ExpectedRegistryValueKind = $installedRegistryValueKind
+        }
+        if ($CheckExpandedValue) {
+            $installedStateArguments.ExpectedExpandedValue = (Get-ExpectedInstalledPathValue -CurrentValue $ExpectedInitialExpandedValue -BinDirectory $configuration.BinDirectory)
+        }
+        Assert-TestRegistryPathState @installedStateArguments
+        if ($AssertRawAndExpandedDiffer) {
+            $installedState = Get-TestRegistryPathState -Configuration $configuration
+            Assert-True -Condition (-not [string]::Equals($installedState.Value, $installedState.ExpandedValue, [System.StringComparison]::Ordinal)) -Message "$Name installed PATH raw value unexpectedly equals its expanded view"
+        }
+
+        if ($ExerciseUninstallRollback) {
+            $ownershipPath = Join-Path -Path (Split-Path -Parent $configuration.InstallRoot) -ChildPath '.tessivum-path-owner'
+            Assert-True -Condition ([System.IO.File]::Exists($ownershipPath)) -Message "$Name install did not create a PATH ownership record"
+            $ownershipAttributes = [System.IO.File]::GetAttributes($ownershipPath)
+            $ownershipReadOnly = $false
+            try {
+                [System.IO.File]::SetAttributes(
+                    $ownershipPath,
+                    ($ownershipAttributes -bor [System.IO.FileAttributes]::ReadOnly)
+                )
+                $ownershipReadOnly = $true
+                $rollbackResult = Invoke-TestUninstall -Configuration $configuration
+                Assert-Failed -Result $rollbackResult -Label "$Name uninstall rollback"
+                Assert-True -Condition (-not (Get-ResultText -Result $rollbackResult).Contains('rollback failed:')) -Message "$Name uninstall rollback did not complete"
+                Assert-TestRegistryPathState @installedStateArguments
+                if ($AssertRawAndExpandedDiffer) {
+                    $rollbackState = Get-TestRegistryPathState -Configuration $configuration
+                    Assert-True -Condition (-not [string]::Equals($rollbackState.Value, $rollbackState.ExpandedValue, [System.StringComparison]::Ordinal)) -Message "$Name rollback PATH raw value unexpectedly equals its expanded view"
+                }
+            }
+            finally {
+                if ($ownershipReadOnly -and [System.IO.File]::Exists($ownershipPath)) {
+                    [System.IO.File]::SetAttributes($ownershipPath, $ownershipAttributes)
+                }
+            }
+            Assert-StableLaunchers -Configuration $configuration -ExpectedVersion $Version -Label "$Name uninstall rollback"
+        }
+
+        if ($UseMissingInstallPathCleanup) {
+            [System.IO.File]::Delete((Join-Path -Path $configuration.BinDirectory -ChildPath 'tessivum.cmd'))
+            [System.IO.File]::Delete((Join-Path -Path $configuration.BinDirectory -ChildPath 'tsv.cmd'))
+            $retainedInstallRoot = $configuration.InstallRoot + '-retained'
+            [System.IO.Directory]::Move($configuration.InstallRoot, $retainedInstallRoot)
+        }
+
+        $uninstallResult = Invoke-TestUninstall -Configuration $configuration
+        Assert-Succeeded -Result $uninstallResult -Label "$Name uninstall"
+        Assert-TestRegistryPathState @initialStateArguments
+    }
+    finally {
+        Remove-RegistryPathTestPrefix -Configuration $configuration
+    }
+}
+
+function Invoke-RegistryOnlyPathRoundTrip {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][bool]$InitialExists,
+        [AllowNull()]$InitialValue,
+        [Microsoft.Win32.RegistryValueKind]$InitialRegistryValueKind = [Microsoft.Win32.RegistryValueKind]::String,
+        [Parameter(Mandatory = $true)][bool]$CheckExpandedValue,
+        [AllowNull()]$ExpectedInitialExpandedValue,
+        [Parameter(Mandatory = $true)][bool]$AssertRawAndExpandedDiffer
+    )
+
+    $configuration = New-RegistryPathTestPrefix -Name $Name
+    try {
+        if ($InitialExists) {
+            Set-TestRegistryPathValue `
+                -Configuration $configuration `
+                -Value $InitialValue `
+                -RegistryValueKind $InitialRegistryValueKind
+        }
+        else {
+            Set-TestRegistryPathValue -Configuration $configuration -Delete
+        }
+
+        $stateArguments = @{
+            Configuration = $configuration
+            Label = "$Name initial"
+            ExpectedExists = $InitialExists
+            ExpectedValue = $InitialValue
+            ExpectedRegistryValueKind = $InitialRegistryValueKind
+        }
+        if ($CheckExpandedValue) {
+            $stateArguments.ExpectedExpandedValue = $ExpectedInitialExpandedValue
+        }
+        Assert-TestRegistryPathState @stateArguments
+        if ($AssertRawAndExpandedDiffer) {
+            $initialState = Get-TestRegistryPathState -Configuration $configuration
+            Assert-True -Condition (-not [string]::Equals($initialState.Value, $initialState.ExpandedValue, [System.StringComparison]::Ordinal)) -Message "$Name initial PATH raw value unexpectedly equals its expanded view"
+        }
+
+        $result = Invoke-TestPathStoreRegression -Configuration $configuration
+        Assert-Succeeded -Result $result -Label "$Name path-store rollback"
+        Assert-TestRegistryPathState @stateArguments
+        if ($AssertRawAndExpandedDiffer) {
+            $restoredState = Get-TestRegistryPathState -Configuration $configuration
+            Assert-True -Condition (-not [string]::Equals($restoredState.Value, $restoredState.ExpandedValue, [System.StringComparison]::Ordinal)) -Message "$Name restored PATH raw value unexpectedly equals its expanded view"
+        }
+    }
+    finally {
+        Remove-RegistryPathTestPrefix -Configuration $configuration
+    }
+}
+
+function Invoke-RegistryOnlyRegression {
+    $tokenName = 'TESSIVUM_REGISTRY_PATH_TEST_TOKEN'
+    $previousToken = [Environment]::GetEnvironmentVariable($tokenName, [EnvironmentVariableTarget]::Process)
+    $expandedToken = 'tessivum-registry-token-' + [System.Guid]::NewGuid().ToString('N')
+    [Environment]::SetEnvironmentVariable($tokenName, $expandedToken, [EnvironmentVariableTarget]::Process)
+    try {
+        $registryStringValue = '%' + $tokenName + '%\literal;C:\registry-unrelated'
+        Invoke-RegistryOnlyPathRoundTrip `
+            -Name 'registry-only REG_SZ' `
+            -InitialExists $true `
+            -InitialValue $registryStringValue `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::String) `
+            -CheckExpandedValue $true `
+            -ExpectedInitialExpandedValue $registryStringValue `
+            -AssertRawAndExpandedDiffer $false
+
+        $registryExpandValue = '%' + $tokenName + '%\expanded;C:\registry-unrelated'
+        $registryExpandExpandedValue = $expandedToken + '\expanded;C:\registry-unrelated'
+        Invoke-RegistryOnlyPathRoundTrip `
+            -Name 'registry-only REG_EXPAND_SZ' `
+            -InitialExists $true `
+            -InitialValue $registryExpandValue `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -CheckExpandedValue $true `
+            -ExpectedInitialExpandedValue $registryExpandExpandedValue `
+            -AssertRawAndExpandedDiffer $true
+
+        Invoke-RegistryOnlyPathRoundTrip `
+            -Name 'registry-only empty REG_EXPAND_SZ' `
+            -InitialExists $true `
+            -InitialValue '' `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -CheckExpandedValue $true `
+            -ExpectedInitialExpandedValue '' `
+            -AssertRawAndExpandedDiffer $false
+
+        Invoke-RegistryOnlyPathRoundTrip `
+            -Name 'registry-only missing PATH' `
+            -InitialExists $false `
+            -InitialValue $null `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::String) `
+            -CheckExpandedValue $false `
+            -ExpectedInitialExpandedValue $null `
+            -AssertRawAndExpandedDiffer $false
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable($tokenName, $previousToken, [EnvironmentVariableTarget]::Process)
+    }
+}
+
+function Invoke-RegistryInstallRollback {
+    param(
+        [Parameter(Mandatory = $true)][string]$FixtureArchive,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$InitialValue,
+        [Parameter(Mandatory = $true)][string]$ExpectedExpandedValue
+    )
+
+    $configuration = New-RegistryPathTestPrefix -Name 'reg rollback'
+    try {
+        Set-TestRegistryPathValue `
+            -Configuration $configuration `
+            -Value $InitialValue `
+            -RegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString)
+        Assert-TestRegistryPathState `
+            -Configuration $configuration `
+            -Label 'registry install rollback initial' `
+            -ExpectedExists $true `
+            -ExpectedValue $InitialValue `
+            -ExpectedRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -ExpectedExpandedValue $ExpectedExpandedValue
+
+        $installBase = Split-Path -Parent $configuration.InstallRoot
+        [System.IO.Directory]::CreateDirectory($installBase) | Out-Null
+        $lockPath = Join-Path -Path $installBase -ChildPath '.tessivum-installer.lock'
+        [System.IO.File]::WriteAllText($lockPath, '', $script:Utf8NoBom)
+        $originalInstallBaseAcl = Get-Acl -LiteralPath $installBase
+        $installBaseAclChanged = $false
+        try {
+            $updatedInstallBaseAcl = Get-Acl -LiteralPath $installBase
+            $denyCreateFiles = [System.Security.AccessControl.FileSystemAccessRule]::new(
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [System.Security.AccessControl.FileSystemRights]::CreateFiles,
+                [System.Security.AccessControl.InheritanceFlags]::None,
+                [System.Security.AccessControl.PropagationFlags]::None,
+                [System.Security.AccessControl.AccessControlType]::Deny
+            )
+            [void]$updatedInstallBaseAcl.AddAccessRule($denyCreateFiles)
+            Set-Acl -LiteralPath $installBase -AclObject $updatedInstallBaseAcl
+            $installBaseAclChanged = $true
+
+            $rollbackResult = Invoke-TestInstall -Configuration $configuration -FixtureArchive $FixtureArchive -Version $Version
+            Assert-Failed -Result $rollbackResult -Label 'registry install rollback'
+            Assert-True -Condition (-not (Get-ResultText -Result $rollbackResult).Contains('rollback failed:')) -Message 'registry install rollback did not complete'
+            Assert-TestRegistryPathState `
+                -Configuration $configuration `
+                -Label 'registry install rollback' `
+                -ExpectedExists $true `
+                -ExpectedValue $InitialValue `
+                -ExpectedRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+                -ExpectedExpandedValue $ExpectedExpandedValue
+            $rollbackState = Get-TestRegistryPathState -Configuration $configuration
+            Assert-True -Condition (-not [string]::Equals($rollbackState.Value, $rollbackState.ExpandedValue, [System.StringComparison]::Ordinal)) -Message 'registry install rollback PATH raw value unexpectedly equals its expanded view'
+            Assert-NoPartialInstall -Configuration $configuration -Version $Version
+        }
+        finally {
+            if ($installBaseAclChanged) {
+                Set-Acl -LiteralPath $installBase -AclObject $originalInstallBaseAcl
+            }
+        }
+    }
+    finally {
+        Remove-RegistryPathTestPrefix -Configuration $configuration
+    }
+}
+
+function Invoke-RegistryPathRegression {
+    param(
+        [Parameter(Mandatory = $true)][string]$FixtureArchive,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    $tokenName = 'TESSIVUM_REGISTRY_PATH_TEST_TOKEN'
+    $previousToken = [Environment]::GetEnvironmentVariable($tokenName, [EnvironmentVariableTarget]::Process)
+    $expandedToken = 'tessivum-registry-token-' + [System.Guid]::NewGuid().ToString('N')
+    [Environment]::SetEnvironmentVariable($tokenName, $expandedToken, [EnvironmentVariableTarget]::Process)
+    try {
+        $registryStringValue = '%' + $tokenName + '%\literal;C:\registry-unrelated'
+        Invoke-RegistryPathRoundTrip `
+            -Name 'reg sz' `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -InitialExists $true `
+            -InitialValue $registryStringValue `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::String) `
+            -CheckExpandedValue $true `
+            -ExpectedInitialExpandedValue $registryStringValue `
+            -AssertRawAndExpandedDiffer $false `
+            -ExerciseUninstallRollback $false
+
+        $registryExpandValue = '%' + $tokenName + '%\expanded;C:\registry-unrelated'
+        $registryExpandExpandedValue = $expandedToken + '\expanded;C:\registry-unrelated'
+        Invoke-RegistryInstallRollback `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -InitialValue $registryExpandValue `
+            -ExpectedExpandedValue $registryExpandExpandedValue
+
+        Invoke-RegistryPathRoundTrip `
+            -Name 'reg expand' `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -InitialExists $true `
+            -InitialValue $registryExpandValue `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -CheckExpandedValue $true `
+            -ExpectedInitialExpandedValue $registryExpandExpandedValue `
+            -AssertRawAndExpandedDiffer $true `
+            -ExerciseUninstallRollback $true
+
+        Invoke-RegistryPathRoundTrip `
+            -Name 'reg empty' `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -InitialExists $true `
+            -InitialValue '' `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -CheckExpandedValue $true `
+            -ExpectedInitialExpandedValue '' `
+            -AssertRawAndExpandedDiffer $false `
+            -ExerciseUninstallRollback $false
+
+        Invoke-RegistryPathRoundTrip `
+            -Name 'reg missing' `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -InitialExists $false `
+            -InitialValue $null `
+            -InitialRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::String) `
+            -CheckExpandedValue $false `
+            -ExpectedInitialExpandedValue $null `
+            -AssertRawAndExpandedDiffer $false `
+            -ExerciseUninstallRollback $false `
+            -UseMissingInstallPathCleanup $true
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable($tokenName, $previousToken, [EnvironmentVariableTarget]::Process)
+    }
+}
+
+function Set-CurrentPowerShellHost {
     $candidateHost = if ($PSVersionTable.PSEdition -eq 'Core') {
         Join-Path -Path $PSHOME -ChildPath 'pwsh.exe'
     }
@@ -614,11 +1390,161 @@ try {
         $script:PowerShellHost = (Get-Process -Id $PID).Path
     }
     Assert-True -Condition ([System.IO.File]::Exists($script:PowerShellHost)) -Message 'cannot locate the current PowerShell executable'
+}
 
-    $release = Get-ReleaseArchiveInfo -Path $archive
-    $variants = Get-VersionVariants -SourceVersion $release.Version
-    $script:WorkDirectory = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('tessivum installer test ' + [System.Guid]::NewGuid().ToString('N'))
+function Get-WindowsPowerShell51Host {
+    $candidateHost = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Assert-True -Condition ([System.IO.File]::Exists($candidateHost)) -Message 'Windows PowerShell 5.1 is not available'
+    return $candidateHost
+}
+
+function Get-PowerShell7Host {
+    if ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion.Major -eq 7) {
+        $currentHost = Join-Path -Path $PSHOME -ChildPath 'pwsh.exe'
+        if ([System.IO.File]::Exists($currentHost)) {
+            return $currentHost
+        }
+    }
+
+    $command = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -ne $command -and [System.IO.File]::Exists($command.Path)) {
+        return $command.Path
+    }
+
+    $candidateHost = Join-Path -Path $env:ProgramFiles -ChildPath 'PowerShell\7\pwsh.exe'
+    Assert-True -Condition ([System.IO.File]::Exists($candidateHost)) -Message 'PowerShell 7 is not available'
+    return $candidateHost
+}
+
+function Invoke-RegistryOnlyAcrossPowerShellHosts {
+    $hostSpecifications = @(
+        [PSCustomObject]@{
+            Path = (Get-WindowsPowerShell51Host)
+            MajorVersion = 5
+            Label = 'Windows PowerShell 5.1 registry-only PATH regression'
+        },
+        [PSCustomObject]@{
+            Path = (Get-PowerShell7Host)
+            MajorVersion = 7
+            Label = 'PowerShell 7 registry-only PATH regression'
+        }
+    )
+    foreach ($hostSpecification in $hostSpecifications) {
+        $arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            $script:TestScriptPath,
+            '-RegistryOnly',
+            '-InstallerPath',
+            $script:InstallerPath,
+            '-ExpectedPowerShellMajor',
+            [string]$hostSpecification.MajorVersion
+        )
+        $output = @(& $hostSpecification.Path @arguments 2>&1)
+        $result = [PSCustomObject]@{
+            ExitCode = $LASTEXITCODE
+            Output = $output
+        }
+        Assert-Succeeded -Result $result -Label $hostSpecification.Label
+    }
+}
+
+function Invoke-RegistryPathRegressionAcrossPowerShellHosts {
+    param([Parameter(Mandatory = $true)][string]$FixtureArchive)
+
+    $hostSpecifications = @(
+        [PSCustomObject]@{
+            Path = (Get-WindowsPowerShell51Host)
+            MajorVersion = 5
+            Label = 'Windows PowerShell 5.1 registry PATH regression'
+        },
+        [PSCustomObject]@{
+            Path = (Get-PowerShell7Host)
+            MajorVersion = 7
+            Label = 'PowerShell 7 registry PATH regression'
+        }
+    )
+    foreach ($hostSpecification in $hostSpecifications) {
+        $arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            $script:TestScriptPath,
+            '-ArchivePath',
+            $FixtureArchive,
+            '-InstallerPath',
+            $script:InstallerPath,
+            '-RegistryPathRegression',
+            '-ExpectedPowerShellMajor',
+            [string]$hostSpecification.MajorVersion
+        )
+        $output = @(& $hostSpecification.Path @arguments 2>&1)
+        $result = [PSCustomObject]@{
+            ExitCode = $LASTEXITCODE
+            Output = $output
+        }
+        Assert-Succeeded -Result $result -Label $hostSpecification.Label
+    }
+}
+
+try {
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        Fail 'PowerShell 5.1 or later is required'
+    }
+    if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        Fail 'this test only supports Windows'
+    }
+
+    $script:InstallerPath = if ([string]::IsNullOrEmpty($InstallerPath)) {
+        Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'install.ps1'
+    }
+    else {
+        Get-AbsolutePath -Path $InstallerPath
+    }
+    Assert-True -Condition ([System.IO.File]::Exists($script:InstallerPath)) -Message "installer does not exist: $script:InstallerPath"
+
+    Set-CurrentPowerShellHost
+    if ($ExpectedPowerShellMajor -gt 0) {
+        Assert-Equal -Expected $ExpectedPowerShellMajor -Actual $PSVersionTable.PSVersion.Major -Message 'registry regression PowerShell major version'
+    }
+
+    # Leave room for the release tree beneath PowerShell 5.1's MAX_PATH boundary.
+    $temporaryCandidate = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('ti ' + [System.IO.Path]::GetRandomFileName())
+    Assert-True -Condition (-not [System.IO.Directory]::Exists($temporaryCandidate) -and -not [System.IO.File]::Exists($temporaryCandidate)) -Message 'temporary test path already exists'
+    $script:WorkDirectory = $temporaryCandidate
     [System.IO.Directory]::CreateDirectory($script:WorkDirectory) | Out-Null
+    if ($RegistryOnly.IsPresent) {
+        if ($ExpectedPowerShellMajor -gt 0) {
+            Invoke-RegistryOnlyRegression
+        }
+        else {
+            Invoke-RegistryOnlyAcrossPowerShellHosts
+        }
+        Write-Output 'Windows installer registry-only PATH regressions passed'
+        return
+    }
+
+    $archive = Get-AbsolutePath -Path $ArchivePath
+    Assert-True -Condition ([System.IO.File]::Exists($archive)) -Message "archive does not exist: $archive"
+    Assert-True -Condition ([System.IO.File]::Exists($archive + '.sha256')) -Message "archive checksum does not exist: $archive.sha256"
+    $release = Get-ReleaseArchiveInfo -Path $archive
+    if ($RegistryPathRegression.IsPresent) {
+        if ($ExpectedPowerShellMajor -gt 0) {
+            Invoke-RegistryPathRegression -FixtureArchive $archive -Version $release.Version
+        }
+        else {
+            Invoke-RegistryPathRegressionAcrossPowerShellHosts -FixtureArchive $archive
+        }
+        Write-Output 'Windows installer registry PATH regressions passed'
+        return
+    }
+
+    Invoke-RegistryPathRegressionAcrossPowerShellHosts -FixtureArchive $archive
+
+    $variants = Get-VersionVariants -SourceVersion $release.Version
     $fixtureDirectory = Join-Path -Path $script:WorkDirectory -ChildPath 'fixtures'
     [System.IO.Directory]::CreateDirectory($fixtureDirectory) | Out-Null
 
