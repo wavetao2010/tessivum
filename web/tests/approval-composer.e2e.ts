@@ -39,7 +39,7 @@ test('keeps a sandbox escalation approval reachable and runs it only after conse
     const input = harness.page.locator('textarea').first()
     await harness.page.locator('[aria-label^="Access mode"]').click()
     await harness.page.getByRole('menuitem', { name: 'Read Only' }).click()
-    await expect(waitUntil(() => harness.page.locator('[aria-label="Access mode, current: Read Only"]').count(), count => count === 1)).resolves.toBe(1)
+    expect(await waitUntil(() => harness.page.locator('[aria-label="Access mode, current: Read Only"]').count(), count => count === 1)).toBe(1)
     const settled = harness.whenTurnSettled()
 
     await input.fill(prompt)
@@ -48,8 +48,8 @@ test('keeps a sandbox escalation approval reachable and runs it only after conse
     const panel = harness.page.locator('[data-approval-key]')
     await panel.waitFor({ timeout: 60_000 })
     const scroll = panel.locator('[data-approval-scroll]')
-    await expect(waitUntil(() => scroll.getByText(/tok/).count(), count => count > 0)).resolves.toBeGreaterThan(0)
-    await expect(readFile(join(harness.workspace, 'notes.txt'), 'utf8')).rejects.toThrow()
+    expect(await waitUntil(() => scroll.getByText(/tok/).count(), count => count > 0)).toBeGreaterThan(0)
+    expect(await readFile(join(harness.workspace, 'notes.txt'), 'utf8').then(() => null, error => error)).toMatchObject({ code: 'ENOENT' })
 
     const geometry = await panel.evaluate(root => {
       const region = root.querySelector<HTMLElement>('[data-approval-scroll]')
@@ -71,7 +71,7 @@ test('keeps a sandbox escalation approval reachable and runs it only after conse
     await panel.waitFor({ state: 'detached', timeout: 15_000 })
     await settled
     expect(await readFile(join(harness.workspace, 'notes.txt'), 'utf8')).toBe(`${tokens}\n`)
-    await expect(waitUntil(() => harness.page.getByText('DONE', { exact: true }).count(), count => count > 0)).resolves.toBeGreaterThanOrEqual(1)
+    expect(await waitUntil(() => harness.page.getByText('DONE', { exact: true }).count(), count => count > 0)).toBeGreaterThanOrEqual(1)
     expect(await panel.count()).toBe(0)
     harness.assertClean()
   } finally {

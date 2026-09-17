@@ -33,6 +33,9 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Preserve raw Windows User PATH registry text, `REG_SZ`/`REG_EXPAND_SZ` types, and missing-versus-empty values during install, rollback, and uninstall; verify real registry transactions through process-local HKCU isolation on PowerShell 5.1 and 7.
 - Normalize local plugin `file://` URLs before invoking pnpm, not just during package preflight; verify actual installation and activation under Unicode, percent, hash, and space-containing paths.
 - Make seeded Browser session setup expand only closed workspace disclosures in one browser task, avoiding a selector race with automatic expansion without changing product behavior or weakening scenario assertions.
+- Await Browser operations before invoking Bun assertions, preserving Playwright protocol event ordering instead of reentering the event loop through Promise matchers.
+- Verify produced-file summaries by ordered visible paths, exact remaining counts, and non-overflowing layout rather than a platform-dependent two-chip count.
+- Check remote revocation through authenticated HTTP admission changing from 200 to 401 and active WebSocket closure, rather than a scheduler-dependent reconnect warning count.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 

@@ -96,7 +96,7 @@ test('switches read-only, danger-full-access, and workspace-write through the re
       await input.fill(PROMPTS[index]!)
       await input.press('Enter')
       sessionId = await settled
-      await expect(input.isEnabled()).resolves.toBe(true)
+      expect(await input.isEnabled()).toBe(true)
     }
 
     await input.fill('/permission read-only')

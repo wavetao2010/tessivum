@@ -114,11 +114,14 @@ test('a completed write turn keeps a one-line ten-file summary and native folder
     await harness.page.setViewportSize({ width: 780, height: 900 })
     const row = harness.page.locator('[data-produced-files-row]')
     await row.waitFor({ timeout: 15_000 })
-    const chips = row.getByRole('button')
-    expect(await waitUntil(() => chips.count(), count => count === 2)).toBe(2)
-    expect(await chips.nth(0).innerText()).toBe('关于我.md')
-    expect(await chips.nth(1).innerText()).toBe('index.html')
-    expect(await row.getByText('+ 8 files', { exact: true }).count()).toBe(1)
+    const summary = await waitUntil(() => row.evaluate(element => ({
+      files: [...element.querySelectorAll('button')].map(button => button.textContent),
+      more: element.querySelector(':scope > span')?.textContent ?? null,
+      width: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    })), value => value.width > 0 && value.scrollWidth <= value.width && value.more !== null)
+    expect(summary.files).toEqual(PRODUCED.slice(0, summary.files.length))
+    expect(summary.more).toBe(`+ ${PRODUCED.length - summary.files.length} files`)
     expect(await harness.page.getByText('Produced', { exact: true }).count()).toBe(1)
 
     const showFolder = harness.page.getByRole('button', { name: 'Show in folder', exact: true })
