@@ -86,16 +86,16 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
     const firstSettled = harness.whenTurnSettled()
     await input.fill(ACTIVE_PROMPT)
     await input.press('Enter')
-    await expect(waitUntil(async () => existsSync(readyFile), Boolean)).resolves.toBe(true)
+    expect(await waitUntil(async () => existsSync(readyFile), Boolean)).toBe(true)
 
     for (const text of [REMOVE, EDIT]) {
       await input.fill(text)
       await input.press('Enter')
     }
     const queueHeader = harness.page.getByRole('button', { name: '2 queued messages' })
-    await expect(waitUntil(() => queueHeader.getAttribute('aria-expanded'), value => value === 'false')).resolves.toBe('false')
+    expect(await waitUntil(() => queueHeader.getAttribute('aria-expanded'), value => value === 'false')).toBe('false')
     await queueHeader.click()
-    await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
+    expect(await waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).toBe(2)
 
     await harness.page.setViewportSize({ width: 640, height: 1000 })
     const [queueBox, composerBox] = await waitUntil(
@@ -132,7 +132,7 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
 
     const removeRow = harness.page.getByText(REMOVE, { exact: true }).locator('..')
     await removeRow.getByRole('button', { name: 'Remove queued message' }).click()
-    await expect(waitUntil(() => harness.page.getByText(REMOVE, { exact: true }).count(), count => count === 0)).resolves.toBe(0)
+    expect(await waitUntil(() => harness.page.getByText(REMOVE, { exact: true }).count(), count => count === 0)).toBe(0)
 
     const active = (await harness.sessions()).find(item => item.running)
     if (active === undefined) throw new Error('queue scenario has no active session')
@@ -141,20 +141,20 @@ test('edits and removes exact occurrences and preserves Queue across stop', asyn
 
     await input.fill(TAIL)
     await input.press('Enter')
-    await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
+    expect(await waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).toBe(2)
     await harness.page.getByRole('button', { name: 'Stop generating' }).click()
     const sessionId = await firstSettled
-    await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Stop generating' }).count(), count => count === 0)).resolves.toBe(0)
-    await expect(waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).resolves.toBe(2)
+    expect(await waitUntil(() => harness.page.getByRole('button', { name: 'Stop generating' }).count(), count => count === 0)).toBe(0)
+    expect(await waitUntil(() => harness.page.getByRole('button', { name: 'Remove queued message' }).count(), count => count === 2)).toBe(2)
 
     const settled = harness.whenTurnSettled()
     await input.fill(WAKE)
     await input.press('Enter')
     await settled
     const log = await sessionEvents(harness, sessionId)
-    await expect(waitUntil(async () => turnEndReasons(await sessionEvents(harness, sessionId)), reasons => reasons.length === 4)).resolves.toEqual(['aborted', 'completed', 'completed', 'completed'])
+    expect(await waitUntil(async () => turnEndReasons(await sessionEvents(harness, sessionId)), reasons => reasons.length === 4)).toEqual(['aborted', 'completed', 'completed', 'completed'])
     expect(userTexts(log)).toEqual([ACTIVE_PROMPT, EDITED, TAIL, WAKE])
-    await expect(waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0)).resolves.toBe(0)
+    expect(await waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0)).toBe(0)
     harness.assertClean()
   } finally {
     await harness.close()
@@ -188,7 +188,7 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
     const input = harness.page.locator('textarea').first()
     await input.fill('/goal Keep the composer context panels aligned')
     await input.press('Enter')
-    await expect(waitUntil(async () => existsSync(readyFile), Boolean, 15_000)).resolves.toBe(true)
+    expect(await waitUntil(async () => existsSync(readyFile), Boolean, 15_000)).toBe(true)
     await harness.page.locator('[data-goal-bar]').waitFor({ timeout: 10_000 })
     await harness.page.locator('[data-testid="todo-panel"]').waitFor({ timeout: 10_000 })
     const sessionId = (await harness.sessions()).find(item => item.running)?.sessionId
@@ -199,7 +199,7 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
       await input.press('Enter')
     }
     const queueHeader = harness.page.getByRole('button', { name: '2 queued messages' })
-    await expect(waitUntil(() => queueHeader.getAttribute('aria-expanded'), value => value === 'false')).resolves.toBe('false')
+    expect(await waitUntil(() => queueHeader.getAttribute('aria-expanded'), value => value === 'false')).toBe('false')
 
     const aligned = async (): Promise<void> => {
       const [queueBox, todoBox, goalBox] = await waitUntil(
@@ -232,13 +232,13 @@ test('orders Todo before Goal and Queue on one responsive card column', async ()
 
     await queueHeader.click()
     const removeButtons = harness.page.getByRole('button', { name: 'Remove queued message' })
-    await expect(waitUntil(() => removeButtons.count(), count => count === 2)).resolves.toBe(2)
+    expect(await waitUntil(() => removeButtons.count(), count => count === 2)).toBe(2)
     await removeButtons.first().click()
-    await expect(waitUntil(() => removeButtons.count(), count => count === 1)).resolves.toBe(1)
+    expect(await waitUntil(() => removeButtons.count(), count => count === 1)).toBe(1)
     await removeButtons.first().click()
-    await expect(waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0)).resolves.toBe(0)
+    expect(await waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0)).toBe(0)
     await harness.page.getByRole('button', { name: 'Clear goal' }).click()
-    await expect(waitUntil(() => harness.page.locator('[data-goal-bar]').count(), count => count === 0)).resolves.toBe(0)
+    expect(await waitUntil(() => harness.page.locator('[data-goal-bar]').count(), count => count === 0)).toBe(0)
     await harness.page.getByRole('button', { name: 'Stop generating' }).click()
     await waitUntil(
       () => harness.sessions(),

@@ -63,6 +63,16 @@ test('authorized remote startup stays usable across reload and device revocation
       socket.send(JSON.stringify({ requestId: 'remote-shutdown', namespace: 'host', method: 'shutdown', args: {} }))
     }))
     expect(shutdownError).toBe('REMOTE_HOST_DENIED')
+    const remoteSessionStatus = () => harness.page.evaluate(async () => {
+      const response = await fetch('/api/session.list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method: 'session.list', payload: { limit: 1 } }),
+      })
+      return response.status
+    })
+    expect(await remoteSessionStatus()).toBe(200)
+    harness.assertClean()
     await devicePage.getByRole('button', { name: 'Disconnect this device' }).click()
     await devicePage.getByRole('heading', { name: 'A pairing link is required' }).waitFor()
     expect(deviceErrors).toEqual([])
@@ -78,8 +88,9 @@ test('authorized remote startup stays usable across reload and device revocation
         resolve()
       }, { once: true })
     }))
-    expect(harness.warnings.splice(0)).toEqual(['[web-runtime] connection lost, retry #1'])
-    harness.assertClean()
+    // Revocation rejects reconnects; their warning count depends on scheduling.
+    expect(await remoteSessionStatus()).toBe(401)
+    expect(harness.pageErrors).toEqual([])
   } finally {
     await harness.close()
   }

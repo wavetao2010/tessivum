@@ -62,13 +62,13 @@ test('asks through the composer, answers, and completes with the answer logged',
 
     const composer = harness.page.locator('[data-question-key]')
     await composer.waitFor({ timeout: 30_000 })
-    await expect(waitUntil(() => composer.getByText('Which color do you prefer?').count(), count => count > 0)).resolves.toBeGreaterThan(0)
+    expect(await waitUntil(() => composer.getByText('Which color do you prefer?').count(), count => count > 0)).toBeGreaterThan(0)
     expect(await composer.getByText('Pick one', { exact: true }).count()).toBe(1)
     expect(await composer.getByRole('checkbox', { name: 'Blue' }).count()).toBe(1)
     expect(await composer.getByRole('checkbox', { name: 'Green' }).count()).toBe(1)
     const selectedRow = harness.page.locator('[role="treeitem"][aria-selected="true"]')
-    await expect(waitUntil(() => selectedRow.locator('[data-state="warning"]').count(), count => count === 1)).resolves.toBe(1)
-    await expect(waitUntil(() => selectedRow.getByText('Waiting for answer', { exact: true }).count(), count => count === 1)).resolves.toBe(1)
+    expect(await waitUntil(() => selectedRow.locator('[data-state="warning"]').count(), count => count === 1)).toBe(1)
+    expect(await waitUntil(() => selectedRow.getByText('Waiting for answer', { exact: true }).count(), count => count === 1)).toBe(1)
 
     const original = harness.page.viewportSize() ?? { width: 1680, height: 1000 }
     for (const height of [520, 440, 380]) {
@@ -114,10 +114,10 @@ test('asks through the composer, answers, and completes with the answer logged',
     })
     expect(log.filter(event => event.type === 'question/asked')).toHaveLength(1)
     expect(log.filter(event => event.type === 'question/resolved')).toHaveLength(1)
-    await expect(waitUntil(() => harness.page.getByText('DONE', { exact: true }).count(), count => count > 0)).resolves.toBeGreaterThanOrEqual(1)
+    expect(await waitUntil(() => harness.page.getByText('DONE', { exact: true }).count(), count => count > 0)).toBeGreaterThanOrEqual(1)
     expect(await harness.page.locator('[data-question-key]').count()).toBe(0)
     expect(await selectedRow.locator('[data-state="warning"]').count()).toBe(0)
-    await expect(waitUntil(() => harness.page.locator('textarea').first().isEnabled(), Boolean)).resolves.toBe(true)
+    expect(await waitUntil(() => harness.page.locator('textarea').first().isEnabled(), Boolean)).toBe(true)
     const backToBottom = harness.page.getByRole('button', { name: 'Back to bottom', exact: true })
     if (await backToBottom.count() !== 0) {
       await backToBottom.click()

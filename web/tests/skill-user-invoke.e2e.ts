@@ -25,7 +25,7 @@ function replayRecording(): string {
     { type: 'finish', reason: { kind: 'stop' } },
   ]
   return [
-    { type: 'session', version: 0, id: 'skill-user-invoke-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'skill-user-invoke-replay', createdAt: 0 },
     ...chunks.map((chunk, seq) => ({ type: 'assistant/chunk', seq, time: 0, data: { turn: 1, step: 1, chunk } })),
   ].map(row => JSON.stringify(row)).join('\n')
 }

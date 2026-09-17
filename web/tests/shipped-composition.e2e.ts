@@ -52,7 +52,9 @@ interface HistoryEvent {
 
 function replayRecording(): string {
   const bash = JSON.stringify({
-    command: 'printf SHIPPED_BACKGROUND_OK',
+    command: process.platform === 'win32'
+      ? "[Console]::Out.Write('SHIPPED_BACKGROUND_OK')"
+      : "printf '%s' 'SHIPPED_BACKGROUND_OK'",
     description: 'Verify the shipped background-job registry',
     run_in_background: true,
   })
@@ -72,7 +74,7 @@ function replayRecording(): string {
   ]
   let seq = 0
   return [
-    { type: 'session', version: 0, id: 'shipped-composition-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'shipped-composition-replay', createdAt: 0 },
     ...attempts.flatMap((chunks, step) => chunks.map(chunk => ({ type: 'assistant/chunk', seq: seq++, time: 0, data: { turn: 1, step: step + 1, chunk } }))),
   ].map(row => JSON.stringify(row)).join('\n')
 }

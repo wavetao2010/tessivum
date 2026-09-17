@@ -1,4 +1,5 @@
 import { access, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { longChatFixture, openSessionByMarker, RustWebHarness, waitUntil } from './support'
 import { chromium, type Browser } from 'playwright-core'
@@ -48,7 +49,9 @@ function textChunks(first: string, done: string, count: number): unknown[] {
 }
 
 function toolChunks(): unknown[] {
-  const command = [`: > ${TOOL_READY}`, `while [ ! -f ${TOOL_RELEASE} ]; do sleep 0.02; done`, 'line=1', `while [ "$line" -le 64 ]; do printf 'CHAT_SCROLL_TOOL_RESULT line %02d\\n' "$line"; line=$((line + 1)); done`].join('; ')
+  const command = process.platform === 'win32'
+    ? [`New-Item -ItemType File -Path '${TOOL_READY}' -Force | Out-Null`, `while (-not (Test-Path -LiteralPath '${TOOL_RELEASE}')) { Start-Sleep -Milliseconds 20 }`, `1..64 | ForEach-Object { [Console]::Out.Write(('CHAT_SCROLL_TOOL_RESULT line {0:D2}' -f $_) + [char]10) }`].join('; ')
+    : [`touch '${TOOL_READY}'`, `while [ ! -f '${TOOL_RELEASE}' ]; do sleep 0.02; done`, `i=1; while [ "$i" -le 64 ]; do printf 'CHAT_SCROLL_TOOL_RESULT line %02d' "$i"; echo; i=$((i + 1)); done`].join('; ')
   const argumentsJson = JSON.stringify({ command, description: 'CHAT_SCROLL_TOOL_RESULT' })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -62,7 +65,7 @@ function toolChunks(): unknown[] {
 function replayRecording(...attempts: unknown[][]): string {
   let seq = 0
   return [
-    { type: 'session', version: 0, id: 'chat-scroll-contract-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'chat-scroll-contract-replay', createdAt: 0 },
     ...attempts.flatMap((chunks, attempt) => chunks.map(chunk => ({ type: 'assistant/chunk', seq: seq++, time: 0, data: { turn: attempt + 1, step: 1, chunk } }))),
   ].map(row => JSON.stringify(row)).join('\n')
 }
@@ -301,8 +304,8 @@ test('chat-scroll-contract keeps running tool disclosure and bottom ownership ac
   })
   try {
     await openSessionByMarker(harness, TOOL.markers.user(1), TOOL.markers.assistant(TOOL.turns))
-    const ready = `${harness.workspace}/${TOOL_READY}`
-    const release = `${harness.workspace}/${TOOL_RELEASE}`
+    const ready = join(harness.workspace, TOOL_READY)
+    const release = join(harness.workspace, TOOL_RELEASE)
     let released = false
     try {
       const settled = harness.whenTurnSettled()
@@ -474,8 +477,8 @@ test('chat-scroll-contract synthetic fling releases and reacquires streaming bot
   })
   try {
     await openSessionByMarker(harness, INPUTS.markers.user(1), INPUTS.markers.assistant(INPUTS.turns))
-    const ready = `${harness.workspace}/${TOOL_READY}`
-    const release = `${harness.workspace}/${TOOL_RELEASE}`
+    const ready = join(harness.workspace, TOOL_READY)
+    const release = join(harness.workspace, TOOL_RELEASE)
     const back = harness.page.getByRole('button', { name: 'Back to bottom', exact: true })
     const settled = harness.whenTurnSettled()
     let released = false

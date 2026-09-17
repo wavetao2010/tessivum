@@ -234,7 +234,12 @@ fn run(mut input: RunnerInput) -> io::Result<u32> {
     }
     let temp = create_private_temp(&temp_base, &user_sid)?;
     let result = execute(&input, &workspace, &user_sid, &current_token, &temp);
-    let cleanup = temp.cleanup(&user_sid);
+    let cleanup = temp.cleanup(&user_sid).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("private temporary directory cleanup: {error}"),
+        )
+    });
     match (result, cleanup) {
         (Ok(code), Ok(())) => Ok(code),
         (Err(error), _) => Err(error),
@@ -422,9 +427,12 @@ fn spawn_wait(token: HANDLE, argv: &[String], cwd: &Path, temp: &Path) -> io::Re
         job.terminate();
         return Err(last_error("GetExitCodeProcess"));
     }
-    job.terminate();
-    job.wait_for_exit()?;
-    drop(job);
+    job.cleanup_process_tree_blocking().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("restricted process-tree cleanup: {error}"),
+        )
+    })?;
     Ok(code)
 }
 

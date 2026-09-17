@@ -23,12 +23,22 @@ Chinese characters and a space. Do not use WSL, elevation, Developer Mode, disab
 software, global store/proxy changes, hand-edited `node_modules`, blind retries, or tool
 version changes as workarounds.
 
-Install Visual Studio 2022 Build Tools (**Desktop development with C++**), Git, PowerShell 7.4+,
-Node.js, Rust stable, and Python 3. Bun `1.4.0` and pnpm `11.7.0` remain fixed. The failed run
-used Windows 11 25H2 build 26200, PowerShell 7.6.4, Git 2.51.2.windows.1, Node 24.11.1,
-Rust/Cargo 1.94.0, Bun 1.4.0, pnpm 11.7.0, and Python 3.12.10. Record every actual version,
-resolved executable path, and difference; do not force or downgrade unrelated tools merely
-to reproduce those patch versions.
+Install Visual Studio 2022 Build Tools (**Desktop development with C++**),
+Git, PowerShell 7.4+, Rust stable, and Python 3. Node.js must be in one of
+these ranges: `>=22.19.0 <23.0.0` or `>=24.13.1 <25.0.0`. The Windows CI
+reference runtime is Node 24.20.0. Bun `1.4.0` and pnpm `11.7.0` remain
+fixed.
+
+The failed run used Windows 11 25H2 build 26200, PowerShell 7.6.4, Git
+2.51.2.windows.1, Node 24.11.1, Rust/Cargo 1.94.0, Bun 1.4.0, pnpm
+11.7.0, and Python 3.12.10. Record every actual version, resolved
+executable path, and difference. Do not force or downgrade unrelated
+tools merely to reproduce those patch versions.
+
+Windows compilation uses `--jobs 1` to bound compiler/linker memory peaks.
+Keep sufficient free space for debug symbols; set `CARGO_TARGET_DIR` to an
+NTFS volume with sufficient capacity when the system drive is nearly full.
+This changes build scheduling only, not Rust test concurrency or coverage.
 
 ## Command groups 1–15
 
@@ -42,6 +52,11 @@ Supply the current candidate commit, not the old report commit. The single `try`
 PowerShell native-command preference make any non-zero native exit terminate the script.
 Later groups are then `NOT RUN`, and the overall result is `FAIL`; an unrun required group is
 never a pass.
+
+The environment, Node version, and Node filesystem probe are prerequisites.
+If any prerequisite fails, stop before external checkouts or pnpm; Groups
+01-16 are `NOT RUN`. The script resolves Node before cloning Tessivum, but
+does not resolve or invoke pnpm until the probe passes.
 
 ```powershell
 #Requires -Version 7.4
@@ -67,34 +82,89 @@ try {
     throw 'Run as an ordinary user.'
   }
   $drive = ([IO.Path]::GetPathRoot($WorkRoot)).Substring(0, 1)
-  if ((Get-Volume -DriveLetter $drive).FileSystem -ne 'NTFS') { throw 'Test path is not on NTFS.' }
-  $developerMode = Get-ItemPropertyValue `
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' `
-    -Name AllowDevelopmentWithoutDevLicense -ErrorAction SilentlyContinue
-  if ($null -ne $developerMode -and [int]$developerMode -ne 0) { throw 'Developer Mode is on.' }
+  $fileSystem = (Get-Volume -DriveLetter $drive).FileSystem
+  if ($fileSystem -ne 'NTFS') { throw 'Test path is not on NTFS.' }
+  $developerModePath =
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+  try {
+    $developerModeKey =
+      Get-ItemProperty -Path $developerModePath -ErrorAction Stop
+  } catch [System.Management.Automation.ItemNotFoundException] {
+    $developerModeKey = $null
+  }
+  $developerModeProperty = $null
+  if ($null -ne $developerModeKey) {
+    $developerModeProperty = $developerModeKey.PSObject.Properties |
+      Where-Object Name -EQ 'AllowDevelopmentWithoutDevLicense'
+  }
+  $developerMode = if ($null -eq $developerModeProperty) {
+    0
+  } else {
+    [int] $developerModeProperty.Value
+  }
+  if ($developerMode -ne 0) { throw 'Developer Mode is on.' }
   if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Run native x64 PowerShell.' }
 
-  rustup component add clippy rustfmt
-  rustup target add x86_64-pc-windows-msvc wasm32-unknown-unknown
+  $Git = Get-Command git -ErrorAction Stop
+  $Node = Get-Command node -ErrorAction Stop
+  $Rustup = Get-Command rustup -ErrorAction Stop
+  $Rustc = Get-Command rustc -ErrorAction Stop
+  $Cargo = Get-Command cargo -ErrorAction Stop
+  $Bun = Get-Command bun -ErrorAction Stop
+  $Python = Get-Command python -ErrorAction Stop
+  $Pwsh = Get-Command pwsh -ErrorAction Stop
+  $earlyCommands = @(
+    $Git, $Node, $Rustup, $Rustc, $Cargo, $Bun, $Python, $Pwsh
+  )
   Get-ComputerInfo WindowsProductName, WindowsVersion, OsBuildNumber, OsArchitecture |
     Format-List | Out-String | Set-Content (Join-Path $Evidence 'windows.txt')
-  Get-Command git, rustup, rustc, cargo, bun, pnpm, node, python, pwsh |
-    Select-Object Name, Source, Version | Format-Table -AutoSize | Out-String |
-    Set-Content (Join-Path $Evidence 'executables.txt')
   @(
-    & git --version; & rustc --version; & cargo --version; & bun --version;
-    & pnpm --version; & node --version; & python --version;
-    "PowerShell $($PSVersionTable.PSVersion)"
-  ) | Tee-Object -FilePath (Join-Path $Evidence 'versions.txt')
-  if ((& bun --version).Trim() -ne '1.4.0' -or (& pnpm --version).Trim() -ne '11.7.0') {
-    throw 'Bun must be 1.4.0 and pnpm must be 11.7.0.'
-  }
+    'ordinary-user=true'
+    "filesystem=$fileSystem"
+    'developer-mode=off'
+    "process-architecture=$($env:PROCESSOR_ARCHITECTURE)"
+  ) | Set-Content (Join-Path $Evidence 'environment-gate.txt')
+  $earlyCommands | ForEach-Object {
+    [pscustomobject] @{
+      Name = $_.Name
+      Source = $_.Source
+      Version = [string] $_.Version
+    } | ConvertTo-Json -Compress
+  } | Set-Content (Join-Path $Evidence 'executables.jsonl')
+  @(
+    & $Git.Source --version
+    & $Node.Source --version
+    & $Rustup.Source --version
+    & $Rustc.Source --version
+    & $Cargo.Source --version
+    & $Bun.Source --version
+    & $Python.Source --version
+    & $Pwsh.Source --version
+  ) | Set-Content (Join-Path $Evidence 'versions.txt')
 
   git clone https://github.com/wavetao2010/tessivum.git $Repo
   git -C $Repo checkout --detach $TessivumRevision
   $actual = (& git -C $Repo rev-parse HEAD).Trim().ToLowerInvariant()
   if ($actual -ne $TessivumRevision.ToLowerInvariant()) { throw "Checked out $actual." }
   $actual | Set-Content (Join-Path $Evidence 'tessivum-revision.txt')
+
+  $nodeVersion = (& $Node.Source --version).Trim()
+  $nodeMatch = [regex]::Match($nodeVersion, '^v(\d+)\.(\d+)\.(\d+)$')
+  if (-not $nodeMatch.Success) { throw "Invalid Node version: $nodeVersion" }
+  $nodeMajor = [int] $nodeMatch.Groups[1].Value
+  $nodeMinor = [int] $nodeMatch.Groups[2].Value
+  $nodePatch = [int] $nodeMatch.Groups[3].Value
+  $nodeSupported =
+    ($nodeMajor -eq 22 -and
+      ($nodeMinor -gt 19 -or ($nodeMinor -eq 19 -and $nodePatch -ge 0))) -or
+    ($nodeMajor -eq 24 -and
+      ($nodeMinor -gt 13 -or ($nodeMinor -eq 13 -and $nodePatch -ge 1)))
+  if (-not $nodeSupported) {
+    $supportedNodeRanges = '>=22.19.0 <23.0.0 or >=24.13.1 <25.0.0'
+    throw "Node $nodeVersion is outside $supportedNodeRanges."
+  }
+  Set-Location $Repo
+  & $Node.Source scripts/check-windows-node-unicode-fs.mjs
 
   New-Item -ItemType Directory -Force (Join-Path $Repo '.ci') | Out-Null
   git clone https://github.com/deepseek-ai/deepseek-harness.git "$Repo\.ci\deepseek-harness"
@@ -112,6 +182,23 @@ try {
   $env:CORDIS_VENDOR_ROOT = "$Repo\.ci\deepseek-harness\vendor"
   Remove-Item Env:TESSIVUM_REQUIRE_FILE_SYMLINKS -ErrorAction SilentlyContinue
   $Evidence | Set-Content "$Repo\.ci\windows-source-evidence-root.txt"
+
+  $Pnpm = Get-Command pnpm -ErrorAction Stop
+  $Pnpm | ForEach-Object {
+    [pscustomobject] @{
+      Name = $_.Name
+      Source = $_.Source
+      Version = [string] $_.Version
+    } | ConvertTo-Json -Compress
+  } | Add-Content (Join-Path $Evidence 'executables.jsonl')
+  & $Pnpm.Source --version |
+    Tee-Object -FilePath (Join-Path $Evidence 'versions.txt') -Append
+  if ((& $Bun.Source --version).Trim() -ne '1.4.0' -or
+      (& $Pnpm.Source --version).Trim() -ne '11.7.0') {
+    throw 'Bun must be 1.4.0 and pnpm must be 11.7.0.'
+  }
+  rustup component add clippy rustfmt
+  rustup target add x86_64-pc-windows-msvc wasm32-unknown-unknown
 
   # 01: frozen clean install, real esbuild execution, installed-state second install.
   Set-Location $env:TESSIVUM_DEEPSEEK_SOURCE
@@ -162,13 +249,13 @@ try {
   "Group 09 exit=$LASTEXITCODE; file-symlink capability outcome is in this transcript"
   # 10
   Set-Location $Repo
-  cargo check --all-targets --locked
+  cargo check --jobs 1 --all-targets --locked
   "Group 10 exit=$LASTEXITCODE"
   # 11
-  cargo clippy --all-targets --locked -- -D warnings
+  cargo clippy --jobs 1 --all-targets --locked -- -D warnings
   "Group 11 exit=$LASTEXITCODE"
   # 12
-  cargo test --all-targets --locked
+  cargo test --jobs 1 --all-targets --locked
   "Group 12 exit=$LASTEXITCODE"
   # 13
   Set-Location "$Repo\web"
@@ -178,7 +265,7 @@ try {
   # 14: first real Agent round trip.
   Set-Location $Repo
   $state = Join-Path $env:TEMP ("tessivum-windows-" + [guid]::NewGuid())
-  $first = @(& cargo run --locked -- --session windows-smoke --data-dir $state `
+  $first = @(& cargo run --jobs 1 --locked -- --session windows-smoke --data-dir $state `
     --replay fixtures/headless/recorded-replay.jsonl --trusted-bash 'prove the CLI tool round trip')
   $first | Tee-Object -FilePath (Join-Path $Evidence 'agent-first.stdout.txt')
   if ($first.Count -ne 1 -or $first[0] -ne 'CLI tool round trip complete: CLI_TOOL_ROUND_TRIP') {
@@ -191,7 +278,7 @@ try {
   "Group 14 exit=$LASTEXITCODE"
 
   # 15: same state and Session; existing bytes must remain an exact prefix.
-  $resumed = @(& cargo run --locked -- --session windows-smoke --data-dir $state `
+  $resumed = @(& cargo run --jobs 1 --locked -- --session windows-smoke --data-dir $state `
     --replay fixtures/headless/recorded-replay.jsonl --trusted-bash --resume `
     'prove the CLI tool round trip')
   $resumed | Tee-Object -FilePath (Join-Path $Evidence 'agent-resume.stdout.txt')
@@ -247,7 +334,7 @@ Set-Location $Repo
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 Start-Transcript -Path (Join-Path $Evidence 'group-16-web.log')
-cargo run --release -- web
+cargo run --jobs 1 --release -- web
 ```
 
 While it listens, terminal B must receive HTTP 200 from `http://127.0.0.1:3000`, open the

@@ -104,6 +104,7 @@ test('image drafts stay model-independent until explicit capability admission', 
     const textModel = harness.page.getByRole('menuitemradio', { name: 'Text Model' })
     expect(await textModel.textContent()).toContain('仅支持文本')
     await textModel.click()
+    await harness.page.getByRole('button', { name: /^选择模型，当前 Text Model/ }).waitFor()
     await harness.page.getByRole('button', { name: '发送消息', exact: true }).click()
     await harness.page.getByText('当前模型不支持图片，请切换支持图片的模型', { exact: true }).waitFor({ timeout: 10_000 })
     expect(requests).toEqual([])
@@ -115,6 +116,7 @@ test('image drafts stay model-independent until explicit capability admission', 
     const visionModel = harness.page.getByRole('menuitemradio', { name: 'Vision Model' })
     expect(await visionModel.textContent()).toContain('支持图片')
     await visionModel.click()
+    await harness.page.getByRole('button', { name: /^选择模型，当前 Vision Model/ }).waitFor()
     await harness.page.getByRole('button', { name: '发送消息', exact: true }).click()
     await harness.page.getByText(MARKER, { exact: true }).waitFor({ timeout: 30_000 })
 

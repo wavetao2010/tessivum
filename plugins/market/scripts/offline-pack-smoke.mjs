@@ -31,7 +31,10 @@ try {
   mkdirSync(first)
   mkdirSync(second)
   for (const destination of [first, second]) {
-    run(['pm', 'pack', '--ignore-scripts', '--destination', destination], root)
+    const args = ['pack', '--ignore-scripts', '--pack-destination', destination]
+    const command = process.platform === 'win32' ? process.execPath : 'npm'
+    if (process.platform === 'win32') args.unshift(join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+    execFileSync(command, args, { cwd: root, env: environment, stdio: 'inherit' })
   }
   const firstArchive = join(first, filename)
   const secondArchive = join(second, filename)

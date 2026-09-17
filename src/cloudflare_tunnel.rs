@@ -228,6 +228,12 @@ fn release_asset() -> Result<ReleaseAsset, CloudflareTunnelError> {
             binary_sha256: Some("50a04624531e7a98ddb65f1223905e32f84e7488ed3ee8dadcd3260aa8932603"),
             archive: true,
         }),
+        ("windows", "x86_64") => Ok(ReleaseAsset {
+            name: "cloudflared-windows-amd64.exe",
+            sha256: "83e726ed18ea78c5ad5213c4c3a3a27051393950d2bc8ed4de69bec12d14eaae",
+            binary_sha256: Some("83e726ed18ea78c5ad5213c4c3a3a27051393950d2bc8ed4de69bec12d14eaae"),
+            archive: false,
+        }),
         _ => Err(CloudflareTunnelError::UnsupportedPlatform(
             env::consts::OS,
             env::consts::ARCH,
@@ -240,7 +246,8 @@ async fn download_cloudflared(data_dir: &Path) -> Result<PathBuf, CloudflareTunn
     let directory = data_dir.join("bin");
     fs::create_dir_all(&directory).await?;
     set_directory_permissions(&directory).await?;
-    let destination = directory.join(format!("cloudflared-{CLOUDFLARED_VERSION}"));
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let destination = directory.join(format!("cloudflared-{CLOUDFLARED_VERSION}{suffix}"));
     if executable_file(&destination) && cached_binary_matches(&destination, asset).await? {
         return Ok(destination);
     }

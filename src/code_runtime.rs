@@ -1354,6 +1354,7 @@ const boot=rl.createInterface({input:process.stdin,crlfDelay:Infinity});boot.onc
  const F=Object.getPrototypeOf(async function(){}).constructor,v=await new F(...ps,'console',`'use strict';\n${d.program}`)(...vs,console);if(v===undefined)emit({type:'done'});else if(valid(v))emit({type:'done',value:v});else emit({type:'done',error:{kind:'invalid-output',message:'program completion must be lossless JSON'}})
 }catch(e){emit({type:'done',error:{kind:'exception',message:String(e&&e.message||e)}})}});"#;
 const PY: &str = r#"import asyncio,builtins,json,math,sys
+for stream in (sys.stdin,sys.stdout,sys.stderr): stream.reconfigure(encoding='utf-8')
 def emit(x): sys.stdout.write(json.dumps(x,separators=(',',':'))+'\n');sys.stdout.flush()
 def valid(x,seen=None):
  if x is None or isinstance(x,(bool,str)): return True
@@ -1440,7 +1441,7 @@ mod windows_tests {
     #[tokio::test]
     async fn timeout_reaps_worker_descendants_before_returning() {
         let root = std::env::temp_dir().join(format!(
-            "tessivum-code-runtime-job-{}",
+            "tessivum-code-runtime-job-中文 空格-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir(&root).unwrap();
