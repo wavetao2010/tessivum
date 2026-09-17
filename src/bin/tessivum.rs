@@ -367,6 +367,16 @@ async fn run_headless_command(command: HeadlessCommand) -> Result<(), Diagnostic
 
 async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
     let (cwd, data_dir) = host_paths(command.data_dir)?;
+    let settings_path = command
+        .settings_file
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+        .unwrap_or_else(|| data_dir.join("settings.yaml"));
     install_packaged_market(&data_dir)?;
     let cli_patches = load_cli_patches(&command.patches).await?;
     let address = env::var("TESSIVUM_WEB_ADDR")
@@ -382,9 +392,8 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let bootstrap_settings = Settings::new(Arc::new(YamlSettingsProvider::new(
-        data_dir.join("settings.yaml"),
-    )));
+    let bootstrap_settings =
+        Settings::new(Arc::new(YamlSettingsProvider::new(settings_path.clone())));
     let persisted_remote_enabled = bootstrap_settings
         .load_document()
         .await
@@ -516,7 +525,7 @@ async fn run_web(command: tessivum::cli::WebCommand) -> Result<(), Diagnostic> {
             .map_err(|error| Diagnostic::runtime("WEB_FRONTEND_FAILED", error))?;
     }
     let lifecycle = Arc::new(WebLifecycle::default());
-    let mut host_config = HostConfig::new(cwd, data_dir.clone());
+    let mut host_config = HostConfig::new(cwd, data_dir.clone()).with_settings_path(settings_path);
     host_config.enable_trusted_bash = true;
     host_config.system_prompt = Some(web_system_prompt(address));
     host_config.host_lifecycle = Some(Arc::clone(&lifecycle) as Arc<dyn HostLifecycle>);

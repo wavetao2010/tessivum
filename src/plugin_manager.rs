@@ -1005,13 +1005,25 @@ fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerErro
             "the added package name could not be resolved",
         ));
     }
-    let path = Path::new(specifier.strip_prefix("file:").unwrap_or(specifier));
-    let root = if path.is_absolute() {
-        path.to_path_buf()
+    let root = if specifier.starts_with("file://") {
+        url::Url::parse(specifier)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .ok_or_else(|| {
+                compatibility_error(
+                    PLUGIN_PACKAGE_ENTRY_INVALID,
+                    "invalid local package file URL",
+                )
+            })?
     } else {
-        env::current_dir()
-            .map_err(|error| io_error(".", error))?
-            .join(path)
+        let path = Path::new(specifier.strip_prefix("file:").unwrap_or(specifier));
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir()
+                .map_err(|error| io_error(".", error))?
+                .join(path)
+        }
     };
     let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
     manifest
@@ -3772,6 +3784,20 @@ mod tests {
         for package in [".", "..", "../escape", "@scope/../escape"] {
             assert!(package_root(profile, package).is_err(), "{package}");
         }
+    }
+
+    #[test]
+    fn local_package_file_url_decodes_unicode_and_reserved_characters() {
+        let profile = temporary_profile();
+        let package = profile.join("插件 % #");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), br#"{"name":"local-plugin"}"#).unwrap();
+        let specifier = url::Url::from_directory_path(&package).unwrap();
+        assert_eq!(
+            resolve_add_package_name(specifier.as_str()).unwrap(),
+            "local-plugin"
+        );
+        fs::remove_dir_all(profile).unwrap();
     }
 
     #[test]

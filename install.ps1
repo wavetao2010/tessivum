@@ -235,17 +235,13 @@ function Get-RelativePath {
 
     $fromTail = $from.Substring($fromRoot.Length).Trim([char[]]@('\', '/'))
     $toTail = $to.Substring($toRoot.Length).Trim([char[]]@('\', '/'))
-    $fromParts = if ([string]::IsNullOrEmpty($fromTail)) {
-        @()
+    [string[]]$fromParts = @()
+    if (-not [string]::IsNullOrEmpty($fromTail)) {
+        $fromParts = $fromTail.Split([char[]]@('\'), [System.StringSplitOptions]::RemoveEmptyEntries)
     }
-    else {
-        @($fromTail.Split([char[]]@('\'), [System.StringSplitOptions]::RemoveEmptyEntries))
-    }
-    $toParts = if ([string]::IsNullOrEmpty($toTail)) {
-        @()
-    }
-    else {
-        @($toTail.Split([char[]]@('\'), [System.StringSplitOptions]::RemoveEmptyEntries))
+    [string[]]$toParts = @()
+    if (-not [string]::IsNullOrEmpty($toTail)) {
+        $toParts = $toTail.Split([char[]]@('\'), [System.StringSplitOptions]::RemoveEmptyEntries)
     }
 
     $common = 0
@@ -1301,7 +1297,7 @@ function Invoke-Install {
         if ($rollbackProblems.Count -gt 0) {
             Fail ('installation failed: ' + $failure.Exception.Message + '; rollback failed: ' + [string]::Join('; ', $rollbackProblems.ToArray()))
         }
-        throw $failure
+        throw
     }
 
     $cleanupProblems = [System.Collections.Generic.List[string]]::new()
@@ -1589,7 +1585,7 @@ function Invoke-Uninstall {
         if ($rollbackProblems.Count -gt 0) {
             Fail ('uninstall failed: ' + $failure.Exception.Message + '; rollback failed: ' + [string]::Join('; ', $rollbackProblems.ToArray()))
         }
-        throw $failure
+        throw
     }
 
     $cleanupProblems = [System.Collections.Generic.List[string]]::new()
@@ -1743,6 +1739,7 @@ try {
 }
 catch {
     [Console]::Error.WriteLine('install.ps1: ' + $_.Exception.Message)
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
     exit 1
 }
 finally {

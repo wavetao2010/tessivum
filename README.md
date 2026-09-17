@@ -86,7 +86,7 @@ On macOS, select an `apple-darwin` target and replace `sha256sum -c` with `shasu
 
 ### Native Windows x86_64 — unpublished source candidate
 
-**Checkpoint only:** full Windows acceptance, the no-Node PTC release smoke, and installer fault-boundary tests are not green. Do not use this installer for production upgrades. See the [verified results and four tracked blockers](docs/WINDOWS_CHECKPOINT_20260916.md).
+**Local verification only:** the four Windows checkpoint blockers have been repaired, including the no-Node PTC smoke and installer fault boundaries. These changes are not a published Windows release; do not treat the local ZIP as an official upgrade asset. See the [repair results and verification scope](docs/WINDOWS_CHECKPOINT_20260916.md).
 
 The Windows ZIP contains a static-CRT MSVC executable, `tessivum.cmd`/`tsv.cmd`, and the packaged compatibility, Cordis, and market assets. It does not require WSL, elevation, Developer Mode, or a separate VC++ runtime installation. Install Bun `1.4.0` and pnpm `11.7.0` separately for Web/plugin use. The archive is not code-signed.
 
@@ -124,6 +124,8 @@ tessivum web
 ```
 
 Open <http://127.0.0.1:3000>, then configure a model relay from **Models/Settings**.
+
+`tessivum web --settings-file <file>` selects a writable settings document; relative paths resolve from the Host working directory. Separate Hosts can point to the same file while keeping distinct `--data-dir` directories and ports. This does not require symbolic links or share workspace locks.
 
 **Alpha.26:** the workbench opens without a Key dialog or implicit model selection. Prepare text/images first, then explicitly select a configured model; text-only or unknown image capabilities refuse submission without discarding the draft. New sessions inherit only an explicitly saved default, while restored sessions retain their saved selection. For deliberately unauthenticated endpoints, configure `auth: none`; the CLI equivalent is `TESSIVUM_LLM_AUTH=none` (still set `OPENAI_MODEL` and `OPENAI_BASE_URL`).
 

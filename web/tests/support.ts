@@ -34,6 +34,7 @@ export interface SessionListItem {
 export interface RustWebOptions {
   name: string
   agentMode?: 'standard' | 'ptc' | 'minimal' | 'composition'
+  settingsFile?: string
   locale?: string
   remoteAuthority?: string
   timeZoneId?: string
@@ -216,6 +217,8 @@ export class RustWebHarness {
 
   static async launch(options: RustWebOptions): Promise<RustWebHarness> {
     const executable = await buildBinary()
+    // Drain closed Bun process resources before Windows can reuse their handles.
+    if (process.platform === 'win32') Bun.gc(true)
     const root = await realpath(await mkdtemp(join(tmpdir(), `tessivum-${options.name}-`)))
     const workspace = join(root, 'workspace')
     await mkdir(workspace)
@@ -260,6 +263,7 @@ export class RustWebHarness {
       const command = [
         executable, 'web', '--data-dir', harness.dataDir,
       ]
+      if (options.settingsFile !== undefined) command.push('--settings-file', options.settingsFile)
       if (options.agentMode !== undefined) {
         const patch = join(root, 'agent-mode.yml')
         await writeFile(patch, `agent-presets:\n  default: ${options.agentMode}\n`)

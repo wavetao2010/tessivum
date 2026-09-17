@@ -122,7 +122,7 @@ test('steering Cmd+Enter sends directly to the live turn without creating a queu
     await input.press('Enter')
     await harness.page.getByRole('button', { name: 'Stop generating' }).waitFor({ timeout: 10_000 })
     await input.fill(STEER)
-    await input.press('Meta+Enter')
+    await input.press('ControlOrMeta+Enter')
     await waitUntil(() => input.inputValue(), value => value === '', 5_000)
     expect(await harness.page.locator('[data-queue-dock]').count()).toBe(0)
 
@@ -157,7 +157,7 @@ test('steering swaps the busy shortcut when Enter is configured to steer', async
     await harness.page.getByRole('button', { name: 'Stop generating' }).waitFor({ timeout: 10_000 })
     const queuedText = 'Queued by the complementary Cmd+Enter shortcut.'
     await input.fill(queuedText)
-    await input.press('Meta+Enter')
+    await input.press('ControlOrMeta+Enter')
     const queued = harness.page.locator('[data-queue-dock]').getByRole('listitem').filter({ hasText: queuedText })
     await queued.getByText(queuedText, { exact: true }).waitFor({ timeout: 10_000 })
     expect(await harness.page.locator('[data-pending-steering]').filter({ hasText: queuedText }).count()).toBe(0)
@@ -191,7 +191,7 @@ test('steering flushes an empty-draft queue in FIFO order through a durable repl
     await dock.getByText(STEER_TWO, { exact: true }).waitFor({ timeout: 10_000 })
     expect(await harness.page.locator('[data-pending-steering]').count()).toBe(0)
 
-    await input.press('Meta+Enter')
+    await input.press('ControlOrMeta+Enter')
     await waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0, 10_000)
     await harness.page.locator('[data-question-key]').waitFor({ timeout: 30_000 })
 

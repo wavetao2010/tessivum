@@ -13,7 +13,7 @@ test('first-party market runs in the native host', async () => {
   const build = Bun.spawn(['bun', 'run', 'build'], { cwd: MARKET_ROOT, stdout: 'inherit', stderr: 'inherit' })
   expect(await build.exited).toBe(0)
   packRoot = await mkdtemp(join(tmpdir(), 'tessivum-market-pack-'))
-  const pack = Bun.spawn(['bun', 'pm', 'pack', '--ignore-scripts', '--destination', packRoot], { cwd: MARKET_ROOT, stdout: 'inherit', stderr: 'inherit' })
+  const pack = Bun.spawn(['npm', 'pack', '--ignore-scripts', '--pack-destination', packRoot], { cwd: MARKET_ROOT, stdout: 'inherit', stderr: 'inherit' })
   expect(await pack.exited).toBe(0)
 
   const manifest = await Bun.file(join(MARKET_ROOT, 'package.json')).json() as { version: string }

@@ -173,6 +173,8 @@ function Invoke-PackagedLauncher {
   $saved = @{}
   $output = @()
   $nativeExit = -1
+  # Capture stderr before the explicit exit-code check below raises the failure.
+  $PSNativeCommandUseErrorActionPreference = $false
   $failure = $null
   try {
     foreach ($name in $script:ResourceVariables) {
@@ -207,6 +209,34 @@ function Invoke-PackagedLauncher {
     throw "Launcher failed with exit code $nativeExit; see $LogName."
   }
   return $output
+}
+
+function Set-ReleaseProcessEnvironmentVariable {
+  param(
+    [Parameter(Mandatory)]
+    [System.Diagnostics.ProcessStartInfo] $Info,
+
+    [Parameter(Mandatory)]
+    [string] $Name,
+
+    [AllowNull()]
+    [object] $Value
+  )
+
+  # ProcessStartInfo preserves an inherited key's casing on assignment. Normalize
+  # every name before applying an override so the child receives one Windows key.
+  foreach ($existingName in @($Info.Environment.Keys)) {
+    if ([string]::Equals(
+      [string] $existingName,
+      $Name,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+      [void] $Info.Environment.Remove([string] $existingName)
+    }
+  }
+  if ($null -ne $Value) {
+    $Info.Environment[$Name] = [string] $Value
+  }
 }
 
 function Start-ReleaseServer {
@@ -248,17 +278,13 @@ function Start-ReleaseServer {
     'TESSIVUM_REPLAY_CONTEXT_WINDOW'
   )
   foreach ($environmentName in $environmentNames) {
-    [void] $info.Environment.Remove($environmentName)
+    Set-ReleaseProcessEnvironmentVariable -Info $info -Name $environmentName -Value $null
   }
   foreach ($entry in $EnvironmentOverrides.GetEnumerator()) {
-    if ($null -eq $entry.Value) {
-      [void] $info.Environment.Remove([string] $entry.Key)
-    } else {
-      $info.Environment[[string] $entry.Key] = [string] $entry.Value
-    }
+    Set-ReleaseProcessEnvironmentVariable -Info $info -Name ([string] $entry.Key) -Value $entry.Value
   }
-  $info.Environment['TESSIVUM_WEB_ADDR'] = "127.0.0.1:$Port"
-  $info.Environment['TESSIVUM_REMOTE_ACCESS'] = '0'
+  Set-ReleaseProcessEnvironmentVariable -Info $info -Name 'TESSIVUM_WEB_ADDR' -Value "127.0.0.1:$Port"
+  Set-ReleaseProcessEnvironmentVariable -Info $info -Name 'TESSIVUM_REMOTE_ACCESS' -Value '0'
 
   $process = [System.Diagnostics.Process]::new()
   $process.StartInfo = $info
@@ -917,7 +943,7 @@ function Invoke-ReleaseRestart {
     args = @{ enabled = $false }
   }
   Assert-Release (
-    $restart.ok -eq $true -and $restart.value.restarting -eq $true
+    $restart.ok -eq $true -and $restart.output.restarting -eq $true
   ) "Web restart request was not accepted for $($Handle.Name)."
   Wait-ForProcessExit -Process $Handle.Process -Description "Restarting release server $($Handle.Name)"
   Assert-Release ($Handle.Process.ExitCode -eq 0) "Restarting release server $($Handle.Name) exited unsuccessfully."
@@ -1051,10 +1077,19 @@ try {
   }
   Assert-CliSmokeToolRoundTrip -SessionPath $sessionPath -ExpectedResults 2 -Phase 'resume'
 
-  $bun = (Get-Command bun.exe -CommandType Application -ErrorAction Stop).Source
+  $bunCommand = Get-Command bun.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+  $bun = [string] $bunCommand.Source
+  Assert-Release (
+    -not [string]::IsNullOrWhiteSpace($bun) -and
+    (Test-Path -LiteralPath $bun -PathType Leaf)
+  ) "PTC smoke did not resolve bun.exe to a file: $bun"
   $bunDirectory = Split-Path -Parent $bun
-  $ptcPath = @($bunDirectory, [Environment]::SystemDirectory, $env:WINDIR) -join ';'
-  foreach ($directory in @($ptcPath.Split(';') | Where-Object { $_.Length -gt 0 })) {
+  $ptcDirectories = @($bunDirectory, [Environment]::SystemDirectory, $env:WINDIR)
+  Assert-Release (
+    Test-Path -LiteralPath (Join-Path $bunDirectory 'bun.exe') -PathType Leaf
+  ) "PTC smoke Bun directory does not contain bun.exe: $bunDirectory"
+  $ptcPath = $ptcDirectories -join ';'
+  foreach ($directory in @($ptcDirectories | Where-Object { -not [string]::IsNullOrEmpty($_) })) {
     Assert-Release (
       -not (Test-Path -LiteralPath (Join-Path $directory 'node.exe') -PathType Leaf)
     ) "PTC smoke PATH unexpectedly exposes node.exe in $directory."

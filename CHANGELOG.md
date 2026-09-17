@@ -2,19 +2,27 @@
 
 ## Unreleased
 
-Windows changes below are a checkpoint, not a supported release. Full acceptance remains blocked; see [Windows checkpoint evidence](docs/WINDOWS_CHECKPOINT_20260916.md).
+Windows changes below are locally verified work, not a supported release. See the [Windows repair evidence and remaining publication scope](docs/WINDOWS_CHECKPOINT_20260916.md).
 
 ### Added
 
 - Native Windows x86_64 ZIP packaging with static-CRT MSVC builds, checksum-verified payloads, CRLF launchers, and a gated Windows release job. Existing published Alpha.27 assets are unchanged; no Windows ARM64 package is added.
 - Ordinary-user PowerShell installation, version switching and rollback, owned User PATH management, and uninstall that preserves application data.
 - Windows cloudflared executable selection and the verified 2026.8.3 Windows asset digest for Quick Tunnel.
+- `web --settings-file <file>` for ordinary-user Hosts that share a settings document while retaining independent data directories and locks.
 
 ### Fixed
 
 - Materialize Windows runtime package aliases as real directories without requiring symbolic-link privileges or recursively copying checkout dependency cycles.
 - Wait for owned Windows process descendants before sandbox permission and temporary-directory cleanup; distinguish unrelated process generations without weakening ownership checks.
 - Make native API preflight, Legacy fixtures, and Browser recordings respect Windows transport, executable, shell, and path behavior.
+- Resolve named IANA time zones with bundled data on Windows and Unix, preserving milliseconds, rejecting DST gaps, choosing the earlier fold, and applying future transition rules.
+- Decode local plugin `file://` URLs as native paths, including percent-encoded Unicode and reserved characters, instead of stripping the scheme.
+- Preserve empty ZIP fixture bytes in PowerShell strict mode and verify installer rollback, committed cleanup failures, idempotent uninstall, and user-data protection.
+- Build case-correct release process environments, resolve one actual Bun executable for no-Node PTC execution, use the native restart response envelope, and retain failed launcher stderr before checking its exit code.
+- Force UTF-8 on the Python code worker's JSONL streams so Windows locale defaults do not corrupt Unicode programs and paths; keep sandbox fixture markers explicitly UTF-8.
+- Make Browser acceptance use portable npm packing, the platform-native Cmd/Ctrl modifier, and completed workflow state before inspecting disclosures.
+- Finalize closed Bun child-process resources before starting the next Windows Browser Host, avoiding stale DevTools pipe handles without retries or altered product behavior.
 
 ## 0.1.0-alpha.27 - 2026-09-10
 

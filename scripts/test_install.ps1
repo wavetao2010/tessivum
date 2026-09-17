@@ -183,11 +183,12 @@ function New-MinimalZipArchive {
             if ($null -eq $specification.Content) {
                 continue
             }
-            $content = if ($specification.Content -is [byte[]]) {
-                [byte[]]$specification.Content
+            [byte[]]$content = $null
+            if ($specification.Content -is [byte[]]) {
+                $content = $specification.Content
             }
             else {
-                $script:Utf8NoBom.GetBytes([string]$specification.Content)
+                $content = $script:Utf8NoBom.GetBytes([string]$specification.Content)
             }
             $stream = $null
             try {
@@ -362,14 +363,14 @@ function Set-TestPathStore {
 function Get-TestPathEntries {
     param([Parameter(Mandatory = $true)]$Configuration)
 
-    if (-not [System.IO.File]::Exists($Configuration.PathStore)) {
-        return @()
+    [string[]]$entries = @()
+    if ([System.IO.File]::Exists($Configuration.PathStore)) {
+        $value = [System.IO.File]::ReadAllText($Configuration.PathStore, $script:Utf8NoBom)
+        if (-not [string]::IsNullOrEmpty($value)) {
+            $entries = $value.Split([char[]]@(';'), [System.StringSplitOptions]::None)
+        }
     }
-    $value = [System.IO.File]::ReadAllText($Configuration.PathStore, $script:Utf8NoBom)
-    if ([string]::IsNullOrEmpty($value)) {
-        return @()
-    }
-    return @($value.Split([char[]]@(';'), [System.StringSplitOptions]::None))
+    return ,$entries
 }
 
 function Get-PathEntryCount {
@@ -725,7 +726,7 @@ try {
     $expectedRoot = [System.IO.Path]::GetFileNameWithoutExtension($expectedArchiveName)
     $wrongRootArchive = Join-Path -Path $fixtureDirectory -ChildPath 'wrong-root.zip'
     New-MinimalZipArchive -Path $wrongRootArchive -ExpectedArchiveName $expectedArchiveName -Entries @(
-        [PSCustomObject]@{ Name = 'tessivum-wrong-root/bin/tessivum.cmd'; Content = ''; ExternalAttributes = $null }
+        [PSCustomObject]@{ Name = 'tessivum-wrong-root/bin/tessivum.cmd'; Content = [byte[]]@(); ExternalAttributes = $null }
     )
     $wrongRoot = New-TestPrefix -Name 'wrong root'
     Assert-Failed -Result (Invoke-TestInstall -Configuration $wrongRoot -FixtureArchive $wrongRootArchive -Version $release.Version) -Label 'wrong archive root'
@@ -733,7 +734,7 @@ try {
 
     $zipSlipArchive = Join-Path -Path $fixtureDirectory -ChildPath 'zip-slip.zip'
     New-MinimalZipArchive -Path $zipSlipArchive -ExpectedArchiveName $expectedArchiveName -Entries @(
-        [PSCustomObject]@{ Name = $expectedRoot + '/../../zip-slip-created.txt'; Content = 'unsafe'; ExternalAttributes = $null }
+        [PSCustomObject]@{ Name = $expectedRoot + '/../../zip-slip-created.txt'; Content = [byte[]]@(0); ExternalAttributes = $null }
     )
     $zipSlip = New-TestPrefix -Name 'zip slip'
     $escapedPath = Join-Path -Path $zipSlip.InstallRoot -ChildPath 'zip-slip-created.txt'
@@ -760,7 +761,7 @@ try {
 
     $reparseArchive = Join-Path -Path $fixtureDirectory -ChildPath 'reparse-entry.zip'
     New-MinimalZipArchive -Path $reparseArchive -ExpectedArchiveName $expectedArchiveName -Entries @(
-        [PSCustomObject]@{ Name = $expectedRoot + '/reparse-entry'; Content = 'unsafe'; ExternalAttributes = 0x0400 }
+        [PSCustomObject]@{ Name = $expectedRoot + '/reparse-entry'; Content = [byte[]]@(0, 128, 255); ExternalAttributes = 0x0400 }
     )
     $reparse = New-TestPrefix -Name 'reparse entry'
     Assert-Failed -Result (Invoke-TestInstall -Configuration $reparse -FixtureArchive $reparseArchive -Version $release.Version) -Label 'reparse-point archive entry'
@@ -920,6 +921,7 @@ try {
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.Message)
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
     exit 1
 }
 finally {

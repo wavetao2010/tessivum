@@ -86,7 +86,7 @@ macOS 请选择 `apple-darwin` target，并将 `sha256sum -c` 替换为 `shasum 
 
 ### 原生 Windows x86_64——尚未发布的源码候选版
 
-**仅为检查点：**完整 Windows 验收、无 Node 的 PTC 发行 smoke、安装器故障边界测试尚未全部通过，请勿用此安装器进行正式升级。详见[实测结果与四项遗留阻塞](docs/WINDOWS_CHECKPOINT_20260916.md)。
+**仅为本机验证：**四项 Windows 检查点阻塞已修复，包括无 Node 的 PTC smoke 和安装器故障边界。这些改动尚未作为 Windows 正式发行发布，请勿把本地 ZIP 当作官方升级资产。详见[修复结果与验收范围](docs/WINDOWS_CHECKPOINT_20260916.md)。
 
 Windows ZIP 包含静态 CRT 的 MSVC 可执行文件、`tessivum.cmd`/`tsv.cmd` 启动器，以及兼容宿主、Cordis 和市场资源。不需要 WSL、管理员权限、开发者模式或单独安装 VC++ 运行库。使用 Web/插件前另行安装 Bun `1.4.0` 和 pnpm `11.7.0`。归档尚未做代码签名。
 
@@ -124,6 +124,8 @@ tessivum web
 ```
 
 打开 <http://127.0.0.1:3000>，然后在 **Models/Settings** 中配置模型中继。
+
+`tessivum web --settings-file <file>` 可指定可写的设置文件，相对路径按 Host 工作目录解析。多个 Host 可指向同一文件，同时使用各自独立的 `--data-dir` 和端口；不需要符号链接，也不共享工作区锁。
 
 **Alpha.26：**直接进入工作台，不弹 Key 引导、不隐式选择模型；可先准备图文草稿，再显式选择已配置模型。纯文本模型或未知图片能力会拒绝发送并保留草稿。新会话只继承明确保存的默认模型，恢复会话保留原选择。明确无鉴权的端点使用 `auth: none`；CLI 使用 `TESSIVUM_LLM_AUTH=none`，仍需设置 `OPENAI_MODEL` 与 `OPENAI_BASE_URL`。
 

@@ -1,12 +1,12 @@
 # Tessivum Phase 10 Windows 原生发行开发计划
 
-> 状态：2026-09-16 检查点。原生 Rust 全量、ZIP 与真实包内 Web/市场、Remote Access 已有本机通过证据；完整 Browser、无 Node PTC 发行 smoke、安装器故障边界仍有阻塞。按用户要求登记后暂缓，不作为正式发布。
+> 状态：2026-09-16 后续修复。四项检查点、完整 Browser、无 Node PTC 发行 smoke 和安装器故障边界均有本机通过证据。完整结果与适用范围见 [Windows 修复记录](WINDOWS_CHECKPOINT_20260916.md)，仍不作为正式发布。
 > 计划日期：2026-09-04
 > Tessivum 起点：`v0.1.0-alpha.23` / `4674aeda870989fede1fc79fb07afbe764d3a1eb`
 > 产品 Core pin：`tessivum-core v0.1.6` / `86c7e1c71bd99a3c0fc70e7be6f251c89f2cc694`
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 首个正式目标：Windows 11 x86-64 / `x86_64-pc-windows-msvc`
-> 最新证据与未解决项：[Windows 检查点报告](WINDOWS_CHECKPOINT_20260916.md)。下文起点事实和旧验收记录保留为历史，不代表当前全部实现状态。
+> 最新本机验收与尚未发布范围：[Windows 修复验收报告](WINDOWS_CHECKPOINT_20260916.md)。下文起点事实和旧验收记录保留为历史，不代表当前全部实现状态。
 
 ## 1. 目标
 
@@ -152,10 +152,10 @@ tessivum-<version>-x86_64-pc-windows-msvc/
    - 仅创建新文件的 rename 不做无意义改写。
 
 4. **Browser 时区**
-   - Unix 继续使用 zoneinfo canonicalization；
-   - Windows 对 `UTC` 及 Browser `Intl` 返回的安全 IANA `Area/Location` 形状做有界语法验证，不把值当文件路径；
-   - 不为一个提示字段引入完整时区数据库依赖；
-   - 恶意控制字符、反斜杠、`.`/`..` segment 和超长值必须拒绝。
+   - Browser 时区验证与本地日历调度统一使用 `jiff` 和内置 IANA 数据库；Windows 与 Unix 不再依赖宿主 `/usr/share/zoneinfo`；
+   - 保留 TZif 的未来规则，覆盖长期夏令时转换，不仅验证当前年份；
+   - 夏令时不存在的本地时间报错，重复时间选择较早瞬间，并保留毫秒精度；
+   - 先验证命名时区形状，再查询内置数据库；未知名称与路径穿越输入拒绝，不把输入作为文件路径。
 
 ### 4.3 基座测试
 
@@ -578,7 +578,7 @@ Phase 10 只有在以下全部满足后才能标记完成：
 
 结案标准：16 组命令全部成功、Agent round trip/resume 与 Web 启停实际通过、文件 symlink 的条件覆盖证据齐全、安全行为未放宽。任一必要条件未满足，继续保持本次源码验收 FAIL；本计划通过也不等于 Windows 安装包已达到发布标准。
 
-### 当前补充证据与剩余阻塞
+### 历史补充证据与当前验证界限
 
 补充日志位于 `tessivum/test-artifacts/windows-source-remediation-20260907`。在上述差异明显的 Mac 环境中，Web 与 Market frozen install、三项 Python 检查、Web build、Market check、严格 Market 全套（53 files / 1059 tests，全部通过、无 skip）以及 locked all-targets Cargo check/Clippy 已通过；这些是回归信号，不是 Windows 11 验收。
 
@@ -588,4 +588,4 @@ Source-client 首次与 Rust 编译并发时有一个 lazy grammar test 超时�
 
 实际 CLI 首次与 `--resume` 均输出 `CLI_TOOL_ROUND_TRIP`；中文与空格临时状态路径下，原 Session 字节前缀保留，形成两组配对 turn/tool 事件。实际 debug Web 在独立端口 56895 返回 HTTP 200，Chromium 完成首次进入并显示工作区，截图保存为 `actual-web.png`；终端 Ctrl+C 返回预期 130，端口可重新绑定，未发现本次进程残留。用户现有 3000 端口服务未动。Ego 截图接口超时已保留日志，视觉证据改由独立 Chromium 获取；此处不是 Windows release Web 验收。
 
-尚未验证：本轮候选提交上的原生 Windows 11 全 16 组、Windows Agent 首次运行/恢复、Windows release Web HTTP/Ctrl+C/残留进程、Windows 文件 symlink capability 结果及 GitHub Windows CI。当前本机没有可用 Windows 11 SSH、VM 或 self-hosted Actions runner；由实习生取得固定候选提交后复验。旧日志缺失不再阻塞这次复验；在新证据齐全前，结论继续为 **FAIL / 待复验**，不得声明 Windows 11 acceptance。
+当前本机候选版的四项检查点、Rust 555/555、严格 Clippy、格式、完整 Browser、无 Node PTC ZIP smoke、安装器故障边界及清理检查均已通过；结果详见本计划所链接的当前报告。历史 macOS 证据仍仅作回归信号。此结果不等于全新机器验收、GitHub Windows CI、签名发行、Windows ARM64 验证或正式 Windows 支持；在这些独立证据齐全前，不得更新公开支持声明。
