@@ -23,6 +23,7 @@ export interface RpcResult<T> {
 
 export interface SessionListItem {
   sessionId: string
+  workspaceId: string | null
   cwd?: string
   updatedAt: number
   running: boolean
@@ -45,6 +46,7 @@ export interface RustWebOptions {
   env?: Record<string, string>
   clientPackageRoots?: string[]
   beforeStart?: (harness: RustWebHarness) => Promise<void>
+  /** Runs with native RPC and the blank browser page ready, before navigation. */
   beforePage?: (harness: RustWebHarness) => Promise<void>
   viewport?: { width: number; height: number }
   browser?: Browser
@@ -290,7 +292,6 @@ export class RustWebHarness {
         })
         if (!credential.ok) throw new Error(`credentials.set failed: ${JSON.stringify(credential.error)}`)
       }
-      await options.beforePage?.(harness)
       if (options.browser === undefined) {
         harness.browser = await chromium.launch(process.env.TESSIVUM_CHROMIUM === undefined
           ? { channel: 'chrome' }
@@ -316,6 +317,7 @@ export class RustWebHarness {
           harness.httpErrors.push(`${response.status()} ${response.url()} ${response.request().postData() ?? ''} ${body}`)
         }
       })
+      await options.beforePage?.(harness)
       const pageUrl = remoteOrigin ?? harness.baseUrl
       if (options.remoteAuthority !== undefined) {
         const response = await fetch(`${harness.baseUrl}/api/remoteAccess/issuePairing`, {
@@ -345,7 +347,8 @@ export class RustWebHarness {
         await harness.page.reload({ waitUntil: 'domcontentloaded' })
         await harness.page.locator('[class*="frame"]').waitFor({ timeout: 30_000 })
       }
-      await waitUntil(() => harness.sessions(), sessions => sessions.some(session => session.blank), 15_000)
+      // Native creation exposes a blank session before its workspace attachment finishes.
+      await waitUntil(() => harness.sessions(), sessions => sessions.some(session => session.blank && typeof session.workspaceId === 'string'), 15_000)
       return harness
     } catch (error) {
       await harness.close()

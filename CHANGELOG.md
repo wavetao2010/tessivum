@@ -36,6 +36,7 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Await Browser operations before invoking Bun assertions, preserving Playwright protocol event ordering instead of reentering the event loop through Promise matchers.
 - Verify produced-file summaries by ordered visible paths, exact remaining counts, and non-overflowing layout rather than a platform-dependent two-chip count.
 - Check remote revocation through authenticated HTTP admission changing from 200 to 401 and active WebSocket closure, rather than a scheduler-dependent reconnect warning count.
+- Wait for native workspace attachment before declaring Browser startup ready; hold and release the real question frame during steering gestures instead of relying on replay pacing before the question hides the composer.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 
