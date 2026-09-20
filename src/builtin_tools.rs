@@ -1153,11 +1153,10 @@ async fn run_windows_powershell(
     let status = tokio::select! {
         status = child.wait() => status,
         _ = context.cancellation.cancelled() => {
-            let capture_error = job.capture_and_terminate().await.err();
+            let cleanup_error = job.capture_and_cleanup_process_tree().await.err();
             let killed = child.kill().await;
             let waited = child.wait().await;
-            let cleanup_error = job.cleanup_process_tree().await.err();
-            if let Some(error) = cleanup_error.or(capture_error) {
+            if let Some(error) = cleanup_error {
                 stdout_task.abort();
                 stderr_task.abort();
                 let _ = stdout_task.await;

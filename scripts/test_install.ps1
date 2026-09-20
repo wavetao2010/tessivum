@@ -409,7 +409,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RegistryOverrideRootSubKey,
     [Parameter(Mandatory = $true)][string]$RegistryOverrideProbe,
     [Parameter(Mandatory = $true)][string]$InstallerArgumentsBase64,
-    [switch]$LoadPathStoreFunctions
+    [switch]$LoadPathStoreFunctions,
+    [switch]$FailNotifierAddType
 )
 
 Set-StrictMode -Version Latest
@@ -572,6 +573,34 @@ try {
                 $installerParameters.Version = [string]$argument
             }
         }
+        if ($FailNotifierAddType.IsPresent) {
+            $global:TessivumInstallerTestFailNotifierAddType = $true
+            function global:Add-Type {
+                [CmdletBinding(DefaultParameterSetName = 'AssemblyName')]
+                param(
+                    [Parameter(Mandatory = $true, ParameterSetName = 'AssemblyName')]
+                    [string[]]$AssemblyName,
+                    [Parameter(Mandatory = $true, ParameterSetName = 'TypeDefinition')]
+                    [string]$TypeDefinition
+                )
+
+                if (
+                    $PSCmdlet.ParameterSetName -eq 'TypeDefinition' -and
+                    $global:TessivumInstallerTestFailNotifierAddType -and
+                    $TypeDefinition.Contains('namespace TessivumInstaller') -and
+                    $TypeDefinition.Contains('EnvironmentChangeNotifier')
+                ) {
+                    $global:TessivumInstallerTestFailNotifierAddType = $false
+                    throw 'injected notifier Add-Type initialization failure'
+                }
+                if ($PSCmdlet.ParameterSetName -eq 'AssemblyName') {
+                    Microsoft.PowerShell.Utility\Add-Type -AssemblyName $AssemblyName
+                    return
+                }
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition $TypeDefinition
+            }
+        }
+
         $global:LASTEXITCODE = 0
         & $InstallerPath @installerParameters
         if ($LASTEXITCODE -is [int]) {
@@ -602,7 +631,8 @@ function Invoke-InstallerProcess {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$InstallerArguments,
         [AllowNull()][string]$RegistryOverrideRootSubKey,
         [AllowNull()][string]$RegistryOverrideProbe,
-        [switch]$LoadPathStoreFunctions
+        [switch]$LoadPathStoreFunctions,
+        [switch]$FailNotifierAddType
     )
 
     $controlledNames = @(
@@ -664,6 +694,9 @@ function Invoke-InstallerProcess {
             if ($LoadPathStoreFunctions.IsPresent) {
                 $arguments += '-LoadPathStoreFunctions'
             }
+            if ($FailNotifierAddType.IsPresent) {
+                $arguments += '-FailNotifierAddType'
+            }
         }
 
         $previousErrorActionPreference = $ErrorActionPreference
@@ -671,7 +704,8 @@ function Invoke-InstallerProcess {
             # PowerShell 5.1 surfaces redirected native stderr as error records.
             # Capture those records and assert the actual exit code in the caller.
             $ErrorActionPreference = 'Continue'
-            $output = @(& $script:PowerShellHost @arguments 2>&1)
+            $global:LASTEXITCODE = 1
+            $output = & $script:PowerShellHost @arguments 2>&1
             $exitCode = $LASTEXITCODE
         }
         finally {
@@ -693,7 +727,8 @@ function Invoke-TestInstall {
     param(
         [Parameter(Mandatory = $true)]$Configuration,
         [Parameter(Mandatory = $true)][string]$FixtureArchive,
-        [Parameter(Mandatory = $true)][string]$Version
+        [Parameter(Mandatory = $true)][string]$Version,
+        [switch]$FailNotifierAddType
     )
 
     $overrides = @{
@@ -711,12 +746,16 @@ function Invoke-TestInstall {
         -Overrides $overrides `
         -InstallerArguments @($Version) `
         -RegistryOverrideRootSubKey $Configuration.RegistryOverrideRootSubKey `
-        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe
+        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe `
+        -FailNotifierAddType:$FailNotifierAddType
 }
 
 
 function Invoke-TestUninstall {
-    param([Parameter(Mandatory = $true)]$Configuration)
+    param(
+        [Parameter(Mandatory = $true)]$Configuration,
+        [switch]$FailNotifierAddType
+    )
 
     $overrides = @{
         TESSIVUM_INSTALLER_TEST = '1'
@@ -732,7 +771,8 @@ function Invoke-TestUninstall {
         -Overrides $overrides `
         -InstallerArguments @('-Uninstall') `
         -RegistryOverrideRootSubKey $Configuration.RegistryOverrideRootSubKey `
-        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe
+        -RegistryOverrideProbe $Configuration.RegistryOverrideProbe `
+        -FailNotifierAddType:$FailNotifierAddType
 }
 
 function Invoke-TestPathStoreRegression {
@@ -780,7 +820,8 @@ function Get-LauncherVersion {
     try {
         [Environment]::SetEnvironmentVariable('USERPROFILE', $Configuration.Home, [EnvironmentVariableTarget]::Process)
         [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $Configuration.LocalAppData, [EnvironmentVariableTarget]::Process)
-        $output = @(& $LauncherPath '--version' 2>&1)
+        $global:LASTEXITCODE = 1
+        $output = & $LauncherPath '--version' 2>&1
         $exitCode = $LASTEXITCODE
         Assert-Equal -Expected 0 -Actual $exitCode -Message "$Label --version exit code"
         $lines = [System.Collections.Generic.List[string]]::new()
@@ -810,6 +851,102 @@ function Assert-StableLaunchers {
     Assert-True -Condition ([System.IO.File]::Exists($alias)) -Message "$Label is missing stable tsv.cmd"
     Assert-Equal -Expected $expectedOutput -Actual (Get-LauncherVersion -Configuration $Configuration -LauncherPath $canonical -Label "$Label tessivum") -Message "$Label tessivum version"
     Assert-Equal -Expected $expectedOutput -Actual (Get-LauncherVersion -Configuration $Configuration -LauncherPath $alias -Label "$Label tsv") -Message "$Label tsv version"
+}
+
+function Wait-ForExclusiveFileAccess {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [ValidateRange(1, 30000)][int]$TimeoutMilliseconds = 5000
+    )
+
+    $deadline = [System.DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $lastFailure = $null
+    $successfulPolls = 0
+    while ($true) {
+        $stream = $null
+        try {
+            $stream = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+            $successfulPolls++
+        }
+        catch [System.IO.IOException] {
+            $successfulPolls = 0
+            $lastFailure = $_
+        }
+        catch [System.UnauthorizedAccessException] {
+            $successfulPolls = 0
+            $lastFailure = $_
+        }
+        finally {
+            if ($null -ne $stream) {
+                $stream.Dispose()
+            }
+        }
+
+        if ($successfulPolls -ge 5) {
+            return
+        }
+
+        if ([System.DateTime]::UtcNow -ge $deadline) {
+            Fail "$Label did not release ${Path}: $($lastFailure.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Wait-ForDirectoryMove {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [ValidateRange(1, 30000)][int]$TimeoutMilliseconds = 5000
+    )
+
+    $probePath = Join-Path -Path (Split-Path -Parent $Path) -ChildPath ('.tessivum-move-probe-' + [System.Guid]::NewGuid().ToString('N'))
+    $deadline = [System.DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $lastFailure = $null
+    $successfulPolls = 0
+    $moved = $false
+    try {
+        while ($true) {
+            try {
+                [System.IO.Directory]::Move($Path, $probePath)
+                $moved = $true
+                [System.IO.Directory]::Move($probePath, $Path)
+                $moved = $false
+                $successfulPolls++
+            }
+            catch [System.IO.IOException] {
+                $successfulPolls = 0
+                $lastFailure = $_
+            }
+            catch [System.UnauthorizedAccessException] {
+                $successfulPolls = 0
+                $lastFailure = $_
+            }
+
+            if ($successfulPolls -ge 5) {
+                return
+            }
+
+            if ($moved) {
+                throw $lastFailure
+            }
+            if ([System.DateTime]::UtcNow -ge $deadline) {
+                Fail "$Label did not release ${Path}: $($lastFailure.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    finally {
+        if ($moved -and [System.IO.Directory]::Exists($probePath) -and -not [System.IO.Directory]::Exists($Path)) {
+            [System.IO.Directory]::Move($probePath, $Path)
+        }
+    }
 }
 
 function Assert-NoPartialInstall {
@@ -1116,6 +1253,13 @@ function Invoke-RegistryPathRoundTrip {
                 }
             }
             Assert-StableLaunchers -Configuration $configuration -ExpectedVersion $Version -Label "$Name uninstall rollback"
+            $rollbackVersionPath = Join-Path -Path $configuration.InstallRoot -ChildPath $Version
+            Wait-ForExclusiveFileAccess `
+                -Path (Join-Path -Path $rollbackVersionPath -ChildPath 'libexec\tessivum.exe') `
+                -Label "$Name uninstall rollback launcher"
+            Wait-ForDirectoryMove `
+                -Path $rollbackVersionPath `
+                -Label "$Name uninstall rollback version directory"
         }
 
         if ($UseMissingInstallPathCleanup) {
@@ -1302,6 +1446,113 @@ function Invoke-RegistryInstallRollback {
     }
 }
 
+function Invoke-RegistryNotifierAddTypeRollback {
+    param(
+        [Parameter(Mandatory = $true)][string]$FixtureArchive,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$InitialValue,
+        [Parameter(Mandatory = $true)][string]$ExpectedInitialExpandedValue
+    )
+
+    $configuration = New-RegistryPathTestPrefix -Name 'notify'
+    try {
+        Set-TestRegistryPathValue `
+            -Configuration $configuration `
+            -Value $InitialValue `
+            -RegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString)
+        Assert-TestRegistryPathState `
+            -Configuration $configuration `
+            -Label 'notifier Add-Type initial' `
+            -ExpectedExists $true `
+            -ExpectedValue $InitialValue `
+            -ExpectedRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -ExpectedExpandedValue $ExpectedInitialExpandedValue
+        $initialSnapshot = Get-TestRegistryPathState -Configuration $configuration
+        $initialStateArguments = @{
+            Configuration = $configuration
+            Label = 'notifier Add-Type initial snapshot'
+            ExpectedExists = [bool]$initialSnapshot.Exists
+            ExpectedValue = $initialSnapshot.Value
+            ExpectedRegistryValueKind = $initialSnapshot.RegistryValueKind
+            ExpectedExpandedValue = $initialSnapshot.ExpandedValue
+        }
+
+        $versionPath = Join-Path -Path $configuration.InstallRoot -ChildPath $Version
+        $canonicalPath = Join-Path -Path $configuration.BinDirectory -ChildPath 'tessivum.cmd'
+        $aliasPath = Join-Path -Path $configuration.BinDirectory -ChildPath 'tsv.cmd'
+        $ownershipPath = Join-Path -Path (Split-Path -Parent $configuration.InstallRoot) -ChildPath '.tessivum-path-owner'
+
+        $installFailure = Invoke-TestInstall `
+            -Configuration $configuration `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -FailNotifierAddType
+        Assert-Failed -Result $installFailure -Label 'notifier Add-Type install rollback'
+        $installFailureText = Get-ResultText -Result $installFailure
+        Assert-True -Condition $installFailureText.Contains('injected notifier Add-Type initialization failure') -Message ('notifier Add-Type install failure was suppressed: ' + $installFailureText)
+        Assert-True -Condition (-not $installFailureText.Contains('rollback failed:')) -Message 'notifier Add-Type install rollback did not complete'
+        $initialStateArguments['Label'] = 'notifier Add-Type install rollback PATH'
+        Assert-TestRegistryPathState @initialStateArguments
+        Assert-True -Condition (-not (Test-Path -LiteralPath $canonicalPath)) -Message 'notifier Add-Type install rollback left a canonical launcher'
+        Assert-True -Condition (-not (Test-Path -LiteralPath $aliasPath)) -Message 'notifier Add-Type install rollback left an alias launcher'
+        Assert-True -Condition (-not (Test-Path -LiteralPath $versionPath)) -Message 'notifier Add-Type install rollback left a managed version'
+        Assert-True -Condition (-not (Test-Path -LiteralPath $ownershipPath)) -Message 'notifier Add-Type install rollback left a PATH ownership record'
+        Assert-NoPartialInstall -Configuration $configuration -Version $Version
+
+        $installResult = Invoke-TestInstall -Configuration $configuration -FixtureArchive $FixtureArchive -Version $Version
+        Assert-Succeeded -Result $installResult -Label 'notifier Add-Type uninstall rollback setup install'
+        $installedValue = Get-ExpectedInstalledPathValue -CurrentValue $InitialValue -BinDirectory $configuration.BinDirectory
+        $installedExpandedValue = Get-ExpectedInstalledPathValue -CurrentValue $ExpectedInitialExpandedValue -BinDirectory $configuration.BinDirectory
+        Assert-TestRegistryPathState `
+            -Configuration $configuration `
+            -Label 'notifier Add-Type uninstall rollback setup PATH' `
+            -ExpectedExists $true `
+            -ExpectedValue $installedValue `
+            -ExpectedRegistryValueKind ([Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -ExpectedExpandedValue $installedExpandedValue
+        $installedSnapshot = Get-TestRegistryPathState -Configuration $configuration
+        $installedStateArguments = @{
+            Configuration = $configuration
+            Label = 'notifier Add-Type uninstall rollback setup snapshot'
+            ExpectedExists = [bool]$installedSnapshot.Exists
+            ExpectedValue = $installedSnapshot.Value
+            ExpectedRegistryValueKind = $installedSnapshot.RegistryValueKind
+            ExpectedExpandedValue = $installedSnapshot.ExpandedValue
+        }
+        Assert-True -Condition ([System.IO.Directory]::Exists($versionPath)) -Message 'notifier Add-Type uninstall rollback setup is missing its managed version'
+        Assert-True -Condition ([System.IO.File]::Exists($ownershipPath)) -Message 'notifier Add-Type uninstall rollback setup is missing its PATH ownership record'
+        $ownershipContent = [System.IO.File]::ReadAllText($ownershipPath, $script:Utf8NoBom)
+
+        $uninstallFailure = Invoke-TestUninstall -Configuration $configuration -FailNotifierAddType
+        Assert-Failed -Result $uninstallFailure -Label 'notifier Add-Type uninstall rollback'
+        $uninstallFailureText = Get-ResultText -Result $uninstallFailure
+        Assert-True -Condition $uninstallFailureText.Contains('injected notifier Add-Type initialization failure') -Message ('notifier Add-Type uninstall failure was suppressed: ' + $uninstallFailureText)
+        Assert-True -Condition (-not $uninstallFailureText.Contains('rollback failed:')) -Message 'notifier Add-Type uninstall rollback did not complete'
+        $installedStateArguments['Label'] = 'notifier Add-Type uninstall rollback PATH'
+        Assert-TestRegistryPathState @installedStateArguments
+        Assert-StableLaunchers -Configuration $configuration -ExpectedVersion $Version -Label 'notifier Add-Type uninstall rollback'
+        Assert-True -Condition ([System.IO.Directory]::Exists($versionPath)) -Message 'notifier Add-Type uninstall rollback did not restore the managed version'
+        Assert-True -Condition ([System.IO.File]::Exists($ownershipPath)) -Message 'notifier Add-Type uninstall rollback did not restore the PATH ownership record'
+        Assert-Equal -Expected $ownershipContent -Actual ([System.IO.File]::ReadAllText($ownershipPath, $script:Utf8NoBom)) -Message 'notifier Add-Type uninstall rollback changed the PATH ownership record'
+
+        Wait-ForExclusiveFileAccess `
+            -Path (Join-Path -Path $versionPath -ChildPath 'libexec\tessivum.exe') `
+            -Label 'notifier Add-Type uninstall rollback launcher'
+        Wait-ForDirectoryMove `
+            -Path $versionPath `
+            -Label 'notifier Add-Type uninstall rollback version directory'
+
+
+        $uninstallResult = Invoke-TestUninstall -Configuration $configuration
+        Assert-Succeeded -Result $uninstallResult -Label 'notifier Add-Type uninstall rollback cleanup'
+        $initialStateArguments['Label'] = 'notifier Add-Type uninstall rollback cleanup PATH'
+        Assert-TestRegistryPathState @initialStateArguments
+    }
+    finally {
+        Remove-RegistryPathTestPrefix -Configuration $configuration
+    }
+}
+
 function Invoke-RegistryPathRegression {
     param(
         [Parameter(Mandatory = $true)][string]$FixtureArchive,
@@ -1328,6 +1579,12 @@ function Invoke-RegistryPathRegression {
 
         $registryExpandValue = '%' + $tokenName + '%\expanded;C:\registry-unrelated'
         $registryExpandExpandedValue = $expandedToken + '\expanded;C:\registry-unrelated'
+        Invoke-RegistryNotifierAddTypeRollback `
+            -FixtureArchive $FixtureArchive `
+            -Version $Version `
+            -InitialValue $registryExpandValue `
+            -ExpectedInitialExpandedValue $registryExpandExpandedValue
+
         Invoke-RegistryInstallRollback `
             -FixtureArchive $FixtureArchive `
             -Version $Version `
@@ -1442,7 +1699,8 @@ function Invoke-RegistryOnlyAcrossPowerShellHosts {
             '-ExpectedPowerShellMajor',
             [string]$hostSpecification.MajorVersion
         )
-        $output = @(& $hostSpecification.Path @arguments 2>&1)
+        $global:LASTEXITCODE = 1
+        $output = & $hostSpecification.Path @arguments 2>&1
         $result = [PSCustomObject]@{
             ExitCode = $LASTEXITCODE
             Output = $output
@@ -1481,7 +1739,8 @@ function Invoke-RegistryPathRegressionAcrossPowerShellHosts {
             '-ExpectedPowerShellMajor',
             [string]$hostSpecification.MajorVersion
         )
-        $output = @(& $hostSpecification.Path @arguments 2>&1)
+        $global:LASTEXITCODE = 1
+        $output = & $hostSpecification.Path @arguments 2>&1
         $result = [PSCustomObject]@{
             ExitCode = $LASTEXITCODE
             Output = $output

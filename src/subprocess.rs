@@ -401,16 +401,33 @@ impl WindowsJob {
         let _ = terminate_windows_job(&self.inner);
     }
 
-    /// Captures every currently traceable descendant before terminating Job members.
-    ///
-    /// Callers that can await cleanup should use this before a root process can
-    /// disappear; the later fence consumes the retained identities.
-    pub(crate) async fn capture_and_terminate(&self) -> std::io::Result<()> {
-        capture_and_terminate_windows_job(Arc::clone(&self.inner)).await
+    pub(crate) async fn cleanup_process_tree(self) -> std::io::Result<()> {
+        let state = Arc::clone(&self.inner);
+        // Move the owning WindowsJob into spawn_blocking. Dropping the outer
+        // async future must not drop the kill-on-close Job before capture/fence.
+        tokio::task::spawn_blocking(move || {
+            let result = cleanup_windows_process_tree(&state);
+            drop(self);
+            result
+        })
+        .await
+        .map_err(|join_error| blocking_task_error("Windows process-tree cleanup", join_error))?
     }
-
-    pub(crate) async fn cleanup_process_tree(&self) -> std::io::Result<()> {
-        cleanup_windows_job(Arc::clone(&self.inner)).await
+    /// Captures descendants and completes the consuming fence while retaining
+    /// this owner inside the blocking task. This is the cancellation path for
+    /// one-shot runners: dropping the awaiting future cannot drop the Job
+    /// before the pre-termination capture has run.
+    pub(crate) async fn capture_and_cleanup_process_tree(self) -> std::io::Result<()> {
+        let state = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let result = capture_and_cleanup_windows_process_tree(&state);
+            drop(self);
+            result
+        })
+        .await
+        .map_err(|join_error| {
+            blocking_task_error("Windows process-tree capture and cleanup", join_error)
+        })?
     }
 
     /// Fences synchronous runners before they revoke grants or remove private temp.
@@ -431,6 +448,15 @@ fn capture_and_terminate_windows_job_blocking(state: &WindowsJobState) -> std::i
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+#[cfg(windows)]
+fn capture_and_cleanup_windows_process_tree(state: &WindowsJobState) -> std::io::Result<()> {
+    // Preserve the early-capture ordering even when this operation is the only
+    // owner of the Job. The consuming fence retains any generations that were
+    // not visible during this first pass and reports its first stored error.
+    let _ = capture_and_terminate_windows_job_blocking(state);
+    cleanup_windows_process_tree(state)
 }
 
 #[cfg(windows)]
@@ -3672,6 +3698,7 @@ mod windows_persistent_escape_tests {
     use std::{
         ffi::OsStr,
         fs::{self, OpenOptions},
+        future::Future,
         io,
         os::windows::{
             ffi::OsStrExt,
@@ -3679,8 +3706,13 @@ mod windows_persistent_escape_tests {
         },
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
-        sync::Arc,
+        sync::{mpsc, Arc},
         time::Duration,
+    };
+
+    use tokio::{
+        process::{Child as TokioChild, Command as TokioCommand},
+        sync::oneshot,
     };
 
     use windows_sys::Win32::{
@@ -3699,7 +3731,8 @@ mod windows_persistent_escape_tests {
     };
 
     use super::{
-        lock, PersistentShell, PersistentShellCommand, PersistentShellConfig, WindowsJobState,
+        lock, PersistentShell, PersistentShellCommand, PersistentShellConfig, WindowsJob,
+        WindowsJobState,
     };
 
     struct TempRoot(PathBuf);
@@ -3898,6 +3931,7 @@ mod windows_persistent_escape_tests {
         ready: NamedEvent,
         hold: NamedEvent,
         unrelated_hold: NamedEvent,
+        launch: NamedEvent,
     }
 
     impl EscapeFixture {
@@ -3915,6 +3949,8 @@ mod windows_persistent_escape_tests {
                 NamedEvent::new("persistent-escape-hold").expect("controlled hold event creates");
             let unrelated_hold = NamedEvent::new("persistent-escape-unrelated")
                 .expect("unrelated hold event creates");
+            let launch = NamedEvent::new("persistent-escape-launch")
+                .expect("controlled launch event creates");
 
             fs::write(&helper, ESCAPE_HELPER).expect("escape helper writes");
             fs::write(&intermediate, INTERMEDIATE_SCRIPT).expect("intermediate script writes");
@@ -3933,6 +3969,7 @@ mod windows_persistent_escape_tests {
                 ready,
                 hold,
                 unrelated_hold,
+                launch,
             }
         }
 
@@ -3988,6 +4025,37 @@ mod windows_persistent_escape_tests {
                 powershell_path(&self.powershell),
                 powershell_literal(&arguments),
             )
+        }
+        fn managed_root_command(&self) -> TokioCommand {
+            let mut command = TokioCommand::new(&self.powershell);
+            command
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&self.intermediate)
+                .arg(&self.helper)
+                .arg(&self.powershell)
+                .arg(&self.grandchild)
+                .arg(&self.pid_file)
+                .arg(&self.lock_file)
+                .arg(&self.ready.name)
+                .arg(&self.hold.name)
+                .arg(&self.launch.name)
+                .current_dir(self.workspace())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            command
+        }
+
+        fn spawn_managed_root(&self) -> (TokioChild, WindowsJob) {
+            let mut command = self.managed_root_command();
+            WindowsJob::spawn(&mut command).expect("managed escape root starts")
         }
 
         async fn generations(&self) -> (u32, u32) {
@@ -4062,12 +4130,8 @@ mod windows_persistent_escape_tests {
         }
     }
 
-    fn enable_fixture_breakaway(shell: &PersistentShell) {
-        let job = lock(&shell.inner.job);
-        let state = &job
-            .as_ref()
-            .expect("persistent shell owns its fixture Job")
-            .inner;
+    fn enable_fixture_breakaway_job(job: &WindowsJob) {
+        let state = &job.inner;
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         // This is an isolated test Job. Production keeps only KILL_ON_JOB_CLOSE;
         // enabling explicit breakaway here constructs the escaped-child boundary.
@@ -4088,16 +4152,16 @@ mod windows_persistent_escape_tests {
         );
     }
 
-    fn assert_fixture_membership(
-        shell: &PersistentShell,
+    fn enable_fixture_breakaway(shell: &PersistentShell) {
+        let job = lock(&shell.inner.job);
+        enable_fixture_breakaway_job(job.as_ref().expect("persistent shell owns its fixture Job"));
+    }
+
+    fn assert_fixture_membership_state(
+        state: &WindowsJobState,
         intermediate: &ProcessGuard,
         grandchild: &ProcessGuard,
     ) {
-        let job = lock(&shell.inner.job);
-        let state = &job
-            .as_ref()
-            .expect("persistent shell keeps its Job until cleanup")
-            .inner;
         assert!(
             intermediate
                 .is_in_job(state)
@@ -4110,6 +4174,19 @@ mod windows_persistent_escape_tests {
                 .expect("escaped grandchild job membership queries"),
             "controlled grandchild explicitly breaks away from the fixture Job"
         );
+    }
+
+    fn assert_fixture_membership(
+        shell: &PersistentShell,
+        intermediate: &ProcessGuard,
+        grandchild: &ProcessGuard,
+    ) {
+        let job = lock(&shell.inner.job);
+        let state = &job
+            .as_ref()
+            .expect("persistent shell keeps its Job until cleanup")
+            .inner;
+        assert_fixture_membership_state(state, intermediate, grandchild);
     }
 
     async fn start_shell(fixture: &EscapeFixture) -> PersistentShell {
@@ -4162,6 +4239,79 @@ mod windows_persistent_escape_tests {
             unrelated.wait().expect("unrelated process waits").success(),
             "unrelated process exits only after its own release"
         );
+    }
+    #[test]
+    fn one_shot_cleanup_retains_job_when_queued_future_is_aborted() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("cleanup regression runtime creates");
+        runtime.block_on(async {
+            let fixture = EscapeFixture::new();
+            let (mut child, job) = fixture.spawn_managed_root();
+            enable_fixture_breakaway_job(&job);
+            fixture
+                .launch
+                .set()
+                .expect("controlled root launch event signals");
+
+            let (intermediate_pid, grandchild_pid) = fixture.generations().await;
+            let intermediate =
+                ProcessGuard::open(intermediate_pid).expect("controlled intermediate opens");
+            let escaped =
+                ProcessGuard::open(grandchild_pid).expect("controlled escaped grandchild opens");
+            assert_fixture_membership_state(&job.inner, &intermediate, &escaped);
+            fixture.assert_lock_held();
+
+            let unrelated = fixture.spawn_unrelated();
+            let unrelated_guard =
+                ProcessGuard::open(unrelated.id()).expect("unrelated process opens");
+
+            let (block_started_tx, block_started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = mpsc::sync_channel(0);
+            let blocker = tokio::task::spawn_blocking(move || {
+                block_started_tx
+                    .send(())
+                    .expect("blocking-pool gate receiver remains live");
+                release_rx
+                    .recv()
+                    .expect("blocking-pool gate release arrives");
+            });
+            block_started_rx
+                .await
+                .expect("blocking-pool gate starts before cleanup queues");
+
+            let (queued_tx, queued_rx) = oneshot::channel();
+            let cleanup_task = tokio::spawn(async move {
+                let mut cleanup = Box::pin(job.cleanup_process_tree());
+                let mut queued = Some(queued_tx);
+                futures_util::future::poll_fn(move |context| {
+                    let result = cleanup.as_mut().poll(context);
+                    if let Some(signal) = queued.take() {
+                        signal
+                            .send(())
+                            .expect("queued cleanup signal receiver lives");
+                    }
+                    result
+                })
+                .await
+            });
+            queued_rx
+                .await
+                .expect("cleanup reaches spawn_blocking while the pool is occupied");
+            cleanup_task.abort();
+            let _ = cleanup_task.await;
+
+            release_tx
+                .send(())
+                .expect("blocking-pool gate release sends");
+            blocker.await.expect("blocking-pool gate joins");
+            child.wait().await.expect("managed root process waits");
+
+            assert_cleanup(&fixture, &intermediate, &escaped, &unrelated_guard);
+            finish_unrelated(&fixture, unrelated);
+        });
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4318,8 +4468,12 @@ param(
     [string]$PidFile,
     [string]$LockPath,
     [string]$ReadyEvent,
-    [string]$HoldEvent
+    [string]$HoldEvent,
+    [string]$StartEvent
 )
+if ($StartEvent) {
+    [System.Threading.EventWaitHandle]::OpenExisting($StartEvent).WaitOne()
+}
 Add-Type -Path $Helper
 [ControlledBreakaway]::Start($PowerShell, $Grandchild, $PidFile, $LockPath, $ReadyEvent, $HoldEvent)
 [System.Threading.EventWaitHandle]::OpenExisting($HoldEvent).WaitOne()

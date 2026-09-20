@@ -37,6 +37,8 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Verify produced-file summaries by ordered visible paths, exact remaining counts, and non-overflowing layout rather than a platform-dependent two-chip count.
 - Check remote revocation through authenticated HTTP admission changing from 200 to 401 and active WebSocket closure, rather than a scheduler-dependent reconnect warning count.
 - Wait for native workspace attachment before declaring Browser startup ready; hold and release the real question frame during steering gestures instead of relying on replay pacing before the question hides the composer.
+- Keep non-persistent Windows Job ownership inside the blocking capture/fence task across outer-task cancellation; add a queued-cleanup regression proving escaped descendants are reaped and unrelated processes survive.
+- Mark installer and uninstaller PATH mutations before broadcasting environment changes, so notifier initialization failures still trigger raw registry snapshot rollback; verify injected Add-Type failures on Windows PowerShell 5.1 and 7.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 

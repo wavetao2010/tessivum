@@ -1424,6 +1424,7 @@ function Invoke-Install {
         }
 
         $pathSnapshot = Get-PathStoreSnapshot -PathStore $PathStore
+        $pathUpdate = Get-InstalledPathUpdate -CurrentValue $pathSnapshot.Value -BinDirectory $BinDirectory
         $ownership = Get-PathOwnershipRecord -OwnershipPath $ownershipPath -BinDirectory $BinDirectory
 
         foreach ($state in $states) {
@@ -1435,13 +1436,14 @@ function Invoke-Install {
             $state.NewPublished = $true
         }
 
-        $pathUpdate = Get-InstalledPathUpdate -CurrentValue $pathSnapshot.Value -BinDirectory $BinDirectory
         if ($pathUpdate.Changed) {
+            # Mark the mutation before broadcasting. If notifier initialization
+            # fails, catch must still restore the registry snapshot.
+            $pathChanged = $true
             Set-PathStoreValue `
                 -PathStore $PathStore `
                 -Value $pathUpdate.Value `
                 -RegistryValueKind (Get-PathStoreWriteKind -Snapshot $pathSnapshot)
-            $pathChanged = $true
         }
         if ($pathUpdate.Added -and -not $ownership.Exists) {
             Write-AtomicTextFile `
@@ -1756,12 +1758,14 @@ function Invoke-Uninstall {
         if ($ownership.Exists) {
             $pathUpdate = Get-UninstalledPathUpdate -CurrentValue $pathSnapshot.Value -BinDirectory $BinDirectory
             if ($pathUpdate.Changed) {
+                # Set-UninstalledPathStoreValue writes before it broadcasts;
+                # record that fact before either operation can throw.
+                $pathChanged = $true
                 Set-UninstalledPathStoreValue `
                     -Snapshot $pathSnapshot `
                     -Update $pathUpdate `
                     -Ownership $ownership `
                     -PathStore $PathStore
-                $pathChanged = $true
             }
             [System.IO.File]::Delete($ownershipPath)
             $ownershipRemoved = $true
