@@ -141,3 +141,4 @@ bun test ./tests/migrated.test.ts ./tests/remote-access.e2e.ts --max-concurrency
 - 追加边界修复：非持久 PowerShell 取消路径现在把拥有 Windows Job 的对象移动进同一个 blocking capture/fence 任务；外层任务取消不能先触发 Job drop。新增单 worker 排队回归实际确认中间祖先、逃逸孙进程及锁资源都回收，且无关进程存活；目标套件 5 passed。
 - 安装/卸载 PATH 事务在写注册表前登记 `$pathChanged`，通知组件首次 Add-Type 故障也进入原始 PATH/类型/所有权回滚。注入故障覆盖 PowerShell 5.1 与 7，完整 `RegistryPathRegression` 退出 0，输出 `Windows installer registry PATH regressions passed`；证据 `installer-notifier-rollback-final.json`。测试仅使用进程局部 HKCU，不修改真实 User PATH。
 - 边界修复后的 `cargo fmt -- --check`、严格 Clippy、全 targets 编译检查均退出 0；完整 Rust 全 targets 回归待本轮最终命令返回后记录。
+- 边界修复提交为 `e0b81a5d3ccfb004364fc95f0fe74b7da8365482`，已推送至 PR #6；该提交的 hosted CI run `35497272686` 的 Windows、Linux verify、macOS Browser 三个 job 均 success。
