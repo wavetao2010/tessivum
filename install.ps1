@@ -1619,12 +1619,13 @@ function Remove-OwnedPathEntryOnly {
     try {
         $update = Get-UninstalledPathUpdate -CurrentValue $snapshot.Value -BinDirectory $BinDirectory
         if ($update.Changed) {
+            # Set-UninstalledPathStoreValue writes before it broadcasts; record that fact before either operation can throw.
+            $changed = $true
             Set-UninstalledPathStoreValue `
                 -Snapshot $snapshot `
                 -Update $update `
                 -Ownership $ownership `
                 -PathStore $PathStore
-            $changed = $true
         }
         [System.IO.File]::Delete($OwnershipPath)
     }

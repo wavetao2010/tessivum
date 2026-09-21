@@ -1267,6 +1267,15 @@ function Invoke-RegistryPathRoundTrip {
             [System.IO.File]::Delete((Join-Path -Path $configuration.BinDirectory -ChildPath 'tsv.cmd'))
             $retainedInstallRoot = $configuration.InstallRoot + '-retained'
             [System.IO.Directory]::Move($configuration.InstallRoot, $retainedInstallRoot)
+
+            $ownershipPath = Join-Path -Path (Split-Path -Parent $configuration.InstallRoot) -ChildPath '.tessivum-path-owner'
+            $rollbackResult = Invoke-TestUninstall -Configuration $configuration -FailNotifierAddType
+            Assert-Failed -Result $rollbackResult -Label "$Name missing-install notifier rollback"
+            $rollbackText = Get-ResultText -Result $rollbackResult
+            Assert-True -Condition $rollbackText.Contains('injected notifier Add-Type initialization failure') -Message ("$Name missing-install notifier failure was suppressed: " + $rollbackText)
+            Assert-True -Condition (-not $rollbackText.Contains('rollback failed:')) -Message "$Name missing-install notifier rollback did not complete"
+            Assert-TestRegistryPathState @installedStateArguments
+            Assert-True -Condition ([System.IO.File]::Exists($ownershipPath)) -Message "$Name missing-install notifier rollback removed the PATH ownership record"
         }
 
         $uninstallResult = Invoke-TestUninstall -Configuration $configuration
