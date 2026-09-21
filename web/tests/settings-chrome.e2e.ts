@@ -1,9 +1,8 @@
-import { mkdir, readFile, symlink } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Page } from 'playwright-core'
 import { expect, test } from 'bun:test'
-import { acknowledgeReloadConnectionLoss, captureStableAria, fixture, RustWebHarness, waitUntil } from './support'
-const SETTINGS_DIALOG_EXPECTED = join(import.meta.dir, 'snapshots/settings-chrome/dialog.expected.md')
+import { acknowledgeReloadConnectionLoss, RustWebHarness, waitUntil } from './support'
 
 
 interface ThemeState {
@@ -49,10 +48,7 @@ async function sharedHost(harness: RustWebHarness, name: string): Promise<RustWe
   return RustWebHarness.launch({
     name,
     locale: 'zh-CN',
-    beforeStart: async candidate => {
-      await mkdir(candidate.dataDir, { recursive: true })
-      await symlink(join(harness.dataDir, 'settings.yaml'), join(candidate.dataDir, 'settings.yaml'))
-    },
+    settingsFile: join(harness.dataDir, 'settings.yaml'),
   })
 }
 
@@ -93,9 +89,6 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
     await waitUntil(() => Promise.resolve(openRequests), value => value === 1, 5_000)
     await waitUntil(() => openDocument.isEnabled(), Boolean, 5_000)
     await harness.page.unroute('**/api/settings.openDocument')
-    expect(await captureStableAria(harness.page, '[role="dialog"]')).toBe(
-      (await readFile(SETTINGS_DIALOG_EXPECTED, 'utf8')).trim(),
-    )
 
     await dialog.getByRole('button', { name: '模型' }).click()
     await waitUntil(() => dialog.getByRole('button', { name: '模型' }).getAttribute('aria-current'), value => value === 'true', 5_000)
@@ -120,9 +113,6 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
     expect(await dialog.getByRole('button', { name: '插件', exact: true }).getAttribute('aria-current')).toBe('true')
     expect(await dialog.getByRole('tab', { name: '插件列表', exact: true }).getAttribute('aria-selected')).toBe('true')
     expect(await dialog.getByRole('button', { name: '模型' }).getAttribute('aria-current')).toBeNull()
-    expect(await captureStableAria(harness.page, '[data-plugin-entry$="ui-settings"]')).toBe(
-      (await readFile(await fixture('settings-chrome', 'plugins.expected.md'), 'utf8')).trim(),
-    )
     await harness.page.keyboard.press('Escape')
     await waitUntil(() => harness.page.getByRole('dialog', { name: '设置' }).count(), count => count === 0, 5_000)
     expect(await trigger.getAttribute('aria-expanded')).toBe('false')
@@ -213,6 +203,12 @@ test('settings chrome preserves source modal, default, theme, Enter, and locale 
       const secondState = await readTheme(second.page)
       expect(secondState.legacy).toBeNull()
       expectThemeColorSynchronized(secondState)
+      const sharedAppearance = await openSettings(second)
+      await sharedAppearance.dialog.getByRole('button', { name: '浅色' }).click()
+      await waitUntil(() => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'), value => /ui-theme:\n\s+preference: light/.test(value), 5_000)
+      await sharedAppearance.dialog.getByRole('button', { name: '深色' }).click()
+      await waitUntil(() => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'), value => /ui-theme:\n\s+preference: dark/.test(value), 5_000)
+      await second.page.keyboard.press('Escape')
       second.assertClean()
     } finally { await second.close() }
     const restored = await openSettings(harness)

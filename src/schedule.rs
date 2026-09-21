@@ -2,7 +2,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -11,6 +10,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use jiff::{
+    civil::DateTime,
+    tz::{AmbiguousOffset, TimeZone},
+};
 use regex::Regex;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -1091,28 +1094,43 @@ fn resolve_local_at(value: &serde_json::Map<String, Value>) -> Result<i64, Value
         .and_then(Value::as_str)
         .ok_or_else(|| error("invalid_time_zone", "time_zone must be a string."))?;
     let fields = parse_local_fields(date, time)?;
-    let local = calendar_millis(fields).ok_or_else(|| {
+    calendar_millis(fields).ok_or_else(|| {
         error(
             "invalid_rule",
             "The local at value must be a real ISO calendar date and time.",
         )
     })?;
-    let offsets = zone_offsets(zone)?;
-    let mut candidates = offsets
-        .into_iter()
-        .filter_map(|offset| {
-            let candidate = local.checked_sub(i64::from(offset) * 1_000)?;
-            let actual = zone_offset_at(zone, candidate).ok()?;
-            (actual == offset && local_fields(candidate, offset) == fields).then_some(candidate)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_unstable();
-    candidates.into_iter().next().ok_or_else(|| {
+    let invalid_zone = || {
         error(
+            "invalid_time_zone",
+            "time_zone must be UTC or a valid IANA Area/Location name.",
+        )
+    };
+    if zone != "UTC" && !valid_zone_name(zone) {
+        return Err(invalid_zone());
+    }
+    let zone = TimeZone::get(zone).map_err(|_| invalid_zone())?;
+    let local = DateTime::new(
+        fields.year as i16,
+        fields.month as i8,
+        fields.day as i8,
+        fields.hour as i8,
+        fields.minute as i8,
+        fields.second as i8,
+        (fields.millis * 1_000_000) as i32,
+    )
+    .map_err(|_| time_out_of_range())?;
+    let candidate = zone.to_ambiguous_timestamp(local);
+    if matches!(candidate.offset(), AmbiguousOffset::Gap { .. }) {
+        return Err(error(
             "invalid_rule",
             "The local at time does not exist in the selected time zone.",
-        )
-    })
+        ));
+    }
+    candidate
+        .earlier()
+        .map(|instant| instant.as_millisecond())
+        .map_err(|_| time_out_of_range())
 }
 
 fn parse_local_fields(date: &str, time: &str) -> Result<Calendar, Value> {
@@ -1147,70 +1165,6 @@ fn parse_local_fields(date: &str, time: &str) -> Result<Calendar, Value> {
     })
 }
 
-fn zone_offsets(zone: &str) -> Result<BTreeSet<i32>, Value> {
-    let zone = zone_data(zone)?;
-    let mut offsets = BTreeSet::new();
-    offsets.insert(zone.default_offset);
-    offsets.extend(zone.types.iter().map(|type_| type_.offset));
-    Ok(offsets)
-}
-fn zone_offset_at(name: &str, millis: i64) -> Result<i32, Value> {
-    let zone = zone_data(name)?;
-    let seconds = millis.div_euclid(1_000);
-    let index = zone
-        .transitions
-        .partition_point(|transition| *transition <= seconds)
-        .checked_sub(1)
-        .and_then(|index| zone.indices.get(index))
-        .copied()
-        .unwrap_or(0);
-    zone.types
-        .get(index as usize)
-        .map(|type_| type_.offset)
-        .ok_or_else(|| {
-            error(
-                "invalid_time_zone",
-                "time_zone must be UTC or a valid IANA Area/Location name.",
-            )
-        })
-}
-struct ZoneData {
-    transitions: Vec<i64>,
-    indices: Vec<u8>,
-    types: Vec<ZoneType>,
-    default_offset: i32,
-}
-struct ZoneType {
-    offset: i32,
-}
-fn zone_data(name: &str) -> Result<ZoneData, Value> {
-    if name == "UTC" {
-        return Ok(ZoneData {
-            transitions: Vec::new(),
-            indices: Vec::new(),
-            types: vec![ZoneType { offset: 0 }],
-            default_offset: 0,
-        });
-    }
-    if !valid_zone_name(name) {
-        return Err(error(
-            "invalid_time_zone",
-            "time_zone must be UTC or a valid IANA Area/Location name.",
-        ));
-    }
-    let bytes = fs::read(format!("/usr/share/zoneinfo/{name}")).map_err(|_| {
-        error(
-            "invalid_time_zone",
-            "time_zone must be UTC or a valid IANA Area/Location name.",
-        )
-    })?;
-    parse_tzif(&bytes).ok_or_else(|| {
-        error(
-            "invalid_time_zone",
-            "time_zone must be UTC or a valid IANA Area/Location name.",
-        )
-    })
-}
 fn valid_zone_name(name: &str) -> bool {
     name.contains('/')
         && !name.starts_with('/')
@@ -1218,98 +1172,6 @@ fn valid_zone_name(name: &str) -> bool {
         && name.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'+' | b'.' | b'-')
         })
-}
-fn parse_tzif(bytes: &[u8]) -> Option<ZoneData> {
-    let (version, counts) = tzif_header(bytes)?;
-    let mut offset = 44usize;
-    if version != b'\0' && version != b'1' {
-        offset = offset.checked_add(tzif_block_len(&counts, 4)?)?;
-        let (second_version, second_counts) = tzif_header(bytes.get(offset..)?)?;
-        if second_version == b'\0' {
-            return None;
-        }
-        offset = offset.checked_add(44)?;
-        return parse_tzif_block(bytes.get(offset..)?, &second_counts, 8);
-    }
-    parse_tzif_block(bytes.get(offset..)?, &counts, 4)
-}
-#[derive(Clone, Copy)]
-struct TzifCounts {
-    leap: usize,
-    time: usize,
-    type_count: usize,
-    chars: usize,
-    std: usize,
-    gmt: usize,
-}
-fn tzif_header(bytes: &[u8]) -> Option<(u8, TzifCounts)> {
-    if bytes.len() < 44 || &bytes[..4] != b"TZif" {
-        return None;
-    }
-    let count = |offset| {
-        usize::try_from(u32::from_be_bytes(
-            bytes.get(offset..offset + 4)?.try_into().ok()?,
-        ))
-        .ok()
-    };
-    Some((
-        bytes[4],
-        TzifCounts {
-            gmt: count(20)?,
-            std: count(24)?,
-            leap: count(28)?,
-            time: count(32)?,
-            type_count: count(36)?,
-            chars: count(40)?,
-        },
-    ))
-}
-fn tzif_block_len(counts: &TzifCounts, width: usize) -> Option<usize> {
-    counts
-        .time
-        .checked_mul(width)?
-        .checked_add(counts.time)?
-        .checked_add(counts.type_count.checked_mul(6)?)?
-        .checked_add(counts.chars)?
-        .checked_add(counts.leap.checked_mul(width + 4)?)?
-        .checked_add(counts.std)?
-        .checked_add(counts.gmt)
-}
-fn parse_tzif_block(bytes: &[u8], counts: &TzifCounts, width: usize) -> Option<ZoneData> {
-    let length = tzif_block_len(counts, width)?;
-    if bytes.len() < length || counts.type_count == 0 {
-        return None;
-    }
-    let mut cursor = 0usize;
-    let mut transitions = Vec::with_capacity(counts.time);
-    for _ in 0..counts.time {
-        let source = bytes.get(cursor..cursor + width)?;
-        transitions.push(if width == 8 {
-            i64::from_be_bytes(source.try_into().ok()?)
-        } else {
-            i64::from(i32::from_be_bytes(source.try_into().ok()?))
-        });
-        cursor += width;
-    }
-    let indices = bytes.get(cursor..cursor + counts.time)?.to_vec();
-    cursor += counts.time;
-    let mut types = Vec::with_capacity(counts.type_count);
-    for _ in 0..counts.type_count {
-        types.push(ZoneType {
-            offset: i32::from_be_bytes(bytes.get(cursor..cursor + 4)?.try_into().ok()?),
-        });
-        cursor += 6;
-    }
-    if indices.iter().any(|index| *index as usize >= types.len()) {
-        return None;
-    }
-    let default_offset = types.first()?.offset;
-    Some(ZoneData {
-        transitions,
-        indices,
-        types,
-        default_offset,
-    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1361,21 +1223,6 @@ fn format_instant(millis: i64) -> Option<String> {
         day % 1_000
     ))
 }
-fn local_fields(millis: i64, offset: i32) -> Calendar {
-    let adjusted = millis + i64::from(offset) * 1_000;
-    let days = adjusted.div_euclid(86_400_000);
-    let day = adjusted.rem_euclid(86_400_000);
-    let (year, month, date) = civil_from_days(days);
-    Calendar {
-        year,
-        month,
-        day: date,
-        hour: day / 3_600_000,
-        minute: day / 60_000 % 60,
-        second: day / 1_000 % 60,
-        millis: day % 1_000,
-    }
-}
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - if month <= 2 { 1 } else { 0 };
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -1395,4 +1242,42 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     (year + if month <= 2 { 1 } else { 0 }, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local_schedule(date: &str, time: &str, zone: &str) -> Result<Record, Value> {
+        Record::at(
+            "local-zone".into(),
+            "Reminder",
+            &json!({"date": date, "time": time, "time_zone": zone}),
+            0,
+        )
+    }
+
+    #[test]
+    fn named_zone_schedule_preserves_milliseconds() {
+        let record = local_schedule("2026-09-16", "15:04:05.123", "Asia/Shanghai").unwrap();
+        assert_eq!(record.value()["scheduledAt"], "2026-09-16T07:04:05.123Z");
+    }
+
+    #[test]
+    fn named_zone_schedule_rejects_gap_and_chooses_earliest_fold() {
+        let gap = local_schedule("2026-03-08", "02:30:00", "America/New_York");
+        assert_eq!(gap.err().unwrap()["code"], "invalid_rule");
+        let fold = local_schedule("2026-11-01", "01:30:00", "America/New_York").unwrap();
+        assert_eq!(fold.value()["scheduledAt"], "2026-11-01T05:30:00.000Z");
+    }
+
+    #[test]
+    fn named_zone_schedule_retains_future_dst_and_rejects_invalid_zone() {
+        let future = local_schedule("2100-07-01", "12:00:00", "America/New_York").unwrap();
+        assert_eq!(future.value()["scheduledAt"], "2100-07-01T16:00:00.000Z");
+        let invalid = local_schedule("2026-09-16", "12:00:00", "Unknown/Place");
+        assert_eq!(invalid.err().unwrap()["code"], "invalid_time_zone");
+        let traversal = local_schedule("2026-09-16", "12:00:00", "../etc/passwd");
+        assert_eq!(traversal.err().unwrap()["code"], "invalid_time_zone");
+    }
 }

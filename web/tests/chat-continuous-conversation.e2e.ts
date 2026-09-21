@@ -44,7 +44,10 @@ function textChunks(spec: TurnSpec): unknown[] {
 }
 
 function toolChunks(spec: TurnSpec): unknown[] {
-  const argumentsJson = JSON.stringify({ command: `printf '${spec.toolMarker}\\n'`, description: spec.toolMarker })
+  const command = process.platform === 'win32'
+    ? `[Console]::Out.Write('${spec.toolMarker}' + [char]10)`
+    : `echo '${spec.toolMarker}'`
+  const argumentsJson = JSON.stringify({ command, description: spec.toolMarker })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
     { type: 'tool-call-delta', index: 0, id: spec.callId, name: 'bash', argumentsDelta: argumentsJson },
@@ -63,7 +66,7 @@ function replayRecording(specs: TurnSpec[]): string {
       ])
   let seq = 0
   return [
-    { type: 'session', version: 0, id: 'continuous-chat-replay', createdAt: 0, cwd: '/workspace' },
+    { type: 'session', version: 0, id: 'continuous-chat-replay', createdAt: 0 },
     ...attempts.flatMap(attempt => attempt.chunks.map(chunk => ({
       type: 'assistant/chunk', seq: seq++, time: 0, data: { turn: attempt.turn, step: attempt.step, chunk },
     }))),

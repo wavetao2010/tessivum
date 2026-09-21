@@ -61,10 +61,10 @@ test('uses a composer model switch as the default without rewriting logged sessi
     await trigger.click()
     await harness.page.getByRole('menuitem', { name: /模型/ }).click()
     await harness.page.getByRole('menuitemradio', { name: 'Acme Large' }).click()
-    await expect(waitUntil(
+    expect(await waitUntil(
       () => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'),
       document => document.includes('provider: acme-gateway'),
-    )).resolves.toContain('model: acme-large')
+    )).toContain('model: acme-large')
 
     expect(await current(await create('default-model-after'))).toEqual({ provider: 'acme-gateway', model: 'acme-large' })
     expect(await current(logged)).toEqual({ provider: 'origin-gateway', model: 'origin-large' })
@@ -74,7 +74,7 @@ test('uses a composer model switch as the default without rewriting logged sessi
     })
     expect(replaced.ok).toBe(true)
     const box = harness.page.locator('textarea[data-input-phase], textarea').first()
-    await expect(waitUntil(() => box.isEnabled(), enabled => !enabled)).resolves.toBe(false)
+    expect(await waitUntil(() => box.isEnabled(), enabled => !enabled)).toBe(false)
     expect(await box.getAttribute('placeholder')).toBe('当前模型不可用，请先选择模型')
     const refused = await harness.rpc('session.prompt', {
       sessionId: await create('default-model-refusal'), mode: 'queue', content: [{ type: 'text', text: 'hi' }],
@@ -84,7 +84,7 @@ test('uses a composer model switch as the default without rewriting logged sessi
     await trigger.click()
     await harness.page.getByRole('menuitem', { name: /模型/ }).click()
     await harness.page.getByRole('menuitemradio', { name: 'Origin Large' }).click()
-    await expect(waitUntil(() => box.isEnabled(), Boolean)).resolves.toBe(true)
+    expect(await waitUntil(() => box.isEnabled(), Boolean)).toBe(true)
     harness.assertClean()
   } finally {
     await harness.close()

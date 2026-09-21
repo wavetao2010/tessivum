@@ -22,6 +22,7 @@ pub enum CliCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebCommand {
     pub data_dir: Option<PathBuf>,
+    pub settings_file: Option<PathBuf>,
     pub patches: Vec<PathBuf>,
 }
 
@@ -206,6 +207,9 @@ enum RawCommand {
 
 #[derive(Debug, Args)]
 struct RawWebCommand {
+    /// Writable settings document; relative paths resolve from the working directory.
+    #[arg(long, value_name = "FILE")]
+    settings_file: Option<PathBuf>,
     #[arg(long = "patch", value_name = "FILE")]
     patches: Vec<PathBuf>,
 }
@@ -260,6 +264,7 @@ where
         let command = match command {
             RawCommand::Web(web) => CliCommand::Web(WebCommand {
                 data_dir: raw.data_dir,
+                settings_file: web.settings_file,
                 patches: web.patches,
             }),
             RawCommand::Sdk => CliCommand::Sdk(SdkCommand {
@@ -294,6 +299,7 @@ where
             Ok(Cli {
                 command: CliCommand::Web(WebCommand {
                     data_dir: raw.data_dir,
+                    settings_file: None,
                     patches: Vec::new(),
                 }),
             })

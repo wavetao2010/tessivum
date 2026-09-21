@@ -514,6 +514,44 @@ impl Drop for TempDir {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn cli_installs_file_url_bundle_with_unicode_and_reserved_path_characters() {
+    let temp = TempDir::new();
+    let source = temp.0.join("插件 % #");
+    write_bundle(
+        &source,
+        "uri-plugin",
+        false,
+        "- insert:\n    - id: uri-plugin-proof\n      name: uri-plugin\n",
+    );
+    let package = source.join("node_modules/uri-plugin");
+    let specifier = url::Url::from_directory_path(&package).unwrap();
+    let data = temp.0.join("installed profile");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tessivum"))
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["plugin", "add", specifier.as_str()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "file URL installation failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tree = load_plugin_entries(&plugin_profile_root(&data))
+        .unwrap()
+        .unwrap();
+    let entries = tree.entries();
+    let installed = entries
+        .iter()
+        .find(|entry| entry.options.id.as_str() == "uri-plugin-proof")
+        .expect("the installed local bundle contributes its active entry");
+    assert_eq!(installed.options.name.as_deref(), Some("uri-plugin"));
+    assert_eq!(installed.options.runtime, RuntimeKind::LegacyNode);
+}
+
 #[cfg(unix)]
 #[test]
 fn legacy_host_process_receives_only_the_valid_parent_shell() {

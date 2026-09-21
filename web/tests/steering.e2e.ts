@@ -11,7 +11,6 @@ const PROMPT = 'Use the ask_user_question tool to ask me exactly one question wi
 const STEER = 'Interjection: include the word BANANA in your final reply.'
 const STEER_ONE = 'Interjection: include the word BANANA in your final reply.'
 const STEER_TWO = 'Interjection: include the word ORANGE in your final reply.'
-const PACE = { TESSIVUM_REPLAY_PACE_MS: '100' }
 
 type Event = { type: string; data: Record<string, unknown> }
 
@@ -49,7 +48,8 @@ async function fixturePrompts(): Promise<string[]> {
   })
 }
 
-async function answerYes(harness: RustWebHarness): Promise<void> {
+async function answerYes(harness: RustWebHarness, showQuestion: () => void): Promise<void> {
+  showQuestion()
   const composer = harness.page.locator('[data-question-key]')
   await composer.waitFor({ timeout: 30_000 })
   const yes = composer.getByRole('radio', { name: 'Yes' })
@@ -57,19 +57,42 @@ async function answerYes(harness: RustWebHarness): Promise<void> {
   await yes.press('Enter')
 }
 
-async function launchSteering(name: string, replayOverride?: string): Promise<RustWebHarness> {
-  return RustWebHarness.launch({
+async function launchSteering(name: string, replayOverride?: string): Promise<{ harness: RustWebHarness; showQuestion: () => void }> {
+  let showQuestions = false
+  const pendingQuestions: Array<() => void> = []
+  const harness = await RustWebHarness.launch({
     name,
     locale: 'en-US',
     replayFixture: FIXTURE,
     replayOverride,
-    env: PACE,
+    beforePage: async candidate => {
+      await candidate.page.routeWebSocket('**/api/events.mux', route => {
+        const server = route.connectToServer()
+        server.onMessage(message => {
+          const frame: unknown = typeof message === 'string' ? JSON.parse(message) : undefined
+          // Question arrival hides the composer. Keep its real frame until the queue gesture finishes.
+          if (!showQuestions && record(frame) && frame.method === 'question/requested') {
+            pendingQuestions.push(() => route.send(message))
+          } else {
+            route.send(message)
+          }
+        })
+      })
+    },
   })
+  return {
+    harness,
+    showQuestion: () => {
+      showQuestions = true
+      for (const send of pendingQuestions) send()
+      pendingQuestions.length = 0
+    },
+  }
 }
 
 test('steering moves one queued occurrence into the live turn and persists the interruption', async () => {
   expect(await fixturePrompts()).toEqual([PROMPT, STEER])
-  const harness = await launchSteering('steering-web-e2e')
+  const { harness, showQuestion } = await launchSteering('steering-web-e2e')
   try {
     const input = harness.page.locator('textarea').first()
     await input.fill(PROMPT)
@@ -84,9 +107,8 @@ test('steering moves one queued occurrence into the live turn and persists the i
     await steer.click()
     expect((await harness.sessions()).find(item => !item.blank)?.running).toBe(true)
     const pending = harness.page.locator('[data-pending-steering]').filter({ hasText: STEER })
-    await harness.page.locator('[data-question-key]').waitFor({ timeout: 30_000 })
 
-    await answerYes(harness)
+    await answerYes(harness, showQuestion)
     const sessionId = (await harness.sessions()).find(item => !item.blank)?.sessionId
     if (sessionId === undefined) throw new Error('steering created no nonblank session')
     const events = await waitUntil(
@@ -114,7 +136,7 @@ test('steering moves one queued occurrence into the live turn and persists the i
 }, 120_000)
 
 test('steering Cmd+Enter sends directly to the live turn without creating a queue row', async () => {
-  const harness = await launchSteering('steering-composer-shortcut-web-e2e')
+  const { harness, showQuestion } = await launchSteering('steering-composer-shortcut-web-e2e')
   try {
     const input = harness.page.locator('textarea').first()
     const settled = harness.whenTurnSettled(60_000)
@@ -122,13 +144,13 @@ test('steering Cmd+Enter sends directly to the live turn without creating a queu
     await input.press('Enter')
     await harness.page.getByRole('button', { name: 'Stop generating' }).waitFor({ timeout: 10_000 })
     await input.fill(STEER)
-    await input.press('Meta+Enter')
+    await input.press('ControlOrMeta+Enter')
     await waitUntil(() => input.inputValue(), value => value === '', 5_000)
     expect(await harness.page.locator('[data-queue-dock]').count()).toBe(0)
 
     const pending = harness.page.locator('[data-pending-steering]').filter({ hasText: STEER })
     await pending.waitFor({ timeout: 10_000 })
-    await answerYes(harness)
+    await answerYes(harness, showQuestion)
     const events = await durableEvents(harness, await settled)
     expect(claimedMessages(events, STEER)).toHaveLength(1)
     await waitUntil(() => harness.page.getByText(STEER, { exact: true }).count(), count => count === 1, 15_000)
@@ -141,7 +163,7 @@ test('steering Cmd+Enter sends directly to the live turn without creating a queu
 }, 90_000)
 
 test('steering swaps the busy shortcut when Enter is configured to steer', async () => {
-  const harness = await launchSteering('steering-swapped-shortcut-web-e2e')
+  const { harness, showQuestion } = await launchSteering('steering-swapped-shortcut-web-e2e')
   try {
     await harness.page.getByRole('button', { name: 'Settings', exact: true }).click()
     const dialog = harness.page.getByRole('dialog', { name: 'Settings' })
@@ -157,7 +179,7 @@ test('steering swaps the busy shortcut when Enter is configured to steer', async
     await harness.page.getByRole('button', { name: 'Stop generating' }).waitFor({ timeout: 10_000 })
     const queuedText = 'Queued by the complementary Cmd+Enter shortcut.'
     await input.fill(queuedText)
-    await input.press('Meta+Enter')
+    await input.press('ControlOrMeta+Enter')
     const queued = harness.page.locator('[data-queue-dock]').getByRole('listitem').filter({ hasText: queuedText })
     await queued.getByText(queuedText, { exact: true }).waitFor({ timeout: 10_000 })
     expect(await harness.page.locator('[data-pending-steering]').filter({ hasText: queuedText }).count()).toBe(0)
@@ -165,7 +187,7 @@ test('steering swaps the busy shortcut when Enter is configured to steer', async
     if (active === undefined) throw new Error('swapped shortcut has no active session')
     expect(claimedMessages(await durableEvents(harness, active.sessionId), queuedText)).toHaveLength(0)
     await queued.getByRole('button', { name: 'Remove queued message' }).click()
-    await answerYes(harness)
+    await answerYes(harness, showQuestion)
     await settled
     harness.assertClean()
   } finally {
@@ -174,7 +196,7 @@ test('steering swaps the busy shortcut when Enter is configured to steer', async
 }, 90_000)
 
 test('steering flushes an empty-draft queue in FIFO order through a durable replay', async () => {
-  const harness = await launchSteering('steering-flush-web-e2e', STEER_ALL_OVERRIDE)
+  const { harness, showQuestion } = await launchSteering('steering-flush-web-e2e', STEER_ALL_OVERRIDE)
   try {
     const input = harness.page.locator('textarea').first()
     const settled = harness.whenTurnSettled(60_000)
@@ -191,11 +213,10 @@ test('steering flushes an empty-draft queue in FIFO order through a durable repl
     await dock.getByText(STEER_TWO, { exact: true }).waitFor({ timeout: 10_000 })
     expect(await harness.page.locator('[data-pending-steering]').count()).toBe(0)
 
-    await input.press('Meta+Enter')
+    await input.press('ControlOrMeta+Enter')
     await waitUntil(() => harness.page.locator('[data-queue-dock]').count(), count => count === 0, 10_000)
-    await harness.page.locator('[data-question-key]').waitFor({ timeout: 30_000 })
 
-    await answerYes(harness)
+    await answerYes(harness, showQuestion)
     const events = await durableEvents(harness, await settled)
     const first = claimedMessages(events, STEER_ONE)
     const second = claimedMessages(events, STEER_TWO)

@@ -331,8 +331,37 @@ async fn assert_process_gone(pid: u32) {
     panic!("process tree child {pid} survived shutdown");
 }
 
-#[cfg(not(unix))]
-async fn assert_process_gone(_: u32) {}
+#[cfg(windows)]
+async fn assert_process_gone(pid: u32) {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        let error = std::io::Error::last_os_error();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER as i32),
+            "{error}"
+        );
+        return;
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    for _ in 0..200 {
+        match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => return,
+            WAIT_TIMEOUT => tokio::time::sleep(Duration::from_millis(10)).await,
+            _ => panic!(
+                "cannot query process {pid}: {}",
+                std::io::Error::last_os_error()
+            ),
+        }
+    }
+    panic!("process tree child {pid} survived shutdown");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_cleans_generation_restarts_cleanly_and_shutdown_reaps_tree() {
@@ -344,7 +373,7 @@ async fn crash_cleans_generation_restarts_cleanly_and_shutdown_reaps_tree() {
 
     let tools = ToolRuntime::new();
     let profile = LegacyProfile::new(
-        HostCommand::new("python3").arg(host),
+        HostCommand::new(if cfg!(windows) { "python" } else { "python3" }).arg(host),
         ClientConfig::default(),
         bridge_services(tools.clone()),
     )

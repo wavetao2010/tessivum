@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1.7. The earlier local Windows verification applies only to the original candidate, not this merged tree. Raw PATH/type preservation now passes isolated transaction regressions on PowerShell 5.1 and 7; final ZIP and cross-platform CI acceptance remain merge gates. See the [Windows repair evidence and remaining publication scope](docs/WINDOWS_CHECKPOINT_20260916.md).
+
+### Added
+
+- Native Windows x86_64 ZIP packaging with static-CRT MSVC builds, checksum-verified payloads, CRLF launchers, and a gated Windows release job. Existing published Alpha.27 assets are unchanged; no Windows ARM64 package is added.
+- Ordinary-user PowerShell installation, version switching and rollback, owned User PATH management, and uninstall that preserves application data.
+- Windows cloudflared executable selection and the verified 2026.8.3 Windows asset digest for Quick Tunnel.
+- `web --settings-file <file>` for ordinary-user Hosts that share a settings document while retaining independent data directories and locks.
+
+### Fixed
+
+- Materialize Windows runtime package aliases as real directories without requiring symbolic-link privileges or recursively copying checkout dependency cycles.
+- Wait for owned Windows process descendants before sandbox permission and temporary-directory cleanup; distinguish unrelated process generations without weakening ownership checks.
+- Make native API preflight, Legacy fixtures, and Browser recordings respect Windows transport, executable, shell, and path behavior.
+- Resolve named IANA time zones with bundled data on Windows and Unix, preserving milliseconds, rejecting DST gaps, choosing the earlier fold, and applying future transition rules.
+- Decode local plugin `file://` URLs as native paths, including percent-encoded Unicode and reserved characters, instead of stripping the scheme.
+- Preserve empty ZIP fixture bytes in PowerShell strict mode and verify installer rollback, committed cleanup failures, idempotent uninstall, and user-data protection.
+- Build case-correct release process environments, resolve one actual Bun executable for no-Node PTC execution, use the native restart response envelope, and retain failed launcher stderr before checking its exit code.
+- Force UTF-8 on the Python code worker's JSONL streams so Windows locale defaults do not corrupt Unicode programs and paths; keep sandbox fixture markers explicitly UTF-8.
+- Make Browser acceptance use portable npm packing, the platform-native Cmd/Ctrl modifier, and completed workflow state before inspecting disclosures.
+- Finalize closed Bun child-process resources before starting the next Windows Browser Host, avoiding stale DevTools pipe handles without retries or altered product behavior.
+- Align the Windows packaging Core checkout with the Alpha.29 Core 0.1.7 pin; keep CI prerequisite-order tests independent of duplicate dependency SHA assertions.
+- Require an explicit Windows installer version instead of defaulting to an unavailable Alpha.27 asset; support Alpha.29/30 adjacent-version binary fixtures and Python 3.9 compatibility checks.
+- Select native Windows/Unix shell commands in Browser replay fixtures instead of unconditionally sending PowerShell to the Unix shell; preserve the explicit PowerShell terminal scenario and the goal fixture's single intentional tool failure.
+- Capture persistent PowerShell descendants before terminating their Windows Job, including cancellation, timeout, disposal, and last-owner runtime teardown; fence retained process generations before releasing resources.
+- Separate ordinary Job-inherited children from explicitly escaped grandchildren in Windows process regressions; keep unrelated processes alive during cleanup verification.
+- Wait for acknowledged Browser model selection before asserting image-capability admission, rather than racing the selection request.
+- Use npm for the market offline smoke's reproducible archives, matching Browser packaging and avoiding Bun 1.4.0 failures for Unicode destination paths; keep the offline install and import checks on Bun.
+- Preserve raw Windows User PATH registry text, `REG_SZ`/`REG_EXPAND_SZ` types, and missing-versus-empty values during install, rollback, and uninstall; verify real registry transactions through process-local HKCU isolation on PowerShell 5.1 and 7.
+- Normalize local plugin `file://` URLs before invoking pnpm, not just during package preflight; verify actual installation and activation under Unicode, percent, hash, and space-containing paths.
+- Make seeded Browser session setup expand only closed workspace disclosures in one browser task, avoiding a selector race with automatic expansion without changing product behavior or weakening scenario assertions.
+- Await Browser operations before invoking Bun assertions, preserving Playwright protocol event ordering instead of reentering the event loop through Promise matchers.
+- Verify produced-file summaries by ordered visible paths, exact remaining counts, and non-overflowing layout rather than a platform-dependent two-chip count.
+- Check remote revocation through authenticated HTTP admission changing from 200 to 401 and active WebSocket closure, rather than a scheduler-dependent reconnect warning count.
+- Wait for native workspace attachment before declaring Browser startup ready; hold and release the real question frame during steering gestures instead of relying on replay pacing before the question hides the composer.
+- Keep non-persistent Windows Job ownership inside the blocking capture/fence task across outer-task cancellation; add a queued-cleanup regression proving escaped descendants are reaped and unrelated processes survive.
+- Mark installer and uninstaller PATH mutations before broadcasting environment changes, so notifier initialization failures still trigger raw registry snapshot rollback; verify injected Add-Type failures on Windows PowerShell 5.1 and 7.
+
 ## 0.1.0-alpha.29 - 2026-09-10
 
 ### Fixed

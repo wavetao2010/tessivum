@@ -995,6 +995,18 @@ fn is_local_package_specifier(specifier: &str) -> bool {
         || path.starts_with("../")
 }
 
+fn local_package_file_url_path(specifier: &str) -> Result<PathBuf, PluginManagerError> {
+    url::Url::parse(specifier)
+        .ok()
+        .and_then(|url| url.to_file_path().ok())
+        .ok_or_else(|| {
+            compatibility_error(
+                PLUGIN_PACKAGE_ENTRY_INVALID,
+                "invalid local package file URL",
+            )
+        })
+}
+
 fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerError> {
     if let Some(package) = add_package_name(specifier).filter(|name| !name.is_empty()) {
         return Ok(package.into());
@@ -1005,13 +1017,17 @@ fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerErro
             "the added package name could not be resolved",
         ));
     }
-    let path = Path::new(specifier.strip_prefix("file:").unwrap_or(specifier));
-    let root = if path.is_absolute() {
-        path.to_path_buf()
+    let root = if specifier.starts_with("file://") {
+        local_package_file_url_path(specifier)?
     } else {
-        env::current_dir()
-            .map_err(|error| io_error(".", error))?
-            .join(path)
+        let path = Path::new(specifier.strip_prefix("file:").unwrap_or(specifier));
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir()
+                .map_err(|error| io_error(".", error))?
+                .join(path)
+        }
     };
     let manifest = read_json(&root.join("package.json"), MAX_PROFILE_MANIFEST_BYTES)?;
     manifest
@@ -1028,6 +1044,10 @@ fn resolve_add_package_name(specifier: &str) -> Result<String, PluginManagerErro
 }
 
 fn anchor_path_spec(specifier: &str, cwd: &Path) -> Result<String, PluginManagerError> {
+    if specifier.starts_with("file://") {
+        let path = local_package_file_url_path(specifier)?;
+        return Ok(format!("file:{}", path.to_string_lossy()));
+    }
     let (prefix, path) = specifier
         .strip_prefix("file:")
         .map_or(("", specifier), |path| ("file:", path));
@@ -2493,7 +2513,7 @@ fn repaired_plugin_root(
         uuid::Uuid::new_v4()
     ));
     let result = (|| {
-        copy_package_tree(root, &temporary)?;
+        copy_package_tree(root, &temporary, true)?;
         let repaired_entry = temporary.join("lib/index.js");
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -2660,16 +2680,41 @@ fn validate_sidebar_repair(
     Ok(())
 }
 
-fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), PluginManagerError> {
+fn copy_package_tree(
+    source: &Path,
+    destination: &Path,
+    copy_dependencies: bool,
+) -> Result<(), PluginManagerError> {
     fs::create_dir(destination).map_err(|error| io_error(destination, error))?;
     for entry in fs::read_dir(source).map_err(|error| io_error(source, error))? {
         let entry = entry.map_err(|error| io_error(source, error))?;
+        if !copy_dependencies && entry.file_name() == "node_modules" {
+            // Vendor development links are not runtime payload. Runtime aliases
+            // are installed together in the profile's own node_modules.
+            continue;
+        }
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata =
             fs::symlink_metadata(&source_path).map_err(|error| io_error(&source_path, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(PluginManagerError::Invalid(format!(
+                "package contains a symbolic link: {}",
+                source_path.display()
+            )));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(PluginManagerError::Invalid(format!(
+                    "package contains a reparse point: {}",
+                    source_path.display()
+                )));
+            }
+        }
         if metadata.is_dir() {
-            copy_package_tree(&source_path, &destination_path)?;
+            copy_package_tree(&source_path, &destination_path, copy_dependencies)?;
         } else if metadata.is_file() {
             fs::copy(&source_path, &destination_path)
                 .map_err(|error| io_error(&destination_path, error))?;
@@ -3483,19 +3528,21 @@ fn install_vendor_aliases(profile: &Path, vendor: &Path) -> Result<(), PluginMan
         }
         fs::create_dir_all(alias.parent().expect("module aliases have a parent"))
             .map_err(|error| io_error(&alias, error))?;
-        symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
+        install_module_alias(&source, &alias)?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(source, alias)
+fn install_module_alias(source: &Path, alias: &Path) -> Result<(), PluginManagerError> {
+    std::os::unix::fs::symlink(source, alias).map_err(|error| io_error(alias, error))
 }
 
 #[cfg(windows)]
-fn symlink_directory(source: &Path, alias: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(source, alias)
+fn install_module_alias(source: &Path, alias: &Path) -> Result<(), PluginManagerError> {
+    // Ordinary Windows users cannot create symlinks. The packaged runtime uses
+    // the same real-directory layout, without enabling Developer Mode.
+    copy_package_tree(source, alias, false)
 }
 
 fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), PluginManagerError> {
@@ -3534,7 +3581,7 @@ fn install_host_module_aliases(profile: &Path, root: &Path) -> Result<(), Plugin
         }
         fs::create_dir_all(alias.parent().expect("scoped alias has a parent"))
             .map_err(|error| io_error(&alias, error))?;
-        symlink_directory(&source, &alias).map_err(|error| io_error(&alias, error))?;
+        install_module_alias(&source, &alias)?;
     }
     Ok(())
 }
@@ -3765,6 +3812,20 @@ mod tests {
         for package in [".", "..", "../escape", "@scope/../escape"] {
             assert!(package_root(profile, package).is_err(), "{package}");
         }
+    }
+
+    #[test]
+    fn local_package_file_url_decodes_unicode_and_reserved_characters() {
+        let profile = temporary_profile();
+        let package = profile.join("插件 % #");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), br#"{"name":"local-plugin"}"#).unwrap();
+        let specifier = url::Url::from_directory_path(&package).unwrap();
+        assert_eq!(
+            resolve_add_package_name(specifier.as_str()).unwrap(),
+            "local-plugin"
+        );
+        fs::remove_dir_all(profile).unwrap();
     }
 
     #[test]

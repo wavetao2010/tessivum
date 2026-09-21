@@ -31,11 +31,33 @@ const PACKAGE_FILES: Readonly<Record<string, string>> = {
   'packages/skill/skill-filesystem/tests/skill-filesystem.spec.ts': 'export {}\n',
 }
 
+const POSIX_COMMANDS: Readonly<Record<string, string>> = {
+  'Get-Location; Get-ChildItem -Force': 'pwd && ls -la',
+  "Get-ChildItem -LiteralPath 'packages'; [Console]::Out.Write('---' + [char]10); Get-ChildItem -LiteralPath 'packages' -Directory -Recurse": 'ls packages && echo "---" && find packages -type d',
+  "Get-ChildItem -LiteralPath 'packages' -Directory -Recurse | Sort-Object FullName | ForEach-Object { $_.FullName }; [Console]::Out.Write('---random pick---' + [char]10); Get-Item -LiteralPath '__dsh_fixture_missing__' -ErrorAction Stop": 'find packages -type d | sort; echo "---random pick---"; __dsh_fixture_missing__',
+  "Get-ChildItem -LiteralPath 'packages' -Filter package.json -File -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName": "find packages -name package.json -exec dirname {} \\; | sort | sed -n '1p'",
+  "Get-ChildItem -LiteralPath 'packages/context/session-reference' -File -Recurse | Sort-Object FullName | ForEach-Object { $_.FullName }": 'find packages/context/session-reference -type f | sort',
+  "Get-ChildItem -LiteralPath 'packages' -Filter package.json -File -Recurse | Where-Object { $_.Directory.Name -ne 'session-reference' } | Select-Object -First 1 -ExpandProperty DirectoryName": "find packages -name package.json ! -path '*/session-reference/*' -exec dirname {} \\; | sort | sed -n '1p'",
+  "Get-ChildItem -LiteralPath 'packages/llm/token-meter' -File -Recurse | Sort-Object FullName | ForEach-Object { $_.FullName }": 'find packages/llm/token-meter -type f | sort',
+}
+
 type JsonRecord = Record<string, unknown>
 type SessionEvent = { type: string; data: JsonRecord }
 
 function record(value: unknown): value is JsonRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function nativeReplayValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(nativeReplayValue)
+  if (record(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, nativeReplayValue(item)]))
+  if (typeof value !== 'string') return value
+  if (POSIX_COMMANDS[value] !== undefined) return POSIX_COMMANDS[value]
+  if (!value.startsWith('{') || !value.includes('"command"')) return value
+  const args = JSON.parse(value) as unknown
+  return record(args) && typeof args.command === 'string' && POSIX_COMMANDS[args.command] !== undefined
+    ? JSON.stringify({ ...args, command: POSIX_COMMANDS[args.command] })
+    : value
 }
 
 function stringField(value: unknown, field: string): string | undefined {
@@ -95,15 +117,27 @@ function endedTurns(events: readonly SessionEvent[]): number[] {
 
 
 test('goal keeps actions on both completed durable turns after reload', async () => {
-  const fixtureEvents = sessionEvents(await readFile(FIXTURE, 'utf8'))
+  const fixture = await readFile(FIXTURE, 'utf8')
+  const fixtureEvents = sessionEvents(fixture)
   expect(createdObjectives(fixtureEvents)).toEqual([PROMPT])
   expect(goalRounds(fixtureEvents)).toEqual([1, 2])
+  const env: Record<string, string> = {}
   const harness = await RustWebHarness.launch({
     name: 'goal-multi-turn-actions',
     locale: 'en-US',
-    replayFixture: FIXTURE,
-    replayOverride: OVERRIDE,
-    beforeStart: candidate => seedPackageInventory(candidate.workspace),
+    replayFixture: process.platform === 'win32' ? FIXTURE : undefined,
+    replayRecording: process.platform === 'win32' ? undefined : fixture.trimEnd().split('\n')
+      .map(line => JSON.stringify(nativeReplayValue(JSON.parse(line)))).join('\n'),
+    replayOverride: process.platform === 'win32' ? OVERRIDE : undefined,
+    env,
+    beforeStart: async candidate => {
+      await seedPackageInventory(candidate.workspace)
+      if (process.platform !== 'win32') {
+        const override = join(candidate.root, 'replay.override.json')
+        await writeFile(override, JSON.stringify(nativeReplayValue(JSON.parse(await readFile(OVERRIDE, 'utf8')))))
+        env.TESSIVUM_REPLAY_OVERRIDE_FILE = override
+      }
+    },
   })
   try {
     const [{ sessionId }] = await harness.sessions()

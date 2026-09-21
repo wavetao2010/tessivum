@@ -438,9 +438,144 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    needs: [web, market]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: wavetao2010/tessivum-core
+          ref: 0caaccf9a79d7a906a08a21c3032eafebe084ffc
+          path: .release/tessivum-core
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: .release/deepseek-harness
+          sparse-checkout: vendor
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: web-assets
+          path: web
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: cordis-runtime
+          path: .release
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: tessivum-market
+          path: .release/market
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: host-modules
+          path: .release/host-modules
+
+      - name: Restore compiled Cordis runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          tar.exe -xzf .release/cordis-runtime.tar.gz -C .release/deepseek-harness
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.20.0
+
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.7.0
+
+      - name: Verify fixed Windows release runtimes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ((node --version).Trim() -ne 'v24.20.0') { throw 'Node must be 24.20.0.' }
+          if ((bun --version).Trim() -ne '1.4.0') { throw 'Bun must be 1.4.0.' }
+          if ((pnpm --version).Trim() -ne '11.7.0') { throw 'pnpm must be 11.7.0.' }
+
+      - name: Build static-CRT Windows release executable
+        shell: pwsh
+        env:
+          CORDIS_VENDOR_ROOT: ${{ github.workspace }}/.release/deepseek-harness/vendor
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --jobs 1 --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Package Windows release ZIP
+        shell: bash
+        run: |
+          bash scripts/package_release.sh \
+            "$RELEASE_TAG" \
+            x86_64-pc-windows-msvc \
+            target/x86_64-pc-windows-msvc/release/tessivum.exe \
+            .release/tessivum-core/node/compat-host \
+            .release/host-modules \
+            .release/deepseek-harness/vendor \
+            ".release/market/tessivum-market-${RELEASE_TAG#v}.tgz" \
+            dist
+
+      - name: Smoke packaged Windows release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = $env:RELEASE_TAG.Substring(1)
+          $archive = Join-Path $env:GITHUB_WORKSPACE "dist\tessivum-$version-x86_64-pc-windows-msvc.zip"
+          $logs = Join-Path $env:GITHUB_WORKSPACE '.release\windows-smoke-logs'
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke_windows_release.ps1 `
+            -ArchivePath $archive `
+            -Version $version `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -LogDirectory $logs
+
+      - name: Run Windows installer behavioral checks against release ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = $env:RELEASE_TAG.Substring(1)
+          $archive = (Resolve-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "dist\tessivum-$version-x86_64-pc-windows-msvc.zip")).Path
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_install.ps1 -ArchivePath $archive
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: ${{ always() }}
+        with:
+          name: windows-release-smoke-logs
+          path: .release/windows-smoke-logs
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: tessivum-x86_64-pc-windows-msvc
+          path: |
+            dist/tessivum-*-x86_64-pc-windows-msvc.zip
+            dist/tessivum-*-x86_64-pc-windows-msvc.zip.sha256
+          if-no-files-found: error
+
   release:
     name: Publish release assets
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -481,4 +616,4 @@ jobs:
               --title "Tessivum ${RELEASE_TAG#v}" \
               --generate-notes
           fi
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.tgz dist/*.sha256 dist/*.source.json dist/tessivum.rb --clobber
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/*.tgz dist/*.sha256 dist/*.source.json dist/tessivum.rb --clobber

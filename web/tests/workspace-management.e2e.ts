@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { mkdir, stat } from 'node:fs/promises'
-import { join, sep } from 'node:path'
+import { join, sep, toNamespacedPath } from 'node:path'
 import type { Locator } from 'playwright-core'
 import {
   acknowledgeReloadConnectionLoss, captureStableAria, RustWebHarness, settledRecording, UPSTREAM_TESTS, waitUntil,
@@ -46,8 +46,9 @@ async function addNewFolderWorkspace(harness: RustWebHarness, parent: string, na
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
   await dialog.waitFor({ state: 'hidden', timeout: 10_000 })
   const path = join(parent, name)
-  const listed = await waitUntil(() => workspaceItems(harness), result => result.items.some(item => item.path === path))
-  const workspace = listed.items.find(item => item.path === path)
+  const expectedPath = toNamespacedPath(path)
+  const listed = await waitUntil(() => workspaceItems(harness), result => result.items.some(item => item.path === expectedPath))
+  const workspace = listed.items.find(item => item.path === expectedPath)
   if (workspace === undefined) throw new Error('workspace did not materialize through directory chrome')
   return workspace
 }
@@ -56,8 +57,9 @@ async function adoptDirectory(harness: RustWebHarness, path: string): Promise<Wo
   const dialog = await browseTo(harness, path)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
   await dialog.waitFor({ state: 'hidden', timeout: 10_000 })
-  const listed = await waitUntil(() => workspaceItems(harness), result => result.items.some(item => item.path === path))
-  const workspace = listed.items.find(item => item.path === path)
+  const expectedPath = toNamespacedPath(path)
+  const listed = await waitUntil(() => workspaceItems(harness), result => result.items.some(item => item.path === expectedPath))
+  const workspace = listed.items.find(item => item.path === expectedPath)
   if (workspace === undefined) throw new Error('workspace did not materialize through directory chrome')
   return workspace
 }
@@ -72,11 +74,16 @@ test('workspace creation, browsing, view preferences, and safe deletion survive 
       name: 'workspace-management',
       beforeStart: async candidate => {
         process.env.HOME = candidate.root
-        await candidate.seedSession(
-          preservedId,
-          settledRecording(preservedTitle, 'Keep this session.', 'PRESERVED_SESSION_DONE')
-            .replaceAll('{{cwd}}', join(candidate.root, 'alpha-ws')),
-        )
+        const recording = settledRecording(preservedTitle, 'Keep this session.', 'PRESERVED_SESSION_DONE')
+          .trimEnd()
+          .split('\n')
+          .map((line, index) => {
+            const event = JSON.parse(line) as Record<string, unknown>
+            if (index === 0) event.cwd = join(candidate.root, 'alpha-ws')
+            return JSON.stringify(event)
+          })
+          .join('\n')
+        await candidate.seedSession(preservedId, recording)
       },
     })
   } finally {
@@ -85,6 +92,7 @@ test('workspace creation, browsing, view preferences, and safe deletion survive 
   }
   if (harness === undefined) throw new Error('workspace harness did not launch')
   try {
+    const alphaPath = join(harness.root, 'alpha-ws')
     const alpha = await addNewFolderWorkspace(harness, harness.root, 'alpha-ws')
     const beta = await addNewFolderWorkspace(harness, harness.root, 'beta-ws')
     expect((await workspaceItems(harness)).items.slice(0, 2).map(workspace => workspace.title)).toEqual(['beta-ws', 'alpha-ws'])
@@ -133,12 +141,12 @@ test('workspace creation, browsing, view preferences, and safe deletion survive 
     await deletion.waitFor({ state: 'detached', timeout: 10_000 })
     expect(await waitUntil(() => harness.page.getByRole('button', { name: 'Workspace actions for gamma-ws' }).count(), count => count === 0)).toBe(0)
     expect((await workspaceItems(harness)).items.some(item => item.workspaceId === alpha.workspaceId)).toBe(false)
-    await stat(alpha.path)
+    await stat(alphaPath)
     expect(await waitUntil(() => preservedRow.getAttribute('aria-selected'), value => value === 'true')).toBe('true')
     await harness.page.getByText('Ungrouped', { exact: true }).waitFor({ timeout: 10_000 })
     const preservedHistory = await harness.rpc<{ events: unknown[] }>('session.history', { sessionId: preservedId, maxMessages: 1_000 })
     expect(preservedHistory.value?.events.length).toBeGreaterThan(0)
-    const reregistered = await adoptDirectory(harness, alpha.path)
+    const reregistered = await adoptDirectory(harness, alphaPath)
     expect(reregistered.workspaceId).not.toBe(alpha.workspaceId)
     const reregisteredRow = harness.page.locator('[role="treeitem"]').filter({ hasText: 'alpha-ws' }).first()
     await reregisteredRow.waitFor({ timeout: 10_000 })
@@ -156,7 +164,7 @@ test('workspace creation, browsing, view preferences, and safe deletion survive 
     expect(await harness.page.getByRole('button', { name: 'Workspace actions for gamma-ws' }).count()).toBe(0)
     await harness.page.getByText('Ungrouped', { exact: true }).waitFor({ timeout: 10_000 })
     expect(await harness.page.locator('[role="treeitem"][aria-selected="true"]').count()).toBe(1)
-    await stat(alpha.path)
+    await stat(alphaPath)
 
     const oldPath = join(harness.root, 'adopted', 'same-name')
     await mkdir(oldPath, { recursive: true })
@@ -170,7 +178,7 @@ test('workspace creation, browsing, view preferences, and safe deletion survive 
     expect(await waitUntil(async () => (await workspaceItems(harness)).items.some(item => item.workspaceId === oldWorkspace.workspaceId), present => !present)).toBe(false)
     const sameName = await addNewFolderWorkspace(harness, harness.root, 'same-name')
     expect(sameName.workspaceId).not.toBe(oldWorkspace.workspaceId)
-    expect(sameName.path).toBe(join(harness.root, 'same-name'))
+    expect(sameName.path).toBe(toNamespacedPath(join(harness.root, 'same-name')))
 
     await harness.page.getByRole('button', { name: 'View options' }).click()
     await harness.page.getByRole('menuitem', { name: 'In one list' }).click()
@@ -276,7 +284,8 @@ test('workspace creation, browsing, view preferences, and safe deletion survive 
     await adoptDirectory(harness, firstPath)
     await adoptDirectory(harness, secondPath)
     const matching = (await workspaceItems(harness)).items.filter(workspace => workspace.title === 'xx')
-    expect(matching.map(workspace => workspace.path).sort()).toEqual([firstPath, secondPath].sort())
+    expect(matching.map(workspace => workspace.path).sort())
+      .toEqual([toNamespacedPath(firstPath), toNamespacedPath(secondPath)].sort())
     expect(await harness.page.locator('button[aria-label="Workspace actions for xx"]').count()).toBe(2)
     harness.assertClean()
   } finally {

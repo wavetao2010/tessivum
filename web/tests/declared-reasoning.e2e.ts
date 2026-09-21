@@ -34,17 +34,16 @@ test('offers declared model reasoning levels and persists the selected effort', 
   try {
     const trigger = harness.page.getByRole('button', { name: /^选择模型/ })
     await trigger.waitFor({ timeout: 15_000 })
-    await expect(waitUntil(() => trigger.getAttribute('aria-label'), label => label?.includes('Acme Think') === true))
-      .resolves.toContain('Acme Think')
+    expect(await waitUntil(() => trigger.getAttribute('aria-label'), label => label?.includes('Acme Think') === true)).toContain('Acme Think')
     await trigger.click()
     await harness.page.getByRole('menuitem', { name: /推理等级/ }).click()
     const efforts = harness.page.getByRole('menuitemradio')
-    await expect(efforts.allTextContents()).resolves.toEqual(['Default', 'Low', 'Medium', 'High'])
+    expect(await efforts.allTextContents()).toEqual(['Default', 'Low', 'Medium', 'High'])
     await harness.page.getByRole('menuitemradio', { name: 'High' }).click()
-    await expect(waitUntil(
+    expect(await waitUntil(
       () => readFile(join(harness.dataDir, 'settings.yaml'), 'utf8'),
       document => document.includes('reasoningEffort: high'),
-    )).resolves.toContain('reasoningEffort: high')
+    )).toContain('reasoningEffort: high')
     harness.assertClean()
   } finally {
     await harness.close()

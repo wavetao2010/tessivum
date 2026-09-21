@@ -19,7 +19,9 @@ test('workflow run exposes its child, settles beside the tool row, and rebuilds 
 
     const workflow = harness.page.locator('[data-workflow-run]')
     await workflow.waitFor({ timeout: 60_000 })
-    if (await workflow.getAttribute('data-run-status') !== 'running') {
+    const terminal = harness.page.locator('[data-workflow-run][data-run-status="completed"]')
+    await terminal.waitFor({ timeout: 15_000 })
+    if (await workflow.getByRole('button', { name: /^snapshot-flow / }).getAttribute('aria-expanded') !== 'true') {
       await workflow.getByRole('button', { name: /^snapshot-flow / }).click()
     }
     const disclosures = workflow.locator('[data-disclosure-row][role="button"]')
@@ -39,8 +41,6 @@ test('workflow run exposes its child, settles beside the tool row, and rebuilds 
       return history.value?.events.some(entry => entry.event.type === 'turn/end') ?? false
     }, Boolean, 60_000)
 
-    const terminal = harness.page.locator('[data-workflow-run][data-run-status="completed"]')
-    await terminal.waitFor({ timeout: 15_000 })
     expect(await harness.page.locator('[data-chat-flow-kind="tool-call"]').count()).toBeGreaterThanOrEqual(1)
     expect(await harness.page.locator('[data-chat-flow-kind="workflow-run"]').count()).toBe(1)
     const record = harness.page.getByRole('button', { name: /^snapshot-flow/ })
