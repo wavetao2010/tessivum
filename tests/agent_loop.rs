@@ -989,7 +989,7 @@ async fn request_aware_pressure_compaction_keeps_full_context_contract() {
         .unwrap();
     for index in 0..4 {
         agent
-            .followup(user(&format!("request-{index}-{}", "界".repeat(80))))
+            .followup(user(&format!("request-{index}-{}", "界".repeat(800))))
             .await
             .unwrap();
         agent.when_idle().await.unwrap();

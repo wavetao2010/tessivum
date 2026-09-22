@@ -1179,6 +1179,64 @@ async fn oversized_live_history_recovers_after_restart_without_replaying_origina
 }
 
 #[tokio::test]
+async fn summary_batch_limits_do_not_reject_history_that_fits_the_main_model() {
+    let store = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    let parent = store
+        .create(header("large-parent", None), cancellation())
+        .await
+        .unwrap();
+    for index in 0..520 {
+        user(&parent, &format!("history-{index}"), &"history ".repeat(16)).await;
+    }
+    let seed = parent.events();
+    let child = store
+        .create_seeded(
+            header("large-child", Some(seed.len() as u64)),
+            seed,
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let (compactor, _registration) = service(Arc::new(FailingAdapter));
+    for session in [&parent, &child] {
+        user(
+            session,
+            "current",
+            "Continue without modifying the existing history.",
+        )
+        .await;
+        let before = session.events();
+        let request = GenerateRequest {
+            provider: "test".into(),
+            model: "large-main".into(),
+            reasoning_effort: None,
+            messages: session.derive_messages(),
+            system: None,
+            tools: None,
+            temperature: None,
+            max_tokens: Some(128),
+            stop: None,
+            session_id: Some(session.id()),
+            purpose: None,
+        };
+        assert!(matches!(
+            compactor
+                .compact_for_request(
+                    session,
+                    CompactionTrigger::Pressure,
+                    &request,
+                    Some(256_000),
+                    cancellation()
+                )
+                .await
+                .unwrap(),
+            CompactionOutcome::Noop { .. }
+        ));
+        assert_eq!(session.events(), before);
+    }
+}
+
+#[tokio::test]
 async fn model_windows_are_separate_and_protected_input_cannot_fake_recovery() {
     let session = session("model-budgets").await;
     for index in 0..20 {

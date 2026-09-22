@@ -368,9 +368,12 @@ impl CompactionService {
             if outcome.is_none() {
                 total_tokens = total_tokens.max(recent_usage_estimate(session, request, &current));
             }
-            let pressured = current.len() > target_count
-                || total_cp > target_cp
-                || request_limit.is_some_and(|limit| total_tokens > limit);
+            // Batch bounds constrain each summary, not the main model's whole history.
+            // Without a known model window, retain the bounded local fallback.
+            let pressured = request_limit.map_or_else(
+                || current.len() > target_count || total_cp > target_cp,
+                |limit| total_tokens > limit,
+            );
             if !pressured && (trigger == CompactionTrigger::Pressure || outcome.is_some()) {
                 return Ok(outcome.unwrap_or(CompactionOutcome::Noop {
                     trigger,

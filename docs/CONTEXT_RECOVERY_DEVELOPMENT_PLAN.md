@@ -118,7 +118,7 @@ OMP 文档默认 `keepRecentTokens=20000`，reserve 通常至少 16,384 tokens �
 2. **摘要模型请求预算**：实际摘要模型的窗口，减去摘要 system、格式包装、输出 reserve；不能使用正常生成模型的窗口代替。
 3. **本地单批硬边界**：保留 `max_surface_messages`、`max_input_codepoints`、`max_summary_codepoints`；每个摘要调用单独满足。
 
-软水位低于对应硬边界。初始设计以单批消息数/码点上限的 75% 作为本地维护触发和恢复目标，并结合模型剩余窗口触发；这是待边界用例校准的产品初值，不是 OMP 默认或已测得的性能结论。连续检查发生在每次模型请求前，仍必须容忍一轮直接跨越硬上限。
+软水位低于对应硬边界。已知正常模型窗口时，仅按其扣除输出 reserve 后的 75% 触发压力维护；摘要单批消息数/码点上限不限制正常模型的整段输入。未知窗口时，才以单批消息数/码点上限的 75% 作为本地维护触发和恢复目标。此校准来自长历史及不可改写 seed 的 Browser 回归；每次摘要仍满足原单批硬边界，不抬高资源限制。连续检查发生在每次模型请求前，仍必须容忍一轮直接跨越单批上限。
 
 复用已暴露的 usage 和 context-window resolver。`tokens_for(codepoints) = ceil(codepoints/4)` 只能作为历史粗估，不能视为中文、代码或图片的安全上界。需要模型 token 预算时优先使用已有适配器数据并加上尚未计入的新消息估算；缺少模型窗口时保留本地硬边界与 provider overflow 恢复，不伪造窗口大小。无需在本次先引入 tokenizer 依赖。
 
@@ -305,3 +305,12 @@ python3 scripts/check_release_facts.py
 ```
 
 Rust 输出合计 598 passed，0 failed；兼容基线检查仍为 RPC 52/52、Remote 24、Host events 11、Node kinds 26、Web source graph 38。此处没有声称运行了完整前端 E2E 或远端 CI；Browser 证据仅指第 10.3 节的实际操作场景。
+
+### 10.6 同候选 CI 暴露的预算混用与修正
+
+- 初始候选 `d0b886f8ae5dba21f79429462f5863999e531e30` 的 [CI 35683564581](https://github.com/wavetao2010/tessivum/actions/runs/35683564581)：Ubuntu `verify`、Windows `windows` 通过，macOS `browser-e2e` 失败；不能把总体结果写成通过。
+- 失败集中在 `chat-long-interactions`、`chat-scroll-contract`、`trajectory-virtualization`。原实现把摘要单批的 75% 本地水位无条件应用于正常请求；即使正常模型容量足够，也会消费仅为普通回复准备的 replay，或阻塞不可改写的分支 seed。
+- 修正已知窗口的压力判定，不改摘要单批硬上限；未知窗口仍保留本地维护水位。新增回归覆盖超过 512 条且超过 65,536 码点的普通历史和分支 seed：正常模型可容纳时不调用摘要、不改变历史。该回归修复前失败、修复后通过。
+- Browser 测试的 recorded 模型默认窗口由 128,000 校准为 256,000，给保守 UTF-8 字节估算下的长历史及请求开销留出空间；显式测试环境变量可覆盖该默认值。只改变测试模型设置，不提高产品或摘要服务硬上限，不缩短长历史 fixture，不删除 Browser 断言。
+- 本机 `compaction` 与 `agent_loop` 专项共 53 项通过；上述三个 Browser 文件共 7 个实际 Host/Chromium 场景通过，包括分支继续、流式滚动及 Trajectory 虚拟化。新候选仍须重新取得三个平台的同 head CI 结果，不继承初始候选的 Ubuntu/Windows 结论。
+- 修正后的本机完整检查：`cargo fmt --all`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked -- --test-threads=4` 通过，Rust 共 599 passed；兼容基线、插件台账、发布事实三项脚本通过。未用这些结果替代新候选远端 CI。

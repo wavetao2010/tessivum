@@ -15,6 +15,7 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 
 - Recover oversized live conversations in bounded compaction batches without raising resource limits or rewriting the original event log; preserve current requests, recent context, seeds, and complete tool groups, and durably prune only oversized text tool results when needed.
 - Evaluate assembled requests before generation, separate primary and summary model budgets, reject non-shrinking summaries, and resume overflow recovery without replaying completed tools.
+- Use the primary model's known window for pressure checks, with local fallback thresholds only when that window is unknown; do not reject valid long histories or immutable branch seeds merely because they exceed one summary batch.
 - Execute `/compact` through the real Host command lifecycle, serialize it with session execution, and allow cancellation and shutdown to terminate idle manual summaries without blocking admission drain.
 - Fold durable Goal changes consistently across service views, enforce revision CAS inside the append boundary, propagate corrupt-history read errors, and preserve explicitly disarmed warm views. Synthetic regressions do not establish the root cause of the reported screenshot; original-session evidence and same-candidate cross-platform acceptance remain outstanding.
 - Materialize Windows runtime package aliases as real directories without requiring symbolic-link privileges or recursively copying checkout dependency cycles.
