@@ -314,3 +314,4 @@ Rust 输出合计 598 passed，0 failed；兼容基线检查仍为 RPC 52/52、R
 - Browser 测试的 recorded 模型默认窗口由 128,000 校准为 256,000，给保守 UTF-8 字节估算下的长历史及请求开销留出空间；显式测试环境变量可覆盖该默认值。只改变测试模型设置，不提高产品或摘要服务硬上限，不缩短长历史 fixture，不删除 Browser 断言。
 - 本机 `compaction` 与 `agent_loop` 专项共 53 项通过；上述三个 Browser 文件共 7 个实际 Host/Chromium 场景通过，包括分支继续、流式滚动及 Trajectory 虚拟化。新候选仍须重新取得三个平台的同 head CI 结果，不继承初始候选的 Ubuntu/Windows 结论。
 - 修正后的本机完整检查：`cargo fmt --all`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked -- --test-threads=4` 通过，Rust 共 599 passed；兼容基线、插件台账、发布事实三项脚本通过。未用这些结果替代新候选远端 CI。
+- 第二候选 `a54c529bda1be885ee0aabc1cbfb69e063069680` 的 [CI 35685949402](https://github.com/wavetao2010/tessivum/actions/runs/35685949402) 中，原失败的 7 个长历史 Browser 场景全部通过；Browser 仅余 `steering` 的 FIFO flush 用例在队列展开前超时。该夹具原先未等待初始请求进入工具等待态，队列操作可与初始领取竞争。四个 steering 场景统一等待已经截获的真实 `question/requested` 事件后再操作，仍在手势后才释放问题 UI；不改产品逻辑、不增加重试、不放宽 FIFO/持久化断言。本机四场景各运行三遍，共 12 passed。
