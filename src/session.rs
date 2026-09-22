@@ -436,6 +436,7 @@ pub struct Session {
     persistence: Arc<dyn SessionPersistence>,
     state: RwLock<SessionState>,
     write_gate: AsyncMutex<()>,
+    pub(crate) execution: AsyncMutex<()>,
     updates: broadcast::Sender<SessionEvent>,
 }
 
@@ -469,6 +470,7 @@ impl Session {
             persistence,
             state: RwLock::new(state),
             write_gate: AsyncMutex::new(()),
+            execution: AsyncMutex::new(()),
             updates,
         })
     }

@@ -18,6 +18,7 @@ use tessivum::{
     agent_mode::{AgentModeId, AgentModeRegistry, AgentModeRoot, AgentModeTrust},
     builtin_tools::PersistentShellSessions,
     code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
+    compaction::{CompactionConfig, CompactionService},
     composition::CompositionRegistry,
     legacy::ProductPackageResolver,
     llm::{LlmAdapter, LlmRetryPolicy, LlmRuntime, LlmStream, RecordedLlmAdapter},
@@ -82,6 +83,13 @@ static TEST_MODES_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
         )
         .unwrap();
     }
+    let directory = root.join("test-recovery");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("mode.toml"),
+        "schema = 1\nid = \"test-recovery\"\nname = \"test-recovery\"\ndescription = \"compaction recovery test mode\"\n\n[prompt]\ncomplete = false\ntext = \"Recovery test mode.\"\n\n[tools]\npresentation = \"direct\"\nenabled = [\"fs.read\"]\n\n[capabilities]\nskills = false\nplanning = false\ncompaction = true\n",
+    )
+    .unwrap();
     let directory = root.join("test-native-plugin");
     fs::create_dir_all(&directory).unwrap();
     fs::write(
@@ -130,6 +138,22 @@ fn factory(llm: LlmRuntime, prompt: SystemPrompt, tools: ToolRuntime) -> AgentLo
     )
     .with_persistent_shell_sessions(PersistentShellSessions::new())
 }
+fn recovery_compaction(llm: &LlmRuntime, max_surface_messages: usize) -> CompactionService {
+    CompactionService::new(
+        llm.clone(),
+        CompactionConfig {
+            provider: "summary".into(),
+            model: "summarizer".into(),
+            max_tokens: Some(128),
+            max_surface_messages,
+            max_input_codepoints: 65_536,
+            max_summary_codepoints: 64,
+            ..CompactionConfig::default()
+        },
+    )
+    .unwrap()
+}
+
 struct UnusedResolver;
 
 impl PackageResolver for UnusedResolver {
@@ -601,6 +625,33 @@ fn tool_turn() -> Vec<StreamChunk> {
         },
     ]
 }
+fn oversized_tool_turn() -> Vec<StreamChunk> {
+    let arguments = format!(r#"{{"value":"{}"}}"#, "tool-output-".repeat(64));
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: "tool-call".into(),
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: ToolCallId::from("call-oversized"),
+            name: Some("read".into()),
+            arguments_delta: arguments.clone(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: ToolCallId::from("call-oversized"),
+                name: "read".into(),
+                arguments,
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+            replay_state: None,
+        },
+    ]
+}
 
 fn text_turn(text: &str) -> Vec<StreamChunk> {
     vec![
@@ -874,6 +925,207 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
         |event| event.event_type != "turn/end" || event.data["reason"]["kind"] != "interrupted"
     ));
     agent.dispose().await.unwrap();
+}
+#[tokio::test]
+async fn request_aware_pressure_compaction_keeps_full_context_contract() {
+    let llm = LlmRuntime::new();
+    let main_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let summary_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let _main = llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&main_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from(
+                    (0..4)
+                        .map(|index| text_turn(&format!("reply-{index}")))
+                        .collect::<Vec<_>>(),
+                ))),
+            }),
+        )
+        .unwrap();
+    let _summary = llm
+        .register(
+            "summary",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&summary_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from(
+                    (0..8)
+                        .map(|_| text_turn("bounded summary"))
+                        .collect::<Vec<_>>(),
+                ))),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "read",
+            "reads",
+            json!({"type":"object","properties":{"value":{"type":"string"}}}),
+            Echo,
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(llm.clone(), SystemPrompt::new(), tools)
+                .with_compaction(recovery_compaction(&llm, 8))
+                .with_context_window_resolver(Arc::new(|_, _| Some(16_000))),
+        ))
+        .unwrap();
+    let agent = registry
+        .create(
+            header_with_mode("request-aware-pressure", "test-recovery"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "model-a".into(),
+                reasoning_effort: None,
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    for index in 0..4 {
+        agent
+            .followup(user(&format!("request-{index}-{}", "界".repeat(80))))
+            .await
+            .unwrap();
+        agent.when_idle().await.unwrap();
+    }
+    agent.dispose().await.unwrap();
+    let requests = main_requests.lock();
+    assert_eq!(requests.len(), 4);
+    let last = requests.last().unwrap();
+    assert!(last.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("request-3")))
+    }));
+    assert!(last
+        .tools
+        .as_ref()
+        .is_some_and(|schemas| schemas.iter().any(|schema| schema.name == "read")));
+    assert!(!summary_requests.lock().is_empty());
+}
+#[tokio::test]
+async fn overflow_recovery_rebuilds_once_without_replaying_completed_tools() {
+    let llm = LlmRuntime::new();
+    let main_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let summary_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let _main = llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&main_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([
+                    text_turn("prior work finished"),
+                    oversized_tool_turn(),
+                    failed_turn("CONTEXT_OVERFLOW"),
+                    text_turn("continued current task"),
+                ]))),
+            }),
+        )
+        .unwrap();
+    let _summary = llm
+        .register(
+            "summary",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&summary_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from(
+                    (0..8)
+                        .map(|_| text_turn("reduced history"))
+                        .collect::<Vec<_>>(),
+                ))),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "read",
+            "reads",
+            json!({"type":"object","properties":{"value":{"type":"string"}}}),
+            Echo,
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(llm.clone(), SystemPrompt::new(), tools)
+                .with_compaction(recovery_compaction(&llm, 512))
+                .with_context_window_resolver(Arc::new(|_, _| None::<u64>)),
+        ))
+        .unwrap();
+    let agent = registry
+        .create(
+            header_with_mode("overflow-recovery", "test-recovery"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "model-a".into(),
+                reasoning_effort: None,
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    agent
+        .followup(user(&"historical context ".repeat(300)))
+        .await
+        .unwrap();
+    agent.when_idle().await.unwrap();
+    agent.followup(user("keep this task")).await.unwrap();
+    agent.when_idle().await.unwrap();
+
+    let events = agent.session().events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "tool/call")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "tool/result")
+            .count(),
+        1
+    );
+    agent.dispose().await.unwrap();
+    let requests = main_requests.lock();
+    assert_eq!(
+        requests.len(),
+        4,
+        "{:?}",
+        events
+            .iter()
+            .filter(|event| event.event_type == "turn/end")
+            .collect::<Vec<_>>()
+    );
+    let retry = requests.last().unwrap();
+    assert!(
+        serde_json::to_string(&retry.messages).unwrap().len()
+            < serde_json::to_string(&requests[2].messages).unwrap().len()
+    );
+    assert!(retry.messages.iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text } if text.contains("keep this task")),
+        )
+    }));
+    assert_eq!(
+        retry
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter(|block| matches!(block, ContentBlock::ToolCall { .. }))
+            .count(),
+        1
+    );
+    assert!(!summary_requests.lock().is_empty());
 }
 
 #[tokio::test]

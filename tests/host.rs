@@ -18,8 +18,8 @@ use tessivum::{
     credentials::{CredentialError, CredentialRef},
     goal::GoalError,
     host::{
-        HostApi, HostConfig, HostDirectoryPicker, HostLlmAdapterFactory, HostNotification,
-        HostPathOpener, HostRuntime, HostSettingsMutation, SessionQueueAction,
+        HostApi, HostCommandResult, HostConfig, HostDirectoryPicker, HostLlmAdapterFactory,
+        HostNotification, HostPathOpener, HostRuntime, HostSettingsMutation, SessionQueueAction,
         SessionUpdateQueueParams,
     },
     llm::{LlmAdapter, LlmStream},
@@ -190,6 +190,31 @@ struct ProviderModelsFactory(Arc<ProviderModelsAdapter>);
 impl HostLlmAdapterFactory for ProviderModelsFactory {
     fn create(&self, _: &str, _: &str) -> Result<Arc<dyn LlmAdapter>, TessivumError> {
         Ok(self.0.clone())
+    }
+}
+
+struct CompactionAdapter;
+
+#[async_trait]
+impl LlmAdapter for CompactionAdapter {
+    async fn generate(
+        &self,
+        _request: GenerateRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<LlmStream, TessivumError> {
+        Ok(Box::pin(stream::iter(
+            llm_text_turn("durable compacted history")
+                .into_iter()
+                .map(Ok),
+        )))
+    }
+}
+
+struct CompactionFactory;
+
+impl HostLlmAdapterFactory for CompactionFactory {
+    fn create(&self, _: &str, _: &str) -> Result<Arc<dyn LlmAdapter>, TessivumError> {
+        Ok(Arc::new(CompactionAdapter))
     }
 }
 
@@ -559,6 +584,13 @@ fn config(root: &TempDir) -> HostConfig {
     config.enable_trusted_bash = true;
     config
 }
+fn compaction_config(root: &TempDir) -> HostConfig {
+    let mut config = HostConfig::new(root.path(), root.path().join("data"))
+        .with_adapter_factory(Arc::new(CompactionFactory));
+    config.provider = "compaction-fixture".into();
+    config.model = "compaction-fixture".into();
+    config
+}
 
 fn hosted_subagent_config(root: &TempDir, adapter: Arc<HostedSubagentAdapter>) -> HostConfig {
     let mode_root = root.path().join("test-modes");
@@ -681,7 +713,7 @@ fn surface_event(event_type: &str, seq: u64, text: &str) -> SessionEvent {
             "content": [{"type": "text", "text": text}],
             "source": {"kind": "user"},
         }),
-        "assistant/message" => json!({"message": {
+        "assistant/message" => json!({"turn": seq / 2 + 1, "step": 1, "message": {
             "id": format!("message-{seq}"),
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
@@ -1427,6 +1459,246 @@ async fn shutdown_drains_racing_settings_writes_before_relays_close() {
         }
     }
     assert!(settings_changed && credentials_changed);
+}
+
+#[tokio::test]
+async fn compact_command_runs_real_service_and_keeps_original_log() {
+    let root = TempDir::new();
+    let data = root.path().join("data");
+    let persistence = JsonlSessionPersistence::new(data.clone());
+    let session = SessionId::from("manual-compact");
+    let cwd = root.path().to_string_lossy().into_owned();
+    persist_session(
+        &persistence,
+        persisted_header(session.as_str(), Some(cwd)),
+        [
+            surface_event("user/message", 0, &"keep user history ".repeat(128)),
+            surface_event("assistant/message", 1, "old answer"),
+            surface_event("user/message", 2, "keep latest request"),
+            surface_event("assistant/message", 3, "latest answer"),
+        ],
+    )
+    .await;
+    let runtime = HostRuntime::boot(compaction_config(&root)).await.unwrap();
+    let goals = runtime
+        .handle()
+        .goal_service(session.clone())
+        .await
+        .unwrap();
+    let goal = goals
+        .create(
+            "keep completed goal readable".into(),
+            None,
+            goals.cancellation(),
+        )
+        .await
+        .unwrap();
+    let completed = goals
+        .complete(goal.reference, goals.cancellation())
+        .await
+        .unwrap();
+    let execution = runtime
+        .command_execute(session.clone(), "/compact".into())
+        .await
+        .unwrap()
+        .expect("compact command is advertised by standard mode");
+    assert!(matches!(
+        execution.result,
+        HostCommandResult::Success { .. }
+    ));
+    let events = runtime.events(session.clone(), 0).await.unwrap();
+    assert!(events.iter().any(|event| event.event_type == "command/run"));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "command/done"));
+    assert!(events.iter().any(|event| {
+        event.event_type == "user/message" && event.data.to_string().contains("keep user history")
+    }));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "compaction/start"));
+    assert_eq!(goals.current().await.unwrap(), Some(completed.clone()));
+    runtime.shutdown().await.unwrap();
+
+    let restarted = HostRuntime::boot(compaction_config(&root)).await.unwrap();
+    let restored_goal = restarted
+        .handle()
+        .goal_service(session.clone())
+        .await
+        .unwrap();
+    assert_eq!(restored_goal.current().await.unwrap(), Some(completed));
+    let replayed = restarted.events(session, 0).await.unwrap();
+    assert!(replayed
+        .iter()
+        .any(|event| event.event_type == "user/message"));
+    assert!(replayed
+        .iter()
+        .any(|event| event.event_type == "compaction/end"));
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn compact_refuses_an_active_turn_without_starting_a_summary() {
+    let root = TempDir::new();
+    let adapter = Arc::new(BlockingAdapter::new());
+    let runtime = HostRuntime::boot(
+        HostConfig::new(root.path(), root.path().join("data"))
+            .with_adapter_factory(Arc::new(BlockingFactory(adapter.clone()))),
+    )
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    let session = SessionId::from("running-compact");
+    handle.prompt(prompt(session.as_str())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), adapter.started.notified())
+        .await
+        .unwrap();
+    let error = handle
+        .command_execute(session.clone(), "/compact".into())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "SESSION_BUSY");
+    let events = handle.events(session.clone(), 0).await.unwrap();
+    assert!(!events
+        .iter()
+        .any(|event| event.event_type == "compaction/start"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "command/done")
+            .count(),
+        1
+    );
+    assert!(handle
+        .cancel(session, AgentCancelCause::User)
+        .await
+        .unwrap());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn compact_serializes_queued_prompts_and_cancels_before_shutdown_drain() {
+    for shutdown in [false, true] {
+        let root = TempDir::new();
+        let persistence = JsonlSessionPersistence::new(root.path().join("data"));
+        let session = SessionId::from("blocked-compact");
+        persist_session(
+            &persistence,
+            persisted_header(
+                session.as_str(),
+                Some(root.path().to_string_lossy().into_owned()),
+            ),
+            [
+                surface_event("user/message", 0, &"old context ".repeat(256)),
+                surface_event("assistant/message", 1, "old answer"),
+                surface_event("user/message", 2, "current request"),
+                surface_event("assistant/message", 3, "recent answer"),
+            ],
+        )
+        .await;
+        let adapter = Arc::new(BlockingAdapter::new());
+        let runtime = HostRuntime::boot(
+            HostConfig::new(root.path(), root.path().join("data"))
+                .with_adapter_factory(Arc::new(BlockingFactory(adapter.clone()))),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let command = tokio::spawn({
+            let handle = handle.clone();
+            let session = session.clone();
+            async move { handle.command_execute(session, "/compact".into()).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), adapter.started.notified())
+            .await
+            .unwrap();
+        let queued = tokio::spawn({
+            let handle = handle.clone();
+            let session = session.clone();
+            async move { handle.prompt(prompt(session.as_str())).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let events = handle.events(session.clone(), 0).await.unwrap();
+                if events
+                    .iter()
+                    .any(|event| event.event_type == "agent/inbox/enqueued")
+                {
+                    assert!(!events.iter().any(|event| event.event_type == "turn/start"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if shutdown {
+            tokio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+        } else {
+            assert!(tokio::time::timeout(
+                Duration::from_secs(5),
+                handle.cancel(session.clone(), AgentCancelCause::User)
+            )
+            .await
+            .unwrap()
+            .unwrap());
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), command)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, "CANCELLED");
+        assert!(tokio::time::timeout(Duration::from_secs(5), queued)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        let events = persistence
+            .read_from(&session, 0, ContextHandle::root().scope().cancellation())
+            .await
+            .unwrap();
+        let runs = events
+            .iter()
+            .filter(|event| event.event_type == "command/run")
+            .collect::<Vec<_>>();
+        let done = events
+            .iter()
+            .filter(|event| event.event_type == "command/done")
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(done.len(), 1);
+        assert_eq!(runs[0].data["commandId"], done[0].data["commandId"]);
+        assert_eq!(done[0].data["kind"], "error");
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event.surface_op, Some(SurfaceOp::Replace { .. }))));
+        if !shutdown {
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn compact_command_rejects_arguments_and_records_failure_lifecycle() {
+    let root = TempDir::new();
+    let runtime = HostRuntime::boot(compaction_config(&root)).await.unwrap();
+    let session = SessionId::from("manual-compact-invalid");
+    let execution = runtime
+        .command_execute(session.clone(), "/compact unexpected".into())
+        .await
+        .unwrap()
+        .expect("compact command is advertised by standard mode");
+    assert!(matches!(execution.result, HostCommandResult::Error { .. }));
+    let events = runtime.events(session, 0).await.unwrap();
+    assert!(events.iter().any(|event| event.event_type == "command/run"));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "command/done"));
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]

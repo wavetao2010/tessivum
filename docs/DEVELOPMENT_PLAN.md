@@ -21,6 +21,7 @@
 - [Phase 8 Remote Access 与新版 Legacy Host 兼容开发计划](PHASE8_REMOTE_ACCESS_COMPATIBILITY_PLAN.md)：通用 Node Host facade、Rust-owned Remote Access、自有最小配对/设备界面及发行门槛已完成。
 - [Phase 9 性能证据与社区插件发布计划](PHASE9_BENCHMARK_ECOSYSTEM_PLAN.md)：固定 Linux 30 样本 Core/产品公开结果、中英文报告、README 可追溯数字及 `dsh-better-sidebar@0.16.1` 社区验证闭环均已完成。
 - [Phase 10 Windows 原生发行开发计划](PHASE10_WINDOWS_NATIVE_RELEASE_PLAN.md)：Windows x86-64 MSVC、PowerShell、ACL sandbox、Job Object、ZIP、`install.ps1` 和真实 Browser/插件发行门槛。
+- [长会话压缩恢复与 Goal 状态一致性开发计划](CONTEXT_RECOVERY_DEVELOPMENT_PLAN.md)：已实施有界分段恢复、真实 Host 手动压缩和 Goal 增量投影/CAS 修复，完成本机合成及 Browser 验证；原截图会话取证与同候选三平台验收仍未关闭，见该文档第 10 节。
 - [`reference.md`](../../reference.md)：最初的技术方向与选型讨论，仅作背景，不覆盖本计划中的源码分析结论。
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
