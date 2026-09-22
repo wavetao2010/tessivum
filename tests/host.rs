@@ -3702,7 +3702,11 @@ async fn host_goal_services_are_session_owned_and_relay_committed_changes() {
     assert_eq!(observed.data["operation"], "create");
 
     let second = handle.goal_service(second_session).await.unwrap();
-    assert!(second.snapshot(&created.reference.id).await.is_none());
+    assert!(second
+        .snapshot(&created.reference.id)
+        .await
+        .unwrap()
+        .is_none());
     assert!(matches!(
         second
             .pause(created.reference.clone(), second.cancellation())

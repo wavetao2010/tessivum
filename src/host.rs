@@ -5848,7 +5848,7 @@ impl HostHandle {
     ) -> Result<HostCommandResult, HostError> {
         let goals = self.goal_service_inner(session_id.clone()).await?;
         let input = raw_input.trim();
-        let current = goals.current().await;
+        let current = goals.current().await?;
         let success = |text| HostCommandResult::Success {
             text: Some(text),
             source_event_seq: None,

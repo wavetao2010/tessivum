@@ -3397,6 +3397,7 @@ async fn compat_remote_goal_view(
     let projection = goals
         .projection()
         .await
+        .map_err(compat_goal_error)?
         .ok_or_else(|| CompatError::internal("goal projection is unavailable"))?;
     let mut goal = projection
         .get("goal")

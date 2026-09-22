@@ -367,11 +367,13 @@ struct GoalTimes {
 #[derive(Clone, Default)]
 struct GoalState {
     goals: BTreeMap<String, GoalSnapshot>,
-    blocked_reasons: BTreeMap<String, GoalBlockReason>,
     times: BTreeMap<String, GoalTimes>,
-    next_activation: u64,
+    blocked_reasons: BTreeMap<String, GoalBlockReason>,
     activation: Option<Activation>,
+    next_activation: u64,
     observed_events: usize,
+    /// The latest durable goal/change pointer, including an explicit clear.
+    current: Option<String>,
 }
 
 #[derive(Clone)]
@@ -406,68 +408,14 @@ impl GoalService {
         let mut state = GoalState::default();
         let events = session.events();
         for event in &events {
-            if event.event_type == "goal/change" {
-                let change: GoalChange = serde_json::from_value(event.data.clone())
-                    .map_err(|_| GoalError::Invalid("durable goal/change payload is invalid"))?;
-                change.validate_shape()?;
-                match change.operation {
-                    GoalOperation::Clear => {
-                        let reference = change
-                            .cleared
-                            .ok_or(GoalError::Invalid("durable goal clear lacks ref"))?;
-                        let current = state
-                            .goals
-                            .get(&reference.id)
-                            .cloned()
-                            .ok_or_else(|| GoalError::NotFound(reference.id.clone()))?;
-                        let snapshot = GoalSnapshot {
-                            reference,
-                            phase: current.phase,
-                            title: current.title,
-                            max_goal_rounds: current.max_goal_rounds,
-                            tombstone: true,
-                        };
-                        validate_goal_operation(&state.goals, GoalOperation::Clear, &snapshot)?;
-                        apply_snapshot(&mut state.goals, None, snapshot.clone(), true)?;
-                        state.times.remove(&snapshot.reference.id);
-                        state.blocked_reasons.remove(&snapshot.reference.id);
-                    }
-                    _ => {
-                        let (snapshot, blocked_reason) = change
-                            .goal
-                            .ok_or(GoalError::Invalid("durable goal change lacks goal"))?
-                            .snapshot()?;
-                        let id = snapshot.reference.id.clone();
-                        let times = GoalTimes {
-                            created_at: change
-                                .created_at
-                                .ok_or(GoalError::Invalid("goal change lacks createdAt"))?,
-                            updated_at: change
-                                .updated_at
-                                .ok_or(GoalError::Invalid("goal change lacks updatedAt"))?,
-                            rounds_started: change
-                                .rounds_started
-                                .ok_or(GoalError::Invalid("goal change lacks roundsStarted"))?,
-                        };
-                        validate_goal_operation(&state.goals, change.operation, &snapshot)?;
-                        validate_goal_times(&state.times, change.operation, &snapshot, times)?;
-                        apply_snapshot(&mut state.goals, None, snapshot.clone(), true)?;
-                        if let Some(reason) = blocked_reason {
-                            state.blocked_reasons.insert(id.clone(), reason);
-                        } else {
-                            state.blocked_reasons.remove(&id);
-                        }
-                        state.times.insert(id, times);
-                    }
-                }
-            }
-            apply_goal_round(&mut state, event)?;
+            apply_goal_event(&mut state, event)?;
         }
         state.observed_events = events.len();
         if let Some(goal) = state
-            .goals
-            .values()
-            .find(|goal| !goal.tombstone && goal.phase == GoalPhase::Active)
+            .current
+            .as_ref()
+            .and_then(|id| state.goals.get(id))
+            .filter(|goal| !goal.tombstone && goal.phase == GoalPhase::Active)
             .cloned()
         {
             let rounds = state
@@ -502,59 +450,61 @@ impl GoalService {
         self.inner.agent.id()
     }
 
-    pub async fn snapshot(&self, id: &str) -> Option<GoalSnapshot> {
+    pub async fn snapshot(&self, id: &str) -> Result<Option<GoalSnapshot>, GoalError> {
         let mut state = self.inner.state.lock().await;
-        self.sync_locked(&mut state).ok()?;
-        state.goals.get(id).cloned()
+        self.sync_locked(&mut state)?;
+        Ok(state.goals.get(id).cloned())
     }
 
-    pub async fn snapshots(&self) -> Vec<GoalSnapshot> {
+    pub async fn snapshots(&self) -> Result<Vec<GoalSnapshot>, GoalError> {
         let mut state = self.inner.state.lock().await;
-        if self.sync_locked(&mut state).is_err() {
-            return Vec::new();
-        }
-        state.goals.values().cloned().collect()
+        self.sync_locked(&mut state)?;
+        Ok(state.goals.values().cloned().collect())
     }
 
-    /// Returns the current durable goal pointer, including a completed goal until cleared.
-    pub async fn current(&self) -> Option<GoalSnapshot> {
-        let events = self.inner.session.events();
-        for event in events.into_iter().rev() {
-            if event.event_type != "goal/change" {
-                continue;
-            }
-            let change: GoalChange = serde_json::from_value(event.data).ok()?;
-            return match change.operation {
-                GoalOperation::Clear => None,
-                _ => change.goal?.snapshot().ok().map(|(snapshot, _)| snapshot),
-            };
-        }
-        None
+    pub async fn current(&self) -> Result<Option<GoalSnapshot>, GoalError> {
+        let mut state = self.inner.state.lock().await;
+        self.sync_locked(&mut state)?;
+        Ok(Self::current_from_state(&state))
+    }
+
+    fn current_from_state(state: &GoalState) -> Option<GoalSnapshot> {
+        state
+            .current
+            .as_ref()
+            .and_then(|id| state.goals.get(id))
+            .filter(|goal| !goal.tombstone)
+            .cloned()
     }
 
     /// Returns the upstream-shaped current goal projection folded through admitted rounds.
-    pub async fn projection(&self) -> Option<Value> {
-        let current = self.current().await?;
+    pub async fn projection(&self) -> Result<Option<Value>, GoalError> {
         let mut state = self.inner.state.lock().await;
-        self.sync_locked(&mut state).ok()?;
-        let times = state.times.get(&current.reference.id)?;
+        self.sync_locked(&mut state)?;
+        let Some(current) = Self::current_from_state(&state) else {
+            return Ok(None);
+        };
+        let times = state
+            .times
+            .get(&current.reference.id)
+            .ok_or(GoalError::Invalid("goal lacks round counter"))?;
         let reason = state.blocked_reasons.get(&current.reference.id).cloned();
         let goal = GoalSnapshotWire::from_snapshot(current, reason);
-        Some(json!({
+        Ok(Some(json!({
             "goal": goal,
             "roundsStarted": times.rounds_started,
             "createdAt": times.created_at,
             "updatedAt": times.updated_at,
-        }))
+        })))
     }
 
     /// Renders the model-facing current goal and transient activation observation.
     pub async fn model_value(&self) -> Result<Value, GoalError> {
-        let Some(current) = self.current().await else {
-            return Ok(json!({"goal": null}));
-        };
         let mut state = self.inner.state.lock().await;
         self.sync_locked(&mut state)?;
+        let Some(current) = Self::current_from_state(&state) else {
+            return Ok(json!({"goal": null}));
+        };
         let times = state
             .times
             .get(&current.reference.id)
@@ -1070,10 +1020,18 @@ impl GoalService {
 
     fn sync_locked(&self, state: &mut GoalState) -> Result<(), GoalError> {
         let events = self.inner.session.events();
-        for event in events.iter().skip(state.observed_events) {
-            apply_goal_round(state, event)?;
+        if state.observed_events > events.len() {
+            return Err(GoalError::Invalid("durable goal event cursor regressed"));
         }
-        state.observed_events = events.len();
+        if state.observed_events == events.len() {
+            return Ok(());
+        }
+        let mut candidate = state.clone();
+        for event in events.iter().skip(candidate.observed_events) {
+            apply_goal_event(&mut candidate, event)?;
+        }
+        candidate.observed_events = events.len();
+        *state = candidate;
         Ok(())
     }
     pub fn cancellation(&self) -> CancellationToken {
@@ -1147,6 +1105,7 @@ impl GoalService {
             };
             match append(
                 &self.inner.session,
+                state.observed_events as u64,
                 "goal/change",
                 serde_json::to_value(change).expect("goal change is serializable"),
                 cancellation.clone(),
@@ -1158,6 +1117,7 @@ impl GoalService {
                     if operation == GoalOperation::Clear {
                         state.times.remove(&snapshot.reference.id);
                         state.blocked_reasons.remove(&snapshot.reference.id);
+                        state.current = None;
                     } else {
                         state.times.insert(snapshot.reference.id.clone(), times);
                         if let Some(reason) = blocked_reason {
@@ -1167,6 +1127,7 @@ impl GoalService {
                         } else {
                             state.blocked_reasons.remove(&snapshot.reference.id);
                         }
+                        state.current = Some(snapshot.reference.id.clone());
                     }
                     state.observed_events = state.observed_events.saturating_add(1);
                     return Ok(snapshot);
@@ -1175,7 +1136,6 @@ impl GoalService {
                     if actual >= expected || self.inner.session.next_seq()? != expected {
                         return Err(GoalError::Session(error));
                     }
-                    // Another session writer won after append sampled next_seq; fold it before rebuilding the event.
                     check_cancellation(&cancellation)?;
                     self.sync_locked(state)?;
                 }
@@ -1891,6 +1851,78 @@ fn apply_snapshot(
     goals.insert(id, snapshot);
     Ok(())
 }
+fn apply_goal_event(state: &mut GoalState, event: &SessionEvent) -> Result<(), GoalError> {
+    if event.event_type == "goal/change" {
+        let change: GoalChange = serde_json::from_value(event.data.clone())
+            .map_err(|_| GoalError::Invalid("durable goal/change payload is invalid"))?;
+        change.validate_shape()?;
+        match change.operation {
+            GoalOperation::Clear => {
+                let reference = change
+                    .cleared
+                    .ok_or(GoalError::Invalid("durable goal clear lacks ref"))?;
+                let current = state
+                    .goals
+                    .get(&reference.id)
+                    .cloned()
+                    .ok_or_else(|| GoalError::NotFound(reference.id.clone()))?;
+                let snapshot = GoalSnapshot {
+                    reference,
+                    phase: current.phase,
+                    title: current.title,
+                    max_goal_rounds: current.max_goal_rounds,
+                    tombstone: true,
+                };
+                validate_goal_operation(&state.goals, GoalOperation::Clear, &snapshot)?;
+                apply_snapshot(&mut state.goals, None, snapshot.clone(), true)?;
+                state.times.remove(&snapshot.reference.id);
+                state.blocked_reasons.remove(&snapshot.reference.id);
+                state.current = None;
+                state.activation = None;
+            }
+            _ => {
+                let (snapshot, blocked_reason) = change
+                    .goal
+                    .ok_or(GoalError::Invalid("durable goal change lacks goal"))?
+                    .snapshot()?;
+                let id = snapshot.reference.id.clone();
+                let times = GoalTimes {
+                    created_at: change
+                        .created_at
+                        .ok_or(GoalError::Invalid("goal change lacks createdAt"))?,
+                    updated_at: change
+                        .updated_at
+                        .ok_or(GoalError::Invalid("goal change lacks updatedAt"))?,
+                    rounds_started: change
+                        .rounds_started
+                        .ok_or(GoalError::Invalid("goal change lacks roundsStarted"))?,
+                };
+                validate_goal_operation(&state.goals, change.operation, &snapshot)?;
+                validate_goal_times(&state.times, change.operation, &snapshot, times)?;
+                apply_snapshot(&mut state.goals, None, snapshot.clone(), true)?;
+                if snapshot.phase != GoalPhase::Active {
+                    state.activation = None;
+                } else if change.operation == GoalOperation::Edit {
+                    if let Some(activation) = state.activation.as_mut() {
+                        if activation.reference.id == snapshot.reference.id {
+                            activation.reference = snapshot.reference.clone();
+                            activation.max_rounds = snapshot.max_goal_rounds;
+                        }
+                    }
+                }
+                if let Some(reason) = blocked_reason {
+                    state.blocked_reasons.insert(id.clone(), reason);
+                } else {
+                    state.blocked_reasons.remove(&id);
+                }
+                state.times.insert(id.clone(), times);
+                state.current = Some(id);
+            }
+        }
+    }
+    apply_goal_round(state, event)
+}
+
 fn apply_goal_round(state: &mut GoalState, event: &SessionEvent) -> Result<(), GoalError> {
     if event.event_type != "user/message" {
         return Ok(());
@@ -1933,6 +1965,7 @@ fn apply_goal_round(state: &mut GoalState, event: &SessionEvent) -> Result<(), G
         state.next_activation = state.next_activation.checked_add(1).unwrap_or(1);
         state.activation = Some(Activation {
             id: state.next_activation,
+
             reference: goal.reference.clone(),
             max_rounds: goal.max_goal_rounds,
             rounds: round,
@@ -1957,6 +1990,7 @@ fn attributed_user(event: &SessionEvent) -> bool {
 
 async fn append(
     session: &Session,
+    seq: u64,
     event_type: &str,
     data: Value,
     cancellation: CancellationToken,
@@ -1965,7 +1999,7 @@ async fn append(
         .append(
             SessionEvent {
                 event_type: event_type.into(),
-                seq: session.next_seq()?,
+                seq,
                 time: now(),
                 data,
                 ignorable: None,
