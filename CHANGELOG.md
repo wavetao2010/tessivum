@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.30 - 2026-09-23
 
-Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1.7. The earlier local Windows verification applies only to the original candidate, not this merged tree. Raw PATH/type preservation now passes isolated transaction regressions on PowerShell 5.1 and 7; final ZIP and cross-platform CI acceptance remain merge gates. See the [Windows repair evidence and remaining publication scope](docs/WINDOWS_CHECKPOINT_20260916.md).
+This release includes bounded context recovery, durable Goal consistency fixes, and native Windows x86_64 packaging on Core 0.1.7. PR #7 source CI passed `verify`, `windows`, and the rerun of `browser-e2e`; publication additionally requires the release workflow's archive smoke checks and installer validation. Earlier local Windows evidence applies to its original candidate, not these release archives. See the [Windows repair evidence and verification limits](docs/WINDOWS_CHECKPOINT_20260916.md).
 
 ### Added
 

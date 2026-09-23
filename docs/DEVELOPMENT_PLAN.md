@@ -1,11 +1,11 @@
 # Tessivum 二阶段开发计划
 
 > 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
-> 计划校准日期：2026-09-10
-> Tessivum 源码基线：`v0.1.0-alpha.29`（配套 Core 0.1.7，四平台预发行已公开）
+> 计划校准日期：2026-09-23
+> Tessivum 源码基线：`v0.1.0-alpha.30` 发布候选（配套 Core 0.1.7）
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
-> 当前发行工作：已按 Core → Tessivum 顺序发布默认 Shell 与模型终端修复，见第 4.5 节。第 4.4 节保留此前本地未发布阶段的证据，不作为当前依赖状态。支持范围仍为 macOS/Linux x86_64 与 ARM64；Windows 验收暂缓，远程侧边栏终端及 Windows 原生发行仍不支持。
+> 当前发行工作：PR #7 已合并，上下文有界恢复与持久 Goal 一致性修复的源码 CI 已通过（Browser 首次失败，重跑通过）。Alpha.30 候选目标为 macOS/Linux x86_64、ARM64 及 Windows x86_64；公开发布以新归档 smoke、安装器验收及校验和验证为门禁。第 4.5 节保留 Alpha.29 历史证据，不冒充本版新验收。远程侧边栏终端及 Windows ARM64 仍不支持。
 
 ## 1. 文档集
 
@@ -853,7 +853,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前源码基线为 `v0.1.0-alpha.29`，产品运行时固定 `tessivum-core v0.1.7` / `0caaccf9a79d7a906a08a21c3032eafebe084ffc`，发行状态见第 4.5 节；Alpha.28 历史发行证据见第 4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
+当前源码基线为 `v0.1.0-alpha.30` 发布候选，产品运行时固定 `tessivum-core v0.1.7` / `0caaccf9a79d7a906a08a21c3032eafebe084ffc`，当前发布门禁见文首；Alpha.29/28 历史发行证据见第 4.5/4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 
