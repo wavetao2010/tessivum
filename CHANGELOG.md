@@ -48,6 +48,13 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Keep non-persistent Windows Job ownership inside the blocking capture/fence task across outer-task cancellation; add a queued-cleanup regression proving escaped descendants are reaped and unrelated processes survive.
 - Mark installer and uninstaller PATH mutations before broadcasting environment changes, so notifier initialization failures still trigger raw registry snapshot rollback; verify injected Add-Type failures on Windows PowerShell 5.1 and 7.
 
+## 0.1.0-alpha.30 - 2026-09-23
+
+### Fixed
+
+- Size context-recovery batches by the active model window and keep durable Goal consistency across compaction.
+- Bound context recovery so oversized histories remain recoverable without unbounded replay.
+
 ## 0.1.0-alpha.29 - 2026-09-10
 
 ### Fixed

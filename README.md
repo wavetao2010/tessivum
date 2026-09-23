@@ -13,7 +13,7 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 ## Status
 
-`v0.1.0-alpha.29` fixes default sidebar shell selection and model-owned terminals, including cold-session working directories. It uses `tessivum-core v0.1.7` at revision `0caaccf9a79d7a906a08a21c3032eafebe084ffc` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
+`v0.1.0-alpha.30` bounds context recovery and sizes compaction batches by the active model window while preserving durable Goal consistency. It uses `tessivum-core v0.1.7` at revision `0caaccf9a79d7a906a08a21c3032eafebe084ffc` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
 
 The exact `terminal.manage` capability preserves mode isolation and parent Deny/Ask restrictions. Core retains the existing bounded history paging and hydrates native sessions before plugin tool callbacks.
 
@@ -33,10 +33,10 @@ Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exac
 
 | Platform | Architecture | Archive | SHA-256 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-apple-darwin.tar.gz.sha256) |
-| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-apple-darwin.tar.gz.sha256) |
-| Linux (glibc) | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-aarch64-unknown-linux-gnu.tar.gz.sha256) |
-| Linux (glibc) | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.29/tessivum-0.1.0-alpha.29-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-apple-darwin.tar.gz.sha256) |
+| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz.sha256) |
+| Linux (glibc) | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux (glibc) | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz.sha256) |
 | Windows native | x86_64/ARM64 | Not published | — |
 
 Release scope remains macOS/Linux x86_64 and ARM64. See [Alpha.29 release evidence](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行); earlier release evidence remains historical and is not claimed as new verification.
@@ -59,8 +59,8 @@ tsv --version
 The installer selects the correct release archive, verifies its SHA-256, installs under `~/.local/lib/tessivum`, and updates launchers in `~/.local/bin`:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.29/install.sh
-sh install.sh 0.1.0-alpha.29
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.30/install.sh
+sh install.sh 0.1.0-alpha.30
 export PATH="$HOME/.local/bin:$PATH"
 tessivum --version
 ```
@@ -69,12 +69,12 @@ It does not use `sudo` or edit shell startup files. Install Bun 1.3.14+ and pnpm
 
 ### Manual archive — macOS or Linux
 
-Download the archive and adjacent `.sha256` file from the [Alpha.29 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.29). Choose one of the four target names listed above.
+Download the archive and adjacent `.sha256` file from the [Alpha.30 release](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.30). Choose one of the four target names listed above.
 
 Linux example:
 
 ```bash
-version=0.1.0-alpha.29
+version=0.1.0-alpha.30
 target=x86_64-unknown-linux-gnu # use aarch64-unknown-linux-gnu on ARM64
 base="https://github.com/wavetao2010/tessivum/releases/download/v$version"
 curl -fLO "$base/tessivum-$version-$target.tar.gz"
@@ -95,14 +95,14 @@ The Windows ZIP contains a static-CRT MSVC executable, `tessivum.cmd`/`tsv.cmd`,
 For a ZIP generated locally into `dist`, verify its adjacent checksum before extraction:
 
 ```powershell
-$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.29-x86_64-pc-windows-msvc.zip).Path
+$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip).Path
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -ne "$hash  $(Split-Path $archive -Leaf)") {
     throw 'Windows archive checksum mismatch'
 }
 Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
-& .\windows-release\tessivum-0.1.0-alpha.29-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
-& .\windows-release\tessivum-0.1.0-alpha.29-x86_64-pc-windows-msvc\bin\tessivum.cmd web
+& .\windows-release\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
+& .\windows-release\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc\bin\tessivum.cmd web
 ```
 
 After a matching Windows release is published, `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` installs under `%LOCALAPPDATA%\Tessivum\versions`, with owned launchers in `%LOCALAPPDATA%\Tessivum\bin`. It verifies the ZIP and launchers before activation, supports upgrade/downgrade and rollback, and changes only the User PATH. `-Uninstall` removes managed installation files and only installer-owned PATH entries; application history and settings are retained. Do not point the installer at the existing Alpha.27 release expecting a Windows asset.
@@ -191,7 +191,7 @@ brew upgrade tessivum
 brew uninstall tessivum
 
 # No-sudo installation
-sh install.sh 0.1.0-alpha.29
+sh install.sh 0.1.0-alpha.30
 sh install.sh --uninstall
 
 # Explicit and destructive data removal
