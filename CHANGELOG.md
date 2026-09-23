@@ -12,6 +12,8 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - `web --settings-file <file>` for ordinary-user Hosts that share a settings document while retaining independent data directories and locks.
 
 ### Fixed
+- Bind manual and automatic compaction to each session's validated provider/model selection, and allocate event sequence numbers under the same surface-write gate to prevent live-history sequence gaps.
+- Let known summary-model windows size recovery batches by their token budget instead of forcing every provider through the conservative 65,536-codepoint fallback; unknown windows retain the local bound.
 
 - Recover oversized live conversations in bounded compaction batches without raising resource limits or rewriting the original event log; preserve current requests, recent context, seeds, and complete tool groups, and durably prune only oversized text tool results when needed.
 - Evaluate assembled requests before generation, separate primary and summary model budgets, reject non-shrinking summaries, and resume overflow recovery without replaying completed tools.

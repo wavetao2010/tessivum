@@ -223,6 +223,7 @@ pub struct CompactionService {
     config: CompactionConfig,
     active: Arc<Mutex<BTreeSet<SessionId>>>,
     context_window_resolver: Option<crate::agent_loop::ContextWindowResolver>,
+    session_model: bool,
 }
 impl std::fmt::Debug for CompactionService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -235,7 +236,7 @@ impl std::fmt::Debug for CompactionService {
     }
 }
 impl CompactionService {
-    /// Creates a service whose provider selection is fixed for its lifetime.
+    /// Creates a service with an explicitly configured summary model.
     pub fn new(llm: LlmRuntime, config: CompactionConfig) -> Result<Self, CompactionError> {
         config.validate()?;
         Ok(Self {
@@ -243,6 +244,7 @@ impl CompactionService {
             config,
             active: Arc::new(Mutex::new(BTreeSet::new())),
             context_window_resolver: None,
+            session_model: false,
         })
     }
 
@@ -251,6 +253,20 @@ impl CompactionService {
         resolver: crate::agent_loop::ContextWindowResolver,
     ) -> Self {
         self.context_window_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) fn with_session_model(mut self, enabled: bool) -> Self {
+        self.session_model = enabled;
+        self
+    }
+
+    /// Binds a host-owned clone to validated agent options without changing shared leases.
+    pub(crate) fn for_session_model(mut self, provider: &str, model: &str) -> Self {
+        if self.session_model {
+            self.config.provider = provider.to_owned();
+            self.config.model = model.to_owned();
+        }
         self
     }
 
@@ -329,6 +345,9 @@ impl CompactionService {
             soft_limit(window.saturating_sub(request.max_tokens.unwrap_or((window / 4).max(1))))
         });
         let summary_limit = self.summary_token_limit(session);
+        let input_codepoint_limit = summary_limit
+            .map(|limit| limit.saturating_mul(4))
+            .unwrap_or(self.config.max_input_codepoints as u64);
         let target_cp = soft_limit(self.config.max_input_codepoints as u64);
         let target_count = soft_limit(self.config.max_surface_messages as u64) as usize;
         let keep = (target_cp / 4)
@@ -427,7 +446,7 @@ impl CompactionService {
                 let group_tokens = estimates[begin..end].iter().sum::<u64>();
                 let begin_batch = start.unwrap_or(begin);
                 if end - begin_batch > self.config.max_surface_messages
-                    || batch_cp + group_cp > self.config.max_input_codepoints as u64
+                    || batch_cp + group_cp > input_codepoint_limit
                     || summary_limit.is_some_and(|limit| batch_tokens + group_tokens > limit)
                 {
                     if selected.is_some() {
@@ -450,7 +469,7 @@ impl CompactionService {
                 }
             }
             if let Some(range) = selected {
-                let plan = self.plan_from_surface(&current, range)?;
+                let plan = self.plan_from_surface(&current, range, input_codepoint_limit)?;
                 outcome = Some(CompactionOutcome::Compacted(
                     self.execute(session, trigger, plan, cancellation.clone())
                         .await?,
@@ -727,13 +746,18 @@ impl CompactionService {
     }
 
     fn plan(&self, session: &Session, range: CompactionRange) -> Result<Plan, CompactionError> {
-        self.plan_from_surface(&session.surface(), range)
+        self.plan_from_surface(
+            &session.surface(),
+            range,
+            self.config.max_input_codepoints as u64,
+        )
     }
 
     fn plan_from_surface(
         &self,
         surface: &[SurfaceMessage],
         range: CompactionRange,
+        input_codepoint_limit: u64,
     ) -> Result<Plan, CompactionError> {
         let selected = range_slice(surface, range)?;
         if selected.len() > self.config.max_surface_messages {
@@ -764,13 +788,13 @@ impl CompactionService {
                     Value::Null,
                 )
             })?;
-        if input_codepoints > self.config.max_input_codepoints as u64 {
+        if input_codepoints > input_codepoint_limit {
             return Err(invalid(
                 "COMPACTION_INPUT_TOO_LARGE",
                 "compaction input exceeds the configured codepoint bound",
                 json!({
                     "codepoints": input_codepoints,
-                    "maximum": self.config.max_input_codepoints,
+                    "maximum": input_codepoint_limit,
                 }),
             ));
         }
@@ -1118,25 +1142,21 @@ async fn append(
     spec: AppendSpec<'_>,
     cancellation: CancellationToken,
 ) -> Result<u64, SessionError> {
-    let seq = session.next_seq()?;
-    let event = SessionEvent {
-        event_type: spec.event_type.into(),
-        seq,
-        time: 0,
-        data: spec.data,
-        ignorable: spec.ignorable,
-        source_event_seqs: spec.source_event_seqs,
-        surface_op: spec.surface_op,
-    };
-    match spec.expected_surface_event_seqs {
-        Some(expected) => {
-            session
-                .append_if_surface(event, expected, cancellation)
-                .await?
-        }
-        None => session.append(event, cancellation).await?,
-    }
-    Ok(seq)
+    session
+        .append_next_if_surface(
+            |seq| SessionEvent {
+                event_type: spec.event_type.into(),
+                seq,
+                time: 0,
+                data: spec.data,
+                ignorable: spec.ignorable,
+                source_event_seqs: spec.source_event_seqs,
+                surface_op: spec.surface_op,
+            },
+            spec.expected_surface_event_seqs,
+            cancellation,
+        )
+        .await
 }
 
 fn summary_message(start_seq: u64, compaction_id: &str, content: Vec<ContentBlock>) -> Message {

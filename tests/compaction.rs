@@ -1088,6 +1088,60 @@ async fn request_recovery_commits_multiple_bounded_chunks() {
 }
 
 #[tokio::test]
+async fn known_summary_window_avoids_tiny_codepoint_batches() {
+    let session = session("known-summary-window").await;
+    for index in 0..40 {
+        user(
+            &session,
+            &format!("history-{index}"),
+            &"history ".repeat(4_000),
+        )
+        .await;
+    }
+    user(&session, "current", "Preserve this request.").await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (service, _registration) = service(Arc::new(StaticAdapter {
+        chunks: text_stream("Earlier history retained."),
+        requests: Arc::clone(&requests),
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    let service = service.with_context_window_resolver(Arc::new(|_, _| Some(200_000)));
+    let request = GenerateRequest {
+        provider: "main".into(),
+        model: "main".into(),
+        reasoning_effort: None,
+        messages: session.derive_messages(),
+        system: None,
+        tools: None,
+        temperature: None,
+        max_tokens: Some(128),
+        stop: None,
+        session_id: Some(session.id()),
+        purpose: None,
+    };
+    service
+        .compact_for_request(
+            &session,
+            CompactionTrigger::ContextOverflow,
+            &request,
+            Some(4_096),
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    let requests = lock(&requests);
+    assert!(requests.len() < 10);
+    assert!(requests.iter().any(|request| {
+        request
+            .messages
+            .iter()
+            .map(|message| serde_json::to_string(message).unwrap().chars().count())
+            .sum::<usize>()
+            > 65_536
+    }));
+}
+
+#[tokio::test]
 async fn oversized_live_history_recovers_after_restart_without_replaying_originals() {
     for unicode in [false, true] {
         let persistence: Arc<dyn SessionPersistence> = Arc::new(MemorySessionPersistence::new());

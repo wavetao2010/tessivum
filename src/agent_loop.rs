@@ -321,7 +321,10 @@ impl AgentFactory for AgentLoopFactory {
             return Err(AgentError::Cancelled);
         }
         materialize_default_mode(&session, &self.default_mode, cancellation.clone()).await?;
-        let runtime = SessionRuntimeSpec::resolve(self, &session)?;
+        let mut runtime = SessionRuntimeSpec::resolve(self, &session)?;
+        runtime.compaction = runtime
+            .compaction
+            .map(|service| service.for_session_model(&options.provider, &options.model));
         let resources = self.attach_resources(&runtime, &session).await?;
         if cancellation.is_cancelled() {
             let failures = resources.dispose(&session.id()).await;

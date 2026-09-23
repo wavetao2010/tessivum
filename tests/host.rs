@@ -1462,6 +1462,99 @@ async fn shutdown_drains_racing_settings_writes_before_relays_close() {
 }
 
 #[tokio::test]
+async fn dynamic_compaction_uses_each_sessions_selected_model() {
+    use axum::{body::Body, http::Response, routing::post, Json, Router};
+
+    let root = TempDir::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/responses", post(|Json(request): Json<Value>| async move {
+            assert!(matches!(request["model"].as_str(), Some("alpha" | "beta")));
+            let events = [
+                json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg","type":"message","role":"assistant","content":[]}}),
+                json!({"type":"response.output_text.delta","output_index":0,"delta":"History retained."}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"id":"msg","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"History retained.","annotations":[]}]}}),
+                json!({"type":"response.completed","response":{"id":"resp","status":"completed","output":[{"id":"msg","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"History retained.","annotations":[]}]}]}}),
+            ];
+            Response::builder().header("content-type", "text/event-stream")
+                .body(Body::from(events.into_iter().map(|event| format!("data: {event}\n\n")).collect::<String>())).unwrap()
+        }))).await.unwrap();
+    });
+    let mut config = HostConfig::new(root.path(), root.path().join("data"));
+    config.profile_patch = json!({"llm-pi-ai": {"providers": {"local": {
+        "displayName": "Local recovery fixture",
+        "api": "openai-responses", "auth": "none", "baseURL": format!("http://{address}/v1"),
+        "models": [{"id": "alpha", "input": ["text"]}, {"id": "beta", "input": ["text"]}]
+    }}}});
+    let persistence = JsonlSessionPersistence::new(root.path().join("data"));
+    for id in ["manual-dynamic", "automatic-dynamic"] {
+        persist_session(
+            &persistence,
+            persisted_header(id, Some(root.path().to_string_lossy().into_owned())),
+            (0..520).map(|seq| {
+                surface_event(
+                    "user/message",
+                    seq,
+                    "Keep this older history in the durable log.",
+                )
+            }),
+        )
+        .await;
+    }
+    let runtime = HostRuntime::boot(config).await.unwrap();
+    for (id, model, manual) in [
+        ("manual-dynamic", "alpha", true),
+        ("automatic-dynamic", "beta", false),
+    ] {
+        let session = SessionId::from(id);
+        runtime
+            .select_model(session.clone(), "local".into(), model.into(), None)
+            .await
+            .unwrap();
+        let before = runtime.events(session.clone(), 0).await.unwrap();
+        if manual {
+            let result = runtime
+                .command_execute(session.clone(), "/compact".into())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(result.result, HostCommandResult::Success { .. }),
+                "{:?}",
+                result.result
+            );
+        } else {
+            runtime.prompt(prompt(id)).await.unwrap();
+            wait_for_turns(&runtime, &session, 1, Duration::from_secs(20)).await;
+        }
+        let after = runtime.events(session.clone(), 0).await.unwrap();
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert!(
+            after
+                .iter()
+                .any(|event| event.event_type == "compaction/summary"
+                    && event.data["provider"] == "local"
+                    && event.data["model"] == model),
+            "{id}: {:?}",
+            after
+                .iter()
+                .filter(|event| event.event_type.starts_with("compaction/")
+                    || event.event_type == "turn/end")
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !after
+                .iter()
+                .any(|event| event.event_type == "turn/end"
+                    && event.data["reason"]["kind"] == "error")
+        );
+    }
+    runtime.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
 async fn compact_command_runs_real_service_and_keeps_original_log() {
     let root = TempDir::new();
     let data = root.path().join("data");

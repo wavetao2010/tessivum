@@ -3013,6 +3013,7 @@ impl HostRuntime {
             },
         )
         .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?
+        .with_session_model(dynamic_routes)
         .with_context_window_resolver(Arc::clone(&context_window_resolver));
         let compaction_service = compaction.publish(&root)?;
         let tools_service = tools.publish(&root)?;
@@ -5661,8 +5662,11 @@ impl HostHandle {
                                 "agent disappeared before compaction",
                             )
                         })?;
+                        let options = agent.options();
                         self.inner
                             .compaction
+                            .clone()
+                            .for_session_model(&options.provider, &options.model)
                             .compact_now(&session, agent.cancellation())
                             .await
                             .map(|outcome| {
