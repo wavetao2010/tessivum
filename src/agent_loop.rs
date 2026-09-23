@@ -1458,12 +1458,12 @@ async fn append_workspace_instructions(
 
 fn request_messages(inner: &Inner) -> Vec<Message> {
     let mut messages = inner.session.derive_messages();
-    if let Some(instructions) = inner.session.events().into_iter().rev().find_map(|event| {
+    if let Some(instructions) = inner.session.find_latest_event(|event| {
         (event.event_type == "user/message"
             && event.data.pointer("/source/kind").and_then(Value::as_str) == Some("plugin")
             && event.data.pointer("/source/plugin").and_then(Value::as_str)
                 == Some("tessivum-workspace-instructions"))
-        .then(|| serde_json::from_value::<Message>(event.data).ok())
+        .then(|| serde_json::from_value::<Message>(event.data.clone()).ok())
         .flatten()
     }) {
         if !messages.iter().any(|message| message.id == instructions.id) {

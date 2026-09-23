@@ -475,6 +475,31 @@ impl CompactionService {
                         .await?,
                 ));
                 completed += 1;
+                if trigger != CompactionTrigger::Manual {
+                    let current = session.surface();
+                    let total_cp = current
+                        .iter()
+                        .map(|entry| serialized_codepoints(&entry.message).expect("Message is serializable"))
+                        .sum::<u64>();
+                    let total_tokens = overhead.saturating_add(
+                        current
+                            .iter()
+                            .map(|entry| message_token_estimate(&entry.message))
+                            .sum::<u64>(),
+                    );
+                    let still_pressured = request_limit.map_or_else(
+                        || current.len() > target_count || total_cp > target_cp,
+                        |limit| total_tokens > limit,
+                    );
+                    if still_pressured {
+                        return Err(invalid(
+                            "COMPACTION_RECOVERY_INCOMPLETE",
+                            &format!("Automatic recovery committed one batch but the request remains over budget: {total_cp} codepoints / {target_cp}, {} messages / {target_count}, estimated {total_tokens} tokens. Retry recovery to continue; committed progress is retained.", current.len()),
+                            json!({"completed": completed, "codepoints": total_cp, "maximum": target_cp, "messages": current.len(), "maximumMessages": target_count, "tokenEstimate": total_tokens}),
+                        ));
+                    }
+                    return Ok(outcome.expect("automatic recovery produced an outcome"));
+                }
                 continue;
             }
             // A huge completed result may be in the recent window. Pruning is
@@ -507,6 +532,34 @@ impl CompactionService {
                             .await?
                         {
                             outcome = Some(CompactionOutcome::Pruned(result));
+                            if trigger != CompactionTrigger::Manual {
+                                let current = session.surface();
+                                let total_cp = current
+                                    .iter()
+                                    .map(|entry| {
+                                        serialized_codepoints(&entry.message)
+                                            .expect("Message is serializable")
+                                    })
+                                    .sum::<u64>();
+                                let total_tokens = overhead.saturating_add(
+                                    current
+                                        .iter()
+                                        .map(|entry| message_token_estimate(&entry.message))
+                                        .sum::<u64>(),
+                                );
+                                let still_pressured = request_limit.map_or_else(
+                                    || current.len() > target_count || total_cp > target_cp,
+                                    |limit| total_tokens > limit,
+                                );
+                                if still_pressured {
+                                    return Err(invalid(
+                                        "COMPACTION_RECOVERY_INCOMPLETE",
+                                        &format!("Automatic recovery committed one batch but the request remains over budget: {total_cp} codepoints / {target_cp}, {} messages / {target_count}, estimated {total_tokens} tokens. Retry recovery to continue; committed progress is retained.", current.len()),
+                                        json!({"completed": completed, "codepoints": total_cp, "maximum": target_cp, "messages": current.len(), "maximumMessages": target_count, "tokenEstimate": total_tokens}),
+                                    ));
+                                }
+                                return Ok(outcome.expect("automatic recovery produced an outcome"));
+                            }
                             continue;
                         }
                     }

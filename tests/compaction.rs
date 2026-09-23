@@ -1034,57 +1034,58 @@ async fn equal_or_larger_summary_is_rejected_without_surface_replacement() {
 }
 
 #[tokio::test]
-async fn request_recovery_commits_multiple_bounded_chunks() {
-    let session = session("request-recovery-chunks").await;
-    for index in 0..12 {
-        user(&session, &format!("chunk-{index}"), &"history ".repeat(32)).await;
-    }
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (service, _registration) = service_with_config(
-        Arc::new(StaticAdapter {
-            chunks: text_stream("small"),
-            requests: Arc::clone(&requests),
-            calls: Arc::clone(&calls),
-        }),
-        CompactionConfig {
-            max_surface_messages: 4,
-            max_input_codepoints: 4_096,
-            max_summary_codepoints: 128,
-            ..CompactionConfig::default()
-        },
-    );
-    let request = GenerateRequest {
-        provider: "test".into(),
-        model: "test".into(),
-        reasoning_effort: None,
-        messages: session.derive_messages(),
-        system: None,
-        tools: None,
-        temperature: None,
-        max_tokens: Some(16),
-        stop: None,
-        session_id: Some(session.id()),
-        purpose: None,
-    };
-    assert!(matches!(
-        service
+async fn automatic_recovery_commits_at_most_one_batch_per_invocation() {
+    for trigger in [CompactionTrigger::Pressure, CompactionTrigger::ContextOverflow] {
+        let session = session(&format!("request-recovery-{trigger:?}")).await;
+        for index in 0..12 {
+            user(&session, &format!("chunk-{index}"), &"history ".repeat(32)).await;
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (service, _registration) = service_with_config(
+            Arc::new(StaticAdapter {
+                chunks: text_stream("small"),
+                requests: Arc::clone(&requests),
+                calls: Arc::clone(&calls),
+            }),
+            CompactionConfig {
+                max_surface_messages: 4,
+                max_input_codepoints: 4_096,
+                max_summary_codepoints: 128,
+                ..CompactionConfig::default()
+            },
+        );
+        let request = GenerateRequest {
+            provider: "test".into(),
+            model: "test".into(),
+            reasoning_effort: None,
+            messages: session.derive_messages(),
+            system: None,
+            tools: None,
+            temperature: None,
+            max_tokens: Some(16),
+            stop: None,
+            session_id: Some(session.id()),
+            purpose: None,
+        };
+        let before_calls = calls.load(Ordering::SeqCst);
+        let before_events = session.events().len();
+        let error = service
             .compact_for_request(
                 &session,
-                CompactionTrigger::ContextOverflow,
+                trigger,
                 &request,
                 None,
-                cancellation()
+                cancellation(),
             )
             .await
-            .unwrap(),
-        CompactionOutcome::Compacted(_)
-    ));
-    assert!(calls.load(Ordering::SeqCst) > 1);
-    assert!(lock(&requests)
-        .iter()
-        .all(|request| request.messages.len() <= 4));
-    assert!(session.surface().len() < 12);
+            .unwrap_err();
+        assert_eq!(error.code(), "COMPACTION_RECOVERY_INCOMPLETE");
+        assert!(calls.load(Ordering::SeqCst) - before_calls <= 1);
+        assert!(session.events().len() > before_events);
+        assert!(session.surface().len() < 12);
+        assert!(lock(&requests).len() <= 1);
+    }
 }
 
 #[tokio::test]

@@ -488,6 +488,10 @@ impl Session {
     pub fn events(&self) -> Vec<SessionEvent> {
         read_lock(&self.state).events.clone()
     }
+    /// Decodes the latest admitted event producing a value without cloning the event log.
+    pub fn find_latest_event<T>(&self, decode: impl Fn(&SessionEvent) -> Option<T>) -> Option<T> {
+        read_lock(&self.state).events.iter().rev().find_map(decode)
+    }
 
     /// Returns the immutable seed prefix declared in the header.
     pub fn seed_events(&self) -> Vec<SessionEvent> {

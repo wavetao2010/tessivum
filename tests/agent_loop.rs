@@ -994,6 +994,14 @@ async fn request_aware_pressure_compaction_keeps_full_context_contract() {
             .unwrap();
         agent.when_idle().await.unwrap();
     }
+    let events = agent.session().events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "compaction/summary")
+            .count(),
+        1
+    );
     agent.dispose().await.unwrap();
     let requests = main_requests.lock();
     assert_eq!(requests.len(), 4);
@@ -1008,7 +1016,7 @@ async fn request_aware_pressure_compaction_keeps_full_context_contract() {
         .tools
         .as_ref()
         .is_some_and(|schemas| schemas.iter().any(|schema| schema.name == "read")));
-    assert!(!summary_requests.lock().is_empty());
+    assert_eq!(summary_requests.lock().len(), 1);
 }
 #[tokio::test]
 async fn overflow_recovery_rebuilds_once_without_replaying_completed_tools() {
@@ -1084,6 +1092,13 @@ async fn overflow_recovery_rebuilds_once_without_replaying_completed_tools() {
     assert_eq!(
         events
             .iter()
+            .filter(|event| event.event_type == "compaction/summary")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| event.event_type == "tool/call")
             .count(),
         1
@@ -1125,7 +1140,7 @@ async fn overflow_recovery_rebuilds_once_without_replaying_completed_tools() {
             .count(),
         1
     );
-    assert!(!summary_requests.lock().is_empty());
+    assert_eq!(summary_requests.lock().len(), 1);
 }
 
 #[tokio::test]
