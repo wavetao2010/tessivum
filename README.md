@@ -37,11 +37,11 @@ Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exac
 | macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz.sha256) |
 | Linux (glibc) | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz.sha256) |
 | Linux (glibc) | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz.sha256) |
-| Windows native | x86_64/ARM64 | Not published | — |
+| Windows native | x86_64 | [`.zip`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip) | [checksum](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip.sha256) |
 
-Release scope remains macOS/Linux x86_64 and ARM64. See [Alpha.29 release evidence](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行); earlier release evidence remains historical and is not claimed as new verification.
+Alpha.30 targets macOS/Linux x86_64 and ARM64 plus Windows x86_64. Publication requires all release archive smoke checks and installer validation; use only assets on the published release page. Earlier [Alpha.29 evidence](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行) remains historical, not new verification.
 
-`install.sh` supports macOS and Linux on x86_64/ARM64. This source tree also contains a native Windows x86_64 ZIP pipeline and a separate `install.ps1`; these changes are **not published Alpha.27 assets**. A Linux archive is not a native Windows executable, and Windows ARM64 is not a release target.
+`install.sh` supports macOS and Linux on x86_64/ARM64; `install.ps1` supports native Windows x86_64. A Linux archive is not a native Windows executable, and Windows ARM64 is not a release target.
 
 ### Homebrew — macOS or Linux
 
@@ -86,13 +86,13 @@ tar -xzf "tessivum-$version-$target.tar.gz"
 
 On macOS, select an `apple-darwin` target and replace `sha256sum -c` with `shasum -a 256 -c`.
 
-### Native Windows x86_64 — unpublished source candidate
+### Native Windows x86_64
 
-**Local verification only:** the four Windows checkpoint blockers have been repaired, including the no-Node PTC smoke and installer fault boundaries. These changes are not a published Windows release; do not treat the local ZIP as an official upgrade asset. See the [repair results and verification scope](docs/WINDOWS_CHECKPOINT_20260916.md).
+Alpha.30 adds a gated native Windows ZIP. Source CI passed on PR #7; the release workflow separately exercises the packaged Host and installer. Earlier [Windows repair evidence](docs/WINDOWS_CHECKPOINT_20260916.md) is not acceptance of the new archive or a clean-user environment.
 
 The Windows ZIP contains a static-CRT MSVC executable, `tessivum.cmd`/`tsv.cmd`, and the packaged compatibility, Cordis, and market assets. It does not require WSL, elevation, Developer Mode, or a separate VC++ runtime installation. Install Bun `1.4.0` and pnpm `11.7.0` separately for Web/plugin use. The archive is not code-signed.
 
-For a ZIP generated locally into `dist`, verify its adjacent checksum before extraction:
+Download the ZIP and adjacent checksum into `dist`, then verify before extraction:
 
 ```powershell
 $archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip).Path
@@ -105,9 +105,9 @@ Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
 & .\windows-release\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc\bin\tessivum.cmd web
 ```
 
-After a matching Windows release is published, `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` installs under `%LOCALAPPDATA%\Tessivum\versions`, with owned launchers in `%LOCALAPPDATA%\Tessivum\bin`. It verifies the ZIP and launchers before activation, supports upgrade/downgrade and rollback, and changes only the User PATH. `-Uninstall` removes managed installation files and only installer-owned PATH entries; application history and settings are retained. Do not point the installer at the existing Alpha.27 release expecting a Windows asset.
+With published Alpha.30 assets, `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 0.1.0-alpha.30` installs under `%LOCALAPPDATA%\Tessivum\versions`, with owned launchers in `%LOCALAPPDATA%\Tessivum\bin`. It verifies the ZIP and launchers before activation, supports upgrade/downgrade and rollback, and changes only the User PATH. `-Uninstall` removes managed installation files and only installer-owned PATH entries; application history and settings are retained.
 
-There is no default Windows release: installation requires an explicit version or `VERSION`; uninstall does not. The September 16 report covers the older Windows candidate, not the Alpha.29/Core 0.1.7 integration. The installer now preserves raw `REG_SZ`/`REG_EXPAND_SZ` PATH text, value type, and missing-versus-empty state. The repair has passed isolated, process-local HKCU transaction regressions on Windows PowerShell 5.1 and PowerShell 7; this is not clean-user acceptance. The integration remains a draft pending its final ZIP and cross-platform CI gates. Do not use the draft installer against a real user PATH until those gates close.
+There is no default Windows release: installation requires an explicit version or `VERSION`; uninstall does not. Raw `REG_SZ`/`REG_EXPAND_SZ` PATH text, value type, and missing-versus-empty state are preserved. Isolated transaction regressions on PowerShell 5.1 and 7 are not clean-user acceptance; do not install unpublished local candidates into a real user PATH.
 
 ### Build from source
 
@@ -203,10 +203,10 @@ Back up the data root before changing Alpha versions. Binary rollback does not d
 ## Security and release provenance
 
 - Release archives and first-party Market artifacts include SHA-256 checksums and source metadata.
-- Checksums detect corruption; they are not signatures. Alpha.29 artifacts are not code-signed or notarized.
+- Checksums detect corruption; they are not signatures. Alpha.30 artifacts are not code-signed or notarized.
 - HTTP listeners remain loopback-only unless Remote Access is explicitly enabled with its separate authority checks.
 - Legacy Node plugins and pnpm subprocesses are trusted local code, not sandboxed extensions.
-- The Windows source ACL runner restricts writes, not reads, network access, or process visibility. It retains Everyone/logon-SID ambient grants for runtime compatibility; NTFS hard-link aliases share file permissions, so this is not complete path isolation. `danger-full-access` requires explicit approval. Windows releases remain unpublished.
+- The Windows ACL runner restricts writes, not reads, network access, or process visibility. It retains Everyone/logon-SID ambient grants for runtime compatibility; NTFS hard-link aliases share file permissions, so this is not complete path isolation. `danger-full-access` requires explicit approval.
 
 ## Reproducible benchmark
 

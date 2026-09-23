@@ -37,11 +37,11 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 | macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz.sha256) |
 | Linux（glibc） | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz.sha256) |
 | Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz.sha256) |
-| Windows 原生 | x86_64/ARM64 | 暂未发布 | — |
+| Windows 原生 | x86_64 | [`.zip`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip.sha256) |
 
-发行范围仍为 macOS/Linux x86_64 与 ARM64。Alpha.29 的验收记录见[发行证据](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行)；此前版本的记录仅作为历史证据，不冒充本版新验收。
+Alpha.30 发行目标为 macOS/Linux x86_64、ARM64 及 Windows x86_64。公开发布必须通过全部归档 smoke 与安装器验证；只使用公开发布页上的资产。[Alpha.29 验收记录](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行)仅作为历史证据，不冒充本版新验收。
 
-`install.sh` 支持 macOS/Linux 的 x86_64 与 ARM64。本源码树另有原生 Windows x86_64 ZIP 发行流程与独立的 `install.ps1`，但这些改动**尚未作为 Alpha.27 资产发布**。Linux 归档不能直接作为 Windows 原生程序运行；Windows ARM64 不在本次发行目标内。
+`install.sh` 支持 macOS/Linux 的 x86_64 与 ARM64；`install.ps1` 支持原生 Windows x86_64。Linux 归档不能直接作为 Windows 原生程序运行；Windows ARM64 不在本次发行目标内。
 
 ### Homebrew——macOS 或 Linux
 
@@ -86,13 +86,13 @@ tar -xzf "tessivum-$version-$target.tar.gz"
 
 macOS 请选择 `apple-darwin` target，并将 `sha256sum -c` 替换为 `shasum -a 256 -c`。
 
-### 原生 Windows x86_64——尚未发布的源码候选版
+### 原生 Windows x86_64
 
-**仅为本机验证：**四项 Windows 检查点阻塞已修复，包括无 Node 的 PTC smoke 和安装器故障边界。这些改动尚未作为 Windows 正式发行发布，请勿把本地 ZIP 当作官方升级资产。详见[修复结果与验收范围](docs/WINDOWS_CHECKPOINT_20260916.md)。
+Alpha.30 新增带发布门禁的原生 Windows ZIP。PR #7 源码 CI 已通过，发行流程另行验证归档 Host 与安装器。此前的 [Windows 修复证据](docs/WINDOWS_CHECKPOINT_20260916.md)不代表新归档或全新用户环境验收。
 
 Windows ZIP 包含静态 CRT 的 MSVC 可执行文件、`tessivum.cmd`/`tsv.cmd` 启动器，以及兼容宿主、Cordis 和市场资源。不需要 WSL、管理员权限、开发者模式或单独安装 VC++ 运行库。使用 Web/插件前另行安装 Bun `1.4.0` 和 pnpm `11.7.0`。归档尚未做代码签名。
 
-本地生成到 `dist` 的 ZIP，应先验证相邻校验和再解压：
+将 ZIP 与相邻校验和下载到 `dist` 后，先验证再解压：
 
 ```powershell
 $archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip).Path
@@ -105,9 +105,9 @@ Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
 & .\windows-release\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc\bin\tessivum.cmd web
 ```
 
-匹配的 Windows 版本发布后，`powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 <version>` 会安装到 `%LOCALAPPDATA%\Tessivum\versions`，并在 `%LOCALAPPDATA%\Tessivum\bin` 创建受管启动器。安装器在切换版本前验证 ZIP 与启动器，支持升级、降级和回滚，仅修改用户级 PATH。`-Uninstall` 只移除受管安装文件和安装器拥有的 PATH 项，保留应用历史与设置。当前已发布的 Alpha.27 没有 Windows 资产，不能据此直接联网安装。
+Alpha.30 资产公开后，`powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 0.1.0-alpha.30` 会安装到 `%LOCALAPPDATA%\Tessivum\versions`，并在 `%LOCALAPPDATA%\Tessivum\bin` 创建受管启动器。安装器在切换版本前验证 ZIP 与启动器，支持升级、降级和回滚，仅修改用户级 PATH。`-Uninstall` 只移除受管安装文件和安装器拥有的 PATH 项，保留应用历史与设置。
 
-当前没有默认 Windows 发行版本：安装必须传入版本或设置 `VERSION`，卸载不需要。9 月 16 日报告验证的是旧 Windows 候选版，不是 Alpha.29/Core 0.1.7 集成结果。安装器现已保留 PATH 的 `REG_SZ`/`REG_EXPAND_SZ` 原文、类型，以及不存在和空值的区别；修复已通过 Windows PowerShell 5.1 与 PowerShell 7 的进程局部 HKCU 隔离事务回归，但这不是全新用户验收。集成仍为等待最终 ZIP 和跨平台 CI 门禁的草稿；门禁关闭前，不要用草稿安装器修改真实用户 PATH。
+Windows 安装必须传入版本或设置 `VERSION`，卸载不需要。安装器保留 PATH 的 `REG_SZ`/`REG_EXPAND_SZ` 原文、类型及不存在和空值的区别。PowerShell 5.1 与 7 的隔离事务回归不代表全新用户验收；不要用未发布的本地候选包修改真实用户 PATH。
 
 ### 从源码运行
 
@@ -203,10 +203,10 @@ rm -rf "${TESSIVUM_HOME:-$HOME/.tessivum}"
 ## 安全与发布来源
 
 - 发布归档与第一方市场工件包含 SHA-256 校验和及来源元数据；
-- 校验和可以检测损坏，但不是签名；Alpha.29 工件未进行代码签名或公证；
+- 校验和可以检测损坏，但不是签名；Alpha.30 工件未进行代码签名或公证；
 - 除非显式启用带独立权限检查的远程访问，否则 HTTP listener 保持 loopback-only；
 - Legacy Node 插件和 pnpm 子进程是受信任的本地代码，不是沙箱扩展。
-- Windows 源码中的 ACL runner 只限制写入，不隔离读取、网络或进程可见性。为兼容运行时保留 Everyone/logon SID 的环境权限；NTFS 硬链接别名共享文件权限，因此不是完整的路径隔离。`danger-full-access` 必须显式批准；Windows 发行包仍未发布。
+- Windows ACL runner 只限制写入，不隔离读取、网络或进程可见性。为兼容运行时保留 Everyone/logon SID 的环境权限；NTFS 硬链接别名共享文件权限，因此不是完整的路径隔离。`danger-full-access` 必须显式批准。
 
 ## 可复现 Benchmark
 

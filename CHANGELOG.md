@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.30 - 2026-09-23
 
-Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1.7. The earlier local Windows verification applies only to the original candidate, not this merged tree. Raw PATH/type preservation now passes isolated transaction regressions on PowerShell 5.1 and 7; final ZIP and cross-platform CI acceptance remain merge gates. See the [Windows repair evidence and remaining publication scope](docs/WINDOWS_CHECKPOINT_20260916.md).
+This release includes bounded context recovery, durable Goal consistency fixes, and native Windows x86_64 packaging on Core 0.1.7. PR #7 source CI passed `verify`, `windows`, and the rerun of `browser-e2e`; publication additionally requires the release workflow's archive smoke checks and installer validation. Earlier local Windows evidence applies to its original candidate, not these release archives. See the [Windows repair evidence and verification limits](docs/WINDOWS_CHECKPOINT_20260916.md).
 
 ### Added
 
@@ -47,13 +47,6 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Wait for the real parked question before Browser steering gestures, keeping queued messages out of the initial request's claim and preserving FIFO flush assertions.
 - Keep non-persistent Windows Job ownership inside the blocking capture/fence task across outer-task cancellation; add a queued-cleanup regression proving escaped descendants are reaped and unrelated processes survive.
 - Mark installer and uninstaller PATH mutations before broadcasting environment changes, so notifier initialization failures still trigger raw registry snapshot rollback; verify injected Add-Type failures on Windows PowerShell 5.1 and 7.
-
-## 0.1.0-alpha.30 - 2026-09-23
-
-### Fixed
-
-- Size context-recovery batches by the active model window and keep durable Goal consistency across compaction.
-- Bound context recovery so oversized histories remain recoverable without unbounded replay.
 
 ## 0.1.0-alpha.29 - 2026-09-10
 
