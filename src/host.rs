@@ -33,7 +33,7 @@ use crate::{
         AgentError, AgentFactoryRegistration, AgentHandle, AgentOptions, AgentRegistry,
         AgentStatus, InboxReservationResult, InboxTarget, InboxUpdate,
     },
-    agent_loop::AgentLoopFactory,
+    agent_loop::{AgentLoopFactory, ContextWindowResolver},
     agent_mode::{
         AgentModeDocument, AgentModeId, AgentModeRegistry, AgentModeRoot, AgentModeTrust,
     },
@@ -54,7 +54,7 @@ use crate::{
         BashJobOwners, BuiltinTools, BuiltinToolsConfig, HostToolServices, PersistentShellSessions,
     },
     code_runtime::{ProcessCodeRuntime, ProcessCodeRuntimeConfig},
-    compaction::{CompactionConfig, CompactionService},
+    compaction::{CompactionConfig, CompactionOutcome, CompactionService},
     compatible_api::CompatibleApiAdapter,
     composition::{CompositionRegistry, CompositionTools},
     credentials::{
@@ -2079,6 +2079,7 @@ struct HostInner {
     goal_tools: GoalToolRouter,
     planning_tools: PlanningToolRouter,
     owned_agents: Mutex<BTreeMap<SessionId, OwnedAgent>>,
+    compaction: CompactionService,
     state: Mutex<State>,
     // ponytail: one Host-wide gate serializes session create/delete and agent handoff; shard by session only if contention matters.
     setup: AsyncMutex<()>,
@@ -2991,6 +2992,18 @@ impl HostRuntime {
             .register_tools(&tools, questions.clone())
             .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
         let projections = ProjectionRegistry::new();
+        let context_window_resolver: ContextWindowResolver = {
+            let routes = Arc::clone(&route_resolver.routes);
+            let recorded = config.recorded_replay_context_window;
+            Arc::new(move |provider: &str, model: &str| {
+                recorded.or_else(|| {
+                    lock(&routes)
+                        .get(provider)
+                        .and_then(|route| route.models.iter().find(|item| item.id == model))
+                        .and_then(|item| item.context_window)
+                })
+            })
+        };
         let compaction = CompactionService::new(
             llm.clone(),
             CompactionConfig {
@@ -2999,7 +3012,9 @@ impl HostRuntime {
                 ..CompactionConfig::default()
             },
         )
-        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?;
+        .map_err(|error| HostError::InvalidConfiguration(error.to_string()))?
+        .with_session_model(dynamic_routes)
+        .with_context_window_resolver(Arc::clone(&context_window_resolver));
         let compaction_service = compaction.publish(&root)?;
         let tools_service = tools.publish(&root)?;
         let registry = AgentRegistry::new(sessions.clone());
@@ -3193,20 +3208,9 @@ impl HostRuntime {
         .with_composition_registry(composition)
         .with_root_context(root.clone())
         .with_approval_required_tools(config.approval_required_tools.clone())
-        .with_compaction(compaction)
+        .with_compaction(compaction.clone())
         .with_skills(skills.clone(), Arc::clone(&skill_scopes))
-        .with_context_window_resolver({
-            let routes = Arc::clone(&route_resolver.routes);
-            let recorded = config.recorded_replay_context_window;
-            Arc::new(move |provider: &str, model: &str| {
-                recorded.or_else(|| {
-                    lock(&routes)
-                        .get(provider)
-                        .and_then(|route| route.models.iter().find(|item| item.id == model))
-                        .and_then(|item| item.context_window)
-                })
-            })
-        });
+        .with_context_window_resolver(Arc::clone(&context_window_resolver));
         if let Some(ptc_runtime) = ptc_runtime {
             factory = factory.with_code_runtime(ptc_runtime);
         }
@@ -3330,6 +3334,7 @@ impl HostRuntime {
                 _factory: factory,
             },
             owned_agents: Mutex::new(BTreeMap::new()),
+            compaction,
             state: Mutex::new(State::default()),
             setup: AsyncMutex::new(()),
             commands: AsyncMutex::new(()),
@@ -5587,13 +5592,32 @@ impl HostHandle {
         let Some((name, raw_input)) = parse_command(&line) else {
             return Ok(None);
         };
-        if !matches!(name, "export" | "feedback" | "goal" | "permission" | "plan") {
+        if !matches!(
+            name,
+            "compact" | "export" | "feedback" | "goal" | "permission" | "plan"
+        ) {
             return Ok(None);
         }
         let _commands = self.inner.commands.lock().await;
         let session = {
             let _setup = self.inner.setup.lock().await;
-            self.ensure_agent_under_setup(&session_id).await?.session()
+            let agent = self.ensure_agent_under_setup(&session_id).await?;
+            let session = agent.session();
+            let mode = self
+                .inner
+                .agent_modes
+                .resolve(
+                    selected_agent_mode(
+                        &session,
+                        &current_default_agent_mode(&self.inner).map_err(mode_error)?,
+                    )
+                    .map_err(mode_error)?,
+                )
+                .map_err(mode_error)?;
+            if name == "compact" && mode.spec.compaction.is_none() {
+                return Ok(None);
+            }
+            session
         };
         let approvals = if name == "permission" {
             Some(self.inner.approvals.lookup(&session_id).ok_or_else(|| {
@@ -5618,6 +5642,51 @@ impl HostHandle {
             .await?;
 
         let result = match name {
+            "compact" => {
+                if !raw_input.trim().is_empty() {
+                    Ok(HostCommandResult::Error {
+                        text: "The /compact command does not accept arguments. Usage: /compact"
+                            .into(),
+                    })
+                } else {
+                    async {
+                        let _execution = session.execution.try_lock().map_err(|_| {
+                            HostError::invalid(
+                                "SESSION_BUSY",
+                                "cannot compact while the session is running",
+                            )
+                        })?;
+                        let agent = self.inner.registry.get(&session_id).ok_or_else(|| {
+                            HostError::invalid(
+                                "SESSION_NOT_FOUND",
+                                "agent disappeared before compaction",
+                            )
+                        })?;
+                        let options = agent.options();
+                        self.inner
+                            .compaction
+                            .clone()
+                            .for_session_model(&options.provider, &options.model)
+                            .compact_now(&session, agent.cancellation())
+                            .await
+                            .map(|outcome| {
+                                let text = match outcome {
+                                    CompactionOutcome::Noop { .. } => "No compaction was needed.",
+                                    CompactionOutcome::Compacted(_) => {
+                                        "Conversation history compacted."
+                                    }
+                                    CompactionOutcome::Pruned(_) => "Conversation history pruned.",
+                                };
+                                HostCommandResult::Success {
+                                    text: Some(text.into()),
+                                    source_event_seq: None,
+                                }
+                            })
+                            .map_err(|error| HostError::invalid(error.code(), error.to_string()))
+                    }
+                    .await
+                }
+            }
             "feedback" => self.run_feedback_command(&session, raw_input).await,
             "export" => Ok(if raw_input.trim().is_empty() {
                 HostCommandResult::Success {
@@ -5848,7 +5917,7 @@ impl HostHandle {
     ) -> Result<HostCommandResult, HostError> {
         let goals = self.goal_service_inner(session_id.clone()).await?;
         let input = raw_input.trim();
-        let current = goals.current().await;
+        let current = goals.current().await?;
         let success = |text| HostCommandResult::Success {
             text: Some(text),
             source_event_seq: None,

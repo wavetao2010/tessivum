@@ -21,7 +21,10 @@ use tessivum::{
         ApprovalAnswerer, ApprovalAsked, ApprovalDecision, ApprovalError, ApprovalOutcome,
         ApprovalPolicy, ApprovalRequest, ApprovalService, HostApprovalRegistry,
     },
-    goal::{GoalError, GoalPhase, GoalRef, GoalService, GoalSnapshot, DEFAULT_MAX_GOAL_ROUNDS},
+    goal::{
+        GoalError, GoalPhase, GoalRef, GoalService, GoalSnapshot, GoalToolRouter,
+        DEFAULT_MAX_GOAL_ROUNDS,
+    },
     planning::{PlanMode, PlanningService},
     session::{
         MemorySessionPersistence, Session, SessionError, SessionInspection, SessionPersistence,
@@ -438,7 +441,7 @@ async fn goal_lifecycle_helpers_are_cas_durable_and_reloadable() {
     let reloaded =
         GoalService::new(registry.get(&SessionId::from("goal-lifecycle")).unwrap()).unwrap();
     assert_eq!(
-        reloaded.snapshot(&cleared.reference.id).await,
+        reloaded.snapshot(&cleared.reference.id).await.unwrap(),
         Some(cleared)
     );
     assert_eq!(DEFAULT_MAX_GOAL_ROUNDS, 256);
@@ -464,11 +467,266 @@ async fn failed_goal_append_leaves_no_snapshot_or_event() {
             .await,
         Err(GoalError::Session(_))
     ));
-    assert!(service.snapshots().await.is_empty());
+    assert!(service.snapshots().await.unwrap().is_empty());
     assert!(session
         .events()
         .into_iter()
         .all(|event| event.event_type != "goal/change"));
+}
+
+#[tokio::test]
+async fn concurrent_goal_views_preserve_revision_cas_across_an_ordinary_append() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let persistence = Arc::new(AskedFailingPersistence {
+        inner: MemorySessionPersistence::new(),
+        fail_asked: AtomicBool::new(false),
+        fail_goal_change: AtomicBool::new(false),
+        block_policy: AtomicBool::new(true),
+        policy_entered: entered.clone(),
+        policy_release: release.clone(),
+    });
+    let (agent, registry) = agent_with_persistence("goal-write-cas", persistence).await;
+    let session = agent.session();
+    let first = GoalService::new(registry.get(&agent.id()).unwrap()).unwrap();
+    let created = first
+        .create("original".into(), None, cancellation())
+        .await
+        .unwrap();
+    let second = GoalService::new(registry.get(&agent.id()).unwrap()).unwrap();
+    let ordinary = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .append_next(
+                    |seq| SessionEvent {
+                        event_type: "approval/policy".into(),
+                        seq,
+                        time: 0,
+                        data: json!({}),
+                        ignorable: None,
+                        source_event_seqs: None,
+                        surface_op: None,
+                    },
+                    cancellation(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    entered.notified().await;
+    let left = first.edit(
+        created.reference.clone(),
+        Some("first edit".into()),
+        None,
+        cancellation(),
+    );
+    let right = second.edit(
+        created.reference,
+        Some("second edit".into()),
+        None,
+        cancellation(),
+    );
+    tokio::pin!(left, right);
+    tokio::select! { biased; _ = &mut left => panic!("write gate must block"), _ = async {} => {} }
+    tokio::select! { biased; _ = &mut right => panic!("write gate must block"), _ = async {} => {} }
+    release.notify_one();
+    ordinary.await.unwrap();
+    let (left, right) = tokio::join!(left, right);
+    let winner = match (left, right) {
+        (Ok(goal), Err(GoalError::Stale)) | (Err(GoalError::Stale), Ok(goal)) => goal,
+        results => panic!("exactly one revision may commit: {results:?}"),
+    };
+    assert_eq!(winner.reference.revision, 2);
+    assert_eq!(
+        session
+            .events()
+            .iter()
+            .filter(|event| event.event_type == "goal/change")
+            .count(),
+        2
+    );
+    assert_eq!(first.current().await.unwrap(), Some(winner.clone()));
+    assert_eq!(second.current().await.unwrap(), Some(winner.clone()));
+    assert_eq!(
+        GoalService::new(agent).unwrap().current().await.unwrap(),
+        Some(winner)
+    );
+}
+
+#[tokio::test]
+async fn incremental_and_cold_goal_views_match_across_interleaved_events() {
+    let (agent, registry) = agent("goal-fold-consistency").await;
+    let session = agent.session();
+    let service = GoalService::new(agent).unwrap();
+    let created = service
+        .create("ship the release".into(), Some(3), cancellation())
+        .await
+        .unwrap();
+
+    // Ordinary events must not advance a goal-only cursor past a later change.
+    append_turn_end(&session, 1).await;
+    let other = GoalService::new(
+        registry
+            .get(&SessionId::from("goal-fold-consistency"))
+            .unwrap(),
+    )
+    .unwrap();
+    let edited = other
+        .edit(
+            created.reference.clone(),
+            Some("ship it safely".into()),
+            None,
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    append_turn_end(&session, 2).await;
+
+    let current = service.current().await.unwrap();
+    assert_eq!(current, Some(edited.clone()));
+    let model = service.model_value().await.unwrap();
+    assert_eq!(model["goal"]["id"], edited.reference.id);
+    assert_eq!(model["goal"]["revision"], edited.reference.revision);
+    assert_eq!(model["goal"]["objective"], edited.title);
+
+    let cold = GoalService::new(
+        registry
+            .get(&SessionId::from("goal-fold-consistency"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cold.current().await.unwrap(), current);
+    assert_eq!(cold.model_value().await.unwrap(), model);
+
+    let completed = other
+        .complete(edited.reference, cancellation())
+        .await
+        .unwrap();
+    assert_eq!(service.current().await.unwrap(), Some(completed));
+    assert!(service.model_value().await.unwrap()["goal"].is_object());
+}
+
+#[tokio::test]
+async fn external_goal_changes_do_not_rearm_a_disarmed_warm_view() {
+    let (agent, registry) = agent("goal-transient-authority").await;
+    let observer = GoalService::new(registry.get(&agent.id()).unwrap()).unwrap();
+    let writer = GoalService::new(agent).unwrap();
+    let created = writer
+        .write(None, goal(1, GoalPhase::Active, false), cancellation())
+        .await
+        .unwrap();
+    assert_eq!(observer.current().await.unwrap(), Some(created.clone()));
+    assert_eq!(
+        observer.model_value().await.unwrap()["activation"],
+        "disarmed"
+    );
+    let activation = observer
+        .activate(created.reference.clone(), 1, cancellation())
+        .await
+        .unwrap();
+    activation.disarm().await.unwrap();
+    let paused = writer
+        .pause(created.reference, cancellation())
+        .await
+        .unwrap();
+    let resumed = writer
+        .resume(paused.reference, cancellation())
+        .await
+        .unwrap();
+    assert_eq!(observer.current().await.unwrap(), Some(resumed));
+    assert_eq!(
+        observer.model_value().await.unwrap()["activation"],
+        "disarmed"
+    );
+}
+
+#[tokio::test]
+async fn get_goal_tool_reads_completion_from_another_service_view() {
+    let (agent, registry) = agent("goal-tool-consistency").await;
+    let service = GoalService::new(registry.get(&agent.id()).unwrap()).unwrap();
+    let created = service
+        .create("verify the user-facing read".into(), None, cancellation())
+        .await
+        .unwrap();
+    let other = GoalService::new(agent).unwrap();
+    let completed = other
+        .complete(created.reference, cancellation())
+        .await
+        .unwrap();
+    let router = GoalToolRouter::default();
+    router.insert(service.clone());
+    let runtime = ToolRuntime::new();
+    let _registrations = router.register_tools(&runtime).unwrap();
+    let output = runtime
+        .execute(
+            ToolRunContext {
+                session: service.agent_id(),
+                call: ToolCallId::from("get-goal"),
+                cancellation: cancellation(),
+            },
+            "get_goal",
+            json!({}),
+        )
+        .await;
+    assert!(!output.is_error);
+    let text = output
+        .content
+        .into_iter()
+        .find_map(|block| match block {
+            tessivum::ContentBlock::Text { text } => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["goal"]["id"], completed.reference.id);
+    assert_eq!(value["goal"]["revision"], completed.reference.revision);
+    assert_eq!(value["goal"]["phase"], "complete");
+    assert_eq!(value["activation"], "disarmed");
+}
+
+#[tokio::test]
+async fn invalid_goal_chain_is_rejected_during_cold_replay() {
+    let (agent, registry) = agent("goal-invalid-chain").await;
+    let session = agent.session();
+    let service = GoalService::new(agent).unwrap();
+    service
+        .create("valid first goal".into(), None, cancellation())
+        .await
+        .unwrap();
+    session
+        .append(
+            SessionEvent {
+                event_type: "goal/change".into(),
+                seq: session.next_seq().unwrap(),
+                time: 0,
+                data: json!({
+                    "kind": "goal/change",
+                    "version": 1,
+                    "operation": "clear",
+                    "cleared": {"id": "missing", "revision": 1},
+                    "clearedAt": 0
+                }),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(service.current().await, Err(GoalError::NotFound(id)) if id == "missing"));
+    assert!(matches!(service.projection().await, Err(GoalError::NotFound(id)) if id == "missing"));
+    assert!(matches!(service.model_value().await, Err(GoalError::NotFound(id)) if id == "missing"));
+    assert!(matches!(service.snapshots().await, Err(GoalError::NotFound(id)) if id == "missing"));
+    assert!(
+        matches!(service.snapshot("missing").await, Err(GoalError::NotFound(id)) if id == "missing")
+    );
+
+    assert!(matches!(
+        GoalService::new(registry.get(&SessionId::from("goal-invalid-chain")).unwrap()),
+        Err(GoalError::NotFound(id)) if id == "missing"
+    ));
 }
 
 #[tokio::test]

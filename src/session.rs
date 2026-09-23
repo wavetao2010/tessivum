@@ -436,6 +436,7 @@ pub struct Session {
     persistence: Arc<dyn SessionPersistence>,
     state: RwLock<SessionState>,
     write_gate: AsyncMutex<()>,
+    pub(crate) execution: AsyncMutex<()>,
     updates: broadcast::Sender<SessionEvent>,
 }
 
@@ -469,6 +470,7 @@ impl Session {
             persistence,
             state: RwLock::new(state),
             write_gate: AsyncMutex::new(()),
+            execution: AsyncMutex::new(()),
             updates,
         })
     }
@@ -551,11 +553,20 @@ impl Session {
         build: impl FnOnce(u64) -> SessionEvent,
         cancellation: CancellationToken,
     ) -> Result<u64, SessionError> {
+        self.append_next_if_surface(build, None, cancellation).await
+    }
+
+    pub(crate) async fn append_next_if_surface(
+        &self,
+        build: impl FnOnce(u64) -> SessionEvent,
+        expected_surface_event_seqs: Option<&[u64]>,
+        cancellation: CancellationToken,
+    ) -> Result<u64, SessionError> {
         check_cancellation(&cancellation)?;
         let _gate = self.write_gate.lock().await;
         check_cancellation(&cancellation)?;
         let seq = next_seq(&read_lock(&self.state).events)?;
-        self.append_under_gate(build(seq), None, cancellation)
+        self.append_under_gate(build(seq), expected_surface_event_seqs, cancellation)
             .await?;
         Ok(seq)
     }

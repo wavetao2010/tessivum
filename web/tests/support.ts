@@ -255,7 +255,9 @@ export class RustWebHarness {
         env.TESSIVUM_REPLAY_FILE = options.replayFixture
       }
       if (options.replayRecording !== undefined || options.replayFixture !== undefined) {
-        env.TESSIVUM_REPLAY_CONTEXT_WINDOW = '128000'
+        // UI recordings contain normal turns, not maintenance summaries. Leave
+        // room for long-history fixtures under the conservative byte estimate.
+        env.TESSIVUM_REPLAY_CONTEXT_WINDOW ??= '256000'
       }
       if (options.deepSeekSearch !== undefined) {
         env.DEEPSEEK_SEARCH_BASE_URL = options.deepSeekSearch.baseURL

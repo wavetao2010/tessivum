@@ -12,7 +12,14 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - `web --settings-file <file>` for ordinary-user Hosts that share a settings document while retaining independent data directories and locks.
 
 ### Fixed
+- Bind manual and automatic compaction to each session's validated provider/model selection, and allocate event sequence numbers under the same surface-write gate to prevent live-history sequence gaps.
+- Let known summary-model windows size recovery batches by their token budget instead of forcing every provider through the conservative 65,536-codepoint fallback; unknown windows retain the local bound.
 
+- Recover oversized live conversations in bounded compaction batches without raising resource limits or rewriting the original event log; preserve current requests, recent context, seeds, and complete tool groups, and durably prune only oversized text tool results when needed.
+- Evaluate assembled requests before generation, separate primary and summary model budgets, reject non-shrinking summaries, and resume overflow recovery without replaying completed tools.
+- Use the primary model's known window for pressure checks, with local fallback thresholds only when that window is unknown; do not reject valid long histories or immutable branch seeds merely because they exceed one summary batch.
+- Execute `/compact` through the real Host command lifecycle, serialize it with session execution, and allow cancellation and shutdown to terminate idle manual summaries without blocking admission drain.
+- Fold durable Goal changes consistently across service views, enforce revision CAS inside the append boundary, propagate corrupt-history read errors, and preserve explicitly disarmed warm views. Synthetic regressions do not establish the root cause of the reported screenshot; original-session evidence and same-candidate cross-platform acceptance remain outstanding.
 - Materialize Windows runtime package aliases as real directories without requiring symbolic-link privileges or recursively copying checkout dependency cycles.
 - Wait for owned Windows process descendants before sandbox permission and temporary-directory cleanup; distinguish unrelated process generations without weakening ownership checks.
 - Make native API preflight, Legacy fixtures, and Browser recordings respect Windows transport, executable, shell, and path behavior.
@@ -37,6 +44,7 @@ Windows changes below are an unreleased draft integration onto Alpha.29/Core 0.1
 - Verify produced-file summaries by ordered visible paths, exact remaining counts, and non-overflowing layout rather than a platform-dependent two-chip count.
 - Check remote revocation through authenticated HTTP admission changing from 200 to 401 and active WebSocket closure, rather than a scheduler-dependent reconnect warning count.
 - Wait for native workspace attachment before declaring Browser startup ready; hold and release the real question frame during steering gestures instead of relying on replay pacing before the question hides the composer.
+- Wait for the real parked question before Browser steering gestures, keeping queued messages out of the initial request's claim and preserving FIFO flush assertions.
 - Keep non-persistent Windows Job ownership inside the blocking capture/fence task across outer-task cancellation; add a queued-cleanup regression proving escaped descendants are reaped and unrelated processes survive.
 - Mark installer and uninstaller PATH mutations before broadcasting environment changes, so notifier initialization failures still trigger raw registry snapshot rollback; verify injected Add-Type failures on Windows PowerShell 5.1 and 7.
 

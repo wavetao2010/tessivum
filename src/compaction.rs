@@ -161,6 +161,7 @@ pub enum CompactionOutcome {
         token_estimate: u64,
     },
     Compacted(CompactionResult),
+    Pruned(ToolResultPruneResult),
 }
 
 /// Facts from a durable tool-result replacement.
@@ -221,6 +222,8 @@ pub struct CompactionService {
     llm: LlmRuntime,
     config: CompactionConfig,
     active: Arc<Mutex<BTreeSet<SessionId>>>,
+    context_window_resolver: Option<crate::agent_loop::ContextWindowResolver>,
+    session_model: bool,
 }
 impl std::fmt::Debug for CompactionService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -232,16 +235,39 @@ impl std::fmt::Debug for CompactionService {
             .finish_non_exhaustive()
     }
 }
-
 impl CompactionService {
-    /// Creates a service whose provider selection is fixed for its lifetime.
+    /// Creates a service with an explicitly configured summary model.
     pub fn new(llm: LlmRuntime, config: CompactionConfig) -> Result<Self, CompactionError> {
         config.validate()?;
         Ok(Self {
             llm,
             config,
             active: Arc::new(Mutex::new(BTreeSet::new())),
+            context_window_resolver: None,
+            session_model: false,
         })
+    }
+
+    pub fn with_context_window_resolver(
+        mut self,
+        resolver: crate::agent_loop::ContextWindowResolver,
+    ) -> Self {
+        self.context_window_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) fn with_session_model(mut self, enabled: bool) -> Self {
+        self.session_model = enabled;
+        self
+    }
+
+    /// Binds a host-owned clone to validated agent options without changing shared leases.
+    pub(crate) fn for_session_model(mut self, provider: &str, model: &str) -> Self {
+        if self.session_model {
+            self.config.provider = provider.to_owned();
+            self.config.model = model.to_owned();
+        }
+        self
     }
 
     /// Publishes this optional capability into a caller-owned context scope.
@@ -256,10 +282,7 @@ impl CompactionService {
         &self.config
     }
 
-    /// Compacts all current live-surface entries when at least two exist.
-    ///
-    /// A standalone idle entry is not useful context to summarize, so this is a
-    /// strict no-op without a durable marker or model call.
+    /// Reduces live history in bounded batches, retaining current and recent context.
     pub async fn compact_now(
         &self,
         session: &Session,
@@ -284,6 +307,228 @@ impl CompactionService {
             ));
         }
         self.compact_automatic(session, trigger, cancellation).await
+    }
+    /// Recovers an assembled model request while preserving protected current-turn input.
+    pub async fn compact_for_request(
+        &self,
+        session: &Session,
+        trigger: CompactionTrigger,
+        request: &GenerateRequest,
+        context_window: Option<u64>,
+        cancellation: CancellationToken,
+    ) -> Result<CompactionOutcome, CompactionError> {
+        check_cancellation(&cancellation)?;
+        let _lease = self.acquire(session.id())?;
+        let initial = session.surface();
+        let seed_seqs = session
+            .seed_events()
+            .into_iter()
+            .map(|event| event.seq)
+            .collect::<BTreeSet<_>>();
+        let initial_ids = initial
+            .iter()
+            .map(|entry| &entry.message.id)
+            .collect::<BTreeSet<_>>();
+        let extra_tokens = request
+            .messages
+            .iter()
+            .filter(|message| !initial_ids.contains(&message.id))
+            .map(message_token_estimate)
+            .sum::<u64>();
+        let overhead = serialized_request_without_messages(request).saturating_add(extra_tokens);
+        let request_window = context_window.or_else(|| {
+            self.context_window_resolver
+                .as_ref()
+                .and_then(|resolve| resolve(&request.provider, &request.model))
+        });
+        let request_limit = request_window.map(|window| {
+            soft_limit(window.saturating_sub(request.max_tokens.unwrap_or((window / 4).max(1))))
+        });
+        let summary_limit = self.summary_token_limit(session);
+        let input_codepoint_limit = summary_limit
+            .map(|limit| limit.saturating_mul(4))
+            .unwrap_or(self.config.max_input_codepoints as u64);
+        let target_cp = soft_limit(self.config.max_input_codepoints as u64);
+        let target_count = soft_limit(self.config.max_surface_messages as u64) as usize;
+        let keep = (target_cp / 4)
+            .min(
+                initial
+                    .iter()
+                    .map(|entry| serialized_codepoints(&entry.message).unwrap_or(u64::MAX))
+                    .sum::<u64>()
+                    / 4,
+            )
+            .max(1);
+        let minimum_summary = serialized_codepoints(&summary_message(
+            session.next_seq()?,
+            "00000000-0000-0000-0000-000000000000",
+            vec![ContentBlock::Text { text: ".".into() }],
+        ))
+        .expect("Message is serializable");
+        let mut outcome = None;
+        let mut completed = 0;
+        // Each step consumes fresh history or shrinks one blocked tool result.
+        let max_steps = initial.len().saturating_mul(2).saturating_add(1);
+        for _ in 0..max_steps {
+            check_cancellation(&cancellation)?;
+            let current = session.surface();
+            let sizes = current
+                .iter()
+                .map(|entry| {
+                    serialized_codepoints(&entry.message).expect("Message is serializable")
+                })
+                .collect::<Vec<_>>();
+            let estimates = current
+                .iter()
+                .map(|entry| message_token_estimate(&entry.message))
+                .collect::<Vec<_>>();
+            let total_cp = sizes.iter().sum::<u64>();
+            let mut total_tokens = overhead.saturating_add(estimates.iter().sum::<u64>());
+            if outcome.is_none() {
+                total_tokens = total_tokens.max(recent_usage_estimate(session, request, &current));
+            }
+            // Batch bounds constrain each summary, not the main model's whole history.
+            // Without a known model window, retain the bounded local fallback.
+            let pressured = request_limit.map_or_else(
+                || current.len() > target_count || total_cp > target_cp,
+                |limit| total_tokens > limit,
+            );
+            if !pressured && (trigger == CompactionTrigger::Pressure || outcome.is_some()) {
+                return Ok(outcome.unwrap_or(CompactionOutcome::Noop {
+                    trigger,
+                    token_estimate: total_tokens,
+                }));
+            }
+            let boundaries = complete_boundaries(&current);
+            let latest_user = current
+                .iter()
+                .rposition(|entry| matches!(entry.message.source, MessageSource::User { .. }));
+            let latest_context = ["tessivum/runtime-context", "tessivum-workspace-instructions"].map(|name| {
+                current.iter().rposition(|entry| matches!(&entry.message.source, MessageSource::Plugin { plugin, .. } if plugin == name))
+            });
+            let mut recent_start = current.len();
+            let mut recent_cp = 0;
+            while recent_start > 0
+                && recent_cp < keep
+                && current.len() - recent_start < (target_count / 4).max(1)
+                && (recent_start == current.len() || recent_cp + sizes[recent_start - 1] <= keep)
+            {
+                recent_start -= 1;
+                recent_cp += sizes[recent_start];
+            }
+            recent_start = boundaries
+                .iter()
+                .copied()
+                .take_while(|index| *index <= recent_start)
+                .last()
+                .unwrap_or(0);
+            let mut selected = None;
+            let mut start = None;
+            let (mut batch_cp, mut batch_tokens, mut fresh) = (0_u64, 0_u64, false);
+            let mut oversized = None;
+            for pair in boundaries.windows(2) {
+                let (begin, end) = (pair[0], pair[1]);
+                let protected = (begin..end).any(|index| {
+                    seed_seqs.contains(&current[index].event_seq)
+                        || Some(index) == latest_user
+                        || latest_context.contains(&Some(index))
+                        || index >= recent_start
+                });
+                if protected {
+                    if selected.is_some() {
+                        break;
+                    }
+                    start = None;
+                    (batch_cp, batch_tokens, fresh) = (0, 0, false);
+                    continue;
+                }
+                let group_cp = sizes[begin..end].iter().sum::<u64>();
+                let group_tokens = estimates[begin..end].iter().sum::<u64>();
+                let begin_batch = start.unwrap_or(begin);
+                if end - begin_batch > self.config.max_surface_messages
+                    || batch_cp + group_cp > input_codepoint_limit
+                    || summary_limit.is_some_and(|limit| batch_tokens + group_tokens > limit)
+                {
+                    if selected.is_some() {
+                        break;
+                    }
+                    oversized = Some((begin, end));
+                    break;
+                }
+                start = Some(begin_batch);
+                batch_cp += group_cp;
+                batch_tokens += group_tokens;
+                fresh |= current[begin..end]
+                    .iter()
+                    .any(|entry| !is_summary(&entry.message));
+                if fresh && batch_cp > minimum_summary {
+                    selected = Some(CompactionRange {
+                        start: begin_batch as u64,
+                        end: (end - 1) as u64,
+                    });
+                }
+            }
+            if let Some(range) = selected {
+                let plan = self.plan_from_surface(&current, range, input_codepoint_limit)?;
+                outcome = Some(CompactionOutcome::Compacted(
+                    self.execute(session, trigger, plan, cancellation.clone())
+                        .await?,
+                ));
+                completed += 1;
+                continue;
+            }
+            // A huge completed result may be in the recent window. Pruning is
+            // explicit and keeps its call, error flag, and durable source.
+            let blocking_group = oversized.or_else(|| {
+                boundaries.windows(2).find_map(|pair| {
+                    let (begin, end) = (pair[0], pair[1]);
+                    ((sizes[begin..end].iter().sum::<u64>() > target_cp / 2)
+                        && !(begin..end).any(|index| seed_seqs.contains(&current[index].event_seq)))
+                    .then_some((begin, end))
+                })
+            });
+            if let Some((begin, end)) = blocking_group {
+                let cap = (self.config.max_input_codepoints as u64 / 4)
+                    .min(target_cp / 2)
+                    .min(summary_limit.unwrap_or(u64::MAX) / 4);
+                if let Some(entry) = current[begin..end]
+                    .iter()
+                    .filter(|entry| matches!(entry.message.source, MessageSource::Tool { .. }))
+                    .max_by_key(|entry| serialized_codepoints(&entry.message).unwrap_or(u64::MAX))
+                {
+                    if serialized_codepoints(&entry.message).unwrap_or(u64::MAX) > cap {
+                        if let ToolResultPruneOutcome::Pruned(result) = self
+                            .prune_tool_result_locked(
+                                session,
+                                entry.event_seq,
+                                cap,
+                                cancellation.clone(),
+                            )
+                            .await?
+                        {
+                            outcome = Some(CompactionOutcome::Pruned(result));
+                            continue;
+                        }
+                    }
+                }
+            }
+            if !pressured && trigger == CompactionTrigger::Manual {
+                return Ok(outcome.unwrap_or(CompactionOutcome::Noop {
+                    trigger,
+                    token_estimate: total_tokens,
+                }));
+            }
+            return Err(invalid(
+                "COMPACTION_PROTECTED_INPUT_TOO_LARGE",
+                &format!("Recovery stopped after {completed} committed summaries: {total_cp} codepoints / {target_cp}, {} messages / {target_count}, estimated {total_tokens} tokens. Seed/current input, pending tools, recent context, or one indivisible tool group cannot fit. Shorten the protected input or tool output; committed recovery is retained.", current.len()),
+                json!({"completed": completed, "codepoints": total_cp, "maximum": target_cp}),
+            ));
+        }
+        Err(invalid(
+            "COMPACTION_NO_PROGRESS",
+            "Recovery exhausted its finite progress bound; committed history is retained.",
+            json!({"completed": completed}),
+        ))
     }
 
     /// Compacts one caller-selected inclusive current-surface region.
@@ -310,6 +555,19 @@ impl CompactionService {
         cancellation: CancellationToken,
     ) -> Result<ToolResultPruneOutcome, CompactionError> {
         check_cancellation(&cancellation)?;
+        let _lease = self.acquire(session.id())?;
+        self.prune_tool_result_locked(session, source_event_seq, max_codepoints, cancellation)
+            .await
+    }
+
+    async fn prune_tool_result_locked(
+        &self,
+        session: &Session,
+        source_event_seq: u64,
+        max_codepoints: u64,
+        cancellation: CancellationToken,
+    ) -> Result<ToolResultPruneOutcome, CompactionError> {
+        check_cancellation(&cancellation)?;
         if max_codepoints == 0 {
             return Err(invalid(
                 "INVALID_TOOL_RESULT_PRUNE_BOUND",
@@ -317,7 +575,6 @@ impl CompactionService {
                 Value::Null,
             ));
         }
-        let _lease = self.acquire(session.id())?;
         let surface = session.surface();
         let expected_surface_event_seqs = surface
             .iter()
@@ -335,32 +592,76 @@ impl CompactionService {
                 )
             })?;
         let (call_id, content, is_error) = tool_result(entry)?;
+        if content
+            .iter()
+            .any(|block| !matches!(block, ContentBlock::Text { .. }))
+        {
+            return Err(invalid(
+                "COMPACTION_UNSHRINKABLE_TOOL_RESULT",
+                "only text tool results may be pruned automatically",
+                json!({"sourceEventSeq": source_event_seq}),
+            ));
+        }
         let original = tool_output_text(content);
         let original_codepoints = codepoints(&original);
-        if original_codepoints <= max_codepoints {
+        if serialized_codepoints(&entry.message).unwrap_or(u64::MAX) <= max_codepoints {
             return Ok(ToolResultPruneOutcome::Noop {
                 source_event_seq,
                 codepoints: original_codepoints,
             });
         }
-        let text = truncate_codepoints(&original, max_codepoints);
-        let retained_codepoints = codepoints(&text);
+        let marker = format!("\n[Truncated tool output; original event {source_event_seq}. Export session history to inspect the full result.]");
         let range = CompactionRange {
             start: position as u64,
             end: position as u64,
         };
-        let replacement = Message {
+        let mut replacement = Message {
             id: MessageId::from(format!("tool-prune-{source_event_seq}")),
             role: MessageRole::User,
             content: vec![ContentBlock::ToolResult {
                 tool_call_id: call_id.clone(),
-                content: vec![ContentBlock::Text { text }],
+                content: vec![ContentBlock::Text {
+                    text: marker.clone(),
+                }],
                 is_error,
             }],
             source: MessageSource::Tool {
                 call_id: call_id.clone(),
             },
         };
+        let overhead = serialized_codepoints(&replacement).expect("Message is serializable");
+        let Some(mut available) = max_codepoints.checked_sub(overhead) else {
+            return Err(invalid("COMPACTION_UNSHRINKABLE_TOOL_RESULT", "Tool call metadata and truncation notice alone exceed the available serialized budget; shorten tool arguments or output.", json!({"sourceEventSeq": source_event_seq, "minimum": overhead, "maximum": max_codepoints})));
+        };
+        let mut prefix = String::new();
+        for character in original.chars() {
+            let cost = match character {
+                '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000c}' => 2,
+                '\u{0000}'..='\u{001f}' => 6,
+                _ => 1,
+            };
+            if cost > available {
+                break;
+            }
+            available -= cost;
+            prefix.push(character);
+        }
+        prefix.push_str(&marker);
+        let retained_codepoints = codepoints(&prefix);
+        if let ContentBlock::ToolResult { content, .. } = &mut replacement.content[0] {
+            content[0] = ContentBlock::Text { text: prefix };
+        }
+        let replacement_size =
+            serialized_codepoints(&replacement).expect("Message is serializable");
+        if replacement_size > max_codepoints
+            || replacement_size >= serialized_codepoints(&entry.message).unwrap_or(0)
+        {
+            return Err(invalid(
+                "COMPACTION_NO_PROGRESS",
+                "Tool-result pruning cannot reduce serialized input within its budget.",
+                json!({"sourceEventSeq": source_event_seq}),
+            ));
+        }
         let replacement_event_seq = append(
             session,
             AppendSpec {
@@ -399,34 +700,38 @@ impl CompactionService {
         trigger: CompactionTrigger,
         cancellation: CancellationToken,
     ) -> Result<CompactionOutcome, CompactionError> {
-        check_cancellation(&cancellation)?;
-        let _lease = self.acquire(session.id())?;
-        let surface = session.surface();
-        let seed_seqs = session
-            .seed_events()
-            .into_iter()
-            .map(|event| event.seq)
-            .collect::<BTreeSet<_>>();
-        // A seed can contain an imported orphan. Automatic compaction only
-        // considers live entries, so old seed anomalies do not block it.
-        let first_live = surface
-            .iter()
-            .position(|entry| !seed_seqs.contains(&entry.event_seq))
-            .unwrap_or(surface.len());
-        let live_len = surface.len().saturating_sub(first_live);
-        if live_len < 2 {
-            return Ok(CompactionOutcome::Noop {
-                trigger,
-                token_estimate: 0,
-            });
-        }
-        let range = CompactionRange {
-            start: first_live as u64,
-            end: (surface.len() - 1) as u64,
+        let request = GenerateRequest {
+            provider: self.config.provider.clone(),
+            model: self.config.model.clone(),
+            reasoning_effort: None,
+            messages: session.derive_messages(),
+            system: None,
+            tools: None,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            session_id: Some(session.id()),
+            purpose: None,
         };
-        let plan = self.plan_from_surface(&surface, range)?;
-        let result = self.execute(session, trigger, plan, cancellation).await?;
-        Ok(CompactionOutcome::Compacted(result))
+        self.compact_for_request(session, trigger, &request, None, cancellation)
+            .await
+    }
+
+    fn summary_token_limit(&self, session: &Session) -> Option<u64> {
+        let window =
+            self.context_window_resolver.as_ref()?(&self.config.provider, &self.config.model)?;
+        let reserve = self.config.max_tokens.unwrap_or((window / 4).max(1));
+        let overhead = self
+            .config
+            .system
+            .as_deref()
+            .unwrap_or(DEFAULT_SYSTEM_PROMPT)
+            .len() as u64
+            + self.config.provider.len() as u64
+            + self.config.model.len() as u64
+            + session.id().as_str().len() as u64
+            + 256;
+        Some(window.saturating_sub(reserve).saturating_sub(overhead))
     }
 
     fn acquire(&self, session: SessionId) -> Result<CompactionLease, CompactionError> {
@@ -441,13 +746,18 @@ impl CompactionService {
     }
 
     fn plan(&self, session: &Session, range: CompactionRange) -> Result<Plan, CompactionError> {
-        self.plan_from_surface(&session.surface(), range)
+        self.plan_from_surface(
+            &session.surface(),
+            range,
+            self.config.max_input_codepoints as u64,
+        )
     }
 
     fn plan_from_surface(
         &self,
         surface: &[SurfaceMessage],
         range: CompactionRange,
+        input_codepoint_limit: u64,
     ) -> Result<Plan, CompactionError> {
         let selected = range_slice(surface, range)?;
         if selected.len() > self.config.max_surface_messages {
@@ -478,13 +788,13 @@ impl CompactionService {
                     Value::Null,
                 )
             })?;
-        if input_codepoints > self.config.max_input_codepoints as u64 {
+        if input_codepoints > input_codepoint_limit {
             return Err(invalid(
                 "COMPACTION_INPUT_TOO_LARGE",
                 "compaction input exceeds the configured codepoint bound",
                 json!({
                     "codepoints": input_codepoints,
-                    "maximum": self.config.max_input_codepoints,
+                    "maximum": input_codepoint_limit,
                 }),
             ));
         }
@@ -505,6 +815,19 @@ impl CompactionService {
         cancellation: CancellationToken,
     ) -> Result<CompactionResult, CompactionError> {
         check_cancellation(&cancellation)?;
+        if self.summary_token_limit(session).is_some_and(|limit| {
+            plan.messages
+                .iter()
+                .map(message_token_estimate)
+                .sum::<u64>()
+                > limit
+        }) {
+            return Err(invalid(
+                "COMPACTION_INPUT_TOO_LARGE",
+                "Selected history exceeds the summary model's available input budget.",
+                Value::Null,
+            ));
+        }
         let compaction_id = uuid::Uuid::new_v4().to_string();
         let turn = open_turn(session);
         let start_seq = append(
@@ -673,18 +996,28 @@ impl CompactionService {
                 )
                 .await;
         }
-        let replacement = Message {
-            id: MessageId::from(format!("compaction-{start_seq}")),
-            role: MessageRole::User,
-            content: summary,
-            source: MessageSource::Plugin {
-                plugin: COMPACTION_PLUGIN.into(),
-                compaction_id: Some(compaction_id.clone()),
-                form: None,
-                sections: None,
-                summary: None,
-            },
-        };
+        let selected_codepoints = plan
+            .messages
+            .iter()
+            .filter_map(|message| serialized_codepoints(message).ok())
+            .sum::<u64>();
+        let replacement = summary_message(start_seq, &compaction_id, summary);
+        let replacement_codepoints = serialized_codepoints(&replacement).unwrap_or(u64::MAX);
+        if replacement_codepoints >= selected_codepoints {
+            return self
+                .finish_error(
+                    session,
+                    &compaction_id,
+                    start_seq,
+                    &plan,
+                    invalid(
+                        "COMPACTION_NO_PROGRESS",
+                        "compaction summary does not reduce serialized input",
+                        json!({"selectedCodepoints": selected_codepoints, "replacementCodepoints": replacement_codepoints}),
+                    ),
+                )
+                .await;
+        }
         let mut sources = Vec::with_capacity(plan.shadowed_event_seqs.len() + 2);
         sources.push(start_seq);
         sources.push(summary_seq);
@@ -809,25 +1142,36 @@ async fn append(
     spec: AppendSpec<'_>,
     cancellation: CancellationToken,
 ) -> Result<u64, SessionError> {
-    let seq = session.next_seq()?;
-    let event = SessionEvent {
-        event_type: spec.event_type.into(),
-        seq,
-        time: 0,
-        data: spec.data,
-        ignorable: spec.ignorable,
-        source_event_seqs: spec.source_event_seqs,
-        surface_op: spec.surface_op,
-    };
-    match spec.expected_surface_event_seqs {
-        Some(expected) => {
-            session
-                .append_if_surface(event, expected, cancellation)
-                .await?
-        }
-        None => session.append(event, cancellation).await?,
+    session
+        .append_next_if_surface(
+            |seq| SessionEvent {
+                event_type: spec.event_type.into(),
+                seq,
+                time: 0,
+                data: spec.data,
+                ignorable: spec.ignorable,
+                source_event_seqs: spec.source_event_seqs,
+                surface_op: spec.surface_op,
+            },
+            spec.expected_surface_event_seqs,
+            cancellation,
+        )
+        .await
+}
+
+fn summary_message(start_seq: u64, compaction_id: &str, content: Vec<ContentBlock>) -> Message {
+    Message {
+        id: MessageId::from(format!("compaction-{start_seq}")),
+        role: MessageRole::User,
+        content,
+        source: MessageSource::Plugin {
+            plugin: COMPACTION_PLUGIN.into(),
+            compaction_id: Some(compaction_id.into()),
+            form: None,
+            sections: None,
+            summary: None,
+        },
     }
-    Ok(seq)
 }
 
 async fn append_end(session: &Session, spec: EndSpec<'_>) -> Result<u64, CompactionError> {
@@ -1088,24 +1432,121 @@ fn append_block_text(block: &ContentBlock, output: &mut String) {
     }
 }
 
-fn truncate_codepoints(text: &str, max_codepoints: u64) -> String {
-    let count = codepoints(text);
-    if count <= max_codepoints {
-        return text.to_owned();
-    }
-    if max_codepoints == 1 {
-        return "…".into();
-    }
-    let prefix = text
-        .chars()
-        .take((max_codepoints - 1) as usize)
-        .collect::<String>();
-    format!("{prefix}…")
-}
-
 fn serialized_codepoints(message: &Message) -> Result<u64, ()> {
     let serialized = serde_json::to_string(message).map_err(|_| ())?;
     Ok(codepoints(&serialized))
+}
+
+fn serialized_request_without_messages(request: &GenerateRequest) -> u64 {
+    // Serialize only fixed fields; never clone the conversation to count overhead.
+    serde_json::to_vec(&json!({
+        "provider": &request.provider, "model": &request.model,
+        "system": &request.system, "tools": &request.tools,
+        "reasoningEffort": &request.reasoning_effort, "maxTokens": request.max_tokens,
+        "temperature": request.temperature, "stop": &request.stop,
+        "sessionId": &request.session_id, "purpose": &request.purpose, "messages": [],
+    }))
+    .map(|bytes| bytes.len() as u64)
+    .unwrap_or(u64::MAX)
+}
+
+fn soft_limit(limit: u64) -> u64 {
+    limit.saturating_sub(limit / 4)
+}
+
+fn is_summary(message: &Message) -> bool {
+    matches!(&message.source, MessageSource::Plugin { plugin, .. } if plugin == COMPACTION_PLUGIN)
+}
+
+fn complete_boundaries(surface: &[SurfaceMessage]) -> Vec<usize> {
+    let mut pending = BTreeSet::new();
+    let mut boundaries = vec![0];
+    for (index, entry) in surface.iter().enumerate() {
+        pending.extend(tool_calls(&entry.message));
+        for result in tool_results(&entry.message) {
+            pending.remove(&result);
+        }
+        if pending.is_empty() {
+            boundaries.push(index + 1);
+        }
+    }
+    boundaries
+}
+
+fn message_token_estimate(message: &Message) -> u64 {
+    // ponytail: conservative UTF-8 byte proxy plus media allowance, not a tokenizer;
+    // provider usage remains a lower bound, and overflow recovery remains enabled.
+    fn media(block: &ContentBlock) -> u64 {
+        match block {
+            ContentBlock::Image { .. } => 16_384,
+            ContentBlock::ToolResult { content, .. } => content.iter().map(media).sum(),
+            _ => 0,
+        }
+    }
+    serde_json::to_vec(message)
+        .map(|bytes| bytes.len() as u64 + 1)
+        .unwrap_or(u64::MAX)
+        .saturating_add(message.content.iter().map(media).sum::<u64>())
+}
+
+fn recent_usage_estimate(
+    session: &Session,
+    request: &GenerateRequest,
+    surface: &[SurfaceMessage],
+) -> u64 {
+    let events = session.events();
+    let Some(header) = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == "request/header")
+        .and_then(|event| event.data.get("header"))
+    else {
+        return 0;
+    };
+    if header.pointer("/config/provider").and_then(Value::as_str) != Some(request.provider.as_str())
+        || header.pointer("/config/model").and_then(Value::as_str) != Some(request.model.as_str())
+        || header.get("system").unwrap_or(&Value::Null)
+            != &serde_json::to_value(&request.system).unwrap_or(Value::Null)
+        || header.get("tools").unwrap_or(&Value::Null)
+            != &serde_json::to_value(&request.tools).unwrap_or(Value::Null)
+    {
+        return 0;
+    }
+    for event in events.iter().rev() {
+        if matches!(event.surface_op, Some(SurfaceOp::Replace { .. })) {
+            return 0;
+        }
+        if event.event_type != "assistant/message" {
+            continue;
+        }
+        let Some(usage) = event.data.get("usage") else {
+            continue;
+        };
+        let model = event.data.pointer("/message/source");
+        if model
+            .and_then(|source| source.get("provider"))
+            .and_then(Value::as_str)
+            != Some(request.provider.as_str())
+            || model
+                .and_then(|source| source.get("model"))
+                .and_then(Value::as_str)
+                != Some(request.model.as_str())
+        {
+            return 0;
+        }
+        let input = ["inputTokens", "cacheReadTokens", "cacheWriteTokens"]
+            .iter()
+            .map(|key| usage.get(key).and_then(Value::as_u64).unwrap_or(0))
+            .sum::<u64>();
+        return input.saturating_add(
+            surface
+                .iter()
+                .filter(|entry| entry.event_seq >= event.seq)
+                .map(|entry| message_token_estimate(&entry.message))
+                .sum::<u64>(),
+        );
+    }
+    0
 }
 
 fn codepoints(text: &str) -> u64 {

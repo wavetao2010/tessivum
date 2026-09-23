@@ -57,7 +57,7 @@ async function answerYes(harness: RustWebHarness, showQuestion: () => void): Pro
   await yes.press('Enter')
 }
 
-async function launchSteering(name: string, replayOverride?: string): Promise<{ harness: RustWebHarness; showQuestion: () => void }> {
+async function launchSteering(name: string, replayOverride?: string): Promise<{ harness: RustWebHarness; waitForQuestion: () => Promise<boolean>; showQuestion: () => void }> {
   let showQuestions = false
   const pendingQuestions: Array<() => void> = []
   const harness = await RustWebHarness.launch({
@@ -82,6 +82,7 @@ async function launchSteering(name: string, replayOverride?: string): Promise<{ 
   })
   return {
     harness,
+    waitForQuestion: () => waitUntil(async () => pendingQuestions.length > 0, Boolean, 10_000),
     showQuestion: () => {
       showQuestions = true
       for (const send of pendingQuestions) send()
@@ -92,11 +93,12 @@ async function launchSteering(name: string, replayOverride?: string): Promise<{ 
 
 test('steering moves one queued occurrence into the live turn and persists the interruption', async () => {
   expect(await fixturePrompts()).toEqual([PROMPT, STEER])
-  const { harness, showQuestion } = await launchSteering('steering-web-e2e')
+  const { harness, waitForQuestion, showQuestion } = await launchSteering('steering-web-e2e')
   try {
     const input = harness.page.locator('textarea').first()
     await input.fill(PROMPT)
     await input.press('Enter')
+    await waitForQuestion()
     await input.fill(STEER)
     await input.press('Enter')
 
@@ -136,12 +138,13 @@ test('steering moves one queued occurrence into the live turn and persists the i
 }, 120_000)
 
 test('steering Cmd+Enter sends directly to the live turn without creating a queue row', async () => {
-  const { harness, showQuestion } = await launchSteering('steering-composer-shortcut-web-e2e')
+  const { harness, waitForQuestion, showQuestion } = await launchSteering('steering-composer-shortcut-web-e2e')
   try {
     const input = harness.page.locator('textarea').first()
     const settled = harness.whenTurnSettled(60_000)
     await input.fill(PROMPT)
     await input.press('Enter')
+    await waitForQuestion()
     await harness.page.getByRole('button', { name: 'Stop generating' }).waitFor({ timeout: 10_000 })
     await input.fill(STEER)
     await input.press('ControlOrMeta+Enter')
@@ -163,7 +166,7 @@ test('steering Cmd+Enter sends directly to the live turn without creating a queu
 }, 90_000)
 
 test('steering swaps the busy shortcut when Enter is configured to steer', async () => {
-  const { harness, showQuestion } = await launchSteering('steering-swapped-shortcut-web-e2e')
+  const { harness, waitForQuestion, showQuestion } = await launchSteering('steering-swapped-shortcut-web-e2e')
   try {
     await harness.page.getByRole('button', { name: 'Settings', exact: true }).click()
     const dialog = harness.page.getByRole('dialog', { name: 'Settings' })
@@ -176,6 +179,7 @@ test('steering swaps the busy shortcut when Enter is configured to steer', async
     const settled = harness.whenTurnSettled(60_000)
     await input.fill(PROMPT)
     await input.press('Enter')
+    await waitForQuestion()
     await harness.page.getByRole('button', { name: 'Stop generating' }).waitFor({ timeout: 10_000 })
     const queuedText = 'Queued by the complementary Cmd+Enter shortcut.'
     await input.fill(queuedText)
@@ -196,12 +200,13 @@ test('steering swaps the busy shortcut when Enter is configured to steer', async
 }, 90_000)
 
 test('steering flushes an empty-draft queue in FIFO order through a durable replay', async () => {
-  const { harness, showQuestion } = await launchSteering('steering-flush-web-e2e', STEER_ALL_OVERRIDE)
+  const { harness, waitForQuestion, showQuestion } = await launchSteering('steering-flush-web-e2e', STEER_ALL_OVERRIDE)
   try {
     const input = harness.page.locator('textarea').first()
     const settled = harness.whenTurnSettled(60_000)
     await input.fill(PROMPT)
     await input.press('Enter')
+    await waitForQuestion()
     await input.fill(STEER_ONE)
     await input.press('Enter')
     await input.fill(STEER_TWO)

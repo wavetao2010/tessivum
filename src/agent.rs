@@ -1185,7 +1185,7 @@ impl AgentRegistry {
         agents
             .into_iter()
             .filter(|agent| {
-                agent.cancel(AgentCancelOptions {
+                agent.cancel_including_idle(AgentCancelOptions {
                     cause: cause.clone(),
                     keep_inbox,
                 })
@@ -1584,7 +1584,7 @@ struct AgentInner {
 
 impl AgentInner {
     fn cancel(&self, options: AgentCancelOptions) -> bool {
-        if self.runtime.status() == AgentStatus::Idle {
+        if self.runtime.status() == AgentStatus::Idle && self.session.execution.try_lock().is_ok() {
             return false;
         }
         self.cancel_including_idle(options)

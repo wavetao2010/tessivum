@@ -321,7 +321,10 @@ impl AgentFactory for AgentLoopFactory {
             return Err(AgentError::Cancelled);
         }
         materialize_default_mode(&session, &self.default_mode, cancellation.clone()).await?;
-        let runtime = SessionRuntimeSpec::resolve(self, &session)?;
+        let mut runtime = SessionRuntimeSpec::resolve(self, &session)?;
+        runtime.compaction = runtime
+            .compaction
+            .map(|service| service.for_session_model(&options.provider, &options.model));
         let resources = self.attach_resources(&runtime, &session).await?;
         if cancellation.is_cancelled() {
             let failures = resources.dispose(&session.id()).await;
@@ -861,6 +864,11 @@ async fn drive(inner: Arc<Inner>) {
             break;
         }
 
+        let _execution = tokio::select! {
+            guard = inner.session.execution.lock() => guard,
+            _ = inner.cancellation.cancelled() => break,
+        };
+
         inner.running.store(true, Ordering::Release);
         loop {
             if inner.cancellation.is_cancelled() {
@@ -947,35 +955,6 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
         if inner.cancellation.is_cancelled() {
             return close_cancelled_step(inner, turn, step).await;
         }
-        if let Some(compaction) = &inner.runtime.compaction {
-            let has_prior_request = inner
-                .session
-                .events()
-                .iter()
-                .any(|event| event.event_type == "request/header");
-            if has_prior_request
-                && inner.session.surface().len() >= compaction.config().max_surface_messages
-            {
-                if let Err(error) = compaction
-                    .compact_for_trigger(
-                        &inner.session,
-                        CompactionTrigger::Pressure,
-                        inner.cancellation.clone(),
-                    )
-                    .await
-                {
-                    close_step(inner, turn, step).await?;
-                    return end_turn(
-                        inner,
-                        turn,
-                        TurnEndReason::Error {
-                            error: compaction_failure(error),
-                        },
-                    )
-                    .await;
-                }
-            }
-        }
         append_runtime_context(inner, turn, step).await?;
 
         let mut tool_schemas = inner.runtime.tools.schemas();
@@ -1015,6 +994,38 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             session_id: Some(inner.session.id()),
             purpose: None,
         };
+        if let Some(compaction) = &inner.runtime.compaction {
+            let context_window = inner
+                .context_window
+                .as_ref()
+                .and_then(|resolve| resolve(&request.provider, &request.model));
+            match compaction
+                .compact_for_request(
+                    &inner.session,
+                    CompactionTrigger::Pressure,
+                    &request,
+                    context_window,
+                    inner.cancellation.clone(),
+                )
+                .await
+            {
+                Ok(CompactionOutcome::Compacted(_) | CompactionOutcome::Pruned(_)) => {
+                    request.messages = request_messages(inner);
+                }
+                Ok(CompactionOutcome::Noop { .. }) => {}
+                Err(error) => {
+                    close_step(inner, turn, step).await?;
+                    return end_turn(
+                        inner,
+                        turn,
+                        TurnEndReason::Error {
+                            error: compaction_failure(error),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
         let effective_header = serde_json::to_value(EpochHeader {
             config: LlmCallConfig {
                 provider: request.provider.clone(),
@@ -1075,7 +1086,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                 Ok((generation, chunk_seqs)) => match &generation.finish_reason {
                     FinishReason::Error { failure: error } => {
                         if !context_overflow_recovered && is_context_overflow(&error.code) {
-                            match compact_context_overflow(inner).await {
+                            match compact_context_overflow(inner, &request).await {
                                 Ok(true) => {
                                     context_overflow_recovered = true;
                                     continue;
@@ -1123,7 +1134,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                 Err(error) => {
                     let error = failure(error);
                     if !context_overflow_recovered && is_context_overflow(&error.code) {
-                        match compact_context_overflow(inner).await {
+                        match compact_context_overflow(inner, &request).await {
                             Ok(true) => {
                                 context_overflow_recovered = true;
                                 continue;
@@ -1536,19 +1547,26 @@ fn is_context_overflow(code: &str) -> bool {
 
 async fn compact_context_overflow(
     inner: &Inner,
+    request: &GenerateRequest,
 ) -> Result<bool, crate::compaction::CompactionError> {
     let Some(compaction) = &inner.runtime.compaction else {
         return Ok(false);
     };
+    let context_window = inner
+        .context_window
+        .as_ref()
+        .and_then(|resolve| resolve(&request.provider, &request.model));
     Ok(matches!(
         compaction
-            .compact_for_trigger(
+            .compact_for_request(
                 &inner.session,
                 CompactionTrigger::ContextOverflow,
+                request,
+                context_window,
                 inner.cancellation.clone(),
             )
             .await?,
-        CompactionOutcome::Compacted(_)
+        CompactionOutcome::Compacted(_) | CompactionOutcome::Pruned(_)
     ))
 }
 
