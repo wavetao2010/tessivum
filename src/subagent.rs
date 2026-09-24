@@ -2668,7 +2668,7 @@ impl SubagentInner {
             }
         };
         let seed_length = root_session.header().seed_length.unwrap_or_default();
-        let events = root_session.events();
+        let events = root_session.events()?;
         let baseline = events
             .iter()
             .filter(|event| {
@@ -2751,7 +2751,7 @@ impl SubagentInner {
                 continue;
             }
             let events = match self.sessions.get(session_id) {
-                Some(session) => session.events(),
+                Some(session) => session.events()?,
                 None => match self
                     .persistence
                     .read_from(session_id, 0, cancellation.clone())
@@ -2860,15 +2860,7 @@ impl SubagentInner {
         child_session_id: &SessionId,
         cancellation: CancellationToken,
     ) -> Result<Option<SubagentDescriptor>, SubagentError> {
-        let events = match self.sessions.get(parent_session_id) {
-            Some(session) => session.events(),
-            None => {
-                self.persistence
-                    .read_from(parent_session_id, 0, cancellation)
-                    .await?
-            }
-        };
-        Ok(events.into_iter().rev().find_map(|event| {
+        let decode = |event: &SessionEvent| {
             if event.event_type != "subagent/contained-start" {
                 return None;
             }
@@ -2878,7 +2870,17 @@ impl SubagentInner {
             (descriptor.parent_session_id == *parent_session_id
                 && descriptor.child_session_id == *child_session_id)
                 .then_some(descriptor)
-        }))
+        };
+        match self.sessions.get(parent_session_id) {
+            Some(session) => Ok(session.find_latest_event(decode)?),
+            None => Ok(self
+                .persistence
+                .read_from(parent_session_id, 0, cancellation)
+                .await?
+                .into_iter()
+                .rev()
+                .find_map(|event| decode(&event))),
+        }
     }
 
     fn child_status(&self, child_session_id: &SessionId) -> SubagentStatus {
@@ -3093,7 +3095,7 @@ impl SubagentInner {
             corpus.insert(session.id(), session.header());
         }
         let parent_events = match self.sessions.get(&parent_session_id) {
-            Some(parent) => parent.events(),
+            Some(parent) => parent.events()?,
             None => match self
                 .persistence
                 .read_from(&parent_session_id, 0, cancellation.clone())
@@ -3212,7 +3214,7 @@ impl SubagentInner {
             )));
         }
         let mut events = match self.sessions.get(&request.child_session_id) {
-            Some(session) => session.events(),
+            Some(session) => session.events()?,
             None => {
                 self.persistence
                     .read_from(&request.child_session_id, 0, cancellation.clone())
@@ -3521,8 +3523,11 @@ impl SubagentInner {
         if cancellation.is_cancelled() {
             return Err(SubagentError::CancelledBeforeAcceptance);
         }
-        let seed_events = provided_seed
-            .or_else(|| seed_parent_prefix.then(|| completed_parent_seed(&parent.events())));
+        let seed_events = match provided_seed {
+            Some(seed) => Some(seed),
+            None if seed_parent_prefix => Some(completed_parent_seed(&parent.events()?)),
+            None => None,
+        };
         let seeded = seed_events.is_some();
         let parent_header = parent.header();
         let header = child_header(
@@ -4160,7 +4165,7 @@ mod delegation_tests {
             )
             .await
             .unwrap();
-        let completed = parent_agent.session().events();
+        let completed = parent_agent.session().events().unwrap();
         parent_agent
             .session()
             .append(
@@ -4188,7 +4193,7 @@ mod delegation_tests {
             .unwrap();
         let child = agents.get(&child_id).unwrap();
 
-        assert_eq!(child.session().seed_events(), completed);
+        assert_eq!(child.session().seed_events().unwrap(), completed);
         parent.dispose().await;
     }
 

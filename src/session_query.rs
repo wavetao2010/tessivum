@@ -192,7 +192,7 @@ impl SessionQuery {
         if let Some(session) = self.store.get(session_id) {
             return Ok(SessionRecord {
                 header: session.header(),
-                events: session.events(),
+                events: session.events()?,
                 live: true,
             });
         }
@@ -473,7 +473,7 @@ impl SessionQuery {
                 session.id(),
                 SessionRecord {
                     header: session.header(),
-                    events: session.events(),
+                    events: session.events()?,
                     live: true,
                 },
             );

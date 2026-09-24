@@ -3653,7 +3653,7 @@ impl HostHandle {
                 )));
             }
         }
-        let events = session.events();
+        let events = session.events()?;
         if has_model_visible_work(&events) {
             return Err(mode_error(TessivumError::new(
                 "MODE_SELECTION_LOCKED",
@@ -3857,7 +3857,7 @@ impl HostHandle {
     ) -> Result<HostSessionModels, HostError> {
         validate_session(&session_id)?;
         let events = if let Some(session) = self.inner.sessions.get(&session_id) {
-            session.events()
+            session.events()?
         } else {
             self.inner
                 .persistence
@@ -4016,7 +4016,7 @@ impl HostHandle {
         Ok(())
     }
     async fn pin_initial_permission(&self, session: &Session) -> Result<(), HostError> {
-        let events = session.events();
+        let events = session.events()?;
         let mut knobs = permission_knobs(&events);
         if knobs.preset().is_none()
             && knobs.sandbox().is_none()
@@ -4090,7 +4090,7 @@ impl HostHandle {
             return Ok(self.config_selection());
         }
         let (events, exists) = if let Some(session) = self.inner.sessions.get(session_id) {
-            (session.events(), true)
+            (session.events()?, true)
         } else if self
             .inner
             .persistence
@@ -4272,7 +4272,7 @@ impl HostHandle {
         validate_session(&session)?;
         let attachment_id = AttachmentId::try_from(attachment_id.as_str())?;
         let events = if let Some(session) = self.inner.sessions.get(&session) {
-            session.events()
+            session.events()?
         } else {
             self.inner
                 .persistence
@@ -4766,7 +4766,7 @@ impl HostHandle {
         let lease = self.inner.workspace_registry.resolve(&workspace_id)?;
         let root = lease.validate_current()?;
         let existing = match self.inner.sessions.get(&session_id) {
-            Some(session) => Some((session.header(), session.events().len() as u64)),
+            Some(session) => Some((session.header(), session.event_count() as u64)),
             None => self
                 .inner
                 .persistence
@@ -4877,8 +4877,8 @@ impl HostHandle {
             parent_session: None,
             origin: None,
             agent_mode,
-            event_count: session.events().len() as u64,
-            blank: !has_model_visible_work(&session.events()),
+            event_count: session.event_count() as u64,
+            blank: !has_model_visible_work(&session.events()?),
         })
     }
 
@@ -5036,12 +5036,39 @@ impl HostHandle {
         if was_running {
             return Ok(SessionPromptResult { message_id });
         }
-        if !session.events().iter().any(|event| {
-            event.event_type == "user/message"
-                && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())
-        }) {
+        if !session.with_events(|events| {
+            events.iter().any(|event| {
+                event.event_type == "user/message"
+                    && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())
+            })
+        })? {
             loop {
-                tokio::select! { received = commits.recv() => match received { Ok(event) if event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str()) => break, Ok(_) => continue, Err(broadcast::error::RecvError::Lagged(_)) => { if session.events().iter().any(|event| event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())) { break; } }, Err(broadcast::error::RecvError::Closed) => return Err(HostError::invalid("PROMPT_NOT_DURABLE", "agent session closed before prompt admission")), }, result = agent.when_idle() => { if session.events().iter().any(|event| event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())) { break; } return Err(result.err().unwrap_or(AgentError::Disposed).into()); } }
+                tokio::select! {
+                    received = commits.recv() => match received {
+                        Ok(event) if event.event_type == "user/message" && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str()) => break,
+                        Ok(_) => continue,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if session.with_events(|events| events.iter().any(|event| {
+                                event.event_type == "user/message"
+                                    && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())
+                            }))? {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(HostError::invalid("PROMPT_NOT_DURABLE", "agent session closed before prompt admission"));
+                        }
+                    },
+                    result = agent.when_idle() => {
+                        if session.with_events(|events| events.iter().any(|event| {
+                            event.event_type == "user/message"
+                                && event.data.get("id").and_then(Value::as_str) == Some(message_id.as_str())
+                        }))? {
+                            break;
+                        }
+                        return Err(result.err().unwrap_or(AgentError::Disposed).into());
+                    }
+                }
             }
         }
         append_fallback_session_title(&session, &message_id, self.inner.cancellation.clone())
@@ -5233,11 +5260,7 @@ impl HostHandle {
     ) -> Result<Vec<SessionEvent>, HostError> {
         validate_session(&session)?;
         if let Some(live) = self.inner.sessions.get(&session) {
-            return Ok(live
-                .events()
-                .into_iter()
-                .filter(|event| event.seq >= from_seq)
-                .collect());
+            return Ok(live.read_events(from_seq, live.event_count())?);
         }
         Ok(self
             .inner
@@ -6051,7 +6074,7 @@ impl HostHandle {
         raw_input: &str,
     ) -> Result<HostCommandResult, HostError> {
         let requested = raw_input.trim();
-        let mut knobs = permission_knobs(&session.events());
+        let mut knobs = permission_knobs(&session.events()?);
         let available = permission_preset_names().collect::<Vec<_>>().join(", ");
         if requested.is_empty() {
             return Ok(HostCommandResult::Success {
@@ -6464,7 +6487,9 @@ impl HostHandle {
         let mut receiver = session.subscribe();
         let task = tokio::spawn(async move {
             let mut next_seq = starting_next_seq;
-            relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+            if relay_missing_events(&inner, &session, &session_id, &mut next_seq).is_err() {
+                return;
+            }
             loop {
                 if inner.relays_closed.load(Ordering::Acquire) {
                     break;
@@ -6472,8 +6497,10 @@ impl HostHandle {
                 tokio::select! {
                     event = receiver.recv() => match event {
                         Ok(event) => {
-                            if event.seq > next_seq {
-                                relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+                            if event.seq > next_seq
+                                && relay_missing_events(&inner, &session, &session_id, &mut next_seq).is_err()
+                            {
+                                break;
                             }
                             if event.seq >= next_seq {
                                 next_seq = event.seq.saturating_add(1);
@@ -6481,14 +6508,18 @@ impl HostHandle {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+                            if relay_missing_events(&inner, &session, &session_id, &mut next_seq).is_err() {
+                                break;
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
                     _ = inner.relay_stop.notified() => break,
                 }
             }
-            relay_missing_events(&inner, &session, &session_id, &mut next_seq);
+            if relay_missing_events(&inner, &session, &session_id, &mut next_seq).is_err() {
+                return;
+            }
         });
         lock(&self.inner.relays).push(task);
     }
@@ -7712,7 +7743,29 @@ fn selected_agent_mode(
     session: &Session,
     default_mode: &AgentModeId,
 ) -> Result<AgentModeId, TessivumError> {
-    selected_agent_mode_from(&session.events(), session.header().agent_mode, default_mode)
+    let selected = session
+        .find_latest_event(|event| {
+            (event.event_type == "agent-mode/selected").then(|| {
+                event
+                    .data
+                    .get("agentMode")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        TessivumError::new(
+                            "INVALID_AGENT_MODE_SELECTION",
+                            "agent mode selection must contain agentMode",
+                            "agent-mode",
+                            Value::Null,
+                        )
+                    })
+                    .and_then(AgentModeId::new)
+            })
+        })
+        .map_err(|error| TessivumError::new(error.code(), error.to_string(), "session", Value::Null))?
+        .transpose()?;
+    Ok(selected
+        .or_else(|| session.header().agent_mode)
+        .unwrap_or_else(|| default_mode.clone()))
 }
 
 fn selected_agent_mode_from(
@@ -9211,7 +9264,7 @@ async fn append_fallback_session_title(
     message_id: &MessageId,
     cancellation: tessivum_core::CancellationToken,
 ) -> Result<(), HostError> {
-    let events = session.events();
+    let events = session.events()?;
     if events
         .iter()
         .any(|event| event.event_type == "session/title")
@@ -9349,16 +9402,17 @@ fn relay_missing_events(
     session: &crate::session::Session,
     session_id: &SessionId,
     next_seq: &mut u64,
-) {
+) -> Result<(), crate::session::SessionError> {
     let start = *next_seq;
     for event in session
-        .events()
+        .read_events(start, session.event_count())?
         .into_iter()
         .filter(|event| event.seq >= start)
     {
         *next_seq = event.seq.saturating_add(1);
         relay_event(inner, session_id, event);
     }
+    Ok(())
 }
 
 fn relay_event(inner: &HostInner, session_id: &SessionId, event: SessionEvent) {
