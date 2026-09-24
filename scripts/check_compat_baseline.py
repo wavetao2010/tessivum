@@ -18,9 +18,9 @@ CORDIS = Path(os.environ.get("TESSIVUM_CORDIS_SOURCE", WORKSPACE / "upstream/cor
 CORE = Path(os.environ.get("TESSIVUM_CORE_SOURCE", WORKSPACE / "tessivum-core"))
 HARNESS_SHA = "47f943859bef60e4160492346772ded9b24f765a"
 CORDIS_SHA = "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4"
-CORE_SHA = "0caaccf9a79d7a906a08a21c3032eafebe084ffc"
-PRODUCT_VERSION = "v0.1.0-alpha.30"
-CORE_VERSION = "v0.1.7"
+CORE_SHA = "f7a9dbba89912f23b80f169d69d0dc34d962002f"
+PRODUCT_VERSION = "v0.1.0-alpha.31"
+CORE_VERSION = "v0.1.8"
 HARNESS_VERSION = "0.1.0-rc.5"
 BASELINE = PROJECT / "docs/COMPATIBILITY_BASELINE.md"
 CHECKLIST = PROJECT / "docs/WEB_E2E_PORT_CHECKLIST.md"
@@ -31,7 +31,7 @@ PLAN = PROJECT / "docs/DEVELOPMENT_PLAN.md"
 README_COMMAND_TOKENS = (
     "brew tap wavetao2010/tap",
     "brew install tessivum",
-    "sh install.sh 0.1.0-alpha.30",
+    "sh install.sh 0.1.0-alpha.31",
     "brew upgrade tessivum",
     "tessivum web",
     "cargo run --release -- web",

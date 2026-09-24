@@ -1,6 +1,6 @@
 # Tessivum 长会话压缩恢复与 Goal 状态一致性开发计划
 
-> 状态：压缩恢复与 Goal 增量一致性修复已实施并完成本机合成场景验证；原会话 G1 与同一候选三平台验收仍未完成，详见第 10 节。
+> 状态：压缩恢复、Goal 增量一致性与 persistence-backed 事件分页已实施；分页、千轮同 session、磁盘重启恢复和二十万事件压力验收已完成。
 > 计划日期：2026-09-21
 > 源码基线：Windows PR #6 合并后的 `main`，`a182b4b40ccc939850683513b7dcc48c6052837f`。
 > OMP 对照：`v18.1.17`，`3b3a6dc9bbd85102ce19d0b1c11bf6870915f6ec`。
@@ -315,3 +315,70 @@ Rust 输出合计 598 passed，0 failed；兼容基线检查仍为 RPC 52/52、R
 - 本机 `compaction` 与 `agent_loop` 专项共 53 项通过；上述三个 Browser 文件共 7 个实际 Host/Chromium 场景通过，包括分支继续、流式滚动及 Trajectory 虚拟化。新候选仍须重新取得三个平台的同 head CI 结果，不继承初始候选的 Ubuntu/Windows 结论。
 - 修正后的本机完整检查：`cargo fmt --all`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked -- --test-threads=4` 通过，Rust 共 599 passed；兼容基线、插件台账、发布事实三项脚本通过。未用这些结果替代新候选远端 CI。
 - 第二候选 `a54c529bda1be885ee0aabc1cbfb69e063069680` 的 [CI 35685949402](https://github.com/wavetao2010/tessivum/actions/runs/35685949402) 中，原失败的 7 个长历史 Browser 场景全部通过；Browser 仅余 `steering` 的 FIFO flush 用例在队列展开前超时。该夹具原先未等待初始请求进入工具等待态，队列操作可与初始领取竞争。四个 steering 场景统一等待已经截获的真实 `question/requested` 事件后再操作，仍在手势后才释放问题 UI；不改产品逻辑、不增加重试、不放宽 FIFO/持久化断言。本机四场景各运行三遍，共 12 passed。
+
+## 11. 长期会话优化计划与验收记录
+
+本节记录 bounded recovery 修复之上的长期会话优化、已交付实现与本机验收证据。
+
+### 11.1 目标与边界
+
+长期会话保持同一个 session 身份，并通过滚动的模型可见 surface 持续对话。分离三类预算：
+
+- **模型上下文预算**：system、tools、surface、当前输入和 pending tool group 组成的实际请求窗口；
+- **单次 compaction 预算**：一次维护允许执行的摘要批次、摘要输入/输出大小和耗时；
+- **运行时存储预算**：完整事件日志、surface projection、近期上下文在进程内的驻留范围。
+
+Compaction 只替换模型可见的旧 surface，不删除原始事件日志。长期会话不依赖强制新建 session；原始日志的归档或分页属于独立的存储运行时工作。
+
+### 11.2 对齐 Harness 的增量压缩策略
+
+参考 DeepSeek Harness 的 `agent/pre-step` 压力检查和 `BasicCompactionEngine`：
+
+- 按实际 provider/model 的上下文窗口提前检查压力，默认目标为窗口约 80% 的压力阈值；
+- 保留近期 surface，优先选择最老且已完成的安全范围；
+- 保持 tool call/result 配对，不拆分 pending tool group、当前输入和必要 seed；
+- 先对可安全处理的巨大文本 tool result 做 model-free pruning，再决定是否调用摘要模型；
+- 正常压力路径一次只做一个 summary replacement，完成后重建请求，不在一个请求内追赶整个历史；
+- replacement 必须实际缩小模型可见输入，并继续合并已有 checkpoint，不反复摘要同一范围。
+
+现有 `d0b886f`、`a54c529`、`2dd9ec5` 的窗口选择、分批边界、pruning、CAS 和工具重试保护继续保留。本计划不替换现有 session 事件格式。
+
+### 11.3 限制超限恢复的总资源消耗
+
+将“每批有界”扩展为“每次调用有界”：
+
+- 普通 pressure compaction 最多执行一个 recovery batch；
+- provider-confirmed overflow 最多执行一次 pruning 和一次最大安全 summary recovery，并最多重试模型一次；
+- 只有 `surface.replaceGeneration` 确实前进时才允许重试；
+- 超过批次、摘要调用或取消预算时，返回明确的 `SESSION_CONTEXT_TOO_LARGE` 类错误，不继续无限压缩；
+- 巨大不可拆分的用户输入、tool 参数、system/tools envelope 或 pending tool group 不通过静默截断解决；
+- 已完成的工具调用不得因 overflow recovery 被重新派发。
+
+目标是防止一次请求内部出现数十个连续 compaction batch，同时保留正常长期对话的增量维护路径。
+
+### 11.4 降低超大日志的运行时内存占用
+
+第一步只做低风险优化：避免每个请求重复复制完整 `events`、`surface` 和 derived messages；compaction 只读取当前 surface 与必要来源事件；避免每个 batch 重新扫描完整事件数组；summary request 不携带未选中的完整历史。
+
+后续如长期 session 仍随原始日志线性增加内存，再将完整 event log 改为 persistence-backed 分页读取；进程内只保留 header、surface projection、近期 tail、来源索引和当前 turn 状态。该阶段不与 compaction 边界修复混合实施。
+
+### 11.5 长期会话验收计划
+
+新增行为验收，而不是仅验证内部字段：
+
+- 连续数百至一千个 turn 使用同一个 session，自动压缩后仍可继续请求；
+- 正常 pressure 请求最多产生一个 summary batch；
+- provider overflow 只在 surface 实际前进后重试一次，已完成工具不重复执行；
+- 515/520 条历史、中文/转义文本、并行工具组和重启恢复继续通过；
+- 二十万级合成事件日志不会在一次请求内执行无界 recovery loop，超过边界时返回明确错误；
+- 取消、shutdown、summary 失败、replacement CAS 冲突不破坏原始 surface；
+- 内存优化阶段验证运行时驻留主要随 live surface/recent tail 增长，而不是随完整历史复制增长。
+
+本节完成前，不应在 `CHANGELOG.md` 中宣称长期会话优化已经交付；实现后再补充同一候选版本的代码、测试和资源使用证据。
+
+### 11.6 第一阶段低风险内存优化记录（2026-09-24）
+
+- `Session` 保留兼容快照 API，同时提供 `read_events`、`fold_events`、`find_latest_event` 和 `SessionEventReader`，持久化恢复只驻留近期 tail 与 projection 状态。
+- Agent Loop、Goal、Compaction、Permission、Projection、Planning、Host/Subagent 等高频路径已迁移到有界读取或增量 fold；显式导出仍按请求物化完整历史。
+- JSONL/SQLite reader 支持分页恢复；冷恢复使用 8192 条扫描页避免逐 256 条重复扫描，普通随机读取仍限制为 256 条页。
+- 验收：`cargo test --locked --test persistence_jsonl --test agent_loop --test compaction` 为 66 passed；二十万事件 ignored 压力测试为 1 passed，resident history 全程 256，采样 allocator RSS 均为 35,340,288 bytes。

@@ -405,12 +405,12 @@ impl GoalService {
         if agent.id() != session.id() || agent.is_disposed() {
             return Err(GoalError::NotLive);
         }
+        let event_count = session.event_count();
         let mut state = GoalState::default();
-        let events = session.events();
-        for event in &events {
-            apply_goal_event(&mut state, event)?;
+        for event in session.read_events(0, event_count)? {
+            apply_goal_event(&mut state, &event)?;
         }
-        state.observed_events = events.len();
+        state.observed_events = event_count;
         if let Some(goal) = state
             .current
             .as_ref()
@@ -1019,18 +1019,21 @@ impl GoalService {
     }
 
     fn sync_locked(&self, state: &mut GoalState) -> Result<(), GoalError> {
-        let events = self.inner.session.events();
-        if state.observed_events > events.len() {
+        let event_count = self.inner.session.event_count();
+        if state.observed_events > event_count {
             return Err(GoalError::Invalid("durable goal event cursor regressed"));
         }
-        if state.observed_events == events.len() {
+        if state.observed_events == event_count {
             return Ok(());
         }
         let mut candidate = state.clone();
-        for event in events.iter().skip(candidate.observed_events) {
-            apply_goal_event(&mut candidate, event)?;
+        for event in self.inner.session.read_events(
+            state.observed_events as u64,
+            event_count - state.observed_events,
+        )? {
+            apply_goal_event(&mut candidate, &event)?;
         }
-        candidate.observed_events = events.len();
+        candidate.observed_events = event_count;
         *state = candidate;
         Ok(())
     }
@@ -1632,15 +1635,12 @@ impl GoalActivation {
         let after = activation
             .last_user_event_seq
             .unwrap_or_else(|| activation.first_event_seq.saturating_sub(1));
-        let expected = inner
+        let events = inner
             .session
-            .events()
+            .read_events(activation.first_event_seq, inner.session.event_count())?;
+        let expected = events
             .into_iter()
-            .find(|event| {
-                event.seq >= activation.first_event_seq
-                    && event.seq > after
-                    && attributed_user(event)
-            })
+            .find(|event| event.seq > after && attributed_user(event))
             .map(|event| event.seq)
             .ok_or(GoalError::InvalidRound)?;
         if expected != user_event_seq {

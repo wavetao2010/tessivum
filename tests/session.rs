@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use serde_json::json;
+use tessivum::persistence_jsonl::JsonlSessionPersistence;
 use tessivum::{
     protocol::{SessionEvent, SessionHeader, SessionId, SurfaceOp, SESSION_FORMAT_VERSION},
     session::{
@@ -9,9 +10,25 @@ use tessivum::{
     },
 };
 use tessivum_core::ContextHandle;
+use uuid::Uuid;
 
 fn cancellation() -> tessivum_core::CancellationToken {
     ContextHandle::root().scope().cancellation()
+}
+
+fn allocator_rss_bytes() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // ru_maxrss is bytes on macOS and KiB on Linux.
+        let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if status == 0 {
+            let usage = unsafe { usage.assume_init() };
+            let scale = if cfg!(target_os = "linux") { 1024 } else { 1 };
+            return u64::try_from(usage.ru_maxrss).ok().map(|rss| rss * scale);
+        }
+    }
+    None
 }
 
 fn header(id: &str, seed_length: Option<u64>) -> SessionHeader {
@@ -87,7 +104,7 @@ async fn user_messages_require_direct_payloads() {
         )
         .await
         .unwrap();
-    assert_eq!(session.events()[0].data, direct);
+    assert_eq!(session.events().unwrap()[0].data, direct);
     assert_eq!(session.derive_messages()[0].id.as_str(), "message-1");
 
     let wrapped = event(
@@ -142,7 +159,7 @@ async fn create_append_and_derive_messages() {
 
     assert_eq!(session.header().id.as_str(), "create");
     assert_eq!(session.next_seq().unwrap(), 1);
-    assert_eq!(session.events().len(), 1);
+    assert_eq!(session.events().unwrap().len(), 1);
     assert_eq!(session.derive_messages()[0].id.as_str(), "message-1");
 }
 
@@ -163,7 +180,7 @@ async fn gaps_do_not_admit_or_persist_events() {
         .await
         .unwrap_err();
     assert!(matches!(error, SessionError::SequenceGap { .. }));
-    assert!(session.events().is_empty());
+    assert!(session.events().unwrap().is_empty());
     assert_eq!(
         persistence
             .inspect(&SessionId::from("gaps"), cancellation())
@@ -200,8 +217,8 @@ async fn seed_prefix_is_separate_from_live_events() {
         .await
         .unwrap();
 
-    assert_eq!(session.seed_events().len(), 1);
-    assert_eq!(session.live_events().len(), 2);
+    assert_eq!(session.seed_events().unwrap().len(), 1);
+    assert_eq!(session.live_events().unwrap().len(), 2);
     assert_eq!(session.derive_messages().len(), 2);
 }
 
@@ -224,7 +241,7 @@ async fn unknown_required_events_reject_but_ignorable_events_are_retained_off_su
     ignorable.ignorable = Some(true);
     session.append(ignorable, cancellation()).await.unwrap();
 
-    assert_eq!(session.events().len(), 1);
+    assert_eq!(session.events().unwrap().len(), 1);
     assert!(session.surface().is_empty());
 }
 
@@ -311,7 +328,7 @@ async fn conditional_surface_append_rejects_a_stale_vector_without_writing() {
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    assert_eq!(session.events().len(), 2);
+    assert_eq!(session.events().unwrap().len(), 2);
     assert_eq!(
         persistence
             .inspect(&SessionId::from("conditional-surface"), cancellation())
@@ -359,7 +376,7 @@ async fn cold_restore_repairs_one_orphan_but_live_restore_rejects_it() {
         )
         .await
         .unwrap();
-    let repaired = restored.events();
+    let repaired = restored.events().unwrap();
     assert_eq!(repaired.len(), 2);
     assert_eq!(repaired[1].event_type, "turn/end");
     assert_eq!(repaired[1].data["reason"]["kind"], "interrupted");
@@ -422,7 +439,7 @@ async fn cold_restore_closes_each_unsettled_tool_before_its_step_and_turn() {
         )
         .await
         .unwrap();
-    let events = restored.events();
+    let events = restored.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -497,6 +514,7 @@ async fn append_next_serializes_concurrent_sequence_allocation() {
     assert_eq!(
         session
             .events()
+            .unwrap()
             .into_iter()
             .map(|event| event.seq)
             .collect::<Vec<_>>(),
@@ -513,4 +531,101 @@ fn session_store_publishes_through_context_handle() {
     assert!(handle.is_current());
     assert_eq!(handle.key().diagnostic_key(), "harness.sessions@1");
     assert!(handle.with(SessionStore::list).unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "200k-event disk stress; run explicitly for long-session evidence"]
+async fn disk_session_pages_200k_events_with_bounded_resident_history() {
+    let root = std::env::temp_dir().join(format!("tessivum-session-stress-{}", Uuid::new_v4()));
+    let persistence = Arc::new(JsonlSessionPersistence::new(&root));
+    let id = SessionId::from("two-hundred-thousand");
+    let mut head = header(id.as_str(), None);
+    head.version = SESSION_FORMAT_VERSION;
+
+    // Bulk-create the fixture without paying 200k ordinary append/fsync costs.
+    fs::create_dir_all(&root).unwrap();
+    let mut fixture = serde_json::to_string(&json!({
+        "type": "session",
+        "version": head.version,
+        "id": id.as_str(),
+        "createdAt": 0,
+    }))
+    .unwrap();
+    fixture.push('\n');
+    for seq in 0..200_000u64 {
+        let mut record = event("future/event", seq, json!({"seq": seq}), None, None);
+        record.ignorable = Some(true);
+        fixture.push_str(&serde_json::to_string(&record).unwrap());
+        fixture.push('\n');
+    }
+    fs::write(persistence.raw_path(&id), fixture).unwrap();
+
+    let store = SessionStore::new(persistence.clone());
+    let session = store
+        .restore(&id, RestoreMode::Cold, cancellation())
+        .await
+        .unwrap();
+    assert_eq!(session.event_count(), 200_000);
+    assert!(session.resident_event_count() <= 256);
+    assert!(session.surface().is_empty());
+    assert_eq!(
+        session
+            .read_events(0, 3)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        session
+            .read_events(199_997, 3)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect::<Vec<_>>(),
+        vec![199_997, 199_998, 199_999]
+    );
+    assert_eq!(
+        session
+            .fold_events(199_000, 0u64, |count, _| count + 1)
+            .unwrap(),
+        1_000
+    );
+    let mut tail = event("future/event", 200_000, json!({"seq": 200_000}), None, None);
+    tail.ignorable = Some(true);
+    session.append(tail, cancellation()).await.unwrap();
+    assert_eq!(session.event_count(), 200_001);
+    assert_eq!(
+        session
+            .find_latest_event(|event| (event.event_type == "future/event").then_some(event.seq))
+            .unwrap(),
+        Some(200_000)
+    );
+    let mut samples = Vec::new();
+    for point in [1_000u64, 10_000, 100_000, 200_000] {
+        let from = point.min(200_000);
+        let _ = session.read_events(from, 1).unwrap();
+        samples.push((point, session.resident_event_count(), allocator_rss_bytes()));
+    }
+    eprintln!("long-session samples (events, resident_events, allocator_rss_bytes): {samples:?}");
+    assert!(samples.iter().all(|(_, resident, _)| *resident <= 256));
+
+    drop(session);
+    let restarted = SessionStore::new(persistence)
+        .restore(&id, RestoreMode::Cold, cancellation())
+        .await
+        .unwrap();
+    assert_eq!(restarted.event_count(), 200_001);
+    assert!(restarted.resident_event_count() <= 256);
+    assert_eq!(
+        restarted
+            .read_events(100_000, 2)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect::<Vec<_>>(),
+        vec![100_000, 100_001]
+    );
+    fs::remove_dir_all(root).unwrap();
 }

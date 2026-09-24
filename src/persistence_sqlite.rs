@@ -21,7 +21,7 @@ use crate::{
         migrate_legacy_agent_preset, migrate_legacy_agent_preset_selection, SessionEvent,
         SessionHeader, SessionId, SessionOrigin, SurfaceOp,
     },
-    session::{SessionError, SessionInspection, SessionPersistence},
+    session::{SessionError, SessionEventReader, SessionInspection, SessionPersistence},
 };
 
 const STORAGE_VERSION: i64 = 1;
@@ -350,6 +350,21 @@ impl SessionPersistence for SqliteSessionPersistence {
             .transpose()
     }
 
+    fn event_reader(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Arc<dyn SessionEventReader>>, SessionError> {
+        let connection = lock(&self.connection);
+        let Some(session) = read_session(&connection, session_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(SqliteEventReader {
+            connection: Arc::clone(&self.connection),
+            session_id: session_id.clone(),
+            upper_seq: session.state.next_seq,
+        })))
+    }
+
     async fn read_from(
         &self,
         session_id: &SessionId,
@@ -357,14 +372,23 @@ impl SessionPersistence for SqliteSessionPersistence {
         cancellation: CancellationToken,
     ) -> Result<Vec<SessionEvent>, SessionError> {
         check_cancellation(&cancellation)?;
-        let connection = lock(&self.connection);
-        let session = read_session(&connection, session_id)?
+        let reader = self
+            .event_reader(session_id)?
             .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
-        Ok(session
-            .events
-            .into_iter()
-            .filter(|event| event.seq >= from_seq)
-            .collect())
+        let mut seq = from_seq;
+        let mut events = Vec::new();
+        loop {
+            check_cancellation(&cancellation)?;
+            let page = reader.read_page(seq, 256)?;
+            if page.is_empty() {
+                break;
+            }
+            seq = seq
+                .checked_add(page.len() as u64)
+                .ok_or(SessionError::SequenceExhausted)?;
+            events.extend(page);
+        }
+        Ok(events)
     }
 
     async fn flush(
@@ -425,48 +449,11 @@ impl SessionPersistence for SqliteSessionPersistence {
 
 struct StoredSession {
     header: SessionHeader,
-    events: Vec<SessionEvent>,
     state: SqlitePersistenceState,
 }
 
 fn initialize(connection: &Connection) -> Result<(), SessionError> {
-    connection
-        .execute_batch(
-            "BEGIN;
-             CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY NOT NULL,
-                version INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                cwd TEXT NULL,
-                parent_session_id TEXT NULL,
-                seed_length INTEGER NULL,
-                origin_json TEXT NULL,
-                delegation_depth INTEGER NULL,
-                agent_mode TEXT NULL
-             );
-             CREATE TABLE IF NOT EXISTS events (
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                seq INTEGER NOT NULL CHECK (seq >= 0),
-                event_type TEXT NOT NULL,
-                time INTEGER NOT NULL CHECK (time >= 0),
-                data_json TEXT NOT NULL,
-                ignorable INTEGER NULL CHECK (ignorable IS NULL OR ignorable = 1),
-                source_event_seqs_json TEXT NULL,
-                surface_op_json TEXT NULL,
-                PRIMARY KEY (session_id, seq)
-             );
-             CREATE TABLE IF NOT EXISTS persistence_state (
-                session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                version INTEGER NOT NULL CHECK (version = 1),
-                revision INTEGER NOT NULL CHECK (revision >= 0),
-                incarnation INTEGER NOT NULL CHECK (incarnation >= 1),
-                next_seq INTEGER NOT NULL CHECK (next_seq >= 0),
-                flush_count INTEGER NOT NULL CHECK (flush_count >= 0)
-             );
-             CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq);
-             COMMIT;",
-        )
-        .map_err(|error| sqlite_error("initialize schema", error))?;
+    connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL, cwd TEXT NULL, parent_session_id TEXT NULL, seed_length INTEGER NULL, origin_json TEXT NULL, delegation_depth INTEGER NULL, agent_mode TEXT NULL); CREATE TABLE IF NOT EXISTS events (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL CHECK (seq >= 0), event_type TEXT NOT NULL, time INTEGER NOT NULL CHECK (time >= 0), data_json TEXT NOT NULL, ignorable INTEGER NULL CHECK (ignorable IS NULL OR ignorable = 1), source_event_seqs_json TEXT NULL, surface_op_json TEXT NULL, PRIMARY KEY (session_id, seq)); CREATE TABLE IF NOT EXISTS persistence_state (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, version INTEGER NOT NULL CHECK (version = 1), revision INTEGER NOT NULL CHECK (revision >= 0), incarnation INTEGER NOT NULL CHECK (incarnation >= 1), next_seq INTEGER NOT NULL CHECK (next_seq >= 0), flush_count INTEGER NOT NULL CHECK (flush_count >= 0)); CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq); COMMIT;").map_err(|error| sqlite_error("initialize schema", error))?;
     migrate_legacy_session_headers(connection)
 }
 
@@ -475,17 +462,16 @@ fn migrate_legacy_session_headers(connection: &Connection) -> Result<(), Session
         let mut statement = connection
             .prepare("PRAGMA table_info(sessions)")
             .map_err(|error| sqlite_error("inspect session schema", error))?;
-        let columns = statement
+        let rows = statement
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|error| sqlite_error("read session schema", error))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| sqlite_error("decode session schema", error))?;
-        columns
+        rows
     };
     if !columns.iter().any(|column| column == "agent_preset") {
         return Ok(());
     }
-
     let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
         .map_err(|error| sqlite_error("begin mode migration", error))?;
     if !columns.iter().any(|column| column == "agent_mode") {
@@ -535,24 +521,7 @@ fn insert_header(
                 json!({"error": error.to_string()}),
             )
         })?;
-    transaction
-        .execute(
-            "INSERT INTO sessions
-             (id, version, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                header.id.as_str(),
-                to_i64(header.version, "header version")?,
-                to_i64(header.created_at, "header creation time")?,
-                header.cwd,
-                header.parent_session.as_ref().map(SessionId::as_str),
-                header.seed_length.map(|value| to_i64(value, "header seed length")).transpose()?,
-                origin_json,
-                header.delegation_depth.map(|value| to_i64(value, "header delegation depth")).transpose()?,
-                header.agent_mode.as_ref().map(AgentModeId::as_str),
-            ],
-        )
-        .map_err(|error| sqlite_error("insert session header", error))?;
+    transaction.execute("INSERT INTO sessions (id, version, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![header.id.as_str(), to_i64(header.version, "header version")?, to_i64(header.created_at, "header creation time")?, header.cwd, header.parent_session.as_ref().map(SessionId::as_str), header.seed_length.map(|value| to_i64(value, "header seed length")).transpose()?, origin_json, header.delegation_depth.map(|value| to_i64(value, "header delegation depth")).transpose()?, header.agent_mode.as_ref().map(AgentModeId::as_str)]).map_err(|error| sqlite_error("insert session header", error))?;
     Ok(())
 }
 
@@ -581,27 +550,11 @@ fn insert_event(
         .transpose()
         .map_err(|error| {
             corrupt(
-                "serialize surface operation",
+                "serialize event surface",
                 json!({"error": error.to_string()}),
             )
         })?;
-    transaction
-        .execute(
-            "INSERT INTO events
-             (session_id, seq, event_type, time, data_json, ignorable, source_event_seqs_json, surface_op_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                session_id.as_str(),
-                to_i64(event.seq, "event sequence")?,
-                event.event_type,
-                to_i64(event.time, "event time")?,
-                data_json,
-                event.ignorable.map(|value| if value { 1_i64 } else { 0_i64 }),
-                sources_json,
-                surface_json,
-            ],
-        )
-        .map_err(|error| sqlite_error("insert event", error))?;
+    transaction.execute("INSERT INTO events (session_id, seq, event_type, time, data_json, ignorable, source_event_seqs_json, surface_op_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![session_id.as_str(), to_i64(event.seq, "event sequence")?, event.event_type, to_i64(event.time, "event time")?, data_json, event.ignorable.map(|value| if value { 1_i64 } else { 0_i64 }), sources_json, surface_json]).map_err(|error| sqlite_error("insert event", error))?;
     Ok(())
 }
 
@@ -609,15 +562,7 @@ fn read_session(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<Option<StoredSession>, SessionError> {
-    let header = connection
-        .query_row(
-            "SELECT version, id, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_mode
-             FROM sessions WHERE id = ?1",
-            params![session_id.as_str()],
-            decode_header,
-        )
-        .optional()
-        .map_err(|error| sqlite_error("read session header", error))?;
+    let header = connection.query_row("SELECT version, id, created_at, cwd, parent_session_id, seed_length, origin_json, delegation_depth, agent_mode FROM sessions WHERE id = ?1", params![session_id.as_str()], decode_header).optional().map_err(|error| sqlite_error("read session header", error))?;
     let Some(header) = header else {
         return Ok(None);
     };
@@ -634,30 +579,40 @@ fn read_session(
             json!({"id": session_id.as_str()}),
         )
     })?;
-    let mut statement = connection
-        .prepare(
-            "SELECT seq, event_type, time, data_json, ignorable, source_event_seqs_json, surface_op_json
-             FROM events WHERE session_id = ?1 ORDER BY seq",
-        )
-        .map_err(|error| sqlite_error("prepare event read", error))?;
-    let mut rows = statement
-        .query(params![session_id.as_str()])
-        .map_err(|error| sqlite_error("read events", error))?;
-    let mut events = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| sqlite_error("read event row", error))?
-    {
-        events.push(decode_event(row)?);
-    }
-    validate_committed(&events, &state, session_id)?;
-    Ok(Some(StoredSession {
-        header,
-        events,
-        state,
-    }))
+    validate_event_shape(connection, session_id, &state)?;
+    Ok(Some(StoredSession { header, state }))
 }
 
+fn validate_event_shape(
+    connection: &Connection,
+    session_id: &SessionId,
+    state: &SqlitePersistenceState,
+) -> Result<(), SessionError> {
+    if state.version != STORAGE_VERSION as u64 || state.incarnation == 0 {
+        return Err(corrupt(
+            "unsupported persistence state",
+            json!({"id": session_id.as_str()}),
+        ));
+    }
+    let (count, minimum, maximum): (i64, Option<i64>, Option<i64>) = connection
+        .query_row(
+            "SELECT COUNT(*), MIN(seq), MAX(seq) FROM events WHERE session_id = ?1",
+            params![session_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| sqlite_error("validate event shape", error))?;
+    let expected = to_i64(state.next_seq, "next sequence")?;
+    if count != expected
+        || (expected == 0 && (minimum.is_some() || maximum.is_some()))
+        || (expected > 0 && (minimum != Some(0) || maximum != Some(expected - 1)))
+    {
+        return Err(corrupt(
+            "committed event sequence is not contiguous",
+            json!({"id": session_id.as_str(), "count": count, "nextSeq": state.next_seq, "minimum": minimum, "maximum": maximum}),
+        ));
+    }
+    Ok(())
+}
 fn state_for(
     connection: &Connection,
     session_id: &SessionId,
@@ -765,44 +720,68 @@ fn decode_event(row: &rusqlite::Row<'_>) -> Result<SessionEvent, SessionError> {
     Ok(event)
 }
 
-fn validate_committed(
-    events: &[SessionEvent],
-    state: &SqlitePersistenceState,
-    session_id: &SessionId,
-) -> Result<(), SessionError> {
-    if state.version != STORAGE_VERSION as u64 || state.incarnation == 0 {
-        return Err(corrupt(
-            "unsupported persistence state",
-            json!({"id": session_id.as_str()}),
-        ));
-    }
-    let mut expected = 0_u64;
-    for event in events {
-        event.validate().map_err(SessionError::from)?;
-        if event.seq != expected {
-            return Err(corrupt(
-                "committed event sequence is not contiguous",
-                json!({"id": session_id.as_str(), "expected": expected, "actual": event.seq}),
-            ));
+struct SqliteEventReader {
+    connection: Arc<Mutex<Connection>>,
+    session_id: SessionId,
+    upper_seq: u64,
+}
+
+impl SessionEventReader for SqliteEventReader {
+    fn read_page(&self, from_seq: u64, limit: usize) -> Result<Vec<SessionEvent>, SessionError> {
+        if limit == 0 || from_seq >= self.upper_seq {
+            return Ok(Vec::new());
         }
-        expected = expected
-            .checked_add(1)
-            .ok_or(SessionError::SequenceExhausted)?;
+        let end = self.upper_seq.min(from_seq.saturating_add(limit as u64));
+        let mut connection = lock(&self.connection);
+        let transaction = connection
+            .transaction()
+            .map_err(|error| sqlite_error("begin paged event read", error))?;
+        let mut statement = transaction.prepare("SELECT seq, event_type, time, data_json, ignorable, source_event_seqs_json, surface_op_json FROM events WHERE session_id = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq LIMIT ?4").map_err(|error| sqlite_error("prepare paged event read", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    self.session_id.as_str(),
+                    to_i64(from_seq, "from sequence")?,
+                    to_i64(end, "page end")?,
+                    to_i64((end - from_seq) as u64, "page limit")?
+                ],
+                |row| decode_event(row).map_err(to_sql_error),
+            )
+            .map_err(|error| sqlite_error("read paged events", error))?;
+        let mut events = Vec::new();
+        let mut expected = from_seq;
+        for row in rows {
+            let event = row.map_err(|error| sqlite_error("decode paged event", error))?;
+            event.validate()?;
+            if event.seq != expected {
+                return Err(SessionError::SequenceGap {
+                    expected,
+                    actual: event.seq,
+                });
+            }
+            expected = expected
+                .checked_add(1)
+                .ok_or(SessionError::SequenceExhausted)?;
+            events.push(event);
+        }
+        drop(statement);
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit paged event read", error))?;
+        if expected != end {
+            return Err(SessionError::SequenceGap {
+                expected,
+                actual: expected,
+            });
+        }
+        Ok(events)
     }
-    if state.next_seq != expected {
-        return Err(corrupt(
-            "persistence state does not match committed event sequence",
-            json!({"id": session_id.as_str(), "nextSeq": state.next_seq, "expected": expected}),
-        ));
-    }
-    Ok(())
 }
 
 fn inspection(session: &StoredSession) -> Result<SessionInspection, SessionError> {
     Ok(SessionInspection {
         header: session.header.clone(),
-        event_count: u64::try_from(session.events.len())
-            .map_err(|_| SessionError::SequenceExhausted)?,
+        event_count: session.state.next_seq,
         next_seq: session.state.next_seq,
         flush_count: session.state.flush_count,
     })

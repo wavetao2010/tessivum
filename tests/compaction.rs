@@ -412,7 +412,7 @@ async fn compact_now_is_a_standalone_noop_without_events_or_model_call() {
         CompactionOutcome::Noop { .. }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(session.events().len(), 1);
+    assert_eq!(session.events().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -466,7 +466,7 @@ async fn regions_are_inclusive_current_surface_bounds() {
             Err(CompactionError::Invalid(error)) if error.code == "INVALID_COMPACTION_REGION"
         ));
     }
-    assert_eq!(session.events().len(), 2);
+    assert_eq!(session.events().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -482,7 +482,7 @@ async fn tool_pairs_must_be_ordered_and_wholly_selected() {
             .await,
         Err(CompactionError::Invalid(error)) if error.code == "UNBALANCED_TOOL_PAIR"
     ));
-    assert_eq!(session.events().len(), 2);
+    assert_eq!(session.events().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -510,7 +510,7 @@ async fn successful_compaction_replaces_only_after_durable_summary() {
     assert_eq!(result.event_seqs.summary, 3);
     assert_eq!(result.event_seqs.replacement, 4);
     assert_eq!(result.event_seqs.end, 5);
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -561,7 +561,7 @@ async fn compaction_rejects_a_surface_changed_during_summary() {
         CompactionError::Session(SessionError::StaleSurface { expected, actual })
             if expected == vec![first, second] && actual == vec![first, second, 3]
     ));
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -606,7 +606,7 @@ async fn summary_failure_records_failed_end_without_changing_surface() {
         Err(CompactionError::Llm(error)) if error.code == "SUMMARY_DOWN"
     ));
     assert_eq!(session.derive_messages(), before);
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(events[2].event_type, "compaction/start");
     assert_eq!(events[3].event_type, "compaction/end");
     assert_eq!(
@@ -643,7 +643,7 @@ async fn cancellation_records_cancelled_end_without_changing_surface() {
         Err(CompactionError::Cancelled)
     ));
     assert_eq!(session.derive_messages(), before);
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(events[2].event_type, "compaction/start");
     assert_eq!(events[3].event_type, "compaction/end");
     assert_eq!(events[3].data["error"], "compaction was cancelled");
@@ -687,7 +687,7 @@ async fn cancellation_during_summary_append_records_a_cancelled_end() {
         Err(CompactionError::Cancelled)
     ));
     assert_eq!(session.derive_messages(), before);
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -741,7 +741,7 @@ async fn cancellation_during_replacement_append_records_a_cancelled_end() {
         Err(CompactionError::Cancelled)
     ));
     assert_eq!(session.derive_messages(), before);
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -820,7 +820,7 @@ async fn tool_result_pruning_uses_unicode_codepoints_and_a_durable_replacement()
         ToolResultPruneOutcome::Pruned(ref result)
             if result.original_codepoints == original.chars().count() as u64
     ));
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(events[3].event_type, "tool/result");
     assert_eq!(events[3].source_event_seqs, Some(vec![source]));
     assert_eq!(
@@ -902,7 +902,7 @@ async fn pruning_rejects_a_source_replaced_before_its_commit() {
         CompactionError::Session(SessionError::StaleSurface { expected, actual })
             if expected == vec![0, call, source] && actual == vec![0, call, 3]
     ));
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(events.len(), 4);
     assert_eq!(events[3].source_event_seqs, Some(vec![source]));
     assert_eq!(
@@ -1035,7 +1035,10 @@ async fn equal_or_larger_summary_is_rejected_without_surface_replacement() {
 
 #[tokio::test]
 async fn automatic_recovery_commits_at_most_one_batch_per_invocation() {
-    for trigger in [CompactionTrigger::Pressure, CompactionTrigger::ContextOverflow] {
+    for trigger in [
+        CompactionTrigger::Pressure,
+        CompactionTrigger::ContextOverflow,
+    ] {
         let session = session(&format!("request-recovery-{trigger:?}")).await;
         for index in 0..12 {
             user(&session, &format!("chunk-{index}"), &"history ".repeat(32)).await;
@@ -1069,20 +1072,14 @@ async fn automatic_recovery_commits_at_most_one_batch_per_invocation() {
             purpose: None,
         };
         let before_calls = calls.load(Ordering::SeqCst);
-        let before_events = session.events().len();
+        let before_events = session.events().unwrap().len();
         let error = service
-            .compact_for_request(
-                &session,
-                trigger,
-                &request,
-                None,
-                cancellation(),
-            )
+            .compact_for_request(&session, trigger, &request, None, cancellation())
             .await
             .unwrap_err();
         assert_eq!(error.code(), "COMPACTION_RECOVERY_INCOMPLETE");
         assert!(calls.load(Ordering::SeqCst) - before_calls <= 1);
-        assert!(session.events().len() > before_events);
+        assert!(session.events().unwrap().len() > before_events);
         assert!(session.surface().len() < 12);
         assert!(lock(&requests).len() <= 1);
     }
@@ -1120,7 +1117,7 @@ async fn known_summary_window_avoids_tiny_codepoint_batches() {
         session_id: Some(session.id()),
         purpose: None,
     };
-    service
+    let error = service
         .compact_for_request(
             &session,
             CompactionTrigger::ContextOverflow,
@@ -1129,7 +1126,8 @@ async fn known_summary_window_avoids_tiny_codepoint_batches() {
             cancellation(),
         )
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(error.code(), "COMPACTION_RECOVERY_INCOMPLETE");
     let requests = lock(&requests);
     assert!(requests.len() < 10);
     assert!(requests.iter().any(|request| {
@@ -1162,7 +1160,7 @@ async fn oversized_live_history_recovers_after_restart_without_replaying_origina
         }
         user(&original, "current", "Preserve this current task exactly.").await;
         let latest = original.derive_messages().last().cloned().unwrap();
-        let raw = original.events();
+        let raw = original.events().unwrap();
         let reader = SessionStore::new(persistence);
         let recovered = reader
             .restore(
@@ -1185,7 +1183,7 @@ async fn oversized_live_history_recovers_after_restart_without_replaying_origina
                 .unwrap(),
             CompactionOutcome::Compacted(_)
         ));
-        assert_eq!(&recovered.events()[..raw.len()], raw.as_slice());
+        assert_eq!(&recovered.events().unwrap()[..raw.len()], raw.as_slice());
         assert_eq!(recovered.derive_messages().last(), Some(&latest));
         assert!(recovered.surface().len() <= 384);
         assert!(
@@ -1243,7 +1241,7 @@ async fn summary_batch_limits_do_not_reject_history_that_fits_the_main_model() {
     for index in 0..520 {
         user(&parent, &format!("history-{index}"), &"history ".repeat(16)).await;
     }
-    let seed = parent.events();
+    let seed = parent.events().unwrap();
     let child = store
         .create_seeded(
             header("large-child", Some(seed.len() as u64)),
@@ -1260,7 +1258,7 @@ async fn summary_batch_limits_do_not_reject_history_that_fits_the_main_model() {
             "Continue without modifying the existing history.",
         )
         .await;
-        let before = session.events();
+        let before = session.events().unwrap();
         let request = GenerateRequest {
             provider: "test".into(),
             model: "large-main".into(),
@@ -1287,7 +1285,7 @@ async fn summary_batch_limits_do_not_reject_history_that_fits_the_main_model() {
                 .unwrap(),
             CompactionOutcome::Noop { .. }
         ));
-        assert_eq!(session.events(), before);
+        assert_eq!(session.events().unwrap(), before);
     }
 }
 
@@ -1351,7 +1349,7 @@ async fn model_windows_are_separate_and_protected_input_cannot_fake_recovery() {
         )
         .await
         .unwrap_err();
-    assert_eq!(error.code(), "COMPACTION_PROTECTED_INPUT_TOO_LARGE");
+    assert_eq!(error.code(), "COMPACTION_RECOVERY_INCOMPLETE");
     assert!(session
         .derive_messages()
         .iter()
@@ -1414,6 +1412,7 @@ async fn partial_recovery_survives_failure_and_cold_restart() {
     );
     assert!(restored
         .events()
+        .unwrap()
         .iter()
         .any(|event| event.event_type == "compaction/end" && event.data.get("error").is_some()));
 }
@@ -1511,7 +1510,8 @@ async fn automatic_recovery_prunes_a_giant_recent_text_result_without_losing_raw
     assert_eq!(messages[0].id.as_str(), "current");
     assert!(serde_json::to_string(&messages[2]).unwrap().chars().count() <= 16_384);
     assert_eq!(
-        session.events()[source as usize].data["message"]["content"][0]["content"][0]["text"],
+        session.events().unwrap()[source as usize].data["message"]["content"][0]["content"][0]
+            ["text"],
         original
     );
 }

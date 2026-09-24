@@ -339,6 +339,7 @@ async fn goals_are_cas_transitioned_tombstoned_and_round_bounded() {
     ));
     assert!(session
         .events()
+        .unwrap()
         .iter()
         .any(|event| event.event_type == "goal/change"));
 }
@@ -414,6 +415,7 @@ async fn goal_lifecycle_helpers_are_cas_durable_and_reloadable() {
     assert_eq!(
         session
             .events()
+            .unwrap()
             .iter()
             .filter(|event| event.event_type == "goal/change")
             .count(),
@@ -421,6 +423,7 @@ async fn goal_lifecycle_helpers_are_cas_durable_and_reloadable() {
     );
     let changes = session
         .events()
+        .unwrap()
         .into_iter()
         .filter(|event| event.event_type == "goal/change")
         .collect::<Vec<_>>();
@@ -470,6 +473,7 @@ async fn failed_goal_append_leaves_no_snapshot_or_event() {
     assert!(service.snapshots().await.unwrap().is_empty());
     assert!(session
         .events()
+        .unwrap()
         .into_iter()
         .all(|event| event.event_type != "goal/change"));
 }
@@ -541,6 +545,7 @@ async fn concurrent_goal_views_preserve_revision_cas_across_an_ordinary_append()
     assert_eq!(
         session
             .events()
+            .unwrap()
             .iter()
             .filter(|event| event.event_type == "goal/change")
             .count(),
@@ -746,10 +751,11 @@ async fn planning_is_an_observable_mode_with_frozen_whole_todos() {
         .write_todos(todos.clone(), cancellation())
         .await
         .unwrap();
-    assert_eq!(planning.mode().await, PlanMode::Plan);
-    assert_eq!(planning.todos().await, todos);
+    assert_eq!(planning.mode().await.unwrap(), PlanMode::Plan);
+    assert_eq!(planning.todos().await.unwrap(), Some(todos));
     let todo = session
         .events()
+        .unwrap()
         .into_iter()
         .find(|event| event.event_type == "todo/write")
         .unwrap();
@@ -759,6 +765,7 @@ async fn planning_is_an_observable_mode_with_frozen_whole_todos() {
     );
     assert!(session
         .events()
+        .unwrap()
         .iter()
         .any(|event| event.event_type == "plan/mode"));
 }
@@ -903,10 +910,12 @@ async fn never_does_not_bypass_answerers_and_events_are_auditable() {
     assert_eq!(calls.0.load(Ordering::SeqCst), 0);
     assert!(session
         .events()
+        .unwrap()
         .iter()
         .any(|event| event.event_type == "approval/asked"));
     assert!(session
         .events()
+        .unwrap()
         .iter()
         .any(|event| event.event_type == "approval/decided"));
 }
@@ -1067,6 +1076,7 @@ async fn ending_the_turn_while_an_answerer_waits_records_a_denial() {
     );
     let decision = session
         .events()
+        .unwrap()
         .into_iter()
         .rev()
         .find(|event| event.event_type == "approval/decided")
@@ -1184,6 +1194,7 @@ async fn panicking_callbacks_fail_closed_and_record_decisions() {
     );
     let outcomes = session
         .events()
+        .unwrap()
         .into_iter()
         .filter_map(|event| {
             (event.event_type == "approval/decided").then(|| {
@@ -1261,6 +1272,7 @@ async fn cancellation_waiting_for_finalization_is_recorded() {
     );
     let decision = session
         .events()
+        .unwrap()
         .into_iter()
         .rev()
         .find(|event| event.event_type == "approval/decided")
@@ -1341,6 +1353,7 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
 
     let asked = session
         .events()
+        .unwrap()
         .into_iter()
         .filter_map(|event| {
             (event.event_type == "approval/asked")
@@ -1349,6 +1362,7 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
         .collect::<Vec<_>>();
     let decided = session
         .events()
+        .unwrap()
         .into_iter()
         .filter_map(|event| {
             (event.event_type == "approval/decided")
@@ -1359,6 +1373,7 @@ async fn host_registry_routes_exact_generations_and_audits_tool_calls() {
     assert_eq!(decided.len(), 2);
     let audit_types = session
         .events()
+        .unwrap()
         .into_iter()
         .filter(|event| event.event_type.starts_with("approval/"))
         .map(|event| event.event_type)
@@ -1494,7 +1509,7 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
         }
     });
     let asked = loop {
-        if let Some(asked) = session.events().into_iter().find_map(|event| {
+        if let Some(asked) = session.events().unwrap().into_iter().find_map(|event| {
             (event.event_type == "approval/asked")
                 .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
         }) {
@@ -1504,6 +1519,7 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     };
     let durable_asked = session
         .events()
+        .unwrap()
         .into_iter()
         .find(|event| event.event_type == "approval/asked")
         .unwrap()
@@ -1558,6 +1574,7 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
     assert_eq!(first.await.unwrap(), ApprovalOutcome::AllowedOnce);
     let decision = session
         .events()
+        .unwrap()
         .into_iter()
         .rev()
         .find_map(|event| {
@@ -1587,11 +1604,17 @@ async fn browser_pending_approvals_are_first_wins_and_durably_resolved() {
         }
     });
     let rejected_asked = loop {
-        if let Some(asked) = session.events().into_iter().rev().find_map(|event| {
-            (event.event_type == "approval/asked")
-                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
-                .filter(|asked| asked.approval_id != requested.approval_id)
-        }) {
+        if let Some(asked) = session
+            .events()
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find_map(|event| {
+                (event.event_type == "approval/asked")
+                    .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+                    .filter(|asked| asked.approval_id != requested.approval_id)
+            })
+        {
             break asked;
         }
         tokio::task::yield_now().await;
@@ -1638,7 +1661,7 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
         }
     });
     let first_asked = loop {
-        if let Some(asked) = session.events().into_iter().find_map(|event| {
+        if let Some(asked) = session.events().unwrap().into_iter().find_map(|event| {
             (event.event_type == "approval/asked")
                 .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
         }) {
@@ -1668,6 +1691,7 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
     assert_eq!(first_outcome, ApprovalOutcome::Unavailable);
     let first_decision = session
         .events()
+        .unwrap()
         .into_iter()
         .rev()
         .find_map(|event| {
@@ -1693,11 +1717,17 @@ async fn pending_authority_caps_times_out_and_cancels_fail_closed() {
         }
     });
     let cancelled_asked = loop {
-        if let Some(asked) = session.events().into_iter().rev().find_map(|event| {
-            (event.event_type == "approval/asked")
-                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
-                .filter(|asked| asked.tool_name == "three")
-        }) {
+        if let Some(asked) = session
+            .events()
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find_map(|event| {
+                (event.event_type == "approval/asked")
+                    .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+                    .filter(|asked| asked.tool_name == "three")
+            })
+        {
             break asked;
         }
         tokio::task::yield_now().await;
@@ -1744,7 +1774,7 @@ async fn delayed_turn_end_cannot_cancel_later_pending_approval() {
         }
     });
     let first_asked = loop {
-        if let Some(asked) = session.events().into_iter().find_map(|event| {
+        if let Some(asked) = session.events().unwrap().into_iter().find_map(|event| {
             (event.event_type == "approval/asked")
                 .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
         }) {
@@ -1776,11 +1806,17 @@ async fn delayed_turn_end_cannot_cancel_later_pending_approval() {
         }
     });
     let second_asked = loop {
-        if let Some(asked) = session.events().into_iter().rev().find_map(|event| {
-            (event.event_type == "approval/asked")
-                .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
-                .filter(|asked| asked.approval_id != first_asked.approval_id)
-        }) {
+        if let Some(asked) = session
+            .events()
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find_map(|event| {
+                (event.event_type == "approval/asked")
+                    .then(|| serde_json::from_value::<ApprovalAsked>(event.data).unwrap())
+                    .filter(|asked| asked.approval_id != first_asked.approval_id)
+            })
+        {
             break asked;
         }
         tokio::task::yield_now().await;

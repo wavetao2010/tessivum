@@ -110,8 +110,8 @@ impl PlanningService {
         if agent.id() != session.id() || agent.is_disposed() {
             return Err(PlanningError::NotLive);
         }
-        fold_plan_mode(&session.events())?;
-        fold_todos(&session.events())?;
+        fold_plan_mode_session(&session)?;
+        fold_todos_session(&session)?;
         Ok(Self {
             inner: Arc::new(PlanningInner { agent, session }),
         })
@@ -125,15 +125,13 @@ impl PlanningService {
         self.inner.agent.id()
     }
 
-    pub async fn mode(&self) -> PlanMode {
-        fold_plan_mode(&self.inner.session.events()).unwrap_or(PlanMode::Normal)
+    pub async fn mode(&self) -> Result<PlanMode, PlanningError> {
+        fold_plan_mode_session(&self.inner.session)
     }
 
     /// The standing todo list retires as soon as a later turn begins.
-    pub async fn todos(&self) -> Vec<TodoItem> {
-        fold_todos(&self.inner.session.events())
-            .unwrap_or_default()
-            .unwrap_or_default()
+    pub async fn todos(&self) -> Result<Option<Vec<TodoItem>>, PlanningError> {
+        fold_todos_session(&self.inner.session)
     }
 
     /// Persists a whole mode value before making it observable.
@@ -190,7 +188,7 @@ impl PlanningService {
     /// Validates a plan before presenting it to the user for review.
     pub async fn validate_exit_plan(&self, plan: &str) -> Result<(), PlanningError> {
         self.require_live()?;
-        if !self.mode().await.active() {
+        if !self.mode().await?.active() {
             return Err(PlanningError::NotInPlanMode);
         }
         if !has_plan_heading(plan) {
@@ -206,6 +204,42 @@ impl PlanningService {
             Ok(())
         }
     }
+}
+
+fn fold_plan_mode_session(session: &Session) -> Result<PlanMode, PlanningError> {
+    session
+        .fold_events(0, Ok(PlanMode::Normal), |mode, event| {
+            mode.and_then(|mode| {
+                if event.event_type != "plan/mode" {
+                    return Ok(mode);
+                }
+                let change: PlanModeChange = serde_json::from_value(event.data.clone())
+                    .map_err(|_| PlanningError::InvalidReplay)?;
+                Ok(if change.active {
+                    PlanMode::Plan
+                } else {
+                    PlanMode::Normal
+                })
+            })
+        })
+        .map_err(PlanningError::Session)?
+}
+
+fn fold_todos_session(session: &Session) -> Result<Option<Vec<TodoItem>>, PlanningError> {
+    session
+        .fold_events(0, Ok(None), |todos, event| {
+            todos.and_then(|todos| match event.event_type.as_str() {
+                "todo/write" => {
+                    let mut write: TodoWrite = serde_json::from_value(event.data.clone())
+                        .map_err(|_| PlanningError::InvalidReplay)?;
+                    normalize_todos(&mut write.todos)?;
+                    Ok(Some(write.todos))
+                }
+                "turn/start" => Ok(None),
+                _ => Ok(todos),
+            })
+        })
+        .map_err(PlanningError::Session)?
 }
 
 /// Folds the upstream `plan/mode` event format.

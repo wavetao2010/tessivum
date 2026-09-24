@@ -1,11 +1,11 @@
 # Tessivum 二阶段开发计划
 
 > 状态：两阶段迁移、Phase 5 原生 Agent Mode clean cutover、Phase 6 DSH Profile 兼容、Phase 7 第一方市场、Phase 8 Remote Access、Phase 9 性能证据与社区插件验证已完成；Phase 10 实施中，10-B Windows 运行时与 ACL sandbox 已实现、原生安全验收进行中，安装与发行尚未完成
-> 计划校准日期：2026-09-23
-> Tessivum 源码基线：`v0.1.0-alpha.30` 发布候选（配套 Core 0.1.7）
+> 计划校准日期：2026-09-24
+> Tessivum 源码基线：`v0.1.0-alpha.31` 发布候选（配套 Core 0.1.8）
 > 上游兼容基线：DeepSeek Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a`
 > 适用范围：Rust Cordis 内核、Tessivum Host/Agent Runtime、原生 Agent Mode、插件生态兼容、第一方市场、Remote Access、Web 模型配置面、性能证据、社区插件验证与 Windows 原生发行
-> 当前发行工作：PR #7 已合并，上下文有界恢复与持久 Goal 一致性修复的源码 CI 已通过（Browser 首次失败，重跑通过）。Alpha.30 候选目标为 macOS/Linux x86_64、ARM64 及 Windows x86_64；公开发布以新归档 smoke、安装器验收及校验和验证为门禁。第 4.5 节保留 Alpha.29 历史证据，不冒充本版新验收。远程侧边栏终端及 Windows ARM64 仍不支持。
+> 当前发行工作：Alpha.31 候选已切换到 Core 0.1.8；公开发布仍以新归档 smoke、安装器验收及校验和验证为门禁。远程侧边栏终端及 Windows ARM64 仍不支持。
 
 ## 1. 文档集
 
@@ -733,6 +733,7 @@ Native API 优先为 Harness 核心服务服务，不追求模拟 TypeScript 的
 
 验收：选择真实社区插件样本，而不是只使用自制 fixture；至少覆盖工具、服务、事件、Node API 和浏览器 client half 类型。
 
+当前证据：已锁定并验证真实发布包 `@cordisjs/plugin-timer@1.1.2`、`@cordisjs/plugin-http@1.5.1`、`dsh-dream-skin@8.30.1`，以及 DeepSeek Harness vendor 的 `@deepseek-ai/cordis-plugin-logger-console@1.0.1`。兼容报告能识别 `direct-legacy`、`needs-proxy`、`browser`、稳定服务和 Node builtin；Logger Console 被正确判定为依赖 `logger@1` typed proxy，且 `node:util` 被识别。真实 Legacy Node 运行验收覆盖未修改的 Logger Console `lib/browser.js` 加载、`ctx.logger(...).info()` 输出、插件 dispose 与 profile shutdown 清理；另以 Legacy Node 工具插件探针验证 `tools@1.register` 的工具 schema 能到达 Native `ToolRuntime`，并在插件 dispose 后移除；新增 Legacy `systemPrompt.section({ name, order, text })` 代理验收，Native `SystemPrompt` 能看到按 order 排序的贡献，dispose 后仅移除 Legacy 贡献并保留原生 section。浏览器包的 `dsh.client` 路由、web 注入和 `node:fs/promises` 子路径扫描均已验证。Timer 未改源码即可经 Legacy Node Host 加载、异步 dispose，并在传输断开后由 profile generation 清理。相同 descriptor ID 的两个 Session 也已验证隔离。完整的首批跨运行时代理矩阵仍未完成，不将本节标记为全部完成。
 ### 2.5 Host、API 与 SDK（已落地）
 
 Rust `HostApi` 现在是 HTTP/SSE/WebSocket 与 bounded NDJSON SDK 的共同权威，接口包含 initialize、prompt、cancel、events、status、durable session listing、subscribe 和 shutdown（`src/host.rs`、`src/api.rs`、`src/sdk.rs`）。TypeScript/Python SDK 与真实 `tessivum sdk` binary 均已完成 initialize/session-new/shutdown smoke；Web API 另保留 published full-form Remote 兼容路由。
@@ -853,7 +854,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前源码基线为 `v0.1.0-alpha.30` 发布候选，产品运行时固定 `tessivum-core v0.1.7` / `0caaccf9a79d7a906a08a21c3032eafebe084ffc`，当前发布门禁见文首；Alpha.29/28 历史发行证据见第 4.5/4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
+当前源码基线为 `v0.1.0-alpha.31` 发布候选，产品运行时固定 `tessivum-core v0.1.8` / `f7a9dbba89912f23b80f169d69d0dc34d962002f`，当前发布门禁见文首；Alpha.30/29/28 历史发行证据保留在相应章节。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 

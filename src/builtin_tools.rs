@@ -674,7 +674,7 @@ impl ToolHandler for Bash {
                 return Err(workspace_error(&context, error));
             }
         };
-        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session);
+        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session)?;
         let requested = arguments
             .get("sandbox_permissions")
             .map(|value| serde_json::from_value::<SandboxMode>(value.clone()))
@@ -919,7 +919,7 @@ impl ToolHandler for WindowsPowerShell {
                 return Err(workspace_error(&context, error));
             }
         };
-        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session);
+        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session)?;
         let requested = arguments
             .get("sandbox_permissions")
             .map(|value| serde_json::from_value::<SandboxMode>(value.clone()))
@@ -1630,18 +1630,26 @@ fn bash_signal_name(signal: i32) -> std::borrow::Cow<'static, str> {
 fn session_sandbox_mode(
     sessions: Option<&SessionStore>,
     session_id: &crate::SessionId,
-) -> SandboxMode {
-    sessions
-        .and_then(|sessions| sessions.get(session_id))
-        .and_then(|session| {
-            session.events().into_iter().rev().find_map(|event| {
-                (event.event_type == "sandbox/mode")
-                    .then(|| event.data.get("mode").cloned())
-                    .flatten()
-                    .and_then(|value| serde_json::from_value(value).ok())
-            })
+) -> Result<SandboxMode, TessivumError> {
+    let Some(session) = sessions.and_then(|sessions| sessions.get(session_id)) else {
+        return Ok(SandboxMode::WorkspaceWrite);
+    };
+    session
+        .find_latest_event(|event| {
+            (event.event_type == "sandbox/mode")
+                .then(|| event.data.get("mode").cloned())
+                .flatten()
+                .and_then(|value| serde_json::from_value(value).ok())
         })
-        .unwrap_or(SandboxMode::WorkspaceWrite)
+        .map(|mode| mode.unwrap_or(SandboxMode::WorkspaceWrite))
+        .map_err(|error| {
+            TessivumError::new(
+                "SESSION_READ_FAILED",
+                "could not read the session sandbox mode",
+                "tools",
+                json!({"sessionId": session_id, "cause": error.to_string()}),
+            )
+        })
 }
 
 #[cfg(any(unix, windows))]

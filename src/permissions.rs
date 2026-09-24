@@ -8,6 +8,7 @@ use crate::{
     approval::ApprovalPolicy,
     protocol::SessionEvent,
     sandbox::SandboxMode,
+    session::{Session, SessionError},
     settings::{SettingsApplies, SettingsRegistration},
     TessivumError,
 };
@@ -134,9 +135,42 @@ pub(crate) fn fold(events: &[SessionEvent]) -> PermissionKnobs {
     state
 }
 
-/// Renders the current durable policy as the model-visible runtime snapshot.
-pub(crate) fn runtime_context(events: &[SessionEvent], workspace: Option<&str>) -> String {
-    let state = fold(events);
+/// Renders runtime context from the session without materializing its history.
+pub(crate) fn runtime_context_for_session(
+    session: &Session,
+    workspace: Option<&str>,
+) -> Result<String, SessionError> {
+    let (state, time_zone) = session.fold_events(
+        0,
+        (PermissionKnobs::default(), None),
+        |(mut state, time_zone), event| {
+            apply(&mut state, event);
+            let time_zone = if event.event_type == "user/message" {
+                event
+                    .data
+                    .get("source")
+                    .and_then(|source| source.get("clientTimeZone"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or(time_zone)
+            } else {
+                time_zone
+            };
+            (state, time_zone)
+        },
+    )?;
+    Ok(render_runtime_context(
+        &state,
+        workspace,
+        time_zone.as_deref(),
+    ))
+}
+
+fn render_runtime_context(
+    state: &PermissionKnobs,
+    workspace: Option<&str>,
+    time_zone: Option<&str>,
+) -> String {
     let workspace = workspace.map_or_else(
         || "Session workspace: unavailable.".to_owned(),
         |workspace| {
@@ -156,11 +190,6 @@ pub(crate) fn runtime_context(events: &[SessionEvent], workspace: Option<&str>) 
         ApprovalPolicy::Ask => "Approval policy: ask. Operations that support escalation may ask through the configured answerers; without an available answerer, the request fails closed.",
         ApprovalPolicy::Never => "Approval policy: never. Actions that require approval are rejected automatically; do not request sandbox escalation (do not set `sandbox_permissions`).",
     };
-    let time_zone = events.iter().rev().find_map(|event| {
-        (event.event_type == "user/message")
-            .then(|| event.data.get("source")?.get("clientTimeZone")?.as_str())
-            .flatten()
-    });
     let browser_time = time_zone.map_or_else(
         || "Browser time zone for this request: unavailable. Ask the user to clarify otherwise-unqualified dates and times.".to_owned(),
         |time_zone| format!("Browser time zone for this request: {time_zone}. Interpret otherwise-unqualified dates and times in this zone."),

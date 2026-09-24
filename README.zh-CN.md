@@ -13,7 +13,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 ## 当前状态
 
-`v0.1.0-alpha.30` 限制上下文恢复并按活动模型窗口调整压缩批次，同时保持持久 Goal 一致性。它使用 `tessivum-core v0.1.7` 修订版 `0caaccf9a79d7a906a08a21c3032eafebe084ffc`，兼容目标仍为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
+`v0.1.0-alpha.31` 增加 Legacy Node `systemPrompt.section()` 代理，并继续提供有界上下文恢复与持久 Goal 一致性。它使用 `tessivum-core v0.1.8` 修订版 `f7a9dbba89912f23b80f169d69d0dc34d962002f`，兼容目标仍为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
 
 精确的 `terminal.manage` 能力保留模式隔离与父级拒绝/审批。Core 保留已有历史分页，并在插件工具回调前预载原生会话。
 
@@ -33,13 +33,13 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 | 平台 | 架构 | 归档 | SHA-256 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-apple-darwin.tar.gz.sha256) |
-| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-apple-darwin.tar.gz.sha256) |
-| Linux（glibc） | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-aarch64-unknown-linux-gnu.tar.gz.sha256) |
-| Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-unknown-linux-gnu.tar.gz.sha256) |
-| Windows 原生 | x86_64 | [`.zip`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.30/tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip.sha256) |
+| macOS | Apple Silicon | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-aarch64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-aarch64-apple-darwin.tar.gz.sha256) |
+| macOS | Intel | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-x86_64-apple-darwin.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-x86_64-apple-darwin.tar.gz.sha256) |
+| Linux（glibc） | ARM64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-aarch64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux（glibc） | x86_64 | [`.tar.gz`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-x86_64-unknown-linux-gnu.tar.gz) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| Windows 原生 | x86_64 | [`.zip`](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-x86_64-pc-windows-msvc.zip) | [校验和](https://github.com/wavetao2010/tessivum/releases/download/v0.1.0-alpha.31/tessivum-0.1.0-alpha.31-x86_64-pc-windows-msvc.zip.sha256) |
 
-Alpha.30 发行目标为 macOS/Linux x86_64、ARM64 及 Windows x86_64。公开发布必须通过全部归档 smoke 与安装器验证；只使用公开发布页上的资产。[Alpha.29 验收记录](docs/DEVELOPMENT_PLAN.md#45-alpha29终端修复配套发行)仅作为历史证据，不冒充本版新验收。
+Alpha.31 发行目标为 macOS/Linux x86_64、ARM64 及 Windows x86_64。公开发布必须通过全部归档 smoke 与安装器验证；只使用公开发布页上的资产。Alpha.30/29 的验收记录仅作为历史证据，不冒充本版新验收。
 
 `install.sh` 支持 macOS/Linux 的 x86_64 与 ARM64；`install.ps1` 支持原生 Windows x86_64。Linux 归档不能直接作为 Windows 原生程序运行；Windows ARM64 不在本次发行目标内。
 
@@ -59,8 +59,8 @@ tsv --version
 安装器会选择正确的发布归档、验证 SHA-256、安装到 `~/.local/lib/tessivum`，并更新 `~/.local/bin` 下的启动器：
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.30/install.sh
-sh install.sh 0.1.0-alpha.30
+curl -fsSLO https://raw.githubusercontent.com/wavetao2010/tessivum/v0.1.0-alpha.31/install.sh
+sh install.sh 0.1.0-alpha.31
 export PATH="$HOME/.local/bin:$PATH"
 tessivum --version
 ```
@@ -69,12 +69,12 @@ tessivum --version
 
 ### 手动下载归档——macOS 或 Linux
 
-从 [Alpha.30 发布页](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.30)下载归档及相邻的 `.sha256` 文件，并从上面的四个 target 中选择一个。
+从 [Alpha.31 发布页](https://github.com/wavetao2010/tessivum/releases/tag/v0.1.0-alpha.31)下载归档及相邻的 `.sha256` 文件，并从上面的五个 target 中选择一个。
 
 Linux 示例：
 
 ```bash
-version=0.1.0-alpha.30
+version=0.1.0-alpha.31
 target=x86_64-unknown-linux-gnu # ARM64 使用 aarch64-unknown-linux-gnu
 base="https://github.com/wavetao2010/tessivum/releases/download/v$version"
 curl -fLO "$base/tessivum-$version-$target.tar.gz"
@@ -95,17 +95,17 @@ Windows ZIP 包含静态 CRT 的 MSVC 可执行文件、`tessivum.cmd`/`tsv.cmd`
 将 ZIP 与相邻校验和下载到 `dist` 后，先验证再解压：
 
 ```powershell
-$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc.zip).Path
+$archive = (Resolve-Path .\dist\tessivum-0.1.0-alpha.31-x86_64-pc-windows-msvc.zip).Path
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -ne "$hash  $(Split-Path $archive -Leaf)") {
     throw 'Windows archive checksum mismatch'
 }
 Expand-Archive -LiteralPath $archive -DestinationPath .\windows-release
-& .\windows-release\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
-& .\windows-release\tessivum-0.1.0-alpha.30-x86_64-pc-windows-msvc\bin\tessivum.cmd web
+& .\windows-release\tessivum-0.1.0-alpha.31-x86_64-pc-windows-msvc\bin\tessivum.cmd --version
+& .\windows-release\tessivum-0.1.0-alpha.31-x86_64-pc-windows-msvc\bin\tessivum.cmd web
 ```
 
-Alpha.30 资产公开后，`powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 0.1.0-alpha.30` 会安装到 `%LOCALAPPDATA%\Tessivum\versions`，并在 `%LOCALAPPDATA%\Tessivum\bin` 创建受管启动器。安装器在切换版本前验证 ZIP 与启动器，支持升级、降级和回滚，仅修改用户级 PATH。`-Uninstall` 只移除受管安装文件和安装器拥有的 PATH 项，保留应用历史与设置。
+Alpha.31 资产公开后，`powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 0.1.0-alpha.31` 会安装到 `%LOCALAPPDATA%\Tessivum\versions`，并在 `%LOCALAPPDATA%\Tessivum\bin` 创建受管启动器。安装器在切换版本前验证 ZIP 与启动器，支持升级、降级和回滚，仅修改用户级 PATH。`-Uninstall` 只移除受管安装文件和安装器拥有的 PATH 项，保留应用历史与设置。
 
 Windows 安装必须传入版本或设置 `VERSION`，卸载不需要。安装器保留 PATH 的 `REG_SZ`/`REG_EXPAND_SZ` 原文、类型及不存在和空值的区别。PowerShell 5.1 与 7 的隔离事务回归不代表全新用户验收；不要用未发布的本地候选包修改真实用户 PATH。
 
@@ -191,7 +191,7 @@ brew upgrade tessivum
 brew uninstall tessivum
 
 # 无 sudo 安装
-sh install.sh 0.1.0-alpha.30
+sh install.sh 0.1.0-alpha.31
 sh install.sh --uninstall
 
 # 显式且具有破坏性的数据删除

@@ -234,7 +234,7 @@ impl ApprovalService {
             return Err(ApprovalError::NotLive);
         }
         let mut state = ApprovalState::default();
-        for event in session.events() {
+        for event in session.events()? {
             if event.event_type == "approval/policy" {
                 let change: ApprovalPolicyChange =
                     serde_json::from_value(event.data).map_err(|_| ApprovalError::InvalidReplay)?;
@@ -357,8 +357,9 @@ impl ApprovalService {
         if cancellation.is_cancelled() {
             return ApprovalOutcome::Cancelled;
         }
-        let Some(turn) = active_turn(&self.inner.session) else {
-            return ApprovalOutcome::Unavailable;
+        let turn = match active_turn(&self.inner.session) {
+            Ok(Some(turn)) => turn,
+            Ok(None) | Err(_) => return ApprovalOutcome::Unavailable,
         };
         let approval_id = ApprovalId::random();
 
@@ -367,7 +368,9 @@ impl ApprovalService {
             if cancellation.is_cancelled() {
                 return ApprovalOutcome::Cancelled;
             }
-            if self.require_live().is_err() || active_turn(&self.inner.session) != Some(turn) {
+            if self.require_live().is_err()
+                || !matches!(active_turn(&self.inner.session), Ok(Some(active)) if active == turn)
+            {
                 return ApprovalOutcome::Rejected;
             }
 
@@ -440,7 +443,8 @@ impl ApprovalService {
         } else if outcome == ApprovalOutcome::AllowedOnce && cancellation.is_cancelled() {
             ApprovalOutcome::Cancelled
         } else if outcome == ApprovalOutcome::AllowedOnce
-            && (self.require_live().is_err() || active_turn(&self.inner.session) != Some(turn))
+            && (self.require_live().is_err()
+                || !matches!(active_turn(&self.inner.session), Ok(Some(active)) if active == turn))
         {
             ApprovalOutcome::Rejected
         } else {
@@ -1184,16 +1188,12 @@ async fn waterfall(
     ApprovalOutcome::Unavailable
 }
 
-fn active_turn(session: &Session) -> Option<u64> {
-    let mut active = None;
-    for event in session.events() {
-        match event.event_type.as_str() {
-            "turn/start" => active = event.data.get("turn").and_then(Value::as_u64),
-            "turn/end" => active = None,
-            _ => {}
-        }
-    }
-    active
+fn active_turn(session: &Session) -> Result<Option<u64>, SessionError> {
+    session.fold_events(0, None, |active, event| match event.event_type.as_str() {
+        "turn/start" => event.data.get("turn").and_then(Value::as_u64),
+        "turn/end" => None,
+        _ => active,
+    })
 }
 
 async fn append(

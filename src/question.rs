@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use crate::{
     agent::{same_authority, AgentAuthority},
     approval::RpcReceipt,
-    session::Session,
+    session::{Session, SessionError},
     tools::{
         ToolDefinition, ToolHandler, ToolHandlerResult, ToolOutput, ToolRegistration,
         ToolRunContext, ToolRuntime,
@@ -338,7 +338,14 @@ impl HostQuestionRegistry {
                     Value::Null,
                 ));
             }
-            let Some(turn) = active_turn(&slot.session) else {
+            let Some(turn) = active_turn(&slot.session).map_err(|error| {
+                question_error(
+                    "SESSION_READ_FAILED",
+                    "could not read the session turn state",
+                    json!({"cause": error.to_string()}),
+                )
+            })?
+            else {
                 return Err(question_error(
                     "NO_ACTIVE_TURN",
                     "ask_user_question requires an active turn",
@@ -363,9 +370,16 @@ impl HostQuestionRegistry {
                     Value::Null,
                 ));
             };
+            let active = active_turn(&session).map_err(|error| {
+                question_error(
+                    "SESSION_READ_FAILED",
+                    "could not read the session turn state",
+                    json!({"cause": error.to_string()}),
+                )
+            })?;
             if !same_authority(&slot.authority, &authority)
                 || !authority.is_live()
-                || active_turn(&session) != Some(turn)
+                || active != Some(turn)
             {
                 return Err(question_error(
                     "CALLER_NOT_LIVE",
@@ -417,10 +431,17 @@ impl HostQuestionRegistry {
             _ = context.cancellation.cancelled() => QuestionReply::Cancelled,
             reply = receiver => reply.unwrap_or(QuestionReply::Cancelled),
         };
+        let active = active_turn(&session).map_err(|error| {
+            question_error(
+                "SESSION_READ_FAILED",
+                "could not read the session turn state",
+                json!({"cause": error.to_string()}),
+            )
+        })?;
         let (outcome, answer) = match reply {
             QuestionReply::Answered(answer)
                 if !context.cancellation.is_cancelled()
-                    && active_turn(&session) == Some(turn)
+                    && active == Some(turn)
                     && self.is_live_owner(&context.session) =>
             {
                 (QuestionOutcome::Answered, Some(answer))
@@ -705,16 +726,12 @@ fn matches_answer(answer: &AskUserQuestionAnswer, questions: &[AskUserQuestionIt
             })
 }
 
-fn active_turn(session: &Session) -> Option<u64> {
-    let mut active = None;
-    for event in session.events() {
-        match event.event_type.as_str() {
-            "turn/start" => active = event.data.get("turn").and_then(Value::as_u64),
-            "turn/end" => active = None,
-            _ => {}
-        }
-    }
-    active
+fn active_turn(session: &Session) -> Result<Option<u64>, SessionError> {
+    session.fold_events(0, None, |active, event| match event.event_type.as_str() {
+        "turn/start" => event.data.get("turn").and_then(Value::as_u64),
+        "turn/end" => None,
+        _ => active,
+    })
 }
 
 async fn append(

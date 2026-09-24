@@ -2,8 +2,9 @@
 
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap},
+    fs as std_fs,
     hash::{Hash, Hasher},
-    io::Cursor,
+    io::{BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -22,7 +23,9 @@ use uuid::Uuid;
 use crate::{
     error::TessivumError,
     protocol::{migrate_legacy_agent_preset_selection, SessionEvent, SessionHeader, SessionId},
-    session::{SessionError, SessionInspection, SessionPersistence, SessionRawArtifact},
+    session::{
+        SessionError, SessionEventReader, SessionInspection, SessionPersistence, SessionRawArtifact,
+    },
 };
 
 const RAW_SUFFIX: &str = ".jsonl";
@@ -50,6 +53,21 @@ pub struct JsonlSessionPersistence {
     format: JsonlStorageFormat,
     gates: Arc<Mutex<HashMap<SessionId, Arc<AsyncMutex<()>>>>>,
     flush_counts: Arc<Mutex<HashMap<SessionId, u64>>>,
+    append_cache: Arc<Mutex<HashMap<SessionId, CachedLog>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CachedLog {
+    stamp: FileStamp,
+    next_seq: u64,
 }
 
 impl JsonlSessionPersistence {
@@ -75,6 +93,7 @@ impl JsonlSessionPersistence {
             format,
             gates: Arc::new(Mutex::new(HashMap::new())),
             flush_counts: Arc::new(Mutex::new(HashMap::new())),
+            append_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -131,17 +150,14 @@ impl JsonlSessionPersistence {
         Ok(None)
     }
 
-    async fn read_session(
+    async fn scan_session(
         &self,
         session_id: &SessionId,
-    ) -> Result<Option<StoredSession>, SessionError> {
+    ) -> Result<Option<ScannedSession>, SessionError> {
         let Some((path, format)) = self.existing_path(session_id).await? else {
             return Ok(None);
         };
-        let bytes = fs::read(&path)
-            .await
-            .map_err(|error| io_error("read", &path, error))?;
-        parse_session(&bytes, format, Some(session_id))
+        scan_file(&path, format, Some(session_id))
             .map(Some)
             .map_err(|error| session_parse_error(&path, error))
     }
@@ -266,26 +282,39 @@ impl SessionPersistence for JsonlSessionPersistence {
         let gate = self.gate(session_id);
         let _guard = gate.lock().await;
         check_cancellation(&cancellation)?;
-        let session = self
-            .read_session(session_id)
+        let (path, format) = self
+            .existing_path(session_id)
             .await?
             .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
-        let expected = next_seq(&session.events)?;
+        let stamp =
+            file_stamp(&path).map_err(|error| io_error("stat log for append", &path, error))?;
+        let cached = lock(&self.append_cache)
+            .get(session_id)
+            .copied()
+            .filter(|cached| cached.stamp == stamp);
+        let expected = if let Some(cached) = cached {
+            cached.next_seq
+        } else {
+            let scanned = scan_file(&path, format, Some(session_id))
+                .map_err(|error| session_parse_error(&path, error))?;
+            lock(&self.append_cache).insert(
+                session_id.clone(),
+                CachedLog {
+                    stamp,
+                    next_seq: scanned.next_seq,
+                },
+            );
+            scanned.next_seq
+        };
         if event.seq != expected {
             return Err(SessionError::SequenceGap {
                 expected,
                 actual: event.seq,
             });
         }
-
-        let (path, format) = self
-            .existing_path(session_id)
-            .await?
-            .expect("read_session found an existing path");
-        let record = event_record(event);
         let record = match format {
-            JsonlStorageFormat::Raw => record.into_bytes(),
-            JsonlStorageFormat::Zstd => encode_frame(&record.into_bytes())?,
+            JsonlStorageFormat::Raw => event_record(event).into_bytes(),
+            JsonlStorageFormat::Zstd => encode_frame(&event_record(event).into_bytes())?,
         };
         let mut file = OpenOptions::new()
             .append(true)
@@ -297,13 +326,38 @@ impl SessionPersistence for JsonlSessionPersistence {
             .map_err(|error| io_error("append log", &path, error))?;
         file.sync_data()
             .await
-            .map_err(|error| io_error("sync appended log", &path, error))
+            .map_err(|error| io_error("sync appended log", &path, error))?;
+        let stamp =
+            file_stamp(&path).map_err(|error| io_error("stat appended log", &path, error))?;
+        lock(&self.append_cache).insert(
+            session_id.clone(),
+            CachedLog {
+                stamp,
+                next_seq: expected
+                    .checked_add(1)
+                    .ok_or(SessionError::SequenceExhausted)?,
+            },
+        );
+        Ok(())
     }
 
     fn supports_raw_artifacts(&self) -> bool {
         true
     }
 
+    fn event_reader(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Arc<dyn SessionEventReader>>, SessionError> {
+        let Some((path, format)) = std_existing_path(&self.root, session_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(JsonlEventReader {
+            path,
+            format,
+            id: session_id.clone(),
+        })))
+    }
     async fn read_raw(
         &self,
         session_id: &SessionId,
@@ -342,7 +396,7 @@ impl SessionPersistence for JsonlSessionPersistence {
     ) -> Result<Option<SessionHeader>, SessionError> {
         check_cancellation(&cancellation)?;
         Ok(self
-            .read_session(session_id)
+            .scan_session(session_id)
             .await?
             .map(|session| session.header))
     }
@@ -353,15 +407,13 @@ impl SessionPersistence for JsonlSessionPersistence {
         cancellation: CancellationToken,
     ) -> Result<Option<SessionInspection>, SessionError> {
         check_cancellation(&cancellation)?;
-        let Some(session) = self.read_session(session_id).await? else {
+        let Some(session) = self.scan_session(session_id).await? else {
             return Ok(None);
         };
-        let event_count =
-            u64::try_from(session.events.len()).map_err(|_| SessionError::SequenceExhausted)?;
         Ok(Some(SessionInspection {
             header: session.header,
-            event_count,
-            next_seq: next_seq(&session.events)?,
+            event_count: session.event_count,
+            next_seq: session.next_seq,
             flush_count: *lock(&self.flush_counts).get(session_id).unwrap_or(&0),
         }))
     }
@@ -373,15 +425,13 @@ impl SessionPersistence for JsonlSessionPersistence {
         cancellation: CancellationToken,
     ) -> Result<Vec<SessionEvent>, SessionError> {
         check_cancellation(&cancellation)?;
-        let session = self
-            .read_session(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
-        Ok(session
-            .events
-            .into_iter()
-            .filter(|event| event.seq >= from_seq)
-            .collect())
+        let Some((path, format)) = self.existing_path(session_id).await? else {
+            return Err(SessionError::NotFound(session_id.clone()));
+        };
+        let events = read_file_events(&path, format, Some(session_id), from_seq, usize::MAX)
+            .map_err(|error| session_parse_error(&path, error))?;
+        check_cancellation(&cancellation)?;
+        Ok(events)
     }
 
     async fn flush(
@@ -523,17 +573,12 @@ impl SessionPersistence for JsonlSessionPersistence {
             let Some((id, format)) = id_from_path(&path) else {
                 continue;
             };
-            let bytes = fs::read(&path)
-                .await
-                .map_err(|error| io_error("read", &path, error))?;
-            let session = parse_session(&bytes, format, Some(&id))
+            let session = scan_file(&path, format, Some(&id))
                 .map_err(|error| session_parse_error(&path, error))?;
-            let event_count =
-                u64::try_from(session.events.len()).map_err(|_| SessionError::SequenceExhausted)?;
             sessions.push(SessionInspection {
-                next_seq: next_seq(&session.events)?,
+                next_seq: session.next_seq,
                 header: session.header,
-                event_count,
+                event_count: session.event_count,
                 flush_count: *lock(&self.flush_counts).get(&id).unwrap_or(&0),
             });
         }
@@ -542,28 +587,235 @@ impl SessionPersistence for JsonlSessionPersistence {
         Ok(sessions)
     }
 }
+struct JsonlEventReader {
+    path: PathBuf,
+    format: JsonlStorageFormat,
+    id: SessionId,
+}
+
+impl SessionEventReader for JsonlEventReader {
+    fn read_page(&self, from_seq: u64, limit: usize) -> Result<Vec<SessionEvent>, SessionError> {
+        read_file_events(&self.path, self.format, Some(&self.id), from_seq, limit)
+            .map_err(|error| session_parse_error(&self.path, error))
+    }
+}
 
 struct StoredSession {
     header: SessionHeader,
     events: Vec<SessionEvent>,
 }
 
+struct ScannedSession {
+    header: SessionHeader,
+    event_count: u64,
+    next_seq: u64,
+}
+
 enum SessionParseError {
     Corrupt(String),
     Protocol(TessivumError),
 }
-
 impl From<String> for SessionParseError {
-    fn from(message: String) -> Self {
-        Self::Corrupt(message)
+    fn from(value: String) -> Self {
+        Self::Corrupt(value)
     }
 }
 
+impl From<&str> for SessionParseError {
+    fn from(value: &str) -> Self {
+        Self::Corrupt(value.to_owned())
+    }
+}
+
+fn scan_file(
+    path: &Path,
+    format: JsonlStorageFormat,
+    expected_id: Option<&SessionId>,
+) -> Result<ScannedSession, SessionParseError> {
+    let file = std_fs::File::open(path).map_err(|error| format!("cannot read log: {error}"))?;
+    let mut state = ScanState::new(expected_id);
+    match format {
+        JsonlStorageFormat::Raw => scan_raw_reader(BufReader::new(file), &mut state)?,
+        JsonlStorageFormat::Zstd => scan_zstd_reader(file, &mut state)?,
+    }
+    state.finish()
+}
+
+fn read_file_events(
+    path: &Path,
+    format: JsonlStorageFormat,
+    expected_id: Option<&SessionId>,
+    from_seq: u64,
+    limit: usize,
+) -> Result<Vec<SessionEvent>, SessionParseError> {
+    let file = std_fs::File::open(path).map_err(|error| format!("cannot read log: {error}"))?;
+    let mut state = ScanState::collecting(expected_id, from_seq, limit);
+    match format {
+        JsonlStorageFormat::Raw => scan_raw_reader(BufReader::new(file), &mut state)?,
+        JsonlStorageFormat::Zstd => scan_zstd_reader(file, &mut state)?,
+    }
+    Ok(state.events)
+}
+
+struct ScanState<'a> {
+    expected_id: Option<&'a SessionId>,
+    header: Option<SessionHeader>,
+    next_seq: u64,
+    event_count: u64,
+    from_seq: u64,
+    limit: usize,
+    events: Vec<SessionEvent>,
+}
+
+impl<'a> ScanState<'a> {
+    fn new(expected_id: Option<&'a SessionId>) -> Self {
+        Self::collecting(expected_id, u64::MAX, 0)
+    }
+
+    fn collecting(expected_id: Option<&'a SessionId>, from_seq: u64, limit: usize) -> Self {
+        Self {
+            expected_id,
+            header: None,
+            next_seq: 0,
+            event_count: 0,
+            from_seq,
+            limit,
+            events: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, record: &[u8]) -> Result<(), SessionParseError> {
+        if record.is_empty() || serde_json::from_slice::<Value>(record).is_err() {
+            return Err("malformed JSONL record in committed prefix".into());
+        }
+        if self.header.is_none() {
+            let header = parse_header(record)?;
+            if header.id.as_str().is_empty() {
+                return Err("session header ID is empty".into());
+            }
+            header.validate().map_err(|error| error.to_string())?;
+            if self.expected_id.is_some_and(|id| *id != header.id) {
+                return Err("session header ID does not match its log path".into());
+            }
+            self.header = Some(header);
+            return Ok(());
+        }
+        let mut event = serde_json::from_slice::<SessionEvent>(record)
+            .map_err(|error| format!("invalid session event: {error}"))?;
+        migrate_legacy_agent_preset_selection(&mut event.event_type, &mut event.data)
+            .map_err(SessionParseError::Protocol)?;
+        event.validate().map_err(|error| error.to_string())?;
+        if event.seq != self.next_seq {
+            return Err(format!(
+                "session event sequence is not contiguous: expected {}, got {}",
+                self.next_seq, event.seq
+            )
+            .into());
+        }
+        self.next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or_else(|| SessionParseError::Corrupt("session sequence exhausted".into()))?;
+        self.event_count = self
+            .event_count
+            .checked_add(1)
+            .ok_or_else(|| SessionParseError::Corrupt("session sequence exhausted".into()))?;
+        if event.seq >= self.from_seq && self.events.len() < self.limit {
+            self.events.push(event);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<ScannedSession, SessionParseError> {
+        let Some(header) = self.header else {
+            return Err("session log has no header record".into());
+        };
+        Ok(ScannedSession {
+            header,
+            event_count: self.event_count,
+            next_seq: self.next_seq,
+        })
+    }
+}
+
+fn scan_raw_reader<R: BufRead>(
+    mut reader: R,
+    state: &mut ScanState<'_>,
+) -> Result<(), SessionParseError> {
+    let mut record = Vec::new();
+    loop {
+        record.clear();
+        let read = reader
+            .read_until(b'\n', &mut record)
+            .map_err(|error| format!("cannot read JSONL log: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let terminated = record.last() == Some(&b'\n');
+        if terminated {
+            record.pop();
+        }
+        if record.is_empty() {
+            return Err("empty JSONL record in committed prefix".into());
+        }
+        if !terminated && serde_json::from_slice::<Value>(&record).is_err() {
+            break;
+        }
+        state.record(&record)?;
+    }
+    Ok(())
+}
+
+fn scan_zstd_reader<R: Read>(
+    mut reader: R,
+    state: &mut ScanState<'_>,
+) -> Result<(), SessionParseError> {
+    let mut header = [0_u8; FRAME_HEADER_LEN];
+    loop {
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(format!("cannot read compressed log: {error}").into()),
+        }
+        let checksum = u32::from_be_bytes(header[..4].try_into().unwrap());
+        let length = u32::from_be_bytes(header[4..].try_into().unwrap()) as usize;
+        let mut compressed = Vec::new();
+        reader
+            .by_ref()
+            .take(length as u64)
+            .read_to_end(&mut compressed)
+            .map_err(|error| format!("cannot read compressed log: {error}"))?;
+        if compressed.len() != length {
+            break;
+        }
+        if crc32(&compressed) != checksum {
+            return Err("compressed frame checksum mismatch".into());
+        }
+        let mut record = zstd::stream::decode_all(Cursor::new(compressed))
+            .map_err(|error| format!("invalid compressed frame: {error}"))?;
+        if record.last() != Some(&b'\n') || record[..record.len() - 1].contains(&b'\n') {
+            return Err("compressed frame does not contain exactly one JSONL record".into());
+        }
+        record.pop();
+        state.record(&record)?;
+    }
+    Ok(())
+}
 fn parse_session(
     bytes: &[u8],
     format: JsonlStorageFormat,
     expected_id: Option<&SessionId>,
 ) -> Result<StoredSession, SessionParseError> {
+    let (header, events) = parse_session_page(bytes, format, expected_id, 0)?;
+    Ok(StoredSession { header, events })
+}
+
+fn parse_session_page(
+    bytes: &[u8],
+    format: JsonlStorageFormat,
+    expected_id: Option<&SessionId>,
+    from_seq: u64,
+) -> Result<(SessionHeader, Vec<SessionEvent>), SessionParseError> {
     let records = match format {
         JsonlStorageFormat::Raw => parse_raw_records(bytes)?,
         JsonlStorageFormat::Zstd => parse_zstd_records(bytes)?,
@@ -582,14 +834,14 @@ fn parse_session(
             .into());
     }
 
-    let mut events = Vec::with_capacity(event_records.len());
+    let mut events = Vec::new();
+    let mut expected = 0_u64;
     for record in event_records {
         let mut event = serde_json::from_slice::<SessionEvent>(record)
             .map_err(|error| format!("invalid session event: {error}"))?;
         migrate_legacy_agent_preset_selection(&mut event.event_type, &mut event.data)
             .map_err(SessionParseError::Protocol)?;
         event.validate().map_err(|error| error.to_string())?;
-        let expected = next_seq(&events).map_err(|error| error.to_string())?;
         if event.seq != expected {
             return Err(format!(
                 "session event sequence is not contiguous: expected {expected}, got {}",
@@ -597,9 +849,14 @@ fn parse_session(
             )
             .into());
         }
-        events.push(event);
+        expected = expected
+            .checked_add(1)
+            .ok_or_else(|| SessionParseError::Corrupt("session sequence exhausted".into()))?;
+        if event.seq >= from_seq {
+            events.push(event);
+        }
     }
-    Ok(StoredSession { header, events })
+    Ok((header, events))
 }
 
 fn parse_raw_records(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
@@ -840,6 +1097,45 @@ fn log_error(path: &Path, message: String) -> SessionError {
         "persistence",
         json!({"path": path.display().to_string()}),
     ))
+}
+
+fn std_existing_path(
+    root: &Path,
+    session_id: &SessionId,
+) -> Result<Option<(PathBuf, JsonlStorageFormat)>, SessionError> {
+    let raw = root.join(format!(
+        "{FILE_PREFIX}{}{}",
+        encode_id(session_id),
+        RAW_SUFFIX
+    ));
+    match std_fs::metadata(&raw) {
+        Ok(_) => return Ok(Some((raw, JsonlStorageFormat::Raw))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error("inspect log path", &raw, error)),
+    }
+    let compressed = root.join(format!(
+        "{FILE_PREFIX}{}{}",
+        encode_id(session_id),
+        ZSTD_SUFFIX
+    ));
+    match std_fs::metadata(&compressed) {
+        Ok(_) => Ok(Some((compressed, JsonlStorageFormat::Zstd))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error("inspect log path", &compressed, error)),
+    }
+}
+
+fn file_stamp(path: &Path) -> Result<FileStamp, std::io::Error> {
+    let metadata = std_fs::metadata(path)?;
+    Ok(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        ino: {
+            use std::os::unix::fs::MetadataExt;
+            metadata.ino()
+        },
+    })
 }
 
 fn persistence_error(operation: &str, message: impl Into<String>) -> SessionError {

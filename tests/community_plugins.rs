@@ -17,7 +17,7 @@ use tessivum::{
     llm::LlmRuntime,
     plugins::PluginRouter,
     session::{MemorySessionPersistence, SessionStore},
-    system_prompt::SystemPrompt,
+    system_prompt::{PromptSection, SystemPrompt},
     tools::ToolRuntime,
     SessionId,
 };
@@ -118,6 +118,50 @@ fn community_packages_are_published_and_routed_without_source_rewrites() {
         node_builtins.iter().any(|marker| marker == "module"),
         "HTTP report identifies its Node module/network client boundary: {http_report}",
     );
+    let logger = scharness_root().join("upstream/deepseek-harness/vendor/logger-console");
+    let logger_report = serde_json::to_value(
+        router
+            .inspect(&logger, None)
+            .expect("vendored logger package is inspectable"),
+    )
+    .expect("logger compatibility report serializes");
+    assert_portable_report(&logger_report);
+    assert_eq!(
+        logger_report["package"],
+        "@deepseek-ai/cordis-plugin-logger-console"
+    );
+    assert_eq!(logger_report["version"], "1.0.1");
+    assert_eq!(logger_report["selectedRuntime"], "legacy-node");
+    assert_eq!(logger_report["compatibility"], "needs-proxy");
+    assert!(logger_report["stableCrossRuntimeServices"]
+        .as_array()
+        .expect("logger report includes stable service evidence")
+        .iter()
+        .any(|service| service == "logger@1"));
+    assert!(logger_report["staticMarkers"]["nodeBuiltins"]
+        .as_array()
+        .expect("logger report includes Node API evidence")
+        .iter()
+        .any(|marker| marker == "util"));
+
+    let dream_skin = community_package("dream-skin");
+    let dream_skin_report = serde_json::to_value(
+        router
+            .inspect(&dream_skin, None)
+            .expect("published browser package is inspectable"),
+    )
+    .expect("browser compatibility report serializes");
+    assert_portable_report(&dream_skin_report);
+    assert_eq!(dream_skin_report["package"], "dsh-dream-skin");
+    assert_eq!(dream_skin_report["version"], "8.30.1");
+    assert_eq!(dream_skin_report["selectedRuntime"], "browser");
+    assert_eq!(dream_skin_report["compatibility"], "browser");
+    assert_eq!(dream_skin_report["dshClient"]["platform"], "web");
+    assert!(dream_skin_report["staticMarkers"]["nodeBuiltins"]
+        .as_array()
+        .expect("browser report includes Node API evidence")
+        .iter()
+        .any(|marker| marker == "fs"));
 }
 
 fn write_module_alias(directory: &Path, name: &str, target: &Path) {
@@ -251,6 +295,36 @@ fn bridge_services() -> BridgeServices {
     )
 }
 
+fn bridge_services_with_tools() -> (BridgeServices, ToolRuntime) {
+    let tools = ToolRuntime::new();
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    (
+        BridgeServices::new(
+            tools.clone(),
+            SystemPrompt::new(),
+            LlmRuntime::new(),
+            sessions.clone(),
+            AgentRegistry::new(sessions),
+        ),
+        tools,
+    )
+}
+
+fn bridge_services_with_system_prompt() -> (BridgeServices, SystemPrompt) {
+    let system_prompt = SystemPrompt::new();
+    let sessions = SessionStore::new(Arc::new(MemorySessionPersistence::new()));
+    (
+        BridgeServices::new(
+            ToolRuntime::new(),
+            system_prompt.clone(),
+            LlmRuntime::new(),
+            sessions.clone(),
+            AgentRegistry::new(sessions),
+        ),
+        system_prompt,
+    )
+}
+
 #[tokio::test]
 async fn vendored_timer_loads_unchanged_through_the_legacy_profile_and_reaps_after_disconnect() {
     let core = core_root();
@@ -330,6 +404,279 @@ async fn vendored_timer_loads_unchanged_through_the_legacy_profile_and_reaps_aft
         "ACTIVE"
     );
     shutdown.expect("profile cleans up the active generation after host disconnect");
+}
+
+#[tokio::test]
+async fn vendored_logger_console_loads_through_legacy_host_and_disposes() {
+    let core = core_root();
+    let vendor = vendor_root();
+    let logger_entry = vendor.join("logger-console/lib/browser.js");
+    assert!(
+        logger_entry.is_file(),
+        "vendored Logger Console browser entry exists"
+    );
+    let command = HostCommand::new("bun")
+        .arg("run")
+        .arg(core.join("node/compat-host/src/index.ts"))
+        .current_dir(core.join("node/compat-host"))
+        .env("CORDIS_VENDOR_ROOT", &vendor);
+    let profile = LegacyProfile::new(
+        command,
+        ClientConfig {
+            handshake_timeout: Duration::from_secs(30),
+            ..ClientConfig::default()
+        },
+        bridge_services(),
+    )
+    .expect("legacy profile accepts the vendored Logger Console host");
+    profile.start().expect("Bun compat host starts");
+    let runtime = profile
+        .runtime()
+        .expect("started profile exposes its legacy runtime");
+    let client = runtime.client();
+    let logs = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let captured = logs.clone();
+    client.set_log_handler(move |message| captured.lock().push(message.to_string()));
+
+    let loaded = client
+        .request(
+            FrameKind::PluginLoad,
+            json!({
+                "pluginId": "vendored-logger-console",
+                "package": {
+                    "specifier": logger_entry.to_string_lossy(),
+                    "location": logger_entry.to_string_lossy(),
+                },
+                "config": {},
+            }),
+            Duration::from_secs(5),
+        )
+        .expect("vendored Logger Console loads unchanged");
+    assert_eq!(loaded["state"], "ACTIVE");
+
+    let probe = std::env::temp_dir().join(format!("tessivum-logger-probe-{}.mjs", Uuid::new_v4()));
+    fs::write(
+        &probe,
+        "export default function probe(ctx) { ctx.logger('probe').info('logger-proxy-ok') }\n",
+    )
+    .expect("logger probe is written");
+    let probe_loaded = client
+        .request(
+            FrameKind::PluginLoad,
+            json!({
+                "pluginId": "logger-probe",
+                "package": {
+                    "specifier": probe.to_string_lossy(),
+                    "location": probe.to_string_lossy(),
+                },
+                "config": {},
+            }),
+            Duration::from_secs(5),
+        )
+        .expect("logger probe loads");
+    assert_eq!(probe_loaded["state"], "ACTIVE");
+    assert!(logs
+        .lock()
+        .iter()
+        .any(|message| message.contains("logger-proxy-ok")));
+    let probe_disposed = client
+        .request(
+            FrameKind::PluginDispose,
+            json!({ "pluginId": "logger-probe" }),
+            Duration::from_secs(5),
+        )
+        .expect("logger probe disposes");
+    assert_eq!(probe_disposed["disposed"], true);
+    fs::remove_file(probe).expect("logger probe is removed");
+
+    let disposed = client
+        .request(
+            FrameKind::PluginDispose,
+            json!({ "pluginId": "vendored-logger-console" }),
+            Duration::from_secs(5),
+        )
+        .expect("vendored Logger Console disposes");
+    assert_eq!(disposed["disposed"], true);
+    client.close();
+    profile
+        .shutdown()
+        .await
+        .expect("Logger profile shuts down cleanly");
+}
+
+#[tokio::test]
+async fn legacy_plugin_tool_contribution_reaches_native_runtime_and_reaps() {
+    let core = core_root();
+    let vendor = vendor_root();
+    let probe = std::env::temp_dir().join(format!("tessivum-tool-probe-{}.mjs", Uuid::new_v4()));
+    fs::write(
+        &probe,
+        r#"export default (ctx) => {
+  return ctx.tools.register({
+    name: 'legacy-tool',
+    description: 'legacy bridge tool',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    execute: async () => ({ ok: true }),
+    output: { render: (_args, value) => JSON.stringify(value) },
+  })
+}
+"#,
+    )
+    .expect("tool probe is written");
+    let (services, tools) = bridge_services_with_tools();
+    let command = HostCommand::new("bun")
+        .arg("run")
+        .arg(core.join("node/compat-host/src/index.ts"))
+        .current_dir(core.join("node/compat-host"))
+        .env("CORDIS_VENDOR_ROOT", &vendor);
+    let profile = LegacyProfile::new(
+        command,
+        ClientConfig {
+            handshake_timeout: Duration::from_secs(30),
+            ..ClientConfig::default()
+        },
+        services,
+    )
+    .expect("legacy profile accepts the tool probe host");
+    profile.start().expect("Bun compat host starts");
+    let client = profile
+        .runtime()
+        .expect("started profile exposes its legacy runtime")
+        .client();
+
+    let entry = probe.to_string_lossy().into_owned();
+    let loaded = client
+        .request(
+            FrameKind::PluginLoad,
+            json!({
+                "pluginId": "legacy-tool-probe",
+                "package": { "specifier": entry.clone(), "location": entry },
+                "config": {},
+            }),
+            Duration::from_secs(5),
+        )
+        .expect("tool probe loads");
+    assert_eq!(loaded["state"], "ACTIVE");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if tools
+                .schemas()
+                .iter()
+                .any(|schema| schema.name == "legacy-tool")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("native ToolRuntime receives the Legacy Node contribution");
+
+    let disposed = client
+        .request(
+            FrameKind::PluginDispose,
+            json!({ "pluginId": "legacy-tool-probe" }),
+            Duration::from_secs(5),
+        )
+        .expect("tool probe disposes");
+    assert_eq!(disposed["disposed"], true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !tools
+                .schemas()
+                .iter()
+                .any(|schema| schema.name == "legacy-tool")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("native ToolRuntime removes the disposed Legacy Node contribution");
+    client.close();
+    profile
+        .shutdown()
+        .await
+        .expect("tool profile shuts down cleanly");
+    fs::remove_file(probe).expect("tool probe is removed");
+}
+
+#[tokio::test]
+async fn legacy_plugin_system_prompt_contribution_reaches_native_runtime_and_reaps() {
+    let core = core_root();
+    let vendor = vendor_root();
+    let probe = std::env::temp_dir().join(format!("tessivum-prompt-probe-{}.mjs", Uuid::new_v4()));
+    fs::write(
+        &probe,
+        "export const inject = ['systemPrompt'];\nexport function apply(ctx) { ctx.systemPrompt.section({ name: 'legacy-section', order: 10, text: 'legacy prompt' }) }\n",
+    )
+    .expect("system prompt probe is written");
+    let (services, prompt) = bridge_services_with_system_prompt();
+    let _native = prompt
+        .register(PromptSection::new("native", 0, "native prompt"))
+        .unwrap();
+    let command = HostCommand::new("bun")
+        .arg("run")
+        .arg(core.join("node/compat-host/src/index.ts"))
+        .current_dir(core.join("node/compat-host"))
+        .env("CORDIS_VENDOR_ROOT", &vendor);
+    let profile = LegacyProfile::new(
+        command,
+        ClientConfig {
+            handshake_timeout: Duration::from_secs(30),
+            ..ClientConfig::default()
+        },
+        services,
+    )
+    .expect("legacy profile accepts the system prompt probe host");
+    profile.start().expect("Bun compat host starts");
+    let client = profile
+        .runtime()
+        .expect("started profile exposes its legacy runtime")
+        .client();
+    let entry = probe.to_string_lossy().into_owned();
+    let loaded = client
+        .request(
+            FrameKind::PluginLoad,
+            json!({
+                "pluginId": "legacy-system-prompt-probe",
+                "package": { "specifier": entry.clone(), "location": entry },
+                "config": {},
+            }),
+            Duration::from_secs(5),
+        )
+        .expect("system prompt probe loads");
+    assert_eq!(loaded["state"], "ACTIVE");
+    assert_eq!(
+        prompt
+            .assemble(Vec::<PromptSection>::new(), Vec::new())
+            .unwrap()
+            .text,
+        "native prompt\n\nlegacy prompt"
+    );
+
+    let disposed = client
+        .request(
+            FrameKind::PluginDispose,
+            json!({ "pluginId": "legacy-system-prompt-probe" }),
+            Duration::from_secs(5),
+        )
+        .expect("system prompt probe disposes");
+    assert_eq!(disposed["disposed"], true);
+    assert_eq!(
+        prompt
+            .assemble(Vec::<PromptSection>::new(), Vec::new())
+            .unwrap()
+            .text,
+        "native prompt"
+    );
+    client.close();
+    profile
+        .shutdown()
+        .await
+        .expect("system prompt profile shuts down cleanly");
+    fs::remove_file(probe).expect("system prompt probe is removed");
 }
 
 #[tokio::test]

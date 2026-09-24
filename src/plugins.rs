@@ -1100,7 +1100,7 @@ fn analyze_sources(package: &PluginPackage) -> Result<SourceAnalysis, PluginErro
     let provide_call = Regex::new(r#"\bctx\.provide\s*\(\s*['\"]([^'\"]+)['\"]"#)
         .expect("valid provide expression");
     let builtins = Regex::new(
-        r#"(?:\bfrom\s+|\brequire\s*\(\s*)['\"](?:node:)?([A-Za-z_][A-Za-z0-9_-]*)['\"]"#,
+        r#"(?:\bfrom\s+|\brequire\s*\(\s*)['\"](?:node:)?([A-Za-z_][A-Za-z0-9_-]*)(?:/[^'\"]*)?['\"]"#,
     )
     .expect("valid builtin expression");
     let mut read_budget = ReadBudget {

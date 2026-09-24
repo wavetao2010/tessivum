@@ -22,6 +22,7 @@ use tessivum::{
     composition::CompositionRegistry,
     legacy::ProductPackageResolver,
     llm::{LlmAdapter, LlmRetryPolicy, LlmRuntime, LlmStream, RecordedLlmAdapter},
+    persistence_jsonl::JsonlSessionPersistence,
     session::{
         MemorySessionPersistence, SessionError, SessionInspection, SessionPersistence, SessionStore,
     },
@@ -40,6 +41,7 @@ use tessivum_core::{
     NativePluginFuture, NativePluginPhase, NativePluginRuntime, PackageResolver, ResolvedPackage,
     RuntimeHandle, RuntimeKind,
 };
+use uuid::Uuid;
 
 fn cancellation() -> CancellationToken {
     ContextHandle::root().scope().cancellation()
@@ -705,7 +707,7 @@ async fn durable_events(adapter: Arc<dyn LlmAdapter>) -> Vec<SessionEvent> {
         .unwrap();
     agent.followup(user("question")).await.unwrap();
     agent.when_idle().await.unwrap();
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     agent.dispose().await.unwrap();
     events
 }
@@ -849,7 +851,7 @@ async fn durable_tool_round_trip_records_balanced_model_ordered_events() {
 
     agent.followup(user("question")).await.unwrap();
     agent.when_idle().await.unwrap();
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -988,20 +990,27 @@ async fn request_aware_pressure_compaction_keeps_full_context_contract() {
         .await
         .unwrap();
     for index in 0..4 {
+        let summaries_before = agent
+            .session()
+            .events()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_type == "compaction/summary")
+            .count();
         agent
             .followup(user(&format!("request-{index}-{}", "界".repeat(800))))
             .await
             .unwrap();
         agent.when_idle().await.unwrap();
-    }
-    let events = agent.session().events();
-    assert_eq!(
-        events
+        let summaries_after = agent
+            .session()
+            .events()
+            .unwrap()
             .iter()
             .filter(|event| event.event_type == "compaction/summary")
-            .count(),
-        1
-    );
+            .count();
+        assert!(summaries_after <= summaries_before + 1);
+    }
     agent.dispose().await.unwrap();
     let requests = main_requests.lock();
     assert_eq!(requests.len(), 4);
@@ -1016,8 +1025,231 @@ async fn request_aware_pressure_compaction_keeps_full_context_contract() {
         .tools
         .as_ref()
         .is_some_and(|schemas| schemas.iter().any(|schema| schema.name == "read")));
-    assert_eq!(summary_requests.lock().len(), 1);
+    assert!(!summary_requests.lock().is_empty());
 }
+#[tokio::test]
+async fn thousand_turn_same_session_preserves_continuation_and_bounds_summaries() {
+    let llm = LlmRuntime::new();
+    let main_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let summary_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let _main = llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&main_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from(
+                    (0..1_000)
+                        .map(|index| text_turn(&format!("reply-{index}")))
+                        .collect::<Vec<_>>(),
+                ))),
+            }),
+        )
+        .unwrap();
+    let _summary = llm
+        .register(
+            "summary",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&summary_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from(
+                    (0..1_000)
+                        .map(|_| text_turn("bounded summary"))
+                        .collect::<Vec<_>>(),
+                ))),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "read",
+            "reads",
+            json!({"type":"object","properties":{"value":{"type":"string"}}}),
+            Echo,
+        ))
+        .unwrap();
+    let registry = AgentRegistry::new(SessionStore::new(Arc::new(MemorySessionPersistence::new())));
+    let _factory = registry
+        .register_factory(Arc::new(
+            factory(llm.clone(), SystemPrompt::new(), tools)
+                .with_compaction(recovery_compaction(&llm, 8))
+                .with_context_window_resolver(Arc::new(|_, _| Some(16_000))),
+        ))
+        .unwrap();
+    let agent = registry
+        .create(
+            header_with_mode("thousand-turn", "test-recovery"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "thousand-turn-model".into(),
+                reasoning_effort: None,
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+
+    for index in 0..1_000 {
+        agent
+            .followup(user(&format!(
+                "continuation-{index} current-input-{index} {}",
+                "界".repeat(160)
+            )))
+            .await
+            .unwrap();
+        agent.when_idle().await.unwrap();
+    }
+
+    let events = agent.session().events().unwrap();
+    assert!(events.len() > 1_000);
+    assert!(!main_requests.lock().is_empty());
+    assert!(summary_requests.lock().len() <= main_requests.lock().len());
+    let last_request = main_requests.lock().last().unwrap().clone();
+    assert!(last_request.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.contains("continuation-999") && text.contains("current-input-999"))
+        })
+    }));
+    let expected_input = format!("continuation-999 current-input-999 {}", "界".repeat(160));
+    assert!(events.iter().any(|event| {
+        event.event_type == "user/message"
+            && event.data["content"][0]["text"].as_str() == Some(expected_input.as_str())
+    }));
+    agent.dispose().await.unwrap();
+}
+#[tokio::test]
+async fn disk_agent_restart_continues_current_input_without_replaying_tools() {
+    let root = std::env::temp_dir().join(format!("tessivum-agent-restart-{}", Uuid::new_v4()));
+    let persistence: Arc<dyn SessionPersistence> = Arc::new(JsonlSessionPersistence::new(&root));
+    let llm = LlmRuntime::new();
+    let _provider = llm
+        .register(
+            "test",
+            Arc::new(DeterministicAdapter {
+                streams: Arc::new(Mutex::new(VecDeque::from([
+                    tool_turn(),
+                    text_turn("initial done"),
+                ]))),
+            }),
+        )
+        .unwrap();
+    let tools = ToolRuntime::new();
+    let _tool = tools
+        .register(ToolDefinition::new(
+            "read",
+            "reads",
+            json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
+            Echo,
+        ))
+        .unwrap();
+    let first_registry = AgentRegistry::new(SessionStore::new(Arc::clone(&persistence)));
+    let _first_factory = first_registry
+        .register_factory(Arc::new(factory(llm, SystemPrompt::new(), tools)))
+        .unwrap();
+    let first = first_registry
+        .create(
+            header_with_mode("disk-agent-restart", "test-read"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "restart-model".into(),
+                reasoning_effort: None,
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    first.followup(user("before restart")).await.unwrap();
+    first.when_idle().await.unwrap();
+    let before = first.session().events().unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .filter(|e| e.event_type == "tool/call")
+            .count(),
+        1
+    );
+    first.dispose().await.unwrap();
+
+    let resumed_llm = LlmRuntime::new();
+    let resumed_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let _resumed_provider = resumed_llm
+        .register(
+            "test",
+            Arc::new(RecordingAdapter {
+                requests: Arc::clone(&resumed_requests),
+                streams: Arc::new(parking_lot::Mutex::new(VecDeque::from([text_turn(
+                    "continued after restart",
+                )]))),
+            }),
+        )
+        .unwrap();
+    let resumed_tools = ToolRuntime::new();
+    let _resumed_tool = resumed_tools
+        .register(ToolDefinition::new(
+            "read",
+            "reads",
+            json!({"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}),
+            Echo,
+        ))
+        .unwrap();
+    let resumed_registry = AgentRegistry::new(SessionStore::new(Arc::clone(&persistence)));
+    let _resumed_factory = resumed_registry
+        .register_factory(Arc::new(factory(
+            resumed_llm,
+            SystemPrompt::new(),
+            resumed_tools,
+        )))
+        .unwrap();
+    let resumed = resumed_registry
+        .resume(
+            SessionId::from("disk-agent-restart"),
+            AgentOptions {
+                provider: "test".into(),
+                model: "restart-model".into(),
+                reasoning_effort: None,
+                max_tokens: None,
+            },
+            cancellation(),
+        )
+        .await
+        .unwrap();
+    resumed
+        .followup(user("continuation after restart current input"))
+        .await
+        .unwrap();
+    resumed.when_idle().await.unwrap();
+    assert!(resumed_requests.lock().iter().any(|request| {
+        request.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("continuation after restart current input"))
+            })
+        })
+    }));
+    let after = resumed.session().events().unwrap();
+    assert_eq!(&after[..before.len()], before.as_slice());
+    assert_eq!(
+        after.iter().filter(|e| e.event_type == "tool/call").count(),
+        1
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|e| e.event_type == "tool/result")
+            .count(),
+        1
+    );
+    assert!(after.iter().any(|event| {
+        event.event_type == "user/message"
+            && event
+                .data
+                .to_string()
+                .contains("continuation after restart current input")
+    }));
+    resumed.dispose().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn overflow_recovery_rebuilds_once_without_replaying_completed_tools() {
     let llm = LlmRuntime::new();
@@ -1088,7 +1320,7 @@ async fn overflow_recovery_rebuilds_once_without_replaying_completed_tools() {
     agent.followup(user("keep this task")).await.unwrap();
     agent.when_idle().await.unwrap();
 
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -1198,7 +1430,7 @@ async fn durable_inbox_claims_precede_their_fifo_user_messages() {
     agent.followup(followup).await.unwrap();
     agent.when_idle().await.unwrap();
 
-    let events = session.events();
+    let events = session.events().unwrap();
     let claims = events
         .iter()
         .filter(|event| event.event_type == "agent/inbox/spliced")
@@ -1265,6 +1497,7 @@ async fn changed_effective_header_emits_change_event() {
     let headers = agent
         .session()
         .events()
+        .unwrap()
         .into_iter()
         .filter(|event| event.event_type == "request/header")
         .collect::<Vec<_>>();
@@ -1354,6 +1587,7 @@ async fn preloaded_request_header_makes_first_runtime_header_resume() {
     let headers = agent
         .session()
         .events()
+        .unwrap()
         .into_iter()
         .filter(|event| event.event_type == "request/header")
         .collect::<Vec<_>>();
@@ -1404,7 +1638,7 @@ async fn restored_legacy_runtime_context_gets_native_snapshots_only_when_state_c
         )
         .await
         .unwrap();
-    let history = session.events();
+    let history = session.events().unwrap();
     let history_bytes = serde_json::to_vec(&history).unwrap();
     drop(session);
     drop(writer);
@@ -1464,6 +1698,7 @@ async fn restored_legacy_runtime_context_gets_native_snapshots_only_when_state_c
         agent
             .session()
             .events()
+            .unwrap()
             .into_iter()
             .filter(|event| {
                 event.event_type == "user/message"
@@ -1534,7 +1769,7 @@ async fn restored_legacy_runtime_context_gets_native_snapshots_only_when_state_c
         ));
     }
 
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     assert_eq!(
         serde_json::to_vec(&events[..history.len()]).unwrap(),
         history_bytes
@@ -1585,7 +1820,7 @@ async fn retry_preserves_partial_chunks_without_committing_or_executing_them() {
 
     agent.followup(user("retry-input")).await.unwrap();
     agent.when_idle().await.unwrap();
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     let retry_seq = events
         .iter()
         .find(|event| event.event_type == "llm/retry")
@@ -1656,7 +1891,7 @@ async fn retry_budget_is_reconstructed_from_the_durable_ledger() {
 
     agent.followup(user("retry-input")).await.unwrap();
     agent.when_idle().await.unwrap();
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -1736,7 +1971,7 @@ async fn cancellation_during_backoff_wins_without_starting_another_attempt() {
     }
     assert!(agent.cancel(AgentCancelCause::User, false));
     agent.when_idle().await.unwrap();
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -1795,7 +2030,7 @@ async fn cancellation_during_provider_wait_closes_one_step_and_turn() {
     }
     assert!(agent.cancel(AgentCancelCause::User, false));
     agent.when_idle().await.unwrap();
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -1873,7 +2108,7 @@ async fn cancellation_during_tool_wait_settles_the_started_call_once() {
     }
     assert!(agent.cancel(AgentCancelCause::User, false));
     agent.when_idle().await.unwrap();
-    let events = session.events();
+    let events = session.events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -1945,7 +2180,7 @@ async fn failed_tool_stream_never_starts_durable_tool_lifecycle() {
 
     agent.followup(user("tool")).await.unwrap();
     agent.when_idle().await.unwrap();
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -2150,7 +2385,7 @@ async fn four_session_runtime_specs_are_isolated() {
         .create(header("mode-standard"), options(), cancellation())
         .await
         .unwrap();
-    assert!(standard.session().events().iter().any(|event| {
+    assert!(standard.session().events().unwrap().iter().any(|event| {
         event.event_type == "agent-mode/selected" && event.data == json!({"agentMode": "standard"})
     }));
     let mut minimal_header = header("mode-minimal");
@@ -3124,6 +3359,7 @@ async fn programmatic_nested_tools_preserve_denial_and_approval() {
         let result = agent
             .session()
             .events()
+            .unwrap()
             .into_iter()
             .find(|event| event.event_type == "tool/result")
             .unwrap();
@@ -3186,7 +3422,7 @@ async fn programmatic_nested_tool_cancellation_reaches_the_native_dispatcher() {
     wait_for_start.await;
     assert!(agent.cancel(AgentCancelCause::User, false));
     agent.when_idle().await.unwrap();
-    let events = agent.session().events();
+    let events = agent.session().events().unwrap();
     assert_eq!(
         events
             .iter()

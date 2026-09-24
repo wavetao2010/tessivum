@@ -964,6 +964,7 @@ async fn continuable_prompt_returns_only_after_fifo_message_persists() {
     let messages = child
         .session()
         .events()
+        .unwrap()
         .into_iter()
         .filter(|event| event.event_type == "user/message")
         .map(|event| event.data["content"][0]["text"].clone())
@@ -1020,6 +1021,7 @@ async fn capability_preflight_happens_before_provider_or_events() {
         .parent
         .session()
         .events()
+        .unwrap()
         .iter()
         .any(is_accepted_child_lifecycle_event));
 }
@@ -1409,6 +1411,7 @@ async fn workspace_attach_failure_disposes_and_leaves_child_for_repair() {
         .parent
         .session()
         .events()
+        .unwrap()
         .iter()
         .any(is_accepted_child_lifecycle_event));
 
@@ -1503,6 +1506,7 @@ async fn precommit_initial_delivery_failure_disposes_without_contained_end() {
         .parent
         .session()
         .events()
+        .unwrap()
         .iter()
         .any(is_accepted_child_lifecycle_event));
 }
@@ -1622,7 +1626,7 @@ async fn workflow_failure_is_a_result_and_durable_prefixes_are_legal() {
         .await
         .unwrap();
     assert_eq!(result.status, WorkflowRunStatus::Error);
-    let events = harness.parent.session().events();
+    let events = harness.parent.session().events().unwrap();
     assert_eq!(
         events
             .iter()
@@ -1691,7 +1695,7 @@ async fn workflow_records_canonical_member_lifecycle_that_reloads() {
     assert_eq!(result.status, WorkflowRunStatus::Completed);
     assert_eq!(result.value, Some(json!({"answer": "complete"})));
 
-    let events = harness.parent.session().events();
+    let events = harness.parent.session().events().unwrap();
     let records = events
         .iter()
         .filter(|event| event.event_type.starts_with("tool-workflow/"))
@@ -1742,7 +1746,7 @@ async fn workflow_records_canonical_member_lifecycle_that_reloads() {
         )
         .await
         .unwrap();
-    assert_eq!(reloaded.events(), events);
+    assert_eq!(reloaded.events().unwrap(), events);
 }
 
 struct CompleteEngine;
@@ -1784,7 +1788,7 @@ async fn workflow_rejects_missing_canonical_name_before_recording() {
             .await,
         Err(WorkflowError::InvalidWorkflowName)
     ));
-    assert!(harness.parent.session().events().is_empty());
+    assert!(harness.parent.session().events().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2061,7 +2065,7 @@ async fn child_admission_sequences_behind_a_persisting_root_write() {
 
     root_write.await.unwrap().unwrap();
     let (_, child) = starting.await.unwrap();
-    let events = root.events();
+    let events = root.events().unwrap();
     assert!(events
         .iter()
         .enumerate()
@@ -2313,6 +2317,7 @@ async fn workflow_stops_recording_after_member_write_failure() {
             .parent
             .session()
             .events()
+            .unwrap()
             .into_iter()
             .filter(|event| event.event_type.starts_with("tool-workflow/"))
             .map(|event| event.event_type)

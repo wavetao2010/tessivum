@@ -113,7 +113,7 @@ impl FileTools {
                 Value::Null,
             ));
         }
-        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session);
+        let current = session_sandbox_mode(self.sessions.as_ref(), &context.session)?;
         if current == SandboxMode::WorkspaceWrite {
             if requested.is_some() {
                 return Err(invalid_arguments(
@@ -1292,18 +1292,25 @@ fn check_lease(
 fn session_sandbox_mode(
     sessions: Option<&SessionStore>,
     session_id: &crate::SessionId,
-) -> SandboxMode {
-    sessions
-        .and_then(|sessions| sessions.get(session_id))
-        .and_then(|session| {
-            session.events().into_iter().rev().find_map(|event| {
-                (event.event_type == "sandbox/mode")
-                    .then(|| event.data.get("mode").cloned())
-                    .flatten()
-                    .and_then(|value| serde_json::from_value(value).ok())
-            })
+) -> Result<SandboxMode, TessivumError> {
+    let Some(session) = sessions.and_then(|sessions| sessions.get(session_id)) else {
+        return Ok(SandboxMode::WorkspaceWrite);
+    };
+    session
+        .find_latest_event(|event| {
+            (event.event_type == "sandbox/mode")
+                .then(|| event.data.get("mode").cloned())
+                .flatten()
+                .and_then(|value| serde_json::from_value(value).ok())
         })
-        .unwrap_or(SandboxMode::WorkspaceWrite)
+        .map(|mode| mode.unwrap_or(SandboxMode::WorkspaceWrite))
+        .map_err(|error| {
+            tool_error(
+                "SESSION_READ_FAILED",
+                "could not read the session sandbox mode",
+                json!({"sessionId": session_id, "cause": error.to_string()}),
+            )
+        })
 }
 
 fn invalid_arguments(message: &str, details: Value) -> TessivumError {

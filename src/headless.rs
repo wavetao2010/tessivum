@@ -241,7 +241,7 @@ async fn run_headless_validated(
         session.flush(scope.root.scope().cancellation()).await?;
 
         let events = session
-            .events()
+            .events()?
             .into_iter()
             .filter(|event| event.seq >= first_event_seq)
             .collect::<Vec<_>>();

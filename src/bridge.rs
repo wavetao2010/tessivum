@@ -2702,7 +2702,7 @@ impl DomainBridge {
                     .sessions
                     .get(&request.session)
                     .ok_or_else(|| remote("SESSION_NOT_FOUND", "session is not live"))?;
-                Ok(json!({"events": session.events()}))
+                Ok(json!({"events": session.events().map_err(session_error)?}))
             }
             "snapshot" => {
                 let request: SessionSnapshotRead = decode(params)?;
@@ -3022,11 +3022,11 @@ impl DomainBridge {
             "get" => {
                 let request: AgentGet = decode(params)?;
                 self.require_owner(&request.session)?;
-                Ok(self.agent_snapshot(&request.session, true))
+                Ok(self.agent_snapshot(&request.session, true)?)
             }
             "inspectCompat" => {
                 let request: AgentGet = decode(params)?;
-                Ok(self.agent_snapshot(&request.session, false))
+                Ok(self.agent_snapshot(&request.session, false)?)
             }
             "createCompat" => {
                 let generation = require_node_generation(generation)?;
@@ -3079,7 +3079,7 @@ impl DomainBridge {
                     let _ = activation.dispose().await;
                     return Err(error);
                 }
-                Ok(self.agent_snapshot(&request.child_session, true))
+                Ok(self.agent_snapshot(&request.child_session, true)?)
             }
             "resumeCompat" => {
                 let generation = require_node_generation(generation)?;
@@ -3131,7 +3131,7 @@ impl DomainBridge {
                     let _ = activation.dispose().await;
                     return Err(error);
                 }
-                Ok(self.agent_snapshot(&request.child_session, true))
+                Ok(self.agent_snapshot(&request.child_session, true)?)
             }
             "sendCompat" => {
                 let request: AgentSend = decode(params)?;
@@ -3204,21 +3204,23 @@ impl DomainBridge {
         }
     }
 
-    fn agent_snapshot(&self, session_id: &SessionId, include_session: bool) -> Value {
+    fn agent_snapshot(&self, session_id: &SessionId, include_session: bool) -> BridgeResult<Value> {
         let agent = self.inner.services.agents.get(session_id);
-        json!({
+        Ok(json!({
             "sessionId": session_id,
             "live": agent.is_some(),
             "status": agent.as_ref().map(|agent| agent.status()),
             "options": agent.as_ref().map(|agent| agent.options()),
             "session": if include_session {
-                self.inner.services.sessions.get(session_id).map(|session| json!({
-                    "id": session.id(),
-                    "header": session.header(),
-                    "events": session.events(),
-                }))
+                self.inner.services.sessions.get(session_id).map(|session| {
+                    Ok::<Value, BridgeError>(json!({
+                        "id": session.id(),
+                        "header": session.header(),
+                        "events": session.events().map_err(session_error)?,
+                    }))
+                }).transpose()?
             } else { None },
-        })
+        }))
     }
 
     fn require_compat_child(&self, session_id: &SessionId) -> BridgeResult<()> {

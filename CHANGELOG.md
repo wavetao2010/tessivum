@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.31 - 2026-09-24
+
+This release candidate pairs with Tessivum Core 0.1.8 at revision `f7a9dbba89912f23b80f169d69d0dc34d962002f`.
+
+### Added
+
+- Bridge Legacy Node `ctx.systemPrompt.section({ name, order, text })` contributions into the native `systemPrompt@1` service, with plugin-scoped disposal and native sections preserved.
+- Add release evidence for vendored Logger Console, Legacy tools, Timer, and SystemPrompt contributions.
+
+### Verification limits
+
+- Publication still requires the release workflow archive smoke checks, installer validation, and a clean cross-platform result. The known Bun WebSocket upgrade mock failure remains separately tracked and is not represented as a passing full host test suite.
+
 ## 0.1.0-alpha.30 - 2026-09-23
 
 This release includes bounded context recovery, durable Goal consistency fixes, and native Windows x86_64 packaging on Core 0.1.7. PR #7 source CI passed `verify`, `windows`, and the rerun of `browser-e2e`; publication additionally requires the release workflow's archive smoke checks and installer validation. Earlier local Windows evidence applies to its original candidate, not these release archives. See the [Windows repair evidence and verification limits](docs/WINDOWS_CHECKPOINT_20260916.md).

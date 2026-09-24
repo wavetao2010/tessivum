@@ -18,12 +18,14 @@ use tokio::{
 
 use crate::{
     protocol::{SessionEvent, SessionHeader, SessionId},
-    session::{Session, SessionStore},
+    session::{Session, SessionError, SessionStore},
 };
 
 /// Stable failure from projection registration, replay, or restoration.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum ProjectionError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
     #[error("projection key must not be empty")]
     EmptyKey,
     #[error("projection is already registered: {0}")]
@@ -43,11 +45,11 @@ pub enum ProjectionError {
     #[error("projection registry has shut down")]
     Shutdown,
 }
-
 impl ProjectionError {
     /// Stable code suitable for host boundaries.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
+            Self::Session(error) => error.code(),
             Self::EmptyKey => "INVALID_PROJECTION_KEY",
             Self::AlreadyRegistered(_) => "PROJECTION_ALREADY_REGISTERED",
             Self::NotRegistered(_) => "PROJECTION_NOT_REGISTERED",
@@ -417,7 +419,7 @@ impl ProjectionRegistry {
     }
 
     fn replay_locked(&self, session: &Session) -> Result<(), ProjectionError> {
-        for event in session.events() {
+        for event in session.events()? {
             self.apply_event_locked(&session.id(), &event)?;
         }
         Ok(())

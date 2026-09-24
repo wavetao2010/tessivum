@@ -320,11 +320,12 @@ impl CompactionService {
         check_cancellation(&cancellation)?;
         let _lease = self.acquire(session.id())?;
         let initial = session.surface();
-        let seed_seqs = session
-            .seed_events()
-            .into_iter()
-            .map(|event| event.seq)
-            .collect::<BTreeSet<_>>();
+        let seed_seqs = session.fold_events(0, BTreeSet::new(), |mut seqs, event| {
+            if event.seq < session.header().seed_length.unwrap_or_default() {
+                seqs.insert(event.seq);
+            }
+            seqs
+        })?;
         let initial_ids = initial
             .iter()
             .map(|entry| &entry.message.id)
@@ -385,7 +386,7 @@ impl CompactionService {
             let total_cp = sizes.iter().sum::<u64>();
             let mut total_tokens = overhead.saturating_add(estimates.iter().sum::<u64>());
             if outcome.is_none() {
-                total_tokens = total_tokens.max(recent_usage_estimate(session, request, &current));
+                total_tokens = total_tokens.max(recent_usage_estimate(session, request, &current)?);
             }
             // Batch bounds constrain each summary, not the main model's whole history.
             // Without a known model window, retain the bounded local fallback.
@@ -479,7 +480,9 @@ impl CompactionService {
                     let current = session.surface();
                     let total_cp = current
                         .iter()
-                        .map(|entry| serialized_codepoints(&entry.message).expect("Message is serializable"))
+                        .map(|entry| {
+                            serialized_codepoints(&entry.message).expect("Message is serializable")
+                        })
                         .sum::<u64>();
                     let total_tokens = overhead.saturating_add(
                         current
@@ -882,7 +885,7 @@ impl CompactionService {
             ));
         }
         let compaction_id = uuid::Uuid::new_v4().to_string();
-        let turn = open_turn(session);
+        let turn = open_turn(session)?;
         let start_seq = append(
             session,
             AppendSpec {
@@ -1147,7 +1150,7 @@ impl CompactionService {
             session,
             EndSpec {
                 compaction_id,
-                turn: open_turn(session),
+                turn: open_turn(session)?,
                 error: Some(&error),
             },
         )
@@ -1415,16 +1418,12 @@ fn summary_blocks(
     Ok(summary)
 }
 
-fn open_turn(session: &Session) -> Option<u64> {
-    let mut turn = None;
-    for event in session.events() {
-        match event.event_type.as_str() {
-            "turn/start" => turn = event.data.get("turn").and_then(Value::as_u64),
-            "turn/end" if event.data.get("turn").and_then(Value::as_u64) == turn => turn = None,
-            _ => {}
-        }
-    }
-    turn
+fn open_turn(session: &Session) -> Result<Option<u64>, SessionError> {
+    session.fold_events(0, None, |turn, event| match event.event_type.as_str() {
+        "turn/start" => event.data.get("turn").and_then(Value::as_u64),
+        "turn/end" if event.data.get("turn").and_then(Value::as_u64) == turn => None,
+        _ => turn,
+    })
 }
 
 fn tool_result(
@@ -1546,60 +1545,63 @@ fn recent_usage_estimate(
     session: &Session,
     request: &GenerateRequest,
     surface: &[SurfaceMessage],
-) -> u64 {
-    let events = session.events();
-    let Some(header) = events
-        .iter()
-        .rev()
-        .find(|event| event.event_type == "request/header")
-        .and_then(|event| event.data.get("header"))
-    else {
-        return 0;
-    };
-    if header.pointer("/config/provider").and_then(Value::as_str) != Some(request.provider.as_str())
-        || header.pointer("/config/model").and_then(Value::as_str) != Some(request.model.as_str())
-        || header.get("system").unwrap_or(&Value::Null)
-            != &serde_json::to_value(&request.system).unwrap_or(Value::Null)
-        || header.get("tools").unwrap_or(&Value::Null)
-            != &serde_json::to_value(&request.tools).unwrap_or(Value::Null)
-    {
-        return 0;
-    }
-    for event in events.iter().rev() {
-        if matches!(event.surface_op, Some(SurfaceOp::Replace { .. })) {
+) -> Result<u64, SessionError> {
+    session.with_events(|events| {
+        let Some(header) = events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "request/header")
+            .and_then(|event| event.data.get("header"))
+        else {
             return 0;
-        }
-        if event.event_type != "assistant/message" {
-            continue;
-        }
-        let Some(usage) = event.data.get("usage") else {
-            continue;
         };
-        let model = event.data.pointer("/message/source");
-        if model
-            .and_then(|source| source.get("provider"))
-            .and_then(Value::as_str)
+        if header.pointer("/config/provider").and_then(Value::as_str)
             != Some(request.provider.as_str())
-            || model
-                .and_then(|source| source.get("model"))
-                .and_then(Value::as_str)
+            || header.pointer("/config/model").and_then(Value::as_str)
                 != Some(request.model.as_str())
+            || header.get("system").unwrap_or(&Value::Null)
+                != &serde_json::to_value(&request.system).unwrap_or(Value::Null)
+            || header.get("tools").unwrap_or(&Value::Null)
+                != &serde_json::to_value(&request.tools).unwrap_or(Value::Null)
         {
             return 0;
         }
-        let input = ["inputTokens", "cacheReadTokens", "cacheWriteTokens"]
-            .iter()
-            .map(|key| usage.get(key).and_then(Value::as_u64).unwrap_or(0))
-            .sum::<u64>();
-        return input.saturating_add(
-            surface
+        for event in events.iter().rev() {
+            if matches!(event.surface_op, Some(SurfaceOp::Replace { .. })) {
+                return 0;
+            }
+            if event.event_type != "assistant/message" {
+                continue;
+            }
+            let Some(usage) = event.data.get("usage") else {
+                continue;
+            };
+            let model = event.data.pointer("/message/source");
+            if model
+                .and_then(|source| source.get("provider"))
+                .and_then(Value::as_str)
+                != Some(request.provider.as_str())
+                || model
+                    .and_then(|source| source.get("model"))
+                    .and_then(Value::as_str)
+                    != Some(request.model.as_str())
+            {
+                return 0;
+            }
+            let input = ["inputTokens", "cacheReadTokens", "cacheWriteTokens"]
                 .iter()
-                .filter(|entry| entry.event_seq >= event.seq)
-                .map(|entry| message_token_estimate(&entry.message))
-                .sum::<u64>(),
-        );
-    }
-    0
+                .map(|key| usage.get(key).and_then(Value::as_u64).unwrap_or(0))
+                .sum::<u64>();
+            return input.saturating_add(
+                surface
+                    .iter()
+                    .filter(|entry| entry.event_seq >= event.seq)
+                    .map(|entry| message_token_estimate(&entry.message))
+                    .sum::<u64>(),
+            );
+        }
+        0
+    })
 }
 
 fn codepoints(text: &str) -> u64 {

@@ -814,7 +814,7 @@ impl Folded {
 }
 
 fn fold(session: &Session) -> Result<Folded, ()> {
-    let events = session.events();
+    let events = session.events().map_err(|_| ())?;
     let seed_length = session.header().seed_length.unwrap_or_default() as usize;
     if seed_length > events.len() {
         return Err(());

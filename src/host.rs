@@ -6031,7 +6031,7 @@ impl HostHandle {
     ) -> Result<HostCommandResult, HostError> {
         let planning = self.planning_service_inner(session_id.clone()).await?;
         let target = raw_input.trim() != "off";
-        if planning.mode().await
+        if planning.mode().await?
             == (if target {
                 PlanMode::Plan
             } else {
@@ -7761,7 +7761,9 @@ fn selected_agent_mode(
                     .and_then(AgentModeId::new)
             })
         })
-        .map_err(|error| TessivumError::new(error.code(), error.to_string(), "session", Value::Null))?
+        .map_err(|error| {
+            TessivumError::new(error.code(), error.to_string(), "session", Value::Null)
+        })?
         .transpose()?;
     Ok(selected
         .or_else(|| session.header().agent_mode)

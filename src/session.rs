@@ -160,10 +160,12 @@ impl SessionError {
     }
 }
 
+/// Reads already committed history in bounded ascending pages.
+pub trait SessionEventReader: Send + Sync {
+    fn read_page(&self, from_seq: u64, limit: usize) -> Result<Vec<SessionEvent>, SessionError>;
+}
+
 /// The durable storage contract behind sessions.
-///
-/// Every method receives the core cancellation primitive. Implementations must
-/// leave a committed prefix intact when an operation fails or is cancelled.
 #[async_trait]
 pub trait SessionPersistence: Send + Sync {
     async fn create(
@@ -206,6 +208,14 @@ pub trait SessionPersistence: Send + Sync {
         cancellation: CancellationToken,
     ) -> Result<Vec<SessionEvent>, SessionError>;
 
+    /// Returns a reader for the committed prefix, when the backend can page it.
+    fn event_reader(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<Arc<dyn SessionEventReader>>, SessionError> {
+        Ok(None)
+    }
+
     async fn flush(
         &self,
         session_id: &SessionId,
@@ -235,8 +245,6 @@ pub trait SessionPersistence: Send + Sync {
     }
 
     /// Cheap, backend-owned change tokens for every durable log, if supported.
-    /// Tokens must change on append, replacement, or header edits, including external writes.
-    /// `None` disables metadata caching; implementations must not use a time-based TTL.
     async fn list_revisions(
         &self,
         _cancellation: CancellationToken,
@@ -445,16 +453,175 @@ impl std::fmt::Debug for Session {
         formatter
             .debug_struct("Session")
             .field("header", &self.header)
-            .field("event_count", &read_lock(&self.state).events.len())
+            .field("event_count", &read_lock(&self.state).event_count)
             .finish_non_exhaustive()
     }
 }
 
+const EVENT_PAGE_SIZE: usize = 256;
+const REPLAY_PAGE_SIZE: usize = 8192;
+
+#[derive(Clone)]
+struct PendingTurnCall {
+    call_id: crate::protocol::ToolCallId,
+    step: u64,
+    call_seq: Option<u64>,
+}
+
+#[derive(Clone)]
+struct TurnReplay {
+    open_turn: Option<u64>,
+    open_step: Option<u64>,
+    pending: Vec<PendingTurnCall>,
+    last_seq: Option<u64>,
+    last_time: u64,
+}
+
+impl Default for TurnReplay {
+    fn default() -> Self {
+        Self {
+            open_turn: None,
+            open_step: None,
+            pending: Vec::new(),
+            last_seq: None,
+            last_time: 0,
+        }
+    }
+}
+impl TurnReplay {
+    fn apply(&mut self, event: &SessionEvent) -> Result<(), SessionError> {
+        self.last_seq = Some(event.seq);
+        self.last_time = event.time;
+        match event.event_type.as_str() {
+            "turn/start" => {
+                self.open_turn = event.data.get("turn").and_then(Value::as_u64);
+                self.open_step = None;
+                self.pending.clear();
+            }
+            "turn/end" => {
+                self.open_turn = None;
+                self.open_step = None;
+                self.pending.clear();
+            }
+            "step/start" => {
+                self.open_step = event.data.get("step").and_then(Value::as_u64);
+            }
+            "step/end" => {
+                self.open_step = None;
+                self.pending.clear();
+            }
+            "assistant/message" => {
+                let step = event
+                    .data
+                    .get("step")
+                    .and_then(Value::as_u64)
+                    .or(self.open_step)
+                    .unwrap_or(0);
+                let Some(message) = decode_surface_event(event)? else {
+                    return Ok(());
+                };
+                for block in message.message.content {
+                    if let ContentBlock::ToolCall { id, .. } = block {
+                        self.pending.push(PendingTurnCall {
+                            call_id: id,
+                            step,
+                            call_seq: None,
+                        });
+                    }
+                }
+            }
+            "tool/call" => {
+                if let Some(call) = self.pending.iter_mut().find(|call| {
+                    Some(call.call_id.as_str()) == event.data.get("callId").and_then(Value::as_str)
+                }) {
+                    call.call_seq = Some(event.seq);
+                }
+            }
+            "tool/result" => {
+                let message =
+                    decode_surface_event(event)?.ok_or(SessionError::InvalidSurfaceMessage)?;
+                if let MessageSource::Tool { call_id } = message.message.source {
+                    self.pending.retain(|call| call.call_id != call_id);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn closers(&self) -> Result<Vec<SessionEvent>, SessionError> {
+        let Some(turn) = self.open_turn else {
+            return Ok(Vec::new());
+        };
+        let Some(last_seq) = self.last_seq else {
+            return Ok(Vec::new());
+        };
+        let mut seq = last_seq
+            .checked_add(1)
+            .ok_or(SessionError::SequenceExhausted)?;
+        let mut closers =
+            Vec::with_capacity(self.pending.len() + usize::from(self.open_step.is_some()) + 1);
+        for call in &self.pending {
+            let (code, name, text) = if call.call_seq.is_some() {
+                ("TOOL_OUTCOME_UNKNOWN", "ToolOutcomeUnknownError", "The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.")
+            } else {
+                ("TOOL_NOT_STARTED", "ToolNotStartedError", "The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.")
+            };
+            let call_id = call.call_id.clone();
+            let message = Message {
+                id: MessageId::from(format!(
+                    "interrupted-tool-result-{}-{seq}",
+                    call_id.as_str()
+                )),
+                role: MessageRole::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: call_id.clone(),
+                    content: vec![ContentBlock::Text { text: text.into() }],
+                    is_error: Some(true),
+                }],
+                source: MessageSource::Tool {
+                    call_id: call_id.clone(),
+                },
+            };
+            closers.push(SessionEvent { event_type: "tool/result".into(), seq, time: self.last_time, data: json!({"turn": turn, "step": call.step, "message": message, "error": {"name": name, "code": code}}), ignorable: None, source_event_seqs: call.call_seq.map(|source_seq| vec![source_seq]), surface_op: Some(SurfaceOp::Append) });
+            seq = seq.checked_add(1).ok_or(SessionError::SequenceExhausted)?;
+        }
+        if let Some(step) = self.open_step {
+            closers.push(SessionEvent {
+                event_type: "step/end".into(),
+                seq,
+                time: self.last_time,
+                data: json!({"turn": turn, "step": step}),
+                ignorable: None,
+                source_event_seqs: None,
+                surface_op: None,
+            });
+            seq = seq.checked_add(1).ok_or(SessionError::SequenceExhausted)?;
+        }
+        closers.push(SessionEvent {
+            event_type: "turn/end".into(),
+            seq,
+            time: self.last_time,
+            data: json!({"turn": turn, "reason": {"kind": "interrupted"}, "synthetic": true}),
+            ignorable: None,
+            source_event_seqs: None,
+            surface_op: None,
+        });
+        Ok(closers)
+    }
+}
+
 struct SessionState {
-    events: Vec<SessionEvent>,
+    tail: Vec<SessionEvent>,
+    memory_events: Option<Vec<SessionEvent>>,
+    reader: Option<Arc<dyn SessionEventReader>>,
+    upper_seq: u64,
+    event_count: usize,
     surface: Vec<SurfaceMessage>,
     seed_length: usize,
     end_seed_seen: bool,
+    inbox: InboxReplay,
+    turn: TurnReplay,
 }
 
 impl Session {
@@ -475,42 +642,81 @@ impl Session {
         })
     }
 
-    /// Returns a clone so the admitted header stays immutable.
+    fn from_reader(
+        header: SessionHeader,
+        reader: Arc<dyn SessionEventReader>,
+        upper_seq: u64,
+        persistence: Arc<dyn SessionPersistence>,
+    ) -> Result<Self, SessionError> {
+        let mut state = empty_state(&header, Some(reader.clone()), upper_seq)?;
+        replay_reader(&header, &mut state, &reader, upper_seq)?;
+        let (updates, _) = broadcast::channel(128);
+        Ok(Self {
+            header,
+            persistence,
+            state: RwLock::new(state),
+            write_gate: AsyncMutex::new(()),
+            execution: AsyncMutex::new(()),
+            updates,
+        })
+    }
+
     pub fn header(&self) -> SessionHeader {
         self.header.clone()
     }
-
     pub fn id(&self) -> SessionId {
         self.header.id.clone()
     }
 
-    /// Returns immutable snapshots of every admitted event, including seed events.
-    pub fn events(&self) -> Vec<SessionEvent> {
-        read_lock(&self.state).events.clone()
-    }
-    /// Decodes the latest admitted event producing a value without cloning the event log.
-    pub fn find_latest_event<T>(&self, decode: impl Fn(&SessionEvent) -> Option<T>) -> Option<T> {
-        read_lock(&self.state).events.iter().rev().find_map(decode)
-    }
-
-    /// Returns the immutable seed prefix declared in the header.
-    pub fn seed_events(&self) -> Vec<SessionEvent> {
+    pub fn events(&self) -> Result<Vec<SessionEvent>, SessionError> {
         let state = read_lock(&self.state);
-        state.events[..state.seed_length].to_vec()
+        self.read_range_locked(&state, 0, state.event_count)
     }
 
-    /// Returns all events after the immutable seed prefix.
-    pub fn live_events(&self) -> Vec<SessionEvent> {
+    pub fn with_events<T>(
+        &self,
+        project: impl FnOnce(&[SessionEvent]) -> T,
+    ) -> Result<T, SessionError> {
+        Ok(project(&self.events()?))
+    }
+
+    pub fn find_latest_event<T>(
+        &self,
+        decode: impl Fn(&SessionEvent) -> Option<T>,
+    ) -> Result<Option<T>, SessionError> {
         let state = read_lock(&self.state);
-        state.events[state.seed_length..].to_vec()
+        if let Some(events) = &state.memory_events {
+            return Ok(events.iter().rev().find_map(decode));
+        }
+        let mut end = state.event_count;
+        while end != 0 {
+            let from = end.saturating_sub(EVENT_PAGE_SIZE);
+            let page = self.read_range_locked(&state, from, end - from)?;
+            if let Some(found) = page.iter().rev().find_map(&decode) {
+                return Ok(Some(found));
+            }
+            end = from;
+        }
+        Ok(None)
     }
 
-    /// Returns the current derived surface, including durable source sequences.
+    pub fn seed_events(&self) -> Result<Vec<SessionEvent>, SessionError> {
+        let state = read_lock(&self.state);
+        self.read_range_locked(&state, 0, state.seed_length)
+    }
+
+    pub fn live_events(&self) -> Result<Vec<SessionEvent>, SessionError> {
+        let state = read_lock(&self.state);
+        self.read_range_locked(
+            &state,
+            state.seed_length,
+            state.event_count - state.seed_length,
+        )
+    }
+
     pub fn surface(&self) -> Vec<SurfaceMessage> {
         read_lock(&self.state).surface.clone()
     }
-
-    /// Returns model messages in exact surface order.
     pub fn derive_messages(&self) -> Vec<Message> {
         read_lock(&self.state)
             .surface
@@ -519,29 +725,109 @@ impl Session {
             .collect()
     }
 
-    /// Rebuilds the durable, not-yet-claimed next-turn inbox in FIFO order.
-    /// Next-step entries are intentionally not resumed after a host restart.
     pub fn pending_next_turn_inbox(&self) -> Result<Vec<Message>, SessionError> {
-        Ok(replay_inbox(&read_lock(&self.state).events)?
+        Ok(read_lock(&self.state)
+            .inbox
             .followups
-            .into_iter()
+            .iter()
+            .cloned()
             .collect())
     }
 
-    /// Returns the only sequence number admissible for the next append.
     pub fn next_seq(&self) -> Result<u64, SessionError> {
-        next_seq(&read_lock(&self.state).events)
+        Ok(read_lock(&self.state).upper_seq)
+    }
+    pub fn event_count(&self) -> usize {
+        read_lock(&self.state).event_count
+    }
+    pub fn resident_event_count(&self) -> usize {
+        read_lock(&self.state).tail.len()
     }
 
-    /// Subscribes to events admitted after this call.
-    ///
-    /// Seed replay is intentionally explicit through [`Self::seed_events`]; a
-    /// receiver observes only live admission and owns its registration by Drop.
+    pub fn read_events(
+        &self,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
+        let state = read_lock(&self.state);
+        if from_seq >= state.upper_seq || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let from = usize::try_from(from_seq).map_err(|_| SessionError::SequenceExhausted)?;
+        let count = limit.min(state.event_count.saturating_sub(from));
+        self.read_range_locked(&state, from, count)
+    }
+
+    pub fn fold_events<T>(
+        &self,
+        from_seq: u64,
+        initial: T,
+        mut fold: impl FnMut(T, &SessionEvent) -> T,
+    ) -> Result<T, SessionError> {
+        let state = read_lock(&self.state);
+        let mut at = usize::try_from(from_seq).map_err(|_| SessionError::SequenceExhausted)?;
+        let mut result = initial;
+        while at < state.event_count {
+            let count = (state.event_count - at).min(EVENT_PAGE_SIZE);
+            for event in self.read_range_locked(&state, at, count)? {
+                result = fold(result, &event);
+            }
+            at += count;
+        }
+        Ok(result)
+    }
+
+    fn read_range_locked(
+        &self,
+        state: &SessionState,
+        from: usize,
+        count: usize,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(events) = &state.memory_events {
+            return Ok(events[from..from + count].to_vec());
+        }
+        let reader = state.reader.as_ref().ok_or_else(|| {
+            SessionError::Protocol(TessivumError::new(
+                "SESSION_PERSISTENCE_IO",
+                "read events: history reader unavailable",
+                "session",
+                Value::Null,
+            ))
+        })?;
+        let mut result = Vec::with_capacity(count);
+        let mut seq = from as u64;
+        while result.len() < count {
+            let page = reader.read_page(seq, (count - result.len()).min(EVENT_PAGE_SIZE))?;
+            if page.is_empty() {
+                break;
+            }
+            for event in page {
+                if event.seq != seq {
+                    return Err(SessionError::SequenceGap {
+                        expected: seq,
+                        actual: event.seq,
+                    });
+                }
+                result.push(event);
+                seq = seq.checked_add(1).ok_or(SessionError::SequenceExhausted)?;
+            }
+        }
+        if result.len() != count {
+            return Err(SessionError::SequenceGap {
+                expected: (from + count) as u64,
+                actual: (from + result.len()) as u64,
+            });
+        }
+        Ok(result)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.updates.subscribe()
     }
 
-    /// Persists and then atomically admits one new event.
     pub async fn append(
         &self,
         event: SessionEvent,
@@ -549,9 +835,6 @@ impl Session {
     ) -> Result<(), SessionError> {
         self.append_inner(event, None, cancellation).await
     }
-
-    /// Builds, persists, and atomically admits the next event without exposing a racy sequence
-    /// snapshot to the caller.
     pub async fn append_next(
         &self,
         build: impl FnOnce(u64) -> SessionEvent,
@@ -559,7 +842,6 @@ impl Session {
     ) -> Result<u64, SessionError> {
         self.append_next_if_surface(build, None, cancellation).await
     }
-
     pub(crate) async fn append_next_if_surface(
         &self,
         build: impl FnOnce(u64) -> SessionEvent,
@@ -569,14 +851,11 @@ impl Session {
         check_cancellation(&cancellation)?;
         let _gate = self.write_gate.lock().await;
         check_cancellation(&cancellation)?;
-        let seq = next_seq(&read_lock(&self.state).events)?;
+        let seq = read_lock(&self.state).upper_seq;
         self.append_under_gate(build(seq), expected_surface_event_seqs, cancellation)
             .await?;
         Ok(seq)
     }
-
-    /// Persists and atomically admits one new event only if the complete
-    /// current surface still has exactly these event sequence numbers.
     pub async fn append_if_surface(
         &self,
         event: SessionEvent,
@@ -586,7 +865,6 @@ impl Session {
         self.append_inner(event, Some(expected_surface_event_seqs), cancellation)
             .await
     }
-
     async fn append_inner(
         &self,
         event: SessionEvent,
@@ -598,7 +876,6 @@ impl Session {
         self.append_under_gate(event, expected_surface_event_seqs, cancellation)
             .await
     }
-
     async fn append_under_gate(
         &self,
         event: SessionEvent,
@@ -606,61 +883,66 @@ impl Session {
         cancellation: CancellationToken,
     ) -> Result<(), SessionError> {
         check_cancellation(&cancellation)?;
-
-        let projection = {
+        let (projection, next_inbox, next_turn) = {
             let state = read_lock(&self.state);
             if let Some(expected) = expected_surface_event_seqs {
-                if !state
-                    .surface
-                    .iter()
-                    .map(|entry| entry.event_seq)
-                    .eq(expected.iter().copied())
-                {
+                let actual: Vec<u64> = state.surface.iter().map(|entry| entry.event_seq).collect();
+                if actual != expected {
                     return Err(SessionError::StaleSurface {
                         expected: expected.to_vec(),
-                        actual: state.surface.iter().map(|entry| entry.event_seq).collect(),
+                        actual,
                     });
                 }
             }
             event.validate()?;
-            let expected = next_seq(&state.events)?;
-            if event.seq != expected {
+            if event.seq != state.upper_seq {
                 return Err(SessionError::SequenceGap {
-                    expected,
+                    expected: state.upper_seq,
                     actual: event.seq,
                 });
             }
             validate_seed_boundary(&self.header, &state, &event)?;
-            validate_sources(&event, &state.events)?;
+            validate_sources(&event, event.seq)?;
             let projection = decode_surface_event(&event)?;
             validate_surface_operation(&event, projection.as_ref(), &state.surface)?;
-            if is_inbox_event(&event) {
-                let mut inbox = replay_inbox(&state.events)?;
+            let next_inbox = if is_inbox_event(&event) {
+                let mut inbox = state.inbox.clone();
                 inbox.apply(&event)?;
-            }
-            projection
+                Some(inbox)
+            } else {
+                None
+            };
+            let mut next_turn = state.turn.clone();
+            next_turn.apply(&event)?;
+            (projection, next_inbox, next_turn)
         };
-
         self.persistence
-            .append(&self.header.id, &event, cancellation.clone())
+            .append(&self.header.id, &event, cancellation)
             .await?;
-        // The persistence append is the commit point. Cancellation observed
-        // afterwards cannot roll it back, so the committed event must be admitted.
-
-        {
-            let mut state = write_lock(&self.state);
-            // The async gate guarantees that the pre-persistence snapshot is still current.
-            if event.event_type == "session/end-seed" {
-                state.end_seed_seen = true;
-            }
-            apply_surface_operation(&event, projection, &mut state.surface);
-            state.events.push(event.clone());
+        let mut state = write_lock(&self.state);
+        if event.event_type == "session/end-seed" {
+            state.end_seed_seen = true;
+        }
+        apply_surface_operation(&event, projection, &mut state.surface);
+        if let Some(inbox) = next_inbox {
+            state.inbox = inbox;
+        }
+        state.turn = next_turn;
+        state.upper_seq = state
+            .upper_seq
+            .checked_add(1)
+            .ok_or(SessionError::SequenceExhausted)?;
+        state.event_count += 1;
+        state.tail.push(event.clone());
+        if state.tail.len() > EVENT_PAGE_SIZE {
+            state.tail.remove(0);
+        }
+        if let Some(events) = &mut state.memory_events {
+            events.push(event.clone());
         }
         let _ = self.updates.send(event);
         Ok(())
     }
-
-    /// Delegates an explicit durability boundary to the persistence implementation.
     pub async fn flush(&self, cancellation: CancellationToken) -> Result<(), SessionError> {
         check_cancellation(&cancellation)?;
         let _gate = self.write_gate.lock().await;
@@ -763,17 +1045,28 @@ impl SessionStore {
         if header.id != *session_id {
             return Err(SessionError::HeaderIdMismatch);
         }
-        let events = self
+        let inspection = self
             .persistence
-            .read_from(session_id, 0, cancellation.clone())
-            .await?;
-        let session = Arc::new(Session::from_committed(
-            header,
-            events,
-            Arc::clone(&self.persistence),
-        )?);
-        let committed_events = session.events();
-        let closers = interrupted_turn_closers(&committed_events)?;
+            .inspect(session_id, cancellation.clone())
+            .await?
+            .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
+        let session = if let Some(reader) = self.persistence.event_reader(session_id)? {
+            Arc::new(Session::from_reader(
+                header,
+                reader,
+                inspection.next_seq,
+                Arc::clone(&self.persistence),
+            )?)
+        } else {
+            Arc::new(Session::from_committed(
+                header,
+                self.persistence
+                    .read_from(session_id, 0, cancellation.clone())
+                    .await?,
+                Arc::clone(&self.persistence),
+            )?)
+        };
+        let closers = read_lock(&session.state).turn.closers()?;
         if !closers.is_empty() {
             if mode == RestoreMode::Live {
                 return Err(SessionError::OrphanTurn);
@@ -786,7 +1079,6 @@ impl SessionStore {
                 session.append(event, cancellation.clone()).await?;
             }
         }
-
         self.insert_live(session_id.clone(), Arc::clone(&session))?;
         Ok(session)
     }
@@ -799,7 +1091,7 @@ impl SessionStore {
     ) -> Result<Option<(SessionHeader, Vec<SessionEvent>)>, SessionError> {
         check_cancellation(&cancellation)?;
         if let Some(session) = self.get(session_id) {
-            return Ok(Some((session.header(), session.events())));
+            return Ok(Some((session.header(), session.events()?)));
         }
         let Some(header) = self
             .persistence
@@ -808,12 +1100,28 @@ impl SessionStore {
         else {
             return Ok(None);
         };
-        let events = self
-            .persistence
-            .read_from(session_id, 0, cancellation)
-            .await?;
-        let session = Session::from_committed(header, events, Arc::clone(&self.persistence))?;
-        Ok(Some((session.header(), session.events())))
+        let session = if let Some(reader) = self.persistence.event_reader(session_id)? {
+            let inspection = self
+                .persistence
+                .inspect(session_id, cancellation.clone())
+                .await?
+                .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
+            Session::from_reader(
+                header,
+                reader,
+                inspection.next_seq,
+                Arc::clone(&self.persistence),
+            )?
+        } else {
+            Session::from_committed(
+                header,
+                self.persistence
+                    .read_from(session_id, 0, cancellation)
+                    .await?,
+                Arc::clone(&self.persistence),
+            )?
+        };
+        Ok(Some((session.header(), session.events()?)))
     }
 
     pub fn get(&self, session_id: &SessionId) -> Option<Arc<Session>> {
@@ -850,51 +1158,109 @@ impl SessionStore {
     }
 }
 
-fn build_state(
+fn empty_state(
     header: &SessionHeader,
-    events: Vec<SessionEvent>,
+    reader: Option<Arc<dyn SessionEventReader>>,
+    upper_seq: u64,
 ) -> Result<SessionState, SessionError> {
     validate_header(header)?;
     let seed_length = usize::try_from(header.seed_length.unwrap_or_default()).map_err(|_| {
         SessionError::InvalidSeedLength {
             seed_length: header.seed_length.unwrap_or_default(),
-            event_count: events.len() as u64,
+            event_count: upper_seq,
         }
     })?;
-    if seed_length > events.len() {
+    if seed_length > usize::try_from(upper_seq).unwrap_or(usize::MAX) {
         return Err(SessionError::InvalidSeedLength {
             seed_length: header.seed_length.unwrap_or_default(),
-            event_count: events.len() as u64,
+            event_count: upper_seq,
         });
     }
-
-    let mut state = SessionState {
-        events: Vec::with_capacity(events.len()),
+    Ok(SessionState {
+        tail: Vec::new(),
+        memory_events: None,
+        reader,
+        upper_seq: 0,
+        event_count: 0,
         surface: Vec::new(),
         seed_length,
         end_seed_seen: false,
-    };
-    for event in events {
-        event.validate()?;
-        let expected = next_seq(&state.events)?;
-        if event.seq != expected {
-            return Err(SessionError::SequenceGap {
-                expected,
-                actual: event.seq,
-            });
+        inbox: InboxReplay {
+            followups: VecDeque::new(),
+            steps: VecDeque::new(),
+        },
+        turn: TurnReplay::default(),
+    })
+}
+
+fn replay_reader(
+    header: &SessionHeader,
+    state: &mut SessionState,
+    reader: &Arc<dyn SessionEventReader>,
+    upper_seq: u64,
+) -> Result<(), SessionError> {
+    let mut seq = 0_u64;
+    while seq < upper_seq {
+        let page = reader.read_page(seq, REPLAY_PAGE_SIZE)?;
+        for event in page {
+            if event.seq != seq || event.seq >= upper_seq {
+                return Err(SessionError::SequenceGap {
+                    expected: seq,
+                    actual: event.seq,
+                });
+            }
+            admit_replayed(header, state, event)?;
+            seq = seq.checked_add(1).ok_or(SessionError::SequenceExhausted)?;
         }
-        validate_seed_boundary(header, &state, &event)?;
-        validate_sources(&event, &state.events)?;
-        let projection = decode_surface_event(&event)?;
-        validate_surface_operation(&event, projection.as_ref(), &state.surface)?;
-        if event.event_type == "session/end-seed" {
-            state.end_seed_seen = true;
-        }
-        apply_surface_operation(&event, projection, &mut state.surface);
-        state.events.push(event);
     }
-    let _ = replay_inbox(&state.events)?;
+    Ok(())
+}
+
+fn build_state(
+    header: &SessionHeader,
+    events: Vec<SessionEvent>,
+) -> Result<SessionState, SessionError> {
+    let upper = events.len() as u64;
+    let mut state = empty_state(header, None, upper)?;
+    state.memory_events = Some(events.clone());
+    for event in events {
+        admit_replayed(header, &mut state, event)?;
+    }
     Ok(state)
+}
+
+fn admit_replayed(
+    header: &SessionHeader,
+    state: &mut SessionState,
+    event: SessionEvent,
+) -> Result<(), SessionError> {
+    event.validate()?;
+    if event.seq != state.upper_seq {
+        return Err(SessionError::SequenceGap {
+            expected: state.upper_seq,
+            actual: event.seq,
+        });
+    }
+    validate_seed_boundary(header, state, &event)?;
+    validate_sources(&event, event.seq)?;
+    let projection = decode_surface_event(&event)?;
+    validate_surface_operation(&event, projection.as_ref(), &state.surface)?;
+    state.inbox.apply(&event)?;
+    state.turn.apply(&event)?;
+    if event.event_type == "session/end-seed" {
+        state.end_seed_seen = true;
+    }
+    apply_surface_operation(&event, projection, &mut state.surface);
+    state.upper_seq = state
+        .upper_seq
+        .checked_add(1)
+        .ok_or(SessionError::SequenceExhausted)?;
+    state.event_count += 1;
+    state.tail.push(event);
+    if state.tail.len() > EVENT_PAGE_SIZE {
+        state.tail.remove(0);
+    }
+    Ok(())
 }
 
 fn validate_header(header: &SessionHeader) -> Result<(), SessionError> {
@@ -903,16 +1269,6 @@ fn validate_header(header: &SessionHeader) -> Result<(), SessionError> {
         return Err(SessionError::EmptySessionId);
     }
     Ok(())
-}
-
-fn next_seq(events: &[SessionEvent]) -> Result<u64, SessionError> {
-    match events.last() {
-        None => Ok(0),
-        Some(event) => event
-            .seq
-            .checked_add(1)
-            .ok_or(SessionError::SequenceExhausted),
-    }
 }
 
 fn validate_seed_boundary(
@@ -926,21 +1282,18 @@ fn validate_seed_boundary(
     if state.end_seed_seen {
         return Err(SessionError::DuplicateSeedBoundary);
     }
-    if state.events.len() != state.seed_length || header.seed_length.is_none() {
+    if state.event_count != state.seed_length || header.seed_length.is_none() {
         return Err(SessionError::InvalidSeedBoundary);
     }
     Ok(())
 }
 
-fn validate_sources(
-    event: &SessionEvent,
-    prior_events: &[SessionEvent],
-) -> Result<(), SessionError> {
+fn validate_sources(event: &SessionEvent, committed_before: u64) -> Result<(), SessionError> {
     let Some(sources) = &event.source_event_seqs else {
         return Ok(());
     };
     for source_seq in sources {
-        if !prior_events.iter().any(|prior| prior.seq == *source_seq) {
+        if *source_seq >= committed_before {
             return Err(SessionError::MissingSourceEvent {
                 source_seq: *source_seq,
             });
@@ -1185,6 +1538,7 @@ enum InboxReplayTarget {
     Step,
 }
 
+#[derive(Clone)]
 struct InboxReplay {
     followups: VecDeque<Message>,
     steps: VecDeque<Message>,
@@ -1421,6 +1775,18 @@ fn inbox_event(reason: impl Into<String>) -> SessionError {
     SessionError::InvalidInboxEvent {
         reason: reason.into(),
     }
+}
+
+fn next_seq(events: &[SessionEvent]) -> Result<u64, SessionError> {
+    events
+        .last()
+        .map(|event| {
+            event
+                .seq
+                .checked_add(1)
+                .ok_or(SessionError::SequenceExhausted)
+        })
+        .unwrap_or(Ok(0))
 }
 
 fn inspect_memory_session(session: &MemorySession) -> Result<SessionInspection, SessionError> {

@@ -328,11 +328,11 @@ async fn cold_restore_migrates_legacy_mode_headers_and_selection_events() {
             Some(AgentModeId::new(agent_mode).unwrap())
         );
         assert_eq!(
-            restored.events().last().unwrap().event_type,
+            restored.events().unwrap().last().unwrap().event_type,
             "agent-mode/selected"
         );
         assert_eq!(
-            restored.events().last().unwrap().data,
+            restored.events().unwrap().last().unwrap().data,
             json!({"agentMode": agent_mode})
         );
     }
@@ -403,9 +403,65 @@ async fn list_and_cold_restore_continue_from_durable_log() {
         .restore(&SessionId::from("b"), RestoreMode::Cold, cancellation())
         .await
         .unwrap();
-    assert_eq!(restored.events().len(), 2);
+    assert_eq!(restored.events().unwrap().len(), 2);
     restored.append(event(2), cancellation()).await.unwrap();
     assert_eq!(restored.next_seq().unwrap(), 3);
     drop(second);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn event_reader_pages_are_bounded_across_raw_and_zstd_records() {
+    let root = root();
+    for (index, persistence) in [
+        JsonlSessionPersistence::new(&root),
+        JsonlSessionPersistence::zstd(&root),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let head = header(&format!("page-{index}"));
+        persistence.create(&head, cancellation()).await.unwrap();
+        let empty = header(&format!("empty-page-{index}"));
+        persistence.create(&empty, cancellation()).await.unwrap();
+        let empty_reader = persistence.event_reader(&empty.id).unwrap().unwrap();
+        assert!(empty_reader.read_page(0, 256).unwrap().is_empty());
+        for seq in 0..300 {
+            persistence
+                .append(&head.id, &event(seq), cancellation())
+                .await
+                .unwrap();
+        }
+        let reader = persistence.event_reader(&head.id).unwrap().unwrap();
+        assert_eq!(
+            reader
+                .read_page(255, 3)
+                .unwrap()
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![255, 256, 257]
+        );
+        assert!(reader.read_page(300, 10).unwrap().is_empty());
+        let path = persistence.raw_path(&head.id);
+        let path = if path.exists() {
+            path
+        } else {
+            persistence.compressed_path(&head.id)
+        };
+        let mut bytes = fs::read(&path).unwrap();
+        if index == 0 {
+            let marker = b"\"seq\":0";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .unwrap();
+            bytes[offset + marker.len() - 1] = b'9';
+        } else {
+            bytes[8] ^= 1;
+        }
+        fs::write(&path, bytes).unwrap();
+        assert!(reader.read_page(255, 3).is_err());
+    }
     fs::remove_dir_all(root).unwrap();
 }

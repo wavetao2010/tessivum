@@ -783,7 +783,7 @@ async fn session_bound_services_reject_cross_session_access() {
         ),
         "OWNER_DENIED"
     );
-    assert_eq!(foreign.session().events(), Vec::new());
+    assert_eq!(foreign.session().events().unwrap(), Vec::new());
     assert_eq!(
         remote_code(
             bridge
@@ -894,7 +894,10 @@ async fn legacy_compat_agents_preserve_seed_cleanup_generation_and_cold_resume()
         true
     );
     let child_id = SessionId::from("side-chat");
-    assert_eq!(agents.get(&child_id).unwrap().session().events(), seed);
+    assert_eq!(
+        agents.get(&child_id).unwrap().session().events().unwrap(),
+        seed
+    );
 
     bridge.cleanup_generation(13);
     tokio::time::timeout(Duration::from_secs(1), async {

@@ -35,7 +35,7 @@ use crate::{
         CompositionDescriptor, CompositionEntryReference, CompositionRegistry, CompositionRuntime,
     },
     llm::{BlockAssembler, LlmRuntime},
-    permissions::runtime_context,
+    permissions::runtime_context_for_session,
     protocol::{
         ContentBlock, ContextForm, EpochHeader, FinishReason, GenerateRequest, LlmCallConfig,
         LlmFailure, Message, MessageId, MessageRole, MessageSource, SessionEvent, SessionOrigin,
@@ -352,7 +352,7 @@ impl AgentFactory for AgentLoopFactory {
             self.context_window.clone(),
             self.max_parallel_tool_calls,
             self.max_steps,
-        ))
+        )?)
     }
 }
 
@@ -605,13 +605,11 @@ impl SessionRuntimeSpec {
 
 fn persisted_mode(session: &Session) -> Result<Option<AgentModeId>, AgentError> {
     session
-        .events()
-        .into_iter()
-        .rev()
-        .find(|event| event.event_type == "agent-mode/selected")
-        .map(|event| {
-            let value = event
-                .data
+        .find_latest_event(|event| {
+            (event.event_type == "agent-mode/selected").then(|| event.data.clone())
+        })?
+        .map(|data| {
+            let value = data
                 .get("agentMode")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
@@ -620,7 +618,7 @@ fn persisted_mode(session: &Session) -> Result<Option<AgentModeId>, AgentError> 
                         "MODE_SELECTION_INVALID",
                         "agent-mode/selected requires an agentMode string",
                         "agent-loop",
-                        event.data,
+                        data.clone(),
                     ))
                 })?;
             AgentModeId::new(value).map_err(AgentError::Message)
@@ -721,11 +719,10 @@ impl AgentLoop {
         context_window: Option<ContextWindowResolver>,
         max_parallel_tool_calls: usize,
         max_steps: u64,
-    ) -> Arc<Self> {
-        let has_prior_request_header = session
-            .events()
-            .iter()
-            .any(|event| event.event_type == "request/header");
+    ) -> Result<Arc<Self>, AgentError> {
+        let has_prior_request_header = session.fold_events(0, false, |seen, event| {
+            seen || event.event_type == "request/header"
+        })?;
         let inner = Arc::new(Inner {
             session,
             options,
@@ -762,10 +759,9 @@ impl AgentLoop {
             .boxed()
             .shared();
         lock(&inner.state).worker = Some(worker);
-        Arc::new(Self { inner })
+        Ok(Arc::new(Self { inner }))
     }
 }
-
 #[async_trait]
 impl AgentRuntime for AgentLoop {
     fn status(&self) -> AgentStatus {
@@ -915,7 +911,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
     if inner.cancellation.is_cancelled() {
         return Ok(());
     }
-    let turn = next_turn(&inner.session);
+    let turn = next_turn(&inner.session)?;
     append(inner, "turn/start", json!({"turn": turn}), None, None).await?;
 
     let mut pending_initial = Some(initial_message);
@@ -985,7 +981,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
             provider: inner.options.provider.clone(),
             model: inner.options.model.clone(),
             reasoning_effort: inner.options.reasoning_effort.clone(),
-            messages: request_messages(inner),
+            messages: request_messages(inner)?,
             system,
             tools: (!tools.is_empty()).then_some(tools),
             temperature: None,
@@ -1010,7 +1006,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                 .await
             {
                 Ok(CompactionOutcome::Compacted(_) | CompactionOutcome::Pruned(_)) => {
-                    request.messages = request_messages(inner);
+                    request.messages = request_messages(inner)?;
                 }
                 Ok(CompactionOutcome::Noop { .. }) => {}
                 Err(error) => {
@@ -1062,13 +1058,9 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
         {
             request_context["contextWindow"] = Value::from(context_window);
         }
-        let previous_context = inner
-            .session
-            .events()
-            .into_iter()
-            .rev()
-            .find(|event| event.event_type == "request/context")
-            .map(|event| event.data);
+        let previous_context = inner.session.find_latest_event(|event| {
+            (event.event_type == "request/context").then(|| event.data.clone())
+        })?;
         if previous_context.as_ref() != Some(&request_context) {
             append(inner, "request/context", request_context, None, None).await?;
         }
@@ -1080,7 +1072,7 @@ async fn run_turn(inner: &Inner, initial_message: Message) -> Result<(), AgentEr
                 first_generation_attempt = false;
             } else {
                 append_runtime_context(inner, turn, step).await?;
-                request.messages = request_messages(inner);
+                request.messages = request_messages(inner)?;
             }
             match consume_generation_attempt(inner, turn, step, request.clone()).await {
                 Ok((generation, chunk_seqs)) => match &generation.finish_reason {
@@ -1241,7 +1233,7 @@ async fn commit_inbox_claim(
     inner: &Inner,
     reservation: InboxClaimReservation,
 ) -> Result<Vec<Message>, AgentError> {
-    if durable_inbox_claim(&inner.session, reservation.messages()) {
+    if durable_inbox_claim(&inner.session, reservation.messages())? {
         append(
             inner,
             "agent/inbox/spliced",
@@ -1261,15 +1253,16 @@ async fn commit_inbox_claim(
         .ok_or_else(|| AgentError::Runtime("inbox claim reservation was lost".into()))
 }
 
-fn durable_inbox_claim(session: &Session, messages: &[Message]) -> bool {
-    !messages.is_empty()
-        && messages.iter().all(|message| {
-            session.events().iter().any(|event| {
-                event.event_type == "agent/inbox/enqueued"
-                    && event.data.pointer("/message/id").and_then(Value::as_str)
-                        == Some(message.id.as_str())
+fn durable_inbox_claim(session: &Session, messages: &[Message]) -> Result<bool, AgentError> {
+    Ok(session
+        .fold_events(0, true, |all, event| {
+            all && messages.iter().all(|message| {
+                event.event_type != "agent/inbox/enqueued"
+                    || event.data.pointer("/message/id").and_then(Value::as_str)
+                        != Some(message.id.as_str())
             })
         })
+        .map(|no_match| !no_match)?)
 }
 
 async fn append_skill_context(
@@ -1363,8 +1356,17 @@ async fn append_skill_context(
 
 async fn append_runtime_context(inner: &Inner, turn: u64, step: u64) -> Result<(), AgentError> {
     let header = inner.session.header();
-    let events = inner.session.events();
-    let text = runtime_context(&events, header.cwd.as_deref());
+    let text = runtime_context_for_session(&inner.session, header.cwd.as_deref())?;
+    let ordinal = inner.session.fold_events(0, 1usize, |ordinal, event| {
+        if event.event_type == "user/message"
+            && event.data.pointer("/source/plugin").and_then(Value::as_str)
+                == Some(RUNTIME_CONTEXT_SOURCE)
+        {
+            ordinal + 1
+        } else {
+            ordinal
+        }
+    })?;
     let unchanged = inner
         .session
         .surface()
@@ -1375,15 +1377,6 @@ async fn append_runtime_context(inner: &Inner, turn: u64, step: u64) -> Result<(
     if unchanged {
         return Ok(());
     }
-    let ordinal = events
-        .iter()
-        .filter(|event| {
-            event.event_type == "user/message"
-                && event.data.pointer("/source/plugin").and_then(Value::as_str)
-                    == Some(RUNTIME_CONTEXT_SOURCE)
-        })
-        .count()
-        + 1;
     append_message(
         inner,
         "user/message",
@@ -1456,7 +1449,7 @@ async fn append_workspace_instructions(
     .await
 }
 
-fn request_messages(inner: &Inner) -> Vec<Message> {
+fn request_messages(inner: &Inner) -> Result<Vec<Message>, AgentError> {
     let mut messages = inner.session.derive_messages();
     if let Some(instructions) = inner.session.find_latest_event(|event| {
         (event.event_type == "user/message"
@@ -1465,12 +1458,12 @@ fn request_messages(inner: &Inner) -> Vec<Message> {
                 == Some("tessivum-workspace-instructions"))
         .then(|| serde_json::from_value::<Message>(event.data.clone()).ok())
         .flatten()
-    }) {
+    })? {
         if !messages.iter().any(|message| message.id == instructions.id) {
             messages.push(instructions);
         }
     }
-    messages
+    Ok(messages)
 }
 
 fn invoked_skill_names(messages: &[Message], available: &BTreeSet<&str>) -> Vec<String> {
@@ -1794,13 +1787,14 @@ async fn schedule_retry(
         return Ok(false);
     }
     let policy_key = policy.policy_key();
-    let prior = inner.session.events().into_iter().rev().find(|event| {
-        event.event_type == "llm/retry"
+    let prior = inner.session.find_latest_event(|event| {
+        (event.event_type == "llm/retry"
             && event.data.get("turn").and_then(Value::as_u64) == Some(turn)
             && event.data.get("step").and_then(Value::as_u64) == Some(step)
             && event.data.get("provider").and_then(Value::as_str) == Some(provider)
-            && event.data.get("policyKey").and_then(Value::as_str) == Some(policy_key.as_str())
-    });
+            && event.data.get("policyKey").and_then(Value::as_str) == Some(policy_key.as_str()))
+        .then(|| event.clone())
+    })?;
     let prior_retry = prior
         .as_ref()
         .and_then(|event| event.data.get("retry").and_then(Value::as_u64))
@@ -1996,15 +1990,21 @@ async fn append(
         .await?)
 }
 
-fn next_turn(session: &Session) -> u64 {
-    session
-        .events()
-        .iter()
-        .filter(|event| event.event_type == "turn/start")
-        .filter_map(|event| event.data.get("turn").and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+fn next_turn(session: &Session) -> Result<u64, AgentError> {
+    Ok(session
+        .fold_events(0, 0u64, |latest, event| {
+            if event.event_type == "turn/start" {
+                event
+                    .data
+                    .get("turn")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(latest)
+                    .max(latest)
+            } else {
+                latest
+            }
+        })?
+        .saturating_add(1))
 }
 
 fn aborted(inner: &Inner) -> TurnEndReason {
