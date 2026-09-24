@@ -9,9 +9,13 @@ This release candidate pairs with Tessivum Core 0.1.8 at revision `eb1bc9fd320f8
 - Bridge Legacy Node `ctx.systemPrompt.section({ name, order, text })` contributions into the native `systemPrompt@1` service, with plugin-scoped disposal and native sections preserved.
 - Add release evidence for vendored Logger Console, Legacy tools, Timer, and SystemPrompt contributions.
 
+### Fixed
+
+- Use a real Node HTTP upgrade socket for unchanged Legacy `ws` `WebSocketServer({ noServer: true })` handlers; the compatibility host test now passes all 28 host/protocol cases.
+
 ### Verification limits
 
-- Publication still requires the release workflow archive smoke checks, installer validation, and a clean cross-platform result. The known Bun WebSocket upgrade mock failure remains separately tracked and is not represented as a passing full host test suite.
+- Publication still requires the release workflow archive smoke checks, installer validation, and a clean cross-platform result. Local Core, compatibility-host, and product Rust gates pass; cross-platform archive evidence remains a release-workflow requirement.
 
 ## 0.1.0-alpha.30 - 2026-09-23
 
