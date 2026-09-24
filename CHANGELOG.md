@@ -2,7 +2,7 @@
 
 ## 0.1.0-alpha.31 - 2026-09-24
 
-This release candidate pairs with Tessivum Core 0.1.8 at revision `f7a9dbba89912f23b80f169d69d0dc34d962002f`.
+This release candidate pairs with Tessivum Core 0.1.8 at revision `eb1bc9fd320f880f0939689adf9af1b666a4b682`.
 
 ### Added
 

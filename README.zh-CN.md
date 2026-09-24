@@ -13,7 +13,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 ## 当前状态
 
-`v0.1.0-alpha.31` 增加 Legacy Node `systemPrompt.section()` 代理，并继续提供有界上下文恢复与持久 Goal 一致性。它使用 `tessivum-core v0.1.8` 修订版 `f7a9dbba89912f23b80f169d69d0dc34d962002f`，兼容目标仍为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
+`v0.1.0-alpha.31` 增加 Legacy Node `systemPrompt.section()` 代理，并使用真实 Node HTTP upgrade socket 兼容未修改的 `ws` 处理器；同时提供有界上下文恢复与持久 Goal 一致性。它使用 `tessivum-core v0.1.8` 修订版 `eb1bc9fd320f880f0939689adf9af1b666a4b682`，兼容目标仍为 DeepSeek Harness `0.1.0-rc.5` 提交 `47f943859bef60e4160492346772ded9b24f765a`。
 
 精确的 `terminal.manage` 能力保留模式隔离与父级拒绝/审批。Core 保留已有历史分页，并在插件工具回调前预载原生会话。
 

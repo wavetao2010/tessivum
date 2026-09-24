@@ -13,7 +13,7 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 ## Status
 
-`v0.1.0-alpha.31` adds the Legacy Node `systemPrompt.section()` bridge and keeps bounded context recovery and durable Goal consistency. It uses `tessivum-core v0.1.8` at revision `f7a9dbba89912f23b80f169d69d0dc34d962002f` and targets DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
+`v0.1.0-alpha.31` adds the Legacy Node `systemPrompt.section()` bridge and uses a real Node HTTP upgrade socket for unchanged `ws` handlers. It keeps bounded context recovery and durable Goal consistency, using `tessivum-core v0.1.8` at revision `eb1bc9fd320f880f0939689adf9af1b666a4b682` and targeting DeepSeek Harness `0.1.0-rc.5` at commit `47f943859bef60e4160492346772ded9b24f765a`.
 
 The exact `terminal.manage` capability preserves mode isolation and parent Deny/Ask restrictions. Core retains the existing bounded history paging and hydrates native sessions before plugin tool callbacks.
 
