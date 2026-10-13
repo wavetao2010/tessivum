@@ -14,6 +14,13 @@
 
 升级上游版本时必须先单独更新本文、RPC/事件协议测试和 Web E2E 清单；不得在功能提交中顺带漂移版本。
 
+### 当前 Core 源码依赖（2026-10-13，产品未发布）
+
+- Core：`v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；Cargo、CI 与打包用 Legacy Host 固定同一提交。
+- `provide` 仅初次注册，重复注册返回错误；有意替换须用 `replace`。缺少必需依赖的 Native Loader consumer 保持 `Pending`，不代表已激活。
+- `cordis.plugin/v1`、`cordis.node/v1` 及上游 RPC/事件清单不变；Bridge 与会话 hydration 的容量错误不得当作空结果。
+- 已发布 Alpha.29 仍配套 Core 0.1.7；本次源码依赖升级不改变产品发行、Windows 或 Browser 验收范围。
+
 ## 2. 范围与完成定义
 
 兼容完成同时满足：

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Pin Rust Core/Extism/Node Bridge dependencies and all CI/package Legacy Host checkouts to Core `v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`.
+- Adopt strict service registration, explicit replacement, managed pending Native Loader dependencies, and bounded Bridge/session hydration from Core. Wire identifiers remain unchanged; see the Core migration guide.
+- Preserve the Alpha.30 version and release metadata from upstream. This dependency upgrade is not a new product release and does not establish additional Windows or Browser acceptance.
+- Verified after integration with the Alpha.30 mainline on macOS ARM64: 601 Rust tests (22 filtered), strict Clippy, compatibility/release-fact checks and actual CLI initial/resume tool round trips with preserved history.
+
 ## 0.1.0-alpha.30 - 2026-09-23
 
 This release includes bounded context recovery, durable Goal consistency fixes, and native Windows x86_64 packaging on Core 0.1.7. PR #7 source CI passed `verify`, `windows`, and the rerun of `browser-e2e`; publication additionally requires the release workflow's archive smoke checks and installer validation. Earlier local Windows evidence applies to its original candidate, not these release archives. See the [Windows repair evidence and verification limits](docs/WINDOWS_CHECKPOINT_20260916.md).

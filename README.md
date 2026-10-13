@@ -17,6 +17,8 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 The exact `terminal.manage` capability preserves mode isolation and parent Deny/Ask restrictions. Core retains the existing bounded history paging and hydrates native sessions before plugin tool callbacks.
 
+Unreleased source now pins `tessivum-core v0.2.0` at `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9` for both Rust crates and the Legacy Host. This dependency upgrade preserves upstream Alpha.30 release metadata and does not replace existing release archives or download links. Core 0.2.0 requires explicit service replacement; see its [migration guide](https://github.com/wavetao2010/tessivum-core/blob/v0.2.0/docs/COMPATIBILITY.md#migrating-from-01x-to-020).
+
 Available today:
 
 - Rust-native Host, Agent Loop, sessions, tools, persistence, HTTP, SSE, WebSocket, and SDK runtimes;

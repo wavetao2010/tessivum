@@ -17,6 +17,8 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 精确的 `terminal.manage` 能力保留模式隔离与父级拒绝/审批。Core 保留已有历史分页，并在插件工具回调前预载原生会话。
 
+未发布源码现固定 `tessivum-core v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`，Rust crate 与 Legacy Host 使用同一修订版。此依赖升级保留上游 Alpha.30 发行元数据，不替换已有发行归档或下载链接。Core 0.2.0 要求显式替换服务，见其[迁移说明](https://github.com/wavetao2010/tessivum-core/blob/v0.2.0/docs/COMPATIBILITY.md#migrating-from-01x-to-020)。
+
 当前已有：
 
 - Rust 原生 Host、Agent Loop、会话、工具、持久化、HTTP、SSE、WebSocket 与 SDK 运行时；
