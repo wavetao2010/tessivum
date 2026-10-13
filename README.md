@@ -17,7 +17,7 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 The exact `terminal.manage` capability preserves mode isolation and parent Deny/Ask restrictions. Core retains the existing bounded history paging and hydrates native sessions before plugin tool callbacks.
 
-Unreleased source now pins `tessivum-core v0.2.0` at `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9` for both Rust crates and the Legacy Host. This dependency upgrade preserves upstream Alpha.30 release metadata and does not replace existing release archives or download links. Core 0.2.0 requires explicit service replacement; see its [migration guide](https://github.com/wavetao2010/tessivum-core/blob/v0.2.0/docs/COMPATIBILITY.md#migrating-from-01x-to-020).
+Unreleased source now pins `tessivum-core v0.2.0` at `b69d0ed86f30adb0b2d6138d458593487336aa08` for both Rust crates and the Legacy Host, including dependency-aware Native configuration re-evaluation and activation-state synchronization. This source commit is newer than the `v0.2.0` release tag. It preserves Alpha.30 release metadata and does not replace existing archives or download links. Core 0.2.0 requires explicit service replacement; see its [migration guide](https://github.com/wavetao2010/tessivum-core/blob/b69d0ed86f30adb0b2d6138d458593487336aa08/docs/COMPATIBILITY.md#migrating-from-01x-to-020).
 
 Available today:
 
@@ -27,7 +27,7 @@ Available today:
 - Headless CLI, TypeScript/Python SDK clients, and the source-compatible React Web shell;
 - OpenAI Responses-compatible relays, attachments, multi-workspace authority, plugin management, the first-party Market, and Rust-owned Remote Access.
 
-Full DeepSeek Harness Agent/LLM wire compatibility is not complete. See the exact [compatibility baseline](docs/COMPATIBILITY_BASELINE.md) and [known plugin matrix](docs/PLUGIN_COMPATIBILITY.md).
+Full DeepSeek Harness Agent/LLM wire compatibility is not complete. The [approved migration scope](docs/SCOPE_DECISION_DRAFT.md) and [implementation/evidence checklist](docs/SCOPE_IMPLEMENTATION_CHECKLIST.md) govern the remaining work; the [compatibility baseline](docs/COMPATIBILITY_BASELINE.md) and [known plugin matrix](docs/PLUGIN_COMPATIBILITY.md) describe existing contracts and limits. The target remains frozen Harness `0.1.0-rc.5`, not newer upstream features.
 
 ## Install
 

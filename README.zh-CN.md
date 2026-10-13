@@ -17,7 +17,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 精确的 `terminal.manage` 能力保留模式隔离与父级拒绝/审批。Core 保留已有历史分页，并在插件工具回调前预载原生会话。
 
-未发布源码现固定 `tessivum-core v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`，Rust crate 与 Legacy Host 使用同一修订版。此依赖升级保留上游 Alpha.30 发行元数据，不替换已有发行归档或下载链接。Core 0.2.0 要求显式替换服务，见其[迁移说明](https://github.com/wavetao2010/tessivum-core/blob/v0.2.0/docs/COMPATIBILITY.md#migrating-from-01x-to-020)。
+未发布源码现固定 `tessivum-core v0.2.0` / `b69d0ed86f30adb0b2d6138d458593487336aa08`，Rust crate 与 Legacy Host 使用同一修订版，包含 Native 依赖配置重求值及激活状态同步修复。该源码提交晚于 `v0.2.0` 发行标签；保留 Alpha.30 发行元数据，不替换已有归档或下载链接。Core 0.2.0 要求显式替换服务，见其[迁移说明](https://github.com/wavetao2010/tessivum-core/blob/b69d0ed86f30adb0b2d6138d458593487336aa08/docs/COMPATIBILITY.md#migrating-from-01x-to-020)。
 
 当前已有：
 
@@ -27,7 +27,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 - 无头 CLI、TypeScript/Python SDK 客户端和源码兼容的 React Web shell；
 - OpenAI Responses 兼容中继、附件、多工作区权限、插件管理、第一方市场和由 Rust 掌权的远程访问。
 
-完整的 DeepSeek Harness Agent/LLM 线路兼容尚未完成。准确边界见[兼容性基线](docs/COMPATIBILITY_BASELINE.md)和[插件兼容矩阵](docs/PLUGIN_COMPATIBILITY.md)。
+完整的 DeepSeek Harness Agent/LLM 线路兼容尚未完成。剩余工作按[已确认迁移范围](docs/SCOPE_DECISION_DRAFT.md)及[实施／证据清单](docs/SCOPE_IMPLEMENTATION_CHECKLIST.md)推进；[兼容性基线](docs/COMPATIBILITY_BASELINE.md)和[插件兼容矩阵](docs/PLUGIN_COMPATIBILITY.md)记录既有契约与限制。目标仍是冻结的 Harness `0.1.0-rc.5`，不追加新版上游功能。
 
 ## 安装
 

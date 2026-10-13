@@ -11,6 +11,8 @@
 
 本计划负责工作顺序、交付物和验收门槛。具体设计见：
 
+- [已确认迁移范围](SCOPE_DECISION_DRAFT.md)：G01—G16、D01—D08、X01—X05 的后续批准记录，优先于旧阶段计划中与之冲突的范围口径。
+- [已批准范围实施清单](SCOPE_IMPLEMENTATION_CHECKLIST.md)：候选身份、已有资产、真实差集、C/H/W/E 批次和逐项验收；当前迁移执行入口，不重新选择上游版本。
 - [目标运行时架构](ARCHITECTURE.md)：Context、生命周期、事件、Native/WASM/Legacy Node 三运行时和浏览器边界。
 - [插件生态兼容方案](PLUGIN_COMPATIBILITY.md)：现有 npm 插件兼容级别、Legacy Node Bridge、WASM ABI 和迁移路径。
 - [Phase 3 产品能力开发计划](PHASE3_PRODUCT_PLAN.md)：已完成的 Alpha.2 WASM 权限、Alpha.3 Browser 控制面与 Alpha.4 多工作区实施记录。
@@ -26,7 +28,7 @@
 
 如实现与本文冲突，先更新本文和关联架构文档，再修改代码；不能让代码和实施指引长期分叉。
 
-> 本文后半保留 Alpha.2–Alpha.6 的产品实施记录；其中“已完成”只描述 Tessivum 自有 Alpha 路径，不代表 DeepSeek Harness 外部契约兼容完成。当前冻结契约、真实缺口和唯一完成定义以 [`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md) 为准。
+> 本文后半保留 Alpha.2–Alpha.6 的产品实施记录；其中“已完成”只描述 Tessivum 自有 Alpha 路径，不代表 DeepSeek Harness 全范围兼容完成。范围与批准差异以 [`SCOPE_DECISION_DRAFT.md`](SCOPE_DECISION_DRAFT.md) 为准，候选与逐项证据以 [`SCOPE_IMPLEMENTATION_CHECKLIST.md`](SCOPE_IMPLEMENTATION_CHECKLIST.md) 为准；[`COMPATIBILITY_BASELINE.md`](COMPATIBILITY_BASELINE.md) 保留固定协议及现有实现边界，不撤销后续批准。
 
 ## 2. 目标与边界
 
@@ -402,12 +404,13 @@ Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已�
 
 ### 4.6 Core 0.2.0 源码依赖升级（产品未发布）
 
-- Core `v0.2.0` 已发布，提交 `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`。产品 Cargo、CI 三处 checkout、Unix/Windows 打包 Host 与 Windows 源码说明统一固定该提交。
+- Core `v0.2.0` 发行标签仍为 `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；当前产品源码改为固定后续修复提交 `b69d0ed86f30adb0b2d6138d458593487336aa08`。产品 Cargo/lock、CI 三处 checkout、Unix/Windows 打包 Host 与 Windows 源码说明统一固定修复提交；不是新的 Core 或产品发行。
 - 严格 `provide`、显式 `replace` 和 Native Loader `Pending` 语义按 Core 迁移指南接入；ABI/Bridge v1 及上游兼容目标不变。
 - 升级基于已合入 PR #7/#8 的 Alpha.30 主线，保留远端版本号、安装器、市场、Homebrew 与 Windows 打包改动，不重写已有发行归档；本次未发布新产品。
 - Core 的 Windows CI 不能代替产品 Windows 或 Browser 验收，本次不扩大支持范围。
 - 合入最新主线前的 Alpha.29 探针曾通过 574 项 Rust 测试（22 项过滤）、严格 Clippy、兼容基线及发行事实检查，证据在 `test-artifacts/core-0.2.0-upgrade/`；该记录不代表 Alpha.30 集成验收。
-- 合入 Alpha.30 主线后的 macOS ARM64 验收：601 项 Rust 测试通过（22 项过滤）、严格 Clippy、兼容基线及发行事实检查通过；实际 CLI 首次运行、工具回环与续接通过，日志前缀保留。证据在 `test-artifacts/alpha30-core020-integration/`；与上述 Alpha.29 探针分开记录。
+- 首次合入 Alpha.30 主线（Core `6cc4cfd`）的 macOS ARM64 历史验收：601 项 Rust 测试通过（22 项过滤）、严格 Clippy、兼容基线及发行事实检查通过；实际 CLI 首次运行、工具回环与续接通过，日志前缀保留。证据在 `test-artifacts/alpha30-core020-integration/`；与上述 Alpha.29 探针及后续配置修复候选分开记录。
+- 后续配置修复候选（Core `b69d0ed`）已使用正式 Git 依赖复验：macOS ARM64 601 项 Rust 测试（22 项过滤）、严格 Clippy、兼容基线及发行事实检查通过；实际 Composition 配置重求值／依赖移除恢复及 CLI 初次工具回环／续接通过，历史前缀保持不变。Cargo metadata 确认三个 Core crate 均来自固定 Git 修订，没有 Core path override；证据在 `test-artifacts/c1-live-config-git-pin/`。[Core CI](https://github.com/wavetao2010/tessivum-core/actions/runs/38366582275) 已通过，不代替产品 Windows／Browser 或发行归档验收。
 
 ---
 
@@ -862,7 +865,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前源码基于 `v0.1.0-alpha.30` 主线，未发布的依赖升级固定 `tessivum-core v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`，升级状态见第 4.6 节；Alpha.29/28 历史发行证据见第 4.5/4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
+当前源码基于 `v0.1.0-alpha.30` 主线，未发布的依赖升级固定 `tessivum-core v0.2.0` / `b69d0ed86f30adb0b2d6138d458593487336aa08`，升级状态见第 4.6 节；Alpha.29/28 历史发行证据见第 4.5/4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 

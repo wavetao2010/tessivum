@@ -172,7 +172,7 @@ try {
   git clone https://github.com/cordiverse/cordis.git "$Repo\.ci\cordis"
   git -C "$Repo\.ci\cordis" checkout 8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4
   git clone https://github.com/wavetao2010/tessivum-core.git "$Repo\.ci\tessivum-core"
-  git -C "$Repo\.ci\tessivum-core" checkout 6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9
+  git -C "$Repo\.ci\tessivum-core" checkout b69d0ed86f30adb0b2d6138d458593487336aa08
 
   $env:TESSIVUM_DEEPSEEK_VENDOR = "$Repo\.ci\deepseek-harness\vendor"
   $env:TESSIVUM_DEEPSEEK_SOURCE = "$Repo\.ci\deepseek-harness"

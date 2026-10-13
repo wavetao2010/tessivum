@@ -2,6 +2,8 @@
 
 本文冻结 Tessivum 的第一目标兼容面。它不是“行为近似”清单；除明确列为 Tessivum 扩展的部分外，源 Web 前端必须能把 Tessivum 当作同版本 DeepSeek Harness Host 使用。
 
+后续已批准迁移范围与差异见[范围决策记录](SCOPE_DECISION_DRAFT.md)，候选及实施证据见[实施清单](SCOPE_IMPLEMENTATION_CHECKLIST.md)。本文的旧缺口描述须按该清单核对；已批准的 Preset、Workflow、动态插件、完整 LLM/provider 等目标不因当前实现较窄而缩减，也不因现有测试通过而自动结案。
+
 ## 1. 上游基线
 
 - 仓库：`deepseek-ai/deepseek-harness`
@@ -16,7 +18,7 @@
 
 ### 当前 Core 源码依赖（2026-10-13，产品未发布）
 
-- Core：`v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；Cargo、CI 与打包用 Legacy Host 固定同一提交。
+- Core：crate 版本 `v0.2.0`，源码修订 `b69d0ed86f30adb0b2d6138d458593487336aa08`（晚于 `v0.2.0` 发行标签）；Cargo、CI 与打包用 Legacy Host 固定同一提交，包含 Native 服务配置重求值和激活状态同步修复。
 - `provide` 仅初次注册，重复注册返回错误；有意替换须用 `replace`。缺少必需依赖的 Native Loader consumer 保持 `Pending`，不代表已激活。
 - `cordis.plugin/v1`、`cordis.node/v1` 及上游 RPC/事件清单不变；Bridge 与会话 hydration 的容量错误不得当作空结果。
 - 已发布 Alpha.29 仍配套 Core 0.1.7；本次源码依赖升级不改变产品发行、Windows 或 Browser 验收范围。

@@ -2929,7 +2929,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -2990,7 +2990,7 @@ dependencies = [
 [[package]]
 name = "tessivum-core"
 version = "0.2.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9#6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=b69d0ed86f30adb0b2d6138d458593487336aa08#b69d0ed86f30adb0b2d6138d458593487336aa08"
 dependencies = [
  "serde",
  "serde_json",
@@ -3001,7 +3001,7 @@ dependencies = [
 [[package]]
 name = "tessivum-extism"
 version = "0.2.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9#6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=b69d0ed86f30adb0b2d6138d458593487336aa08#b69d0ed86f30adb0b2d6138d458593487336aa08"
 dependencies = [
  "extism",
  "libc",
@@ -3013,7 +3013,7 @@ dependencies = [
 [[package]]
 name = "tessivum-node-bridge"
 version = "0.2.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9#6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=b69d0ed86f30adb0b2d6138d458593487336aa08#b69d0ed86f30adb0b2d6138d458593487336aa08"
 dependencies = [
  "serde",
  "serde_json",

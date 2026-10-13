@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Pin Rust Core/Extism/Node Bridge dependencies and all CI/package Legacy Host checkouts to Core `v0.2.0` / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`.
+- Pin Rust Core/Extism/Node Bridge dependencies and all CI/package Legacy Host checkouts to Core crate version `v0.2.0`, source commit `b69d0ed86f30adb0b2d6138d458593487336aa08` (newer than the release tag), including live Native configuration re-evaluation and activation-state synchronization. No Cargo path override is required.
 - Adopt strict service registration, explicit replacement, managed pending Native Loader dependencies, and bounded Bridge/session hydration from Core. Wire identifiers remain unchanged; see the Core migration guide.
 - Preserve the Alpha.30 version and release metadata from upstream. This dependency upgrade is not a new product release and does not establish additional Windows or Browser acceptance.
-- Verified after integration with the Alpha.30 mainline on macOS ARM64: 601 Rust tests (22 filtered), strict Clippy, compatibility/release-fact checks and actual CLI initial/resume tool round trips with preserved history.
+- Historical integration evidence for Core `6cc4cfd` with the Alpha.30 mainline on macOS ARM64: 601 Rust tests (22 filtered), strict Clippy, compatibility/release-fact checks and actual CLI initial/resume tool round trips with preserved history. This is not validation of later Core commits.
+- Verified the `b69d0ed` Git-pinned candidate on macOS ARM64: 601 Rust tests (22 filtered), strict Clippy, compatibility/release-fact checks, actual Composition configuration replacement/removal/restoration, and CLI tool round trips across resume with preserved history. Cargo metadata confirms all three Core crates resolve from Git, not local path overrides; evidence is retained in `test-artifacts/c1-live-config-git-pin/`.
 
 ## 0.1.0-alpha.30 - 2026-09-23
 
