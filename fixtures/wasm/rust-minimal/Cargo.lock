@@ -320,8 +320,8 @@ dependencies = [
 
 [[package]]
 name = "tessivum-pdk"
-version = "0.1.0"
-source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=2d3fd3c418d8ce28c4ca7a8180f6794963271db7#2d3fd3c418d8ce28c4ca7a8180f6794963271db7"
+version = "0.2.0"
+source = "git+https://github.com/wavetao2010/tessivum-core.git?rev=c937718b7dcd33241d3ed7cf18f8039055690f9f#c937718b7dcd33241d3ed7cf18f8039055690f9f"
 dependencies = [
  "extism-pdk",
  "serde",

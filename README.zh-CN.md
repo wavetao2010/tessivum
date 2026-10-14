@@ -17,7 +17,7 @@ Tessivum 是独立的 Rust 原生智能体框架。Host、Agent、会话、工�
 
 精确的 `terminal.manage` 能力保留模式隔离与父级拒绝/审批。Core 保留已有历史分页，并在插件工具回调前预载原生会话。
 
-未发布源码现固定 `tessivum-core v0.2.0` / `b69d0ed86f30adb0b2d6138d458593487336aa08`，Rust crate 与 Legacy Host 使用同一修订版，包含 Native 依赖配置重求值及激活状态同步修复。该源码提交晚于 `v0.2.0` 发行标签；保留 Alpha.30 发行元数据，不替换已有归档或下载链接。Core 0.2.0 要求显式替换服务，见其[迁移说明](https://github.com/wavetao2010/tessivum-core/blob/b69d0ed86f30adb0b2d6138d458593487336aa08/docs/COMPATIBILITY.md#migrating-from-01x-to-020)。
+未发布源码固定 `tessivum-core v0.2.0` / `c937718b7dcd33241d3ed7cf18f8039055690f9f`，Rust crate 与 Legacy Host 使用同一修订版。保留 C1/C2/W2 验收；W3 新增真实 TinyGo 与 MicroPython WASM Guest、共同 ABI/安全矩阵及产品同候选消费，见[验收记录](docs/SCOPE_IMPLEMENTATION_CHECKLIST.md#214-w3-gopython-wasm-验收2026-10-14)。该提交晚于 `v0.2.0` 发行标签，保留 Alpha.30 元数据及已有归档。Core 0.2.0 要求显式替换服务，见其[迁移说明](https://github.com/wavetao2010/tessivum-core/blob/c937718b7dcd33241d3ed7cf18f8039055690f9f/docs/COMPATIBILITY.md#migrating-from-01x-to-020)。Guest 支持不等于任意 Go 包或 CPython/pip 兼容；产品 profile 与发行平台验收仍独立保留。
 
 当前已有：
 

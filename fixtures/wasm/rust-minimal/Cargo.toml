@@ -12,4 +12,4 @@ crate-type = ["cdylib"]
 [dependencies]
 extism-pdk = { version = "=1.4.1", default-features = false }
 serde_json = "1"
-tessivum-pdk = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "2d3fd3c418d8ce28c4ca7a8180f6794963271db7" }
+tessivum-pdk = { git = "https://github.com/wavetao2010/tessivum-core.git", rev = "c937718b7dcd33241d3ed7cf18f8039055690f9f" }

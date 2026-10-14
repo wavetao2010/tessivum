@@ -404,13 +404,15 @@ Alpha.27 以已发布的 `v0.1.0-alpha.26` 为基线，只纳入以下两项已�
 
 ### 4.6 Core 0.2.0 源码依赖升级（产品未发布）
 
-- Core `v0.2.0` 发行标签仍为 `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；当前产品源码改为固定后续修复提交 `b69d0ed86f30adb0b2d6138d458593487336aa08`。产品 Cargo/lock、CI 三处 checkout、Unix/Windows 打包 Host 与 Windows 源码说明统一固定修复提交；不是新的 Core 或产品发行。
+- Core `v0.2.0` 发行标签仍为 `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；当前产品源码固定 W3 候选 `c937718b7dcd33241d3ed7cf18f8039055690f9f`。产品 Cargo/lock、CI 三处 checkout、Unix/Windows 打包 Host、Rust Guest PDK 与 Windows 源码说明使用同一候选；不是新的 Core 或产品发行。C1/C2/W2 历史与 W3 当前消费证据分别见实施清单 §2.1.1—§2.1.4。
 - 严格 `provide`、显式 `replace` 和 Native Loader `Pending` 语义按 Core 迁移指南接入；ABI/Bridge v1 及上游兼容目标不变。
 - 升级基于已合入 PR #7/#8 的 Alpha.30 主线，保留远端版本号、安装器、市场、Homebrew 与 Windows 打包改动，不重写已有发行归档；本次未发布新产品。
 - Core 的 Windows CI 不能代替产品 Windows 或 Browser 验收，本次不扩大支持范围。
 - 合入最新主线前的 Alpha.29 探针曾通过 574 项 Rust 测试（22 项过滤）、严格 Clippy、兼容基线及发行事实检查，证据在 `test-artifacts/core-0.2.0-upgrade/`；该记录不代表 Alpha.30 集成验收。
 - 首次合入 Alpha.30 主线（Core `6cc4cfd`）的 macOS ARM64 历史验收：601 项 Rust 测试通过（22 项过滤）、严格 Clippy、兼容基线及发行事实检查通过；实际 CLI 首次运行、工具回环与续接通过，日志前缀保留。证据在 `test-artifacts/alpha30-core020-integration/`；与上述 Alpha.29 探针及后续配置修复候选分开记录。
 - 后续配置修复候选（Core `b69d0ed`）已使用正式 Git 依赖复验：macOS ARM64 601 项 Rust 测试（22 项过滤）、严格 Clippy、兼容基线及发行事实检查通过；实际 Composition 配置重求值／依赖移除恢复及 CLI 初次工具回环／续接通过，历史前缀保持不变。Cargo metadata 确认三个 Core crate 均来自固定 Git 修订，没有 Core path override；证据在 `test-artifacts/c1-live-config-git-pin/`。[Core CI](https://github.com/wavetao2010/tessivum-core/actions/runs/38366582275) 已通过，不代替产品 Windows／Browser 或发行归档验收。
+- 2026-10-14：正式 Git-pin 候选 Core `6c444b5` 已复验，macOS ARM64 601 项 Rust 测试通过（22 项过滤），严格 Clippy、兼容基线及发行事实检查通过；实际产品 Composition 依赖重求值、Core Pending 配置更新/拒绝候选回滚及 CLI 初次工具回环/续接通过，事件 24→46 且历史前缀保持不变。三个 Core crate 均来自同一 Git 修订，无 Core path override；证据在 `test-artifacts/c1-admission-git-pin/`。上游 Pending 配置原始 `MISMATCH` 按用户批准差异保留，C1 服务 oracle、同步 emit 错误及文件监听证据缺口未关闭；不扩大 Windows/Browser 或发行归档验收。
+- 2026-10-14 C1 结案：Core `08d87f9` 补齐真实服务/同步事件对照及带事务回滚、边界校验和静默关闭的文件监听，六份双端相等夹具加两份明确批准差异（最新 Pending 配置、旧 handle 失效保护），保留原始 mismatch。Core 130 项测试、Bun 6 项／151 断言、TypeScript 与严格 Clippy 通过；产品同 Git 候选 601 项测试（22 项过滤）、严格 Clippy、兼容/发行事实检查及真实 watcher／Composition／CLI 初次续接通过。证据在 `test-artifacts/c1-complete/` 与 Core `fixtures/conformance/c1-admission-report.json`；C2、D04、Windows/Browser/归档仍按各自门槛验收。
 
 ---
 
@@ -865,7 +867,7 @@ Alpha.5 的剩余产品缺口是配置面而非模型 wire：Web 仍只能看到
 
 ## 14. 当前实现状态
 
-当前源码基于 `v0.1.0-alpha.30` 主线，未发布的依赖升级固定 `tessivum-core v0.2.0` / `b69d0ed86f30adb0b2d6138d458593487336aa08`，升级状态见第 4.6 节；Alpha.29/28 历史发行证据见第 4.5/4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
+当前源码基于 `v0.1.0-alpha.30` 主线，未发布的依赖升级固定 `tessivum-core v0.2.0` / `c937718b7dcd33241d3ed7cf18f8039055690f9f`，升级状态见第 4.6 节；Alpha.29/28 历史发行证据见第 4.5/4.3 节。Phase 9 的 Core Benchmark driver 仍位于 `cedbeb9e1607056845b69e09b825eb7f5be67a69`。性能证据仍来自 Alpha.23 的固定共享 Core 工作量、Base/Compatibility 产品 manifest、真实 Chromium 和完整进程树 PSS 测量，保留失败、超时、清理残留和非 Linux PSS unavailable 状态；三样本运行仅为协议试运行，正式 Linux 30 样本数据已经发布，不冒充后续 Alpha 版本的新测量。
 
 Alpha.26 追加状态：历史分页与侧边栏 PTY 生命周期修复已发布，已授权远程历史恢复通过。用户确认远程终端暂不支持、维持 legacy 路由仅限本机，不再作为本版发布阻断项。源码、发行归档与安装升级的具体证据及限制见第 4.1.6–4.1.8 节。
 

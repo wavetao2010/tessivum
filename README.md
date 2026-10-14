@@ -17,7 +17,7 @@ Tessivum is an independent, Rust-native agent harness. The Host, Agent, sessions
 
 The exact `terminal.manage` capability preserves mode isolation and parent Deny/Ask restrictions. Core retains the existing bounded history paging and hydrates native sessions before plugin tool callbacks.
 
-Unreleased source now pins `tessivum-core v0.2.0` at `b69d0ed86f30adb0b2d6138d458593487336aa08` for both Rust crates and the Legacy Host, including dependency-aware Native configuration re-evaluation and activation-state synchronization. This source commit is newer than the `v0.2.0` release tag. It preserves Alpha.30 release metadata and does not replace existing archives or download links. Core 0.2.0 requires explicit service replacement; see its [migration guide](https://github.com/wavetao2010/tessivum-core/blob/b69d0ed86f30adb0b2d6138d458593487336aa08/docs/COMPATIBILITY.md#migrating-from-01x-to-020).
+Unreleased source pins `tessivum-core v0.2.0` at `c937718b7dcd33241d3ed7cf18f8039055690f9f` for Rust crates and the Legacy Host. C1/C2/W2 acceptance is retained; W3 adds real TinyGo and MicroPython WASM guests, the shared ABI/security matrix and same-candidate product consumption. See the [acceptance record](docs/SCOPE_IMPLEMENTATION_CHECKLIST.md#214-w3-gopython-wasm-验收2026-10-14). This is newer than the `v0.2.0` release tag and preserves Alpha.30 release metadata and archives. Core 0.2.0 requires explicit service replacement; see its [migration guide](https://github.com/wavetao2010/tessivum-core/blob/c937718b7dcd33241d3ed7cf18f8039055690f9f/docs/COMPATIBILITY.md#migrating-from-01x-to-020). Guest support does not imply arbitrary Go packages or CPython/pip compatibility; product-profile and release-platform acceptance remain separate.
 
 Available today:
 

@@ -16,16 +16,16 @@
 
 ## 2. 固定事实与证据优先级
 
-### 2.1 当前候选与已取得证据（2026-10-13）
+### 2.1 当前候选与已取得证据（2026-10-14）
 
 | 对象／单元 | 固定身份与实际证据 | 可以关闭的边界／仍未关闭的范围 |
 |---|---|---|
 | 冻结上游 | Harness `0.1.0-rc.5` / `47f943859bef60e4160492346772ded9b24f765a` | 既有 G/D/X 范围不变；不追加较新上游功能 |
-| Core 发行基线 | [v0.2.0](https://github.com/wavetao2010/tessivum-core/releases/tag/v0.2.0) / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；Rust/Node/WASM v1 wire 不变 | 发行标签未改；后续 Native 配置修复提交为 `b69d0ed86f30adb0b2d6138d458593487336aa08`，不是新发行 |
-| 当前产品源码 | 基于 `306ecf3f393f44859ab05ae50a6e1214b78ee7c2`，包版本仍为 `0.1.0-alpha.30`，Cargo/lock 与五处 CI/打包 checkout 固定 Core `b69d0ed86f30adb0b2d6138d458593487336aa08`；保留 PR #7/#8 | 不再依赖临时 path override；原调查 recovery 工作副本仍不假定已全部合入 |
+| Core 发行基线 | [v0.2.0](https://github.com/wavetao2010/tessivum-core/releases/tag/v0.2.0) / `6cc4cfd40d6c69c55fd95917dda9fa8a0d4678b9`；Rust/Node/WASM v1 wire 不变 | 发行标签未改；已推送 W3 源码候选 `c937718b7dcd33241d3ed7cf18f8039055690f9f`，不是新发行 |
+| 当前产品源码 | 基于 `2bc3257546121b7348fdef3a7b6dfdacd6c4e4b0`，包版本仍为 `0.1.0-alpha.30`，Cargo/lock、五处 CI/打包 checkout 与 Rust Guest PDK 固定 Core `c937718b7dcd33241d3ed7cf18f8039055690f9f`；保留 PR #7/#8 | C1/C2/W2 历史消费见 §2.1.1—§2.1.3；W3 当前同候选消费见 §2.1.4；不外推为 D04 profile 或发行归档完成 |
 | 原调查工作副本 | `tessivum-context-recovery` 的 `e12cada3b84464b7aef0be1c4247e096c56fac29`；Alpha.31 / Core 0.1.8 `eb1bc9fd320f880f0939689adf9af1b666a4b682` | 单独保留候选与证据；Alpha 数字较大不代表包含当前主线的 Core 升级，不回退主线 pin，不据局部源码相同推定整棵树等价 |
-| C1 目录差分 | [当前 Core 报告](../../tessivum-core/docs/CONFORMANCE_REPORT.md)及 release 资产 `conformance-0.2.0.json`：lifecycle 12、service 9、严格注册 3、event 11、Loader 10、依赖生命周期 5；六份夹具均执行真实 Rust/Bun 并逐项比较轨迹 | 关闭这些**已列举目录用例**的对照缺口；旧文“TS 只有三个场景／Loader unsupported”已过时，不能继续按缺实现处理；不能外推为全部 live 配置求值/HMR 语义等价 |
-| C2 与 D07 | [Native 运行时](../../tessivum-core/crates/tessivum-core/src/native.rs)、[Extism 运行时](../../tessivum-core/crates/tessivum-extism/src/lib.rs)是已有资产；本次对账不重新执行 Guest 验收 | 不能把目录差分或产品 CI 当真实 Guest Host Functions、全部资源限制共同矩阵，更不能据此关闭 TS/JS、Go、Python |
+| C1 目录差分 | [Core 完整原始记录](../../tessivum-core/fixtures/conformance/c1-admission-report.json)：六份双端相等夹具，另两份已批准差异保留 Rust PASS／上游 MISMATCH；服务六项相等加三项旧引用差异，事件增至十二项 | 真实 consumer、旧引用操作、Service 配置解析及 emit 错误取代原常量；独立真实文件监听场景验证收敛与关闭。C1 在列明边界内结案，历史 release 轨迹不改写 |
+| C2、W2、W3 与 D07 | Native、真实 Rust、TS/JS、Go、Python Guest 全共同矩阵及产品同候选消费通过；§2.1.2—§2.1.4 分列场景与产物摘要 | D07 四语言源码验收已结案；不承诺任意语言库兼容或新增发行平台支持 |
 | 历史消费方同候选验证 | 产品 `306ecf3` / Core `6cc4cfd`：macOS ARM64 601 项 Rust 测试、22 项过滤、严格 Clippy；实际 CLI 初次运行与续接，事件 24→46、日志前缀保留；[产品 CI](https://github.com/wavetao2010/tessivum/actions/runs/38342882283) 的 verify、windows、browser-e2e 全通过 | 只关闭该旧候选的既有集成门槛；不把现有 Browser suite 通过当 D01—D08 全契约已实现，不把源码 CI 当发行归档/安装验收 |
 | 证据位置 | `test-artifacts/alpha30-core020-integration/` 保留命令日志、结果、manifest/lock 与 remote-ci.json；旧 Alpha.29 的 574 项结果分别留在原探针目录 | 本地证据未随 Git 提交；公共证据由以上固定 release/CI 链接提供。禁止将旧 574 项结果冒充 Alpha.30 的验收 |
 
@@ -37,7 +37,97 @@
 
 **正式 Git 依赖复验：** Core `b69d0ed` 固定后，Cargo metadata 确认 Core／Extism／Node Bridge 均解析到该 Git 修订，没有本地 Core path override。macOS ARM64 全部 601 项 Rust 测试（22 项过滤）、严格 Clippy、兼容基线及发行事实检查通过。实际产品 Composition 的缺依赖 admission、配置重求值、移除／恢复、源表达式保留均通过，轨迹仍为 `null → first → second → null → restored → null`；CLI 初次与续接分别取得 1／2 个成功的实际 bash 工具结果，日志记录 25→47 且旧前缀不变。独立证据保存在 `test-artifacts/c1-live-config-git-pin/`；[Core CI](https://github.com/wavetao2010/tessivum-core/actions/runs/38366582275) 通过，不外推产品新候选 Windows／Browser 或新发行验收。
 
+**C1/G03 Pending 配置与回滚追加验证（2026-10-13，本地候选）：** 在 Core `b69d0ed` 上修复重复调用 Native `activation()` 将失败实例重新排队、导致 Loader 回滚挂起的问题；新增回归先超时失败，修复后保留原错误并清除临时服务。新增独立夹具 `loader-pending-config.json`，真实 Native Loader 执行 Pending 整体替换配置→provider 到达→拒绝候选→恢复→卸载；100 次实际运行通过。Core workspace/all-targets 129 项测试、严格 Clippy，既有 Bun 5 项／151 断言及 TypeScript 检查通过。
+
+**2026-10-13 发现、2026-10-14 已批准的差异：** 同夹具在冻结 Harness `47f9438` 的未修改 vendor 上首次激活仍得到旧表达式值并保留已删除字段，而 Rust 使用最新配置；两端都未过早启动，后续失败回滚、源表达式保留、恢复和卸载观测一致。用户随后明确批准保留 Rust 最新配置语义，见 §2.1.1；上游原始结果仍保留为 `MISMATCH`，不改预期来制造等价。历史证据在 `test-artifacts/c1-pending-config/`。
+
+**历史临时联调边界（2026-10-13）：** 产品 `2bc3257` 的实际 Composition 配置生命周期经临时 Cargo patch 使用本地 Core／Extism／Node Bridge 通过；当时 manifest/lock 固定 `b69d0ed`。随后正式依赖固定 `6c444b5`，现已升级为 §2.1.1 的 `08d87f9`；不同候选证据分开保存，不发布 Core／产品归档。
+
+**历史同候选消费验证（2026-10-14，Core `6c444b5`）：** 三个 crate 均为正式 Git 来源，无 Core path override；macOS ARM64 601 项 Rust 测试通过（22 项过滤），严格 Clippy、兼容/发行事实检查，以及 Composition、Core Pending 回滚、实际 CLI 初次/续接通过，事件 24→46 且历史前缀保留。证据在 `test-artifacts/c1-admission-git-pin/`。该轮未关闭服务 oracle、同步事件错误和 watcher 缺口；本轮最终候选与结案证据见 §2.1.1。
+
 **产品资产保留门槛：** recovery 中的 [Legacy 实际插件回归](../../tessivum-context-recovery/tests/community_plugins.rs)包含 `legacy_plugin_system_prompt_contribution_reaches_native_runtime_and_reaps`，实际加载插件、验证 Native/Legacy prompt 顺序及卸载撤销；当前主线 `tests/community_plugins.rs` 没有该用例。主线已有 `systemPrompt@1` 的注册路由，不应因此重写桥接实现；但实现存在也不能代替这份回归。在进入相应产品单元时迁移并以 Core 0.2.0 或后续固定候选复验。原工作副本与原测试保留未改，本轮未执行它，不把此次有限对账称为工作副本的完整合并。
+
+### 2.1.1 C1 准入对账（2026-10-14）
+
+**C1 已结案（2026-10-14），固定 Core `08d87f93fe92c7dbe74446bc7e5f563c687da84a`。** 用户批准两项差异：`pending-config-uses-latest-source` 保留最新 Pending 配置及删除字段语义；`revoked-service-handles-reject-access` 保留 Rust 旧 handle 失效保护。两份夹具原始 Rust `PASS`／冻结上游 `MISMATCH` 均保留；逐字段核对仅上述差异不同，不设“允许任意 mismatch”的豁免。
+
+| 项目 | 本轮结案证据与保留边界 |
+|---|---|
+| G01 服务 | 实际 Cordis consumer 与 Native 插件 start/stop 回调验证 required/optional readiness、晚到服务及移除恢复；保留旧引用后真正调用，Rust 拒绝而上游返回旧值的差异已批准；realm、duplicate、实际 `Service.resolveConfig` 合并均对齐。 |
+| G02 生命周期 | 现有真实目录覆盖声明的启动、异步/逆序/重入释放、失败清理与父子静默；并发 race 是额外 Rust 不变量证据。 |
+| G02 事件 | 十二项真实双端目录相等；新增同步 emit 抛错后只执行首个 listener，错误 `listener exploded` 传至调用方，后续 listener 不运行。 |
+| G03 Loader/配置 | 十项 Loader 目录、五项依赖生命周期、Pending 整体更新与失败回滚已实跑；Pending 首次激活差异保留。Native live JSON 投影不外推为 WASM/Legacy 或任意 typed service。 |
+| G03 watcher/HMR | 新增真实 `EntryTreeWatcher`，有界轮询驱动 Loader 事务；实际 Native 与冻结上游 Node 22 HMR/Include 验证无效/丢失文件保留已提交配置、快速更新收敛、原子重建、等待在途更新关闭及关闭后静默。Rust 另验证大文件/特殊文件拒绝、空闲时 Tokio 插件任务继续运行及 Drop 清理。保留 `HmrDriver` 包缓存失效接口；JS/module HMR 与产品 profile 接线仍属 D04。 |
+
+历史含常量的“六份夹具相等”不再作为本次准入依据；当前六份相等夹具和两份差异夹具均执行真实 CLI，并从仓库外工作目录复验。原子文件写仍不升级为内存/磁盘/外部副作用联合事务；C2 多语言与发行归档不混入 C1 结论。
+
+**同候选验证：** Core workspace/all-targets 130 项通过、严格 Clippy 通过；Bun 6 项／151 断言与 TypeScript 通过。产品正式 Git 依赖 601 项 Rust 测试通过（22 项过滤）、严格 Clippy、兼容/发行事实检查通过。metadata 确认 Core／Extism／Node Bridge 均为 `08d87f9` Git 来源，无 Core path override；实际 Git 候选的文件监听、产品 Composition 配置生命周期与 CLI 初次/续接通过，CLI 事件 24→46、历史前缀保留。公开 Core 原始记录见上表；本地产品证据在 `test-artifacts/c1-complete/`。
+
+**运行边界：** 文件监听默认 100 ms 轮询、4 MiB 源文件上限，均可配置；瞬时中间写入可能合并，最终持续存在的配置会在在途事务结束后重新读取。stop/Drop 为阻塞 join，需要调用方运行时协作的异步 Host 应经 `spawn_blocking` 调用。文件丢失是可见错误，不是空配置；没有新增默认 JS 信任或执行路径。C1 结案后可按既定顺序进入 C2；本轮不宣称整个独立 Core、Harness 迁移或 Windows/Browser/发行归档全部完成。
+
+### 2.1.2 C2 Native 与真实 Rust WASM 验收（2026-10-14）
+
+**C2 已结案，固定 Core `38032f769a8a558d2fb18b9cc171ced18bd1c342`；平台 macOS ARM64，Rust 1.97.1、Extism 1.30.0。** 产品版本仍为 Alpha.30，未发布新 Core／产品归档。
+
+| 契约 | 实际入口与结果 |
+|---|---|
+| Native 生命周期 | `tests/native.rs` 16 项与 `native-minimal` 实跑：依赖等待/到达/撤销、配置更新、失败清理、取消、重复释放、旧服务拒绝访问、卸载后事件静默；示例最终零资源。 |
+| 两项 Native 修复 | 失败激活后的 ready 依赖通知现在直接恢复并启动，不再停在 Pending；卸载先于恢复 token 发布时，新 token 立即取消且不在控制锁内唤醒。两个永久回归均保留修复前失败与修复后通过日志；重复观察失败本身不会触发重试。 |
+| Rust ABI／Host Functions | `crates/tessivum-extism/tests/real_guest.rs` 的六项 artifact-dependent 检查显式运行并通过：严格 manifest/request/response、五个导出、非法/未知字段/错 ID/双 result-error、guest 错误脱敏与 trap；全部八个 Host Function 经真实 WASM 内存调用，并验证 stateful 服务/配置/事件订阅/日志/KV 以及未声明、未授权、撤销后拒绝。 |
+| 资源与沙箱 | 内存及输出同一输入先在充足上限成功，再降低上限失败；输入、fuel、timeout、取消分别触发。20 ms timeout 和真实 guest readiness 后的取消都在独立 1 秒验收上限内完成，不把五秒兜底到期当取消。网络探针全程保留回环监听且未接收连接；默认 WASI/网络仍禁用。 |
+| 产品权限生命周期 | `tests/wasm_plugins.rs` 七项：预校验失败保留原实例；真实候选 init 在权限安装后因一次 Host service 故障失败，候选权限撤销，Loader 恢复已提交树为新实例，旧 ID 不复活；成功更新、重复卸载、manifest 重载、重复 identity 拒绝均通过。 |
+| 实际消费 | 正式 Git 来源的 Core/Extism/Node Bridge，无 path override；产品 602 项测试通过（22 项过滤），严格 Clippy、兼容基线与发行事实检查通过。Core 132 项一般测试通过，六项真实 Guest 矩阵另行通过；真实 Native/Extism/Legacy runtime-smoke 通过。CLI 实际首次/续接各完成工具回环，事件 24→46、历史前缀保留。 |
+
+**产物与复现：** Core Guest SHA-256 `97778fbcdd77c079263be5aba4627de10c732a1eebbbd25c069b4e9927e7feb7`；产品同候选 PDK 重编译并更新 checked Guest，SHA-256 `490d5fa8012e89f6ac9f9e7f24a84c7d9c4780ad54dd617f8b0551fd84fae2ea`，hash 校验与最终七项 WASM 加一项 package interop 复验通过。Core 复现命令见上述 Core 记录，CI 已在编译后显式执行矩阵。完整命令、输出、失败修正记录、manifest/lock、产物及 CLI 日志保留于 `test-artifacts/c2-complete/`，不把一般 suite 的 ignored 状态当 Guest 验收。
+
+**边界：** Native 仍是完全受信任代码，取消依赖插件协作；Host handlers 需要自行设置 deadline/quota。失败回滚恢复已提交树不保证旧实例 identity 不变，也不回滚外部文件/网络副作用；若插件文件本身已被改坏，旧树恢复也可能显式失败。本轮曾用修改磁盘 manifest 的不适当场景触发这种恢复失败，原日志保留；最终回归改为不改变已提交包的 Host service 单次故障，未通过放宽 Loader 契约或改变预期掩盖生产缺陷。TS/JS→Go/Python、H1 产品配置/信任、Windows/Browser 及发行归档不在本次完成声明内。
+
+### 2.1.3 W2 TypeScript/JavaScript WASM 验收（2026-10-14）
+
+**W2 已结案，固定 Core `edc07b36474e9f86d1dc9a334bee91eb66a65bd1`。** macOS ARM64 源码验收，未发布新版本。产品 Cargo/lock、五处 Host checkout 与 Rust Guest PDK 已统一切换；Cargo metadata 确认三项 Core crate 均来自该 Git 修订，无 path override。
+
+| 契约 | 实际入口与结果 |
+|---|---|
+| 真实编译 | extism-js release v1.7.0（该二进制自报 1.6.1）、Binaryen 133；锁定 PDK 1.1.1、TypeScript 5.9.3、esbuild 0.28.2。`examples/wasm-typescript/build.mjs` 编译 ES2020 CJS→QuickJS/WASM；编译器 archive hash 与复现命令见 [Core 协议说明](../../tessivum-core/docs/PROTOCOLS.md#building-the-typescriptjavascript-guest)。 |
+| ABI 与真实矩阵 | 原示例真实 init 先复现顶层 `ok` 导致 `PROTOCOL_INVALID`；修复后 TS/JS 显式运行同一六项矩阵全部通过，覆盖严格请求/响应、五个导出、八个 Host Functions 的实际内存调用、状态变更、授权/拒绝/撤销、错误/trap、内存/输入/输出/fuel/timeout/cancel、更新/卸载与旧 handle。Rust 六项也重新通过。 |
+| 错误 phase 修复 | 审查发现 Host 拒绝被原样转发为 `call` phase；TS 和已有 Rust Guest 均先复现 denied init 错报 `PROTOCOL_INVALID`。TS lifecycle 与 Rust PDK dispatch 统一设为当前 export phase；共同回归验证 init 拒绝及 call/event/update/stop 撤销均为 `GUEST_REJECTED`，拒绝无 Host mutation、配置不提交。 |
+| 沙箱 | 编译器私有下划线绑定在 WASM 链接时映射到精确 dotted imports；默认 Host 不添加别名、不启用 WASI、不放开网络、不提高资源上限。编译器遗留 WASI syscalls 全部静态链接为 trap，最终产物结构检查无 WASI imports；`Date.now()` 实际 trap，回环监听全过程无连接。 |
+| 实际运行与消费 | Core runtime-smoke 实跑 Native、TS Extism、Legacy 的加载/释放；产品使用该真实 TS 产物完成 echo、权限 generation 更新/撤销、旧 authority 拒绝、生产 Host boot/shutdown。既有 Rust 产品 Guest 用同候选 PDK 重编译，七项 WASM 与 package interop 随全套通过。 |
+| 集成门槛 | Core 132 项、产品 602 项（22 项过滤）、双方严格 Clippy 通过；六项 Guest 矩阵按语言另行显式运行，不计作一般 suite 的 ignored 成功。CLI 首次/续接真实 bash 回环成功，事件 24→46，原始历史前缀不变。 |
+
+**固定产物：** TS SHA-256 `2304cedcd85c87aae2ba12456bdfda8422c042e2d9c8136efa7c2270aa0a1f39`（2,494,018 bytes）；Core Rust `82f5012ad10c7627c448d6b65fad48aee915602f91ccb50d112e52e0b8e65ca0`；产品 checked Rust Guest `63b7d5d4b57b89bb47d97b9fdaa6133139789c1a64cd02dd40fc4272306e6a70`。证据保留于 `test-artifacts/w2-complete/`，包括产物、完整命令/失败日志、锁文件、临时产品 smoke 源码与 CLI 历史。
+
+**复现限制：** 上游 Wizer 初始化快照实测同源重编译得到不同字节；这里保证固定工具链的编译/验收路径，不承诺 byte-identical 构建。每次新产物必须保留新摘要并重跑矩阵。静态 WASI trap 也意味着 clock/entropy syscall/文件功能不可用，TS/JS Guest 不等于 Node.js 或任意 npm 包兼容。
+
+**验证中修正的夹具：** Core 启动日志测试的 peer 写 Ready 后立即关闭，导致 EOF 抢先；按相邻用例保留 peer 到观察完成。产品 shell 取消测试在 PID 文件刚创建、尚未写入内容时读取，出现空串 parse；改为写临时文件后原子 rename。均保留原失败，不改生产行为或弱化断言。产品 smoke 首次使用包根之外的临时目录被现有 confinement 正确拒绝；随后将 workspace 与测试包根一致，未放宽限制。
+
+**W2 结案时未关闭：** Go/Python Guest 后续已由 §2.1.4 的 W3 独立验收；产品 profile、Windows/Browser 与发行归档仍单独保留。CI 配置提交不冒充远端已运行。
+
+
+
+
+### 2.1.4 W3 Go/Python WASM 验收（2026-10-14）
+
+**W3 已结案，固定 Core `c937718b7dcd33241d3ed7cf18f8039055690f9f`。** macOS ARM64 源码验收；产品保持 Alpha.30，未发布新版本或归档。Cargo metadata 确认三个 Core crate 均使用该 Git 修订，无 path override；Rust Guest PDK 与五处 Host checkout 同步。
+
+| 契约 | 实际入口与结果 |
+|---|---|
+| Go 真实编译 | Go 1.26.9、TinyGo 0.43.0、go-pdk 1.1.3、Binaryen 133；`wasm-unknown` 无 WASI 初始化。精确 dotted imports，严格区分 envelope 字段大小写与 null request ID。 |
+| Python 真实编译 | MicroPython 1.26.1、mpy-cross 1.26.1.post2、WASI SDK 34.0、Binaryen 133、Node 26.5.0；Python 字节码运行于真实解释器，C 仅负责嵌入与 Extism 绑定。启用现有 WASM exception 特性，转换标准异常指令；最终无 WASI imports。 |
+| 共同矩阵 | Rust、TS/JS、Go、Python 各显式通过同一六项检查：manifest/envelope、五导出、八 Host Functions 实际调用及状态变更、授权/拒绝/撤销、错误/trap、资源限额、取消、更新/卸载与旧 handle。Go/Python clock 拒绝也实际执行；回环网络无连接。 |
+| Python 修复与边界 | 预编译避免启动编译耗尽 fuel；WASM 指针 spill 修复 GC 丢失根；hard trap/fuel/timeout/cancel 后所有导出拒绝重新进入 VM，stop 报错但释放实例与 authority。代理对正确转 Unicode、孤立 surrogate 拒绝、字面转义保留；审查问题均先失败后通过。 |
+| 内存与 GC | 16 MiB 真 Extism 分配逐页写入并释放，默认成功、128 pages 失败；不伪称大 Go slice/Python bytearray 满足默认 fuel。Python live-object 全 GC 后 event/update/stop 另用显式 100M fuel 通过，默认 10M 不足；原默认资源矩阵未提高限额，Host 默认与沙箱权限不变。 |
+| 实际运行与消费 | 两种语言均跑 Native/Extism/Legacy runtime smoke；产品分别使用真实 Go/Python 产物完成 echo、权限 generation 更新/撤销、旧 authority 拒绝、生产 Host boot/shutdown。产品 checked Rust Guest 用同候选 PDK 重编译，七项 WASM 与 package interop 随全套通过。 |
+| 集成门槛 | Core 132 项一般测试、产品 602 项（22 项过滤）、双方严格 Clippy 通过；四语言六项矩阵单独显式执行。实际 CLI 首次/续接均完成真实 bash 工具回环，事件 24→46、成功工具结果 1→2，原始历史字节前缀保留。 |
+
+| 固定产物 | bytes | SHA-256 |
+|---|---:|---|
+| Go | 308147 | `d9fa8934c265e64a15a3f5bab899e8eaf6f8eb03bacb737778a7ca8b22cdc42b` |
+| Python | 223400 | `c57a9f24191596eab8ae7971f7d0c430138b3f30e9ff65b7f54e19fb25adebd4` |
+
+Core Rust/TS 固定产物与 W2 相同，本轮仍重新通过扩展矩阵；产品 checked Rust Guest 摘要为 `e6f5d55be384af9a2d7fca68d226c02109c1bfb505e6da275b9572d7f03e66a6`。完整命令、失败构建、前后回归、产物、工具链锁与 CLI 历史在 `test-artifacts/w3-complete/`；复现命令见 [Core 协议说明](../../tessivum-core/docs/PROTOCOLS.md#building-the-python-guest)。Linux checksum-pinned Go/Python CI 配置已增加，本地记录不冒充远端结果。
+
+**未外推的范围：** TinyGo 不等于任意 Go 库；MicroPython 不等于 CPython/pip/C 扩展，文件、外部 imports、clock/stdout 不可用，解释器堆为 768 KiB。Python hard failure 后须新建实例，不可 retry 原 VM。D04 profile、H1—H4 产品迁移、Windows/Browser 与发行归档不由 D07 自动关闭；不宣布全项目迁移完成。
 
 ### 2.2 原始调查快照（2026-10-10，非当前版本声明）
 
@@ -189,10 +279,10 @@ Core 只拥有 Context、服务、生命周期、事件、配置/Loader 与插�
 
 | 语言 | 已知资产／缺口 | 依赖／批次 | 通过条件 |
 |---|---|---|---|
-| Rust | PDK、wasm-minimal、runtime-smoke 已有；minimal 不覆盖 Host Functions 全面场景 | C1 → C2 | 真实编译 Guest 通过共同矩阵，不只加载/卸载 |
-| TypeScript/JavaScript | 示例顶层 ok 与 Host deny_unknown_fields 冲突；ABI 文档“忽略未知字段”也不符；现有 scripts 仅 typecheck | C2 → W2 | 先统一 Host/PDK/文档严格 envelope 契约，修示例并建立真实编译/加载路径；不是只做类型检查 |
-| Go | 未定位 Go Guest 工程 | W2 → W3-Go | 固定可行工具链/PDK和真实产物，通过共同矩阵；不要求另建通用 SDK 框架 |
-| Python | 现有 benchmark Python 不是 Guest；未定位 Guest 工程 | W2 → W3-Python，可与 Go 并行 | 固定实际编译路线/限制并用真实 Guest 验证；不承诺任意 pip/C 扩展可用 |
+| Rust | PDK、真实编译 Guest、Host Functions 全共同矩阵与 runtime smoke 已验收，见 §2.1.2 | C1 → C2（已完成） | Core 六项真实矩阵及产品同候选 Guest/权限生命周期均通过；独立产物摘要已记录 |
+| TypeScript/JavaScript | 严格 ABI 示例、固定真实编译路径、全共同矩阵与产品同候选消费已通过，见 §2.1.3 | C2 → W2（已完成） | 真实 QuickJS/WASM 产物独立摘要；六项共同矩阵显式通过，默认 WASI/网络禁用；不等于 Node/npm 全兼容或字节可复现 |
+| Go | TinyGo/go-pdk 真实 Guest、共同矩阵及产品同候选消费通过，见 §2.1.4 | W2 → W3-Go（已完成） | 固定工具链、独立摘要；不要求通用 SDK，不承诺任意 Go 包兼容 |
+| Python | MicroPython 字节码真实 Guest、共同矩阵及产品同候选消费通过，见 §2.1.4 | W2 → W3-Python（已完成） | 固定工具链、独立摘要、GC/Unicode/中断回归；不承诺 CPython/pip/C 扩展 |
 
 共同矩阵：`cordis.plugin/v1` manifest、request/response、五个生命周期导出；Host Functions 授权/拒绝/撤销；错误/非法 envelope/trap；timeout/cancel/memory/output 上限；更新/卸载和旧 handle 失效。每种语言独立产物摘要与结果；保持默认 WASI/网络禁用，不为编译通过放宽沙箱。W2/W3 是建议批次名，Rust→TS/JS→Go/Python 顺序是已批准要求。
 
@@ -229,7 +319,7 @@ X 轨道独立，不自动回滚已有能力，也不成为所有基础迁移的
 | H3 | D02、D03、D06.1/D06.2/D06.3；G11 LSP、G13、G15 精确外部契约 | 各自所需 H1/H2，不强制这些独立能力互相等待；每条 provider/run/协议单独验收和支持标记 |
 | H4 | G16/D08 与受影响 Host 契约的源 Web 综合验收 | 被测路径所属 H1/H2/H3；分场景可提前跑，全部基线的完成声明须依赖全部对应项。不把页面能开当全量通过 |
 | W2 | D07 真实 TS/JS WASM 与 ABI 示例/文档一致 | C2；通过共同矩阵后才能标该语言已验证，不阻塞无该语言依赖的 H 批次 |
-| W3-Go / W3-Python | 两种真实 Guest 分别交付 | W2；二者可并行，分别通过共同矩阵；延期不删除范围 |
+| W3-Go / W3-Python | 两种真实 Guest 分别交付并通过，见 §2.1.4 | W2；四语言各通过共同矩阵及产品同候选消费；不替代 H 或发行验收 |
 | E1 | D06.4 共享 E2B owner + fs/process/PTY adapters | H2 execution-world seam、G10、真实 E2B 授权/环境；明确延后，不作为基础迁移门槛 |
 | X-Market / X-Remote / X-Release / X-Perf | 第 6 节各轨道复验与已批准产品交付 | 按实际共享依赖进入，不设虚假的全局串行屏障；每轨独立证据，发行仍另行授权 |
 
